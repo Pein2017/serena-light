@@ -83,6 +83,71 @@ def test_cross_root_swap_acquires_then_releases_old_lease() -> None:
     assert registry.runtime_state("/data/new").reference_count == 1  # type: ignore[union-attr]
 
 
+def test_cross_root_prepared_activation_aborts_without_replacing_existing_lease() -> None:
+    registry = WorkspaceRuntimeRegistry[str, object, str](lambda _identity: object())
+    old = registry.activate("session", resolved("/data/old", "old/subdir"))
+
+    prepared = registry.prepare_activation("session", resolved("/data/new", "new/subdir"))
+
+    assert registry.binding_for("session") is old
+    assert prepared.binding.lease.id != old.lease.id
+    assert prepared.candidate_runtime_created
+    assert registry.runtime_state("/data/old").reference_count == 1  # type: ignore[union-attr]
+    assert registry.runtime_state("/data/new").reference_count == 1  # type: ignore[union-attr]
+
+    assert registry.abort_activation(prepared)
+    assert registry.binding_for("session") is old
+    assert registry.runtime_state("/data/old").reference_count == 1  # type: ignore[union-attr]
+    assert registry.runtime_state("/data/new").reference_count == 0  # type: ignore[union-attr]
+
+
+def test_same_root_preparation_preserves_lease_until_commit_updates_subdirectory() -> None:
+    registry = WorkspaceRuntimeRegistry[str, object, str](lambda _identity: object())
+    old = registry.activate("session", resolved("/data/project", "old/subdir"))
+
+    prepared = registry.prepare_activation("session", resolved("/data/project", "new/subdir"))
+
+    assert not prepared.candidate_is_provisional
+    assert not prepared.candidate_runtime_created
+    assert registry.binding_for("session") is old
+    assert not registry.abort_activation(prepared)
+    assert registry.binding_for("session") is old
+
+    committed = registry.commit_activation(prepared)
+    assert committed.lease is old.lease
+    assert committed.working_subdirectory == Path("new/subdir")
+    assert registry.runtime_state("/data/project").reference_count == 1  # type: ignore[union-attr]
+
+
+def test_preparing_a_retained_idle_runtime_does_not_claim_its_ownership() -> None:
+    registry = WorkspaceRuntimeRegistry[str, object, str](lambda _identity: object())
+    retained = registry.activate("retained", resolved("/data/target", "."))
+    assert registry.release("retained")
+
+    prepared = registry.prepare_activation("session", resolved("/data/target", "next"))
+
+    assert prepared.candidate_is_provisional
+    assert not prepared.candidate_runtime_created
+    assert prepared.binding.runtime is retained.runtime
+    assert registry.abort_activation(prepared)
+    state = registry.runtime_state("/data/target")
+    assert state is not None and state.reference_count == 0
+
+
+def test_prepared_commit_rejects_a_changed_current_binding_and_aborts_candidate() -> None:
+    registry = WorkspaceRuntimeRegistry[str, object, str](lambda _identity: object())
+    registry.activate("session", resolved("/data/old", "."))
+    prepared = registry.prepare_activation("session", resolved("/data/candidate", "."))
+    current = registry.activate("session", resolved("/data/current", "."))
+
+    with pytest.raises(RuntimeError, match="changed"):
+        registry.commit_activation(prepared)
+
+    assert registry.binding_for("session") is current
+    assert registry.runtime_state("/data/candidate").reference_count == 0  # type: ignore[union-attr]
+    assert registry.runtime_state("/data/current").reference_count == 1  # type: ignore[union-attr]
+
+
 def test_release_is_idempotent_and_lease_release_detaches_binding() -> None:
     registry = WorkspaceRuntimeRegistry[str, object, str](lambda _identity: object())
     binding = registry.activate("session", resolved("/data/project", "."))

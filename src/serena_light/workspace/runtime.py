@@ -152,6 +152,8 @@ MAX_CONTROLLED_OPENS = 32
 
 class RuntimeErrorCode(StrEnum):
     SCOPE_INCOMPATIBLE = "SCOPE_INCOMPATIBLE"
+    NOT_READY = "NOT_READY"
+    TIMED_OUT = "TIMED_OUT"
     UNSUPPORTED = "UNSUPPORTED"
     STOPPED = "STOPPED"
 
@@ -454,6 +456,18 @@ class FreshnessScan:
         }
 
 
+@dataclass(frozen=True, slots=True)
+class _PendingAdapterRestart:
+    """A replacement that cannot be published until one exact old stop resolves."""
+
+    family: LanguageFamily
+    projection: ScopeProjection
+    tracker: ScopeGenerationTracker | None
+    trusted_paths: tuple[str, ...]
+    stop_adapter: RuntimeAdapter | None
+    stop_future: Future[AdapterSnapshot] | None
+
+
 class _SharedScan:
     """One in-flight scan whose single result every joined caller receives."""
 
@@ -563,6 +577,10 @@ class FreshnessCoordinator:
 
     def _scan_git(self) -> FreshnessScan:
         runtime = self._runtime
+        # A failed config restart remains decision-bearing even after its
+        # filesystem facts have been committed.  Resolve that exact pending stop
+        # before an unchanged scan can authorize another semantic operation.
+        runtime.retry_pending_restarts()
         previous = runtime.inventory
         rebuilt = runtime.rebuild_inventory()
         before, after = set(previous.paths), set(rebuilt.paths)
@@ -724,6 +742,7 @@ class WorkspaceRuntime:
         self._adapter_factories = dict(adapter_factories or {})
         self._adapters: dict[LanguageFamily, RuntimeAdapter] = {}
         self._trackers: dict[LanguageFamily, ScopeGenerationTracker] = {}
+        self._pending_restarts: dict[LanguageFamily, _PendingAdapterRestart] = {}
         self._versions: dict[str, int] = {}
         self._state_lock = threading.RLock()
         self._stopped = False
@@ -820,7 +839,8 @@ class WorkspaceRuntime:
 
         paths_by_family = _family_paths(inventory)
         to_stop: list[RuntimeAdapter] = []
-        to_build: list[tuple[LanguageFamily, ScopeProjection, ScopeGenerationTracker | None]] = []
+        restart_adapters: list[tuple[_PendingAdapterRestart, RuntimeAdapter]] = []
+        restart_without_adapter: list[_PendingAdapterRestart] = []
         restart = frozenset(restart_families)
         config_events = {
             family: tuple(
@@ -853,9 +873,22 @@ class WorkspaceRuntime:
                         if tracker.generations.configured_program == before_program:
                             tracker.apply_did_change_watched_files(config_events[family])
                     adapter = self._adapters.pop(family, None)
-                    if adapter is not None:
-                        to_stop.append(adapter)
-                    to_build.append((family, projection, tracker))
+                    pending = _PendingAdapterRestart(
+                        family,
+                        projection,
+                        tracker,
+                        paths_by_family[family],
+                        None,
+                        None,
+                    )
+                    self._family_errors[family] = WorkspaceRuntimeError(
+                        RuntimeErrorCode.NOT_READY,
+                        f"{family.value} adapter restart is in progress",
+                    )
+                    if adapter is None:
+                        restart_without_adapter.append(pending)
+                    else:
+                        restart_adapters.append((pending, adapter))
                     continue
                 tracker = self._trackers.get(family)
                 if tracker is not None:
@@ -873,24 +906,162 @@ class WorkspaceRuntime:
                 self._adapters[family] = adapter
         for adapter in to_stop:
             adapter.stop().result(timeout=self._future_timeout)
-        # Keep the replacement absent until the old process has actually
-        # stopped.  This prevents a concurrent caller from observing the new
-        # projection through the old native configuration.
+        failures: list[BaseException] = []
+        for pending in restart_without_adapter:
+            with self._state_lock:
+                self._pending_restarts[pending.family] = pending
+            failure = self._complete_pending_restart(pending)
+            if failure is not None:
+                failures.append(failure)
+        for pending, adapter in restart_adapters:
+            pending = _PendingAdapterRestart(
+                pending.family,
+                pending.projection,
+                pending.tracker,
+                pending.trusted_paths,
+                adapter,
+                None,
+            )
+            with self._state_lock:
+                self._pending_restarts[pending.family] = pending
+            pending, failure = self._start_pending_stop(pending)
+            if failure is not None:
+                failures.append(failure)
+                continue
+            assert pending is not None
+            stop_future = pending.stop_future
+            assert stop_future is not None
+            try:
+                stop_future.result(timeout=self._future_timeout)
+            except TimeoutError as error:
+                with self._state_lock:
+                    self._family_errors[pending.family] = WorkspaceRuntimeError(
+                        RuntimeErrorCode.TIMED_OUT,
+                        f"{pending.family.value} adapter stop timed out; freshness will retry",
+                    )
+                failures.append(error)
+                continue
+            except Exception as error:
+                failure = WorkspaceRuntimeError(
+                    RuntimeErrorCode.UNSUPPORTED,
+                    f"{pending.family.value} adapter stop failed ({type(error).__name__})",
+                )
+                with self._state_lock:
+                    self._family_errors[pending.family] = failure
+                failures.append(failure)
+                continue
+            failure = self._complete_pending_restart(pending)
+            if failure is not None:
+                failures.append(failure)
+        if failures:
+            raise failures[0]
+
+    def retry_pending_restarts(self) -> None:
+        """Resolve uncertain config restarts before unchanged facts can pass."""
+
         with self._state_lock:
-            for family, projection, tracker in to_build:
+            pending_restarts = tuple(self._pending_restarts.values())
+        failures: list[BaseException] = []
+        for pending in pending_restarts:
+            pending, failure = self._start_pending_stop(pending)
+            if failure is not None:
+                failures.append(failure)
+                continue
+            if pending is None:
+                continue
+            stop_future = pending.stop_future
+            if stop_future is not None:
                 try:
-                    adapter, tracker = self._build_adapter(
-                        family, projection, paths_by_family[family], scope_tracker=tracker
-                    )
-                except Exception as error:
-                    self._family_errors[family] = WorkspaceRuntimeError(
-                        RuntimeErrorCode.SCOPE_INCOMPATIBLE,
-                        f"{family.value} adapter construction failed ({type(error).__name__})",
-                    )
-                    self._trackers.pop(family, None)
+                    stop_future.result(timeout=self._future_timeout)
+                except TimeoutError as error:
+                    with self._state_lock:
+                        self._family_errors[pending.family] = WorkspaceRuntimeError(
+                            RuntimeErrorCode.TIMED_OUT,
+                            f"{pending.family.value} adapter stop timed out; freshness will retry",
+                        )
+                    failures.append(error)
                     continue
-                self._trackers[family] = tracker
-                self._adapters[family] = adapter
+                except Exception as error:
+                    failure = WorkspaceRuntimeError(
+                        RuntimeErrorCode.UNSUPPORTED,
+                        f"{pending.family.value} adapter stop failed ({type(error).__name__})",
+                    )
+                    with self._state_lock:
+                        self._family_errors[pending.family] = failure
+                    failures.append(failure)
+                    continue
+            failure = self._complete_pending_restart(pending)
+            if failure is not None:
+                failures.append(failure)
+        if failures:
+            raise failures[0]
+
+    def _start_pending_stop(
+        self,
+        pending: _PendingAdapterRestart,
+    ) -> tuple[_PendingAdapterRestart | None, WorkspaceRuntimeError | None]:
+        """Submit one pending old-adapter stop exactly once under lifecycle lock."""
+
+        with self._state_lock:
+            current = self._pending_restarts.get(pending.family)
+            if current is None:
+                return None, None
+            if current is not pending:
+                return current, None
+            stop_adapter = pending.stop_adapter
+            if stop_adapter is None:
+                return pending, None
+            try:
+                stop_future = stop_adapter.stop()
+            except Exception as error:
+                failure = WorkspaceRuntimeError(
+                    RuntimeErrorCode.UNSUPPORTED,
+                    f"{pending.family.value} adapter stop failed ({type(error).__name__})",
+                )
+                self._family_errors[pending.family] = failure
+                return pending, failure
+            replacement = _PendingAdapterRestart(
+                pending.family,
+                pending.projection,
+                pending.tracker,
+                pending.trusted_paths,
+                None,
+                stop_future,
+            )
+            self._pending_restarts[pending.family] = replacement
+            return replacement, None
+
+    def _complete_pending_restart(
+        self,
+        pending: _PendingAdapterRestart,
+    ) -> WorkspaceRuntimeError | None:
+        """Publish one cold replacement only after its old stop is proven done."""
+
+        with self._state_lock:
+            if self._pending_restarts.get(pending.family) is not pending:
+                return None
+            if self._stopped:
+                self._pending_restarts.pop(pending.family, None)
+                return None
+            try:
+                adapter, tracker = self._build_adapter(
+                    pending.family,
+                    pending.projection,
+                    pending.trusted_paths,
+                    scope_tracker=pending.tracker,
+                )
+            except Exception as error:
+                failure = WorkspaceRuntimeError(
+                    RuntimeErrorCode.SCOPE_INCOMPATIBLE,
+                    f"{pending.family.value} adapter construction failed ({type(error).__name__})",
+                )
+                self._family_errors[pending.family] = failure
+                return failure
+            self._trackers[pending.family] = tracker
+            self._adapters[pending.family] = adapter
+            self._family_errors.pop(pending.family, None)
+            self._pending_restarts.pop(pending.family, None)
+            return None
 
     def notify_watched_files(
         self,
@@ -1404,12 +1575,20 @@ class WorkspaceRuntime:
         except WorkspaceError as caught:
             return from_workspace_error(caught)
         except WorkspaceRuntimeError as caught:
-            code = (
-                ErrorCode.SCOPE_INCOMPATIBLE
-                if caught.code is RuntimeErrorCode.SCOPE_INCOMPATIBLE
-                else ErrorCode.UNSUPPORTED
+            try:
+                code = ErrorCode(caught.code)
+            except ValueError:
+                code = ErrorCode.UNSUPPORTED
+            retry = (
+                RetryMetadata(retryable=True)
+                if code in {ErrorCode.NOT_READY, ErrorCode.TIMED_OUT}
+                else None
             )
-            return error(code, details={"paths": caught.paths} if caught.paths else {})
+            return error(
+                code,
+                details={"paths": caught.paths} if caught.paths else {},
+                retry=retry,
+            )
         # TimeoutError is an OSError; it must keep its own code rather than be
         # rewritten as invalid input by the clause below.
         except TimeoutError:
@@ -1700,23 +1879,57 @@ class WorkspaceRuntime:
         }
 
     def stop(self) -> None:
-        """Stop every adapter before closing the sole workspace executor."""
+        """Settle current and pending adapter stops before closing the executor."""
 
         with self._state_lock:
             if self._stopped:
                 return
             self._stopped = True
+            adapters = tuple(self._adapters.values())
+            pending_restarts = tuple(self._pending_restarts.values())
         failures: list[BaseException] = []
-        futures = tuple(adapter.stop() for adapter in self._adapters.values())
+        responsibilities: dict[int, Future[AdapterSnapshot]] = {}
+        for adapter in adapters:
+            try:
+                future = adapter.stop()
+            except BaseException as error:
+                failures.append(error)
+            else:
+                responsibilities[id(future)] = future
+        for pending in pending_restarts:
+            pending, failure = self._start_pending_stop(pending)
+            if failure is not None:
+                failures.append(failure)
+                continue
+            if pending is not None and pending.stop_future is not None:
+                responsibilities[id(pending.stop_future)] = pending.stop_future
+        timed_out: list[tuple[Future[AdapterSnapshot], TimeoutError]] = []
+        futures = tuple(responsibilities.values())
         for future in futures:
             try:
                 future.result(timeout=self._future_timeout)
+            except TimeoutError as error:
+                timed_out.append((future, error))
             except BaseException as error:
                 failures.append(error)
         try:
-            self._executor.close(cancel_queued=True, timeout=min(self._future_timeout, 5.0))
+            # If a cleanup future exceeded its ordinary request timeout, retain
+            # it in FIFO order rather than canceling away process ownership.
+            self._executor.close(
+                cancel_queued=not timed_out,
+                timeout=min(self._future_timeout, 5.0),
+            )
         except BaseException as error:
             failures.append(error)
+        for future, timeout_error in timed_out:
+            try:
+                future.result(timeout=0)
+            except TimeoutError:
+                failures.append(timeout_error)
+            except BaseException as error:
+                failures.append(error)
+        with self._state_lock:
+            self._pending_restarts.clear()
         if failures:
             raise RuntimeError(f"workspace runtime stop failed: {failures[0]}") from failures[0]
 
@@ -2305,7 +2518,7 @@ def _unavailable_family_status(
 ) -> Mapping[str, object]:
     status: dict[str, object] = {
         "error": {"code": failure.code, "paths": failure.paths},
-        "scope_compatible": False,
+        "scope_compatible": projection is not None and projection.compatible,
     }
     if projection is not None:
         status.update(

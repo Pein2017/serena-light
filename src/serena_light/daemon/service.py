@@ -37,7 +37,12 @@ from serena_light.tools.envelopes import (
     success,
 )
 from serena_light.workspace.identity import WorkspaceError, WorkspaceIdentity, WorkspacePolicy
-from serena_light.workspace.registry import ResolvedWorkspace, WorkspaceBinding, WorkspaceRuntimeRegistry
+from serena_light.workspace.registry import (
+    PreparedWorkspaceActivation,
+    ResolvedWorkspace,
+    WorkspaceBinding,
+    WorkspaceRuntimeRegistry,
+)
 from serena_light.workspace.runtime import WorkspaceRuntimeError
 
 
@@ -140,7 +145,7 @@ class WorkspaceDaemonService[IdentityT: Hashable, RuntimeT]:
         return _release_workspace_data(daemon_lease_id, result, immediate=immediate)
 
     async def activate_workspace(self, *, lease_id: str, absolute_path: str) -> Mapping[str, object]:
-        """Resolve off-loop, then acquire-swap and bind one live daemon lease."""
+        """Resolve, refresh, then atomically bind one live daemon lease."""
 
         daemon_lease_id = _lease_uuid(lease_id)
         activation_path = Path(absolute_path)
@@ -152,11 +157,15 @@ class WorkspaceDaemonService[IdentityT: Hashable, RuntimeT]:
             # Resolution precedes registry/lifecycle mutation, so failures keep
             # the prior binding and lease authority unchanged.
             return from_workspace_error(exc).to_dict()
+        except Exception as exc:
+            return self._activation_error(exc)
 
         runtimes_to_stop: list[RuntimeT] = []
         expiry_error: LifecycleLeaseExpiredError[IdentityT, RuntimeT] | None = None
         binding: WorkspaceBinding[IdentityT, RuntimeT] | None = None
-        refresh_runtime: RuntimeT | None = None
+        prepared: PreparedWorkspaceActivation[IdentityT, RuntimeT, UUID] | None = None
+        committed = False
+        activation_error: Mapping[str, object] | None = None
         async with self._binding_lock:
             try:
                 # Reject a release/expiry that happened while path resolution ran
@@ -166,33 +175,47 @@ class WorkspaceDaemonService[IdentityT: Hashable, RuntimeT]:
                 expiry_error = exc
                 runtimes_to_stop.extend(self._apply_decision_locked(exc.decision))
             else:
-                existing_runtime = self._registry.runtime_state(resolved.identity)
-                binding = await asyncio.to_thread(self._registry.activate, daemon_lease_id, resolved)
                 try:
+                    prepared = await asyncio.to_thread(
+                        self._registry.prepare_activation,
+                        daemon_lease_id,
+                        resolved,
+                    )
+                    await self._ensure_runtime_fresh(prepared.binding.runtime)
+                    # Refresh runs off-loop and can outlive lease authority.
+                    # Check again before publishing any provisional binding.
+                    self._lifecycle.require_active(daemon_lease_id)
+                    binding = await asyncio.to_thread(self._registry.commit_activation, prepared)
+                    committed = True
                     self._lifecycle.rebind(daemon_lease_id, binding)
-                    if existing_runtime is not None:
-                        refresh_runtime = binding.runtime
                 except LifecycleLeaseExpiredError as exc:
                     expiry_error = exc
-                    # Runtime acquisition completed after authority expired.  It
-                    # never entered lifecycle grace ownership, so retire it now.
-                    self._registry.release(daemon_lease_id)
-                    detached = self._registry.retire_idle(binding.identity, binding.runtime)
-                    if detached is not None:
-                        runtimes_to_stop.append(detached)
+                    if prepared is not None:
+                        runtimes_to_stop.extend(
+                            self._discard_prepared_activation_locked(
+                                daemon_lease_id,
+                                prepared,
+                                committed=committed,
+                            )
+                        )
                     runtimes_to_stop.extend(self._apply_decision_locked(exc.decision))
+                except Exception as exc:
+                    if prepared is not None:
+                        runtimes_to_stop.extend(
+                            self._discard_prepared_activation_locked(
+                                daemon_lease_id,
+                                prepared,
+                                committed=committed,
+                            )
+                        )
+                    activation_error = self._activation_error(exc)
 
         await self._stop_runtimes(runtimes_to_stop)
         if expiry_error is not None:
             raise LeaseExpiredError(str(expiry_error)) from expiry_error
+        if activation_error is not None:
+            return activation_error
         assert binding is not None
-        if refresh_runtime is not None:
-            try:
-                callback = cast(Callable[[], object], cast(Any, refresh_runtime).ensure_fresh)
-            except AttributeError:
-                callback = None
-            if callback is not None:
-                await asyncio.to_thread(callback)
         return {
             "lease_id": str(daemon_lease_id),
             "workspace": _binding_data(binding),
@@ -291,6 +314,56 @@ class WorkspaceDaemonService[IdentityT: Hashable, RuntimeT]:
         async with self._binding_lock:
             runtimes_to_stop = self._apply_decision_locked(error.decision)
         await self._stop_runtimes(runtimes_to_stop)
+
+    async def _ensure_runtime_fresh(self, runtime: RuntimeT) -> None:
+        """Refresh a provisional runtime before committing its lease binding."""
+
+        try:
+            callback = cast(Callable[[], object], cast(Any, runtime).ensure_fresh)
+        except AttributeError:
+            return
+        result = await asyncio.to_thread(callback)
+        if isawaitable(result):
+            await result
+
+    def _discard_prepared_activation_locked(
+        self,
+        lease_id: UUID,
+        prepared: PreparedWorkspaceActivation[IdentityT, RuntimeT, UUID],
+        *,
+        committed: bool,
+    ) -> list[RuntimeT]:
+        """Discard an uncommitted candidate or a post-expiry committed binding."""
+
+        if committed:
+            self._registry.release(lease_id)
+        else:
+            self._registry.abort_activation(prepared)
+        if not prepared.candidate_runtime_created:
+            return []
+        detached = self._registry.retire_idle(prepared.binding.identity, prepared.binding.runtime)
+        return [] if detached is None else [detached]
+
+    @staticmethod
+    def _activation_error(exc: Exception) -> Mapping[str, object]:
+        """Convert activation setup failures without leaking exception detail."""
+
+        if isinstance(exc, WorkspaceError):
+            return from_workspace_error(exc).to_dict()
+        if isinstance(exc, WorkspaceRuntimeError):
+            try:
+                code = ErrorCode(exc.code)
+            except ValueError:
+                code = ErrorCode.UNSUPPORTED
+            details: dict[str, JsonValue] = {"paths": exc.paths} if exc.paths else {}
+            return error(code, details=details).to_dict()
+        if isinstance(exc, ExecutorBusyError):
+            return from_executor_busy(exc).to_dict()
+        if isinstance(exc, AdapterError):
+            return from_adapter_error(exc).to_dict()
+        if isinstance(exc, TimeoutError):
+            return from_timeout(exc).to_dict()
+        return error(ErrorCode.UNCERTAIN).to_dict()
 
     async def _semantic_call(
         self, lease_id: str, operation: str, **kwargs: object

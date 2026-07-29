@@ -2,10 +2,10 @@ from __future__ import annotations
 
 import asyncio
 import threading
-from collections.abc import Callable, Coroutine
+from collections.abc import Callable, Coroutine, Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from uuid import UUID
 
 import pytest
@@ -24,9 +24,12 @@ def run[ResultT](coroutine: Coroutine[Any, Any, ResultT]) -> ResultT:
 class Runtime:
     identity: str
     freshness_count: int = 0
+    freshness_error: Exception | None = None
 
     def ensure_fresh(self) -> None:
         self.freshness_count += 1
+        if self.freshness_error is not None:
+            raise self.freshness_error
 
 
 @dataclass(slots=True)
@@ -147,8 +150,8 @@ def test_same_root_reuses_runtime_while_cross_root_bindings_remain_isolated() ->
             await service.binding_for(lease_id=third)
         ).runtime
         assert len(created) == 2
-        assert created[0].freshness_count == 1
-        assert created[1].freshness_count == 0
+        assert created[0].freshness_count == 2
+        assert created[1].freshness_count == 1
 
     run(scenario())
 
@@ -234,6 +237,105 @@ def test_expiry_during_cross_root_acquisition_rolls_back_orphan_runtime() -> Non
             await switch
         assert registry.runtime_state("/data/new") is None
         assert [runtime.identity for runtime in stopped] == ["/data/new"]
+
+    run(scenario())
+
+
+def test_failed_same_root_refresh_preserves_prior_binding_and_holder_count() -> None:
+    service, registry, _clock, stopped, _threads = make_service(
+        resolver=lambda path: ResolvedWorkspace(identity=str(path.parent), working_subdirectory=path)
+    )
+
+    async def scenario() -> None:
+        lease_id = await acquire(service)
+        await service.activate_workspace(lease_id=lease_id, absolute_path="/data/project/old")
+        prior = await service.binding_for(lease_id=lease_id)
+        prior.runtime.freshness_error = TimeoutError("refresh stalled")
+
+        failed = await service.activate_workspace(lease_id=lease_id, absolute_path="/data/project/new")
+        assert failed["ok"] is False
+        failure = cast(Mapping[str, object], failed["error"])
+        assert failure.get("code") == "TIMED_OUT"
+
+        restored = await service.binding_for(lease_id=lease_id)
+        assert restored == prior
+        state = registry.runtime_state("/data/project")
+        assert state is not None and state.reference_count == 1
+        assert service._lifecycle.active_holders("/data/project") == 1
+        assert stopped == []
+
+    run(scenario())
+
+
+def test_failed_cross_root_refresh_restores_prior_binding_and_retires_new_runtime() -> None:
+    created: list[Runtime] = []
+
+    def factory(identity: str) -> Runtime:
+        freshness_error = TimeoutError("refresh stalled") if identity == "/data/new" else None
+        runtime = Runtime(identity, freshness_error=freshness_error)
+        created.append(runtime)
+        return runtime
+
+    service, registry, _clock, stopped, _threads = make_service(
+        factory=factory,
+        resolver=lambda path: ResolvedWorkspace(identity=str(path.parent), working_subdirectory=path),
+    )
+
+    async def scenario() -> None:
+        lease_id = await acquire(service)
+        await service.activate_workspace(lease_id=lease_id, absolute_path="/data/old/work")
+        prior = await service.binding_for(lease_id=lease_id)
+
+        failed = await service.activate_workspace(lease_id=lease_id, absolute_path="/data/new/work")
+        assert failed["ok"] is False
+        failure = cast(Mapping[str, object], failed["error"])
+        assert failure.get("code") == "TIMED_OUT"
+
+        restored = await service.binding_for(lease_id=lease_id)
+        assert restored == prior
+        old_state = registry.runtime_state("/data/old")
+        assert old_state is not None and old_state.reference_count == 1
+        assert registry.runtime_state("/data/new") is None
+        assert service._lifecycle.active_holders("/data/old") == 1
+        assert service._lifecycle.active_holders("/data/new") == 0
+        assert [runtime.identity for runtime in stopped] == ["/data/new"]
+
+        await service.release_lease(lease_id=lease_id, immediate=False)
+        old_state = registry.runtime_state("/data/old")
+        assert old_state is not None and old_state.reference_count == 0
+
+    run(scenario())
+
+
+def test_failed_refresh_keeps_an_existing_warm_runtime_retained() -> None:
+    service, registry, _clock, stopped, _threads = make_service(
+        resolver=lambda path: ResolvedWorkspace(identity=str(path.parent), working_subdirectory=path)
+    )
+
+    async def scenario() -> None:
+        warm_lease = await acquire(service, "warm")
+        await service.activate_workspace(lease_id=warm_lease, absolute_path="/data/target/work")
+        warm_runtime = (await service.binding_for(lease_id=warm_lease)).runtime
+        await service.release_lease(lease_id=warm_lease, immediate=False)
+        warm_state = registry.runtime_state("/data/target")
+        assert warm_state is not None and warm_state.reference_count == 0
+
+        lease_id = await acquire(service, "active")
+        await service.activate_workspace(lease_id=lease_id, absolute_path="/data/old/work")
+        prior = await service.binding_for(lease_id=lease_id)
+        warm_runtime.freshness_error = TimeoutError("refresh stalled")
+
+        failed = await service.activate_workspace(lease_id=lease_id, absolute_path="/data/target/next")
+        assert failed["ok"] is False
+        failure = cast(Mapping[str, object], failed["error"])
+        assert failure.get("code") == "TIMED_OUT"
+
+        assert await service.binding_for(lease_id=lease_id) == prior
+        target_state = registry.runtime_state("/data/target")
+        assert target_state is not None
+        assert target_state.runtime is warm_runtime
+        assert target_state.reference_count == 0
+        assert stopped == []
 
     run(scenario())
 

@@ -53,6 +53,17 @@ class WorkspaceBinding[IdentityT, RuntimeT]:
 
 
 @dataclass(frozen=True, slots=True)
+class PreparedWorkspaceActivation[IdentityT, RuntimeT, SessionT]:
+    """A registry-owned candidate that is not yet visible as a binding."""
+
+    session: SessionT
+    expected_binding: WorkspaceBinding[IdentityT, RuntimeT] | None
+    binding: WorkspaceBinding[IdentityT, RuntimeT]
+    candidate_is_provisional: bool
+    candidate_runtime_created: bool
+
+
+@dataclass(frozen=True, slots=True)
 class RuntimeState[RuntimeT]:
     """Observable lifecycle facts for a retained runtime.
 
@@ -118,6 +129,66 @@ class WorkspaceRuntimeRegistry[IdentityT: Hashable, RuntimeT, SessionT: Hashable
             if old_binding is not None:
                 self._release_locked(old_binding.lease.id)
             return new_binding
+
+    def prepare_activation(
+        self,
+        session: SessionT,
+        resolved: ResolvedWorkspace[IdentityT],
+    ) -> PreparedWorkspaceActivation[IdentityT, RuntimeT, SessionT]:
+        """Acquire a refresh candidate without replacing the current binding.
+
+        A cross-root candidate owns one temporary registry lease until callers
+        commit or abort it. Same-root preparation keeps the existing lease and
+        changes no registry state, letting callers validate the shared runtime
+        before they make even a working-subdirectory update visible.
+        """
+
+        with self._lock:
+            expected = self._bindings.get(session)
+            if expected is not None and expected.identity == resolved.identity:
+                return PreparedWorkspaceActivation(
+                    session=session,
+                    expected_binding=expected,
+                    binding=WorkspaceBinding(expected.lease, resolved.working_subdirectory),
+                    candidate_is_provisional=False,
+                    candidate_runtime_created=False,
+                )
+            candidate_runtime_created = resolved.identity not in self._runtimes
+            lease = self._acquire_locked(resolved.identity)
+            return PreparedWorkspaceActivation(
+                session=session,
+                expected_binding=expected,
+                binding=WorkspaceBinding(lease, resolved.working_subdirectory),
+                candidate_is_provisional=True,
+                candidate_runtime_created=candidate_runtime_created,
+            )
+
+    def commit_activation(
+        self,
+        prepared: PreparedWorkspaceActivation[IdentityT, RuntimeT, SessionT],
+    ) -> WorkspaceBinding[IdentityT, RuntimeT]:
+        """Atomically publish a prepared binding only if its prior state remains current."""
+
+        with self._lock:
+            current = self._bindings.get(prepared.session)
+            if current != prepared.expected_binding:
+                self._abort_prepared_locked(prepared)
+                raise RuntimeError("workspace binding changed before activation commit")
+            if prepared.candidate_is_provisional:
+                lease = self._leases.get(prepared.binding.lease.id)
+                if lease != prepared.binding.lease:
+                    self._abort_prepared_locked(prepared)
+                    raise RuntimeError("prepared workspace lease is no longer active")
+            self._bindings[prepared.session] = prepared.binding
+            if prepared.expected_binding is not None and prepared.candidate_is_provisional:
+                self._release_locked(prepared.expected_binding.lease.id)
+            return prepared.binding
+
+    def abort_activation(self, prepared: PreparedWorkspaceActivation[IdentityT, RuntimeT, SessionT]) -> bool:
+        """Discard only a cross-root candidate; never change the current binding."""
+
+        with self._lock:
+            return self._abort_prepared_locked(prepared)
 
     def binding_for(self, session: SessionT) -> WorkspaceBinding[IdentityT, RuntimeT] | None:
         """Return the current session binding, if one is active."""
@@ -192,3 +263,11 @@ class WorkspaceRuntimeRegistry[IdentityT: Hashable, RuntimeT, SessionT: Hashable
         if entry.reference_count < 0:  # pragma: no cover - internal invariant
             raise RuntimeError(f"workspace lease underflow for {lease.identity!r}")
         return True
+
+    def _abort_prepared_locked(
+        self,
+        prepared: PreparedWorkspaceActivation[IdentityT, RuntimeT, SessionT],
+    ) -> bool:
+        if not prepared.candidate_is_provisional:
+            return False
+        return self._release_locked(prepared.binding.lease.id)

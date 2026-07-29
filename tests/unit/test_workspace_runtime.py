@@ -88,6 +88,7 @@ class _Adapter:
         self.open_thread: str | None = None
         self.probe_thread: str | None = None
         self.stop_thread: str | None = None
+        self.stop_calls = 0
         self._phase = AdapterPhase.COLD
         self._document_generation = 0
         self._running = False
@@ -177,6 +178,8 @@ class _Adapter:
         return self.context.executor.submit(lambda: operation(self.client))
 
     def stop(self) -> Future[AdapterSnapshot]:
+        self.stop_calls += 1
+
         def stop_on_executor() -> AdapterSnapshot:
             self.stop_thread = threading.current_thread().name
             self._phase = AdapterPhase.STOPPING
@@ -549,6 +552,7 @@ def _git_runtime(
     *,
     inventory_factory: Callable[[Any], TrustInventory] | None = None,
     attributions: dict[LanguageFamily, int] | None = None,
+    future_timeout: float = 35.0,
 ) -> WorkspaceRuntime:
     def attribute(family: LanguageFamily) -> Callable[[Path, tuple[str, ...]], ScopeProjection]:
         def attributor(_root: Path, paths: tuple[str, ...]) -> ScopeProjection:
@@ -567,6 +571,7 @@ def _git_runtime(
             LanguageFamily.TYPESCRIPT: attribute(LanguageFamily.TYPESCRIPT),
         },
         adapter_factories=_factories(adapters, contexts, symbols=[]),
+        future_timeout=future_timeout,
     )
 
 
@@ -775,6 +780,129 @@ def test_nested_native_config_restarts_only_its_running_adapter_before_new_readi
         assert attributions == {LanguageFamily.TYPESCRIPT: 3}
     finally:
         runtime.stop()
+
+
+def test_config_restart_timeout_is_explicit_and_retries_same_stop_before_recovery(tmp_path: Path) -> None:
+    _git_repository(tmp_path)
+    (tmp_path / "main.py").write_text("value = 1\n")
+    (tmp_path / "main.ts").write_text("export const value = 1;\n")
+    adapters: dict[LanguageFamily, _Adapter] = {}
+    contexts: dict[LanguageFamily, AdapterBuildContext] = {}
+    runtime = _git_runtime(tmp_path, adapters, contexts, future_timeout=0.05)
+    release = threading.Event()
+    entered = threading.Event()
+    try:
+        runtime.load_document_symbols("main.py")
+        runtime.load_document_symbols("main.ts")
+        original_python = adapters[LanguageFamily.PYTHON]
+        original_typescript = adapters[LanguageFamily.TYPESCRIPT]
+        python_program_before = original_python.snapshot().generations.program
+        typescript_generations = original_typescript.snapshot().generations
+
+        def block_executor() -> None:
+            entered.set()
+            assert release.wait(5)
+
+        blocked = runtime.executor.submit(block_executor)
+        assert entered.wait(5)
+        (tmp_path / "pyrightconfig.json").write_text('{"include": ["*.py"]}\n')
+
+        with pytest.raises(TimeoutError):
+            runtime.ensure_fresh()
+
+        assert LanguageFamily.PYTHON not in runtime.adapters
+        unavailable = cast(Mapping[str, object], runtime.status()["unavailable_language_families"])
+        python_error = cast(Mapping[str, object], cast(Mapping[str, object], unavailable["python"])["error"])
+        assert python_error["code"] == "TIMED_OUT"
+        assert runtime.adapters[LanguageFamily.TYPESCRIPT] is original_typescript
+        assert original_typescript.snapshot().generations == typescript_generations
+
+        timed_out = runtime.get_symbols_overview("main.py").to_dict()
+        assert timed_out["error"]["code"] == "TIMED_OUT"
+        assert timed_out["error"]["retry"]["retryable"] is True
+
+        release.set()
+        blocked.result(timeout=5)
+        recovered_scan = runtime.ensure_fresh()
+        replacement = adapters[LanguageFamily.PYTHON]
+
+        assert recovered_scan.config_changed == ()
+        assert runtime.adapters[LanguageFamily.PYTHON] is replacement
+        assert replacement is not original_python
+        assert replacement.snapshot().phase is AdapterPhase.COLD
+        assert replacement.snapshot().generations.program == python_program_before + 1
+        assert "python" not in runtime.status()["unavailable_language_families"]
+        assert runtime.adapters[LanguageFamily.TYPESCRIPT] is original_typescript
+        assert original_typescript.snapshot().generations == typescript_generations
+    finally:
+        release.set()
+        runtime.stop()
+
+
+def test_runtime_stop_settles_pending_restart_once_without_publishing_replacement(tmp_path: Path) -> None:
+    _git_repository(tmp_path)
+    (tmp_path / "main.py").write_text("value = 1\n")
+    adapters: dict[LanguageFamily, _Adapter] = {}
+    contexts: dict[LanguageFamily, AdapterBuildContext] = {}
+    runtime = WorkspaceRuntime(
+        (WorkspaceKind.GIT, tmp_path),
+        path_policy=_PathPolicy(),
+        inventory_factory=lambda identity: git_trust_inventory(identity.root),
+        attributors={
+            LanguageFamily.PYTHON: lambda _root, paths: _projection(LanguageFamily.PYTHON, paths)
+        },
+        adapter_factories=_factories(adapters, contexts, symbols=[]),
+        future_timeout=0.2,
+    )
+    unblock = threading.Event()
+    unblocked = threading.Event()
+    finish = threading.Event()
+    stop_failures: list[BaseException] = []
+    stopped = False
+    try:
+        runtime.load_document_symbols("main.py")
+        original = adapters[LanguageFamily.PYTHON]
+
+        def block_executor() -> None:
+            assert unblock.wait(5)
+            unblocked.set()
+            assert finish.wait(5)
+
+        runtime.executor.submit(block_executor)
+        (tmp_path / "pyrightconfig.json").write_text('{"include": ["*.py"]}\n')
+        with pytest.raises(TimeoutError):
+            runtime.ensure_fresh()
+        assert original.stop_calls == 1
+        assert original.stop_thread is None
+        assert LanguageFamily.PYTHON not in runtime.adapters
+
+        unblock.set()
+        assert unblocked.wait(5)
+
+        def stop_runtime() -> None:
+            try:
+                runtime.stop()
+            except BaseException as error:
+                stop_failures.append(error)
+
+        stopping = threading.Thread(target=stop_runtime)
+        stopping.start()
+        assert stopping.is_alive()
+        finish.set()
+        stopping.join(timeout=5)
+        assert not stopping.is_alive()
+        stopped = True
+
+        assert stop_failures == []
+        assert original.stop_calls == 1
+        assert original.stop_thread is not None
+        assert adapters[LanguageFamily.PYTHON] is original
+        assert runtime.adapters == {}
+    finally:
+        unblock.set()
+        finish.set()
+        if not stopped:
+            runtime.stop()
 
 
 def test_read_only_non_git_root_uses_targeted_stat_instead_of_a_full_scan(tmp_path: Path) -> None:
