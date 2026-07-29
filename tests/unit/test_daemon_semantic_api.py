@@ -14,6 +14,7 @@ from serena_light.daemon.leases import LeaseLifecycle
 from serena_light.daemon.server import create_daemon_app
 from serena_light.daemon.service import WorkspaceDaemonService
 from serena_light.lsp.adapter import AdapterError, AdapterErrorCode
+from serena_light.lsp.client import LspProtocolError, LspResponseError
 from serena_light.lsp.executor import ExecutorBusyError
 from serena_light.runtime_files import BearerSecret
 from serena_light.tools.envelopes import ErrorCode, JsonValue, error, success
@@ -40,6 +41,11 @@ class OutcomeRuntime:
     outcome: object
 
     def operation(self) -> object:
+        if isinstance(self.outcome, BaseException):
+            raise self.outcome
+        return self.outcome
+
+    def replace_symbol_body(self) -> object:
         if isinstance(self.outcome, BaseException):
             raise self.outcome
         return self.outcome
@@ -327,6 +333,7 @@ def test_http_immediate_workspace_release_stops_only_the_last_holder() -> None:
         assert non_last["active_holders"] == 1
         assert non_last["immediate"] is True
         assert non_last["runtime_stopped"] is False
+        assert non_last["runtime_stop_pending"] is False
         assert stopped == []
         assert _data(_call(client, authorization, session, "find_symbol", {"name_path": "Thing"}, second))[
             "identity"
@@ -338,6 +345,7 @@ def test_http_immediate_workspace_release_stops_only_the_last_holder() -> None:
         assert last["active_holders"] == 0
         assert last["immediate"] is True
         assert last["runtime_stopped"] is True
+        assert last["runtime_stop_pending"] is False
         assert [runtime.identity for runtime in stopped] == ["/data/project"]
 
 
@@ -383,8 +391,8 @@ def test_http_release_workspace_rejects_non_boolean_immediate() -> None:
 def test_runtime_boundary_converts_typed_failures_without_generic_rewriting() -> None:
     service, _created = _service()
 
-    async def call(outcome: object) -> Mapping[str, object]:
-        return await service._runtime_result(cast(FakeRuntime, OutcomeRuntime(outcome)), "operation", {})
+    async def call(outcome: object, *, operation: str = "operation") -> Mapping[str, object]:
+        return await service._runtime_result(cast(FakeRuntime, OutcomeRuntime(outcome)), operation, {})
 
     for code in WorkspaceErrorCode:
         converted = asyncio.run(call(WorkspaceError(WorkspaceErrorData(code, "secret"))))
@@ -399,6 +407,26 @@ def test_runtime_boundary_converts_typed_failures_without_generic_rewriting() ->
     )["code"] == "SCOPE_INCOMPATIBLE"
     assert _data_map(asyncio.run(call(TimeoutError("secret")))["error"])["code"] == "TIMED_OUT"
     assert _data_map(asyncio.run(call(OSError("secret")))["error"])["code"] == "UNCERTAIN"
+
+    # A read can never have installed anything, so an ordinary LSP failure is
+    # declared UNSUPPORTED with a bounded reason -- not a code that could
+    # imply a possible write.
+    lsp_response_read = asyncio.run(call(LspResponseError(-32603, "internal error: secret")))
+    assert _data_map(lsp_response_read["error"]) == {
+        "code": "UNSUPPORTED",
+        "message": "operation is unsupported",
+        "retry": None,
+        "details": {"tool": "operation", "reason": "lsp_failure"},
+    }
+    assert "secret" not in json.dumps(lsp_response_read)
+
+    # A write must fail conservatively since it may already be installed.
+    lsp_protocol_edit = asyncio.run(
+        call(LspProtocolError("malformed frame: secret"), operation="replace_symbol_body")
+    )
+    assert _data_map(lsp_protocol_edit["error"])["code"] == "UNCERTAIN"
+    assert "secret" not in json.dumps(lsp_protocol_edit)
+
     uncertain = error(ErrorCode.UNCERTAIN).to_dict()
     assert asyncio.run(call(uncertain)) == uncertain
 
@@ -423,3 +451,80 @@ def test_runtime_boundary_rejects_malformed_runtime_mappings() -> None:
 def _data_map(value: object) -> Mapping[str, object]:
     assert isinstance(value, Mapping)
     return cast(Mapping[str, object], value)
+
+
+@dataclass(eq=False)
+class LspFailingRuntime:
+    """A runtime whose semantic read and pre-install edit resolution both
+    surface ordinary LSP failures instead of a wrapped workspace/adapter error."""
+
+    identity: str
+    calls: list[tuple[str, dict[str, object]]] = field(default_factory=list)
+
+    def find_symbol(self, **kwargs: object) -> object:
+        self.calls.append(("find_symbol", dict(kwargs)))
+        raise LspResponseError(-32603, "internal error: secret-token")
+
+    def replace_symbol_body(self, **kwargs: object) -> object:
+        # Fails while resolving the edit target, before any replacement is
+        # installed -- there is nothing to replay.
+        self.calls.append(("replace_symbol_body", dict(kwargs)))
+        raise LspProtocolError("pre-install resolution failed: secret-token")
+
+
+def _lsp_failing_service() -> tuple[WorkspaceDaemonService[str, LspFailingRuntime], list[LspFailingRuntime]]:
+    created: list[LspFailingRuntime] = []
+
+    def factory(identity: str) -> LspFailingRuntime:
+        runtime = LspFailingRuntime(identity)
+        created.append(runtime)
+        return runtime
+
+    service = WorkspaceDaemonService[str, LspFailingRuntime](
+        lifecycle=LeaseLifecycle(clock=lambda: 0.0),
+        registry=WorkspaceRuntimeRegistry(factory),
+        resolver=lambda path: ResolvedWorkspace(identity=str(path.parent), working_subdirectory=path),
+        runtime_stopper=lambda _runtime: None,
+    )
+    return service, created
+
+
+def test_lsp_response_and_protocol_errors_translate_through_service_and_http_boundary_without_replay() -> None:
+    service, created = _lsp_failing_service()
+    token = "t" * 48
+    daemon_id = str(uuid4())
+    app = create_daemon_app(service=service, bearer=BearerSecret(token), daemon_id=daemon_id)
+    authorization = f"Bearer {token}"
+
+    with TestClient(app, base_url="http://127.0.0.1:8000", client=("127.0.0.1", 50000)) as client:
+        session = _initialize(client, authorization)
+        lease = _data(_call(client, authorization, session, "acquire_lease"))["lease_id"]
+        assert isinstance(lease, str)
+        _call(client, authorization, session, "activate_workspace", {"absolute_path": "/data/one/subdir"}, lease)
+
+        # A read cannot have installed anything, so it is declared UNSUPPORTED
+        # with a bounded reason -- never a code implying a possible write.
+        read_failure = _call(client, authorization, session, "find_symbol", {"name_path": "Thing"}, lease)
+        assert _data_map(read_failure["error"]) == {
+            "code": "UNSUPPORTED",
+            "message": "operation is unsupported",
+            "retry": None,
+            "details": {"tool": "find_symbol", "reason": "lsp_failure"},
+        }
+        assert "secret-token" not in json.dumps(read_failure)
+
+        # A write must fail conservatively (it may already be installed).
+        edit_failure = _call(
+            client,
+            authorization,
+            session,
+            "replace_symbol_body",
+            {"name_path": "Thing", "relative_path": "a.py", "body": "x", "expected_hash": "0" * 64},
+            lease,
+        )
+        assert _data_map(edit_failure["error"])["code"] == "UNCERTAIN"
+        assert "secret-token" not in json.dumps(edit_failure)
+
+        # Each failing operation ran exactly once: no automatic replay of the
+        # pre-install edit resolution or the read.
+        assert [call[0] for call in created[0].calls] == ["find_symbol", "replace_symbol_body"]

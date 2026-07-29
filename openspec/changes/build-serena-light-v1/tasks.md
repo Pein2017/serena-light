@@ -167,5 +167,8 @@
 - [x] 15.5 Pass `/data/CoordExp`, `cc-plugin-codex`, `/data/ms-swift`, and transformers in fresh Codex, Claude Code, and CC Agent sessions while retaining the working external-network proxy; separately pass exact clean and poisoned child environments through the real stdio connector so localhost traffic never depends on the model client's proxy.
 - [x] 15.6 Update compatibility, registration, README, roadmap, and acceptance evidence with recorded environment/proxy preconditions.
 - [x] 15.7 Restore agent-public `replace_symbol_body`, restart fresh clients, and rerun hash edit/release only after every preceding repair gate passes.
+- [x] 15.8a Disposition the exact-`8f51d9e` Sol-xhigh and Opus-max HOLD findings: reconcile changed open documents before current-generation success, retain failed runtime-stop ownership and truthful pending status, translate ordinary LSP failures at the service boundary, and correct declaration-client evidence.
+- [x] 15.8b Separate deterministic default tests from explicitly snapshot-bound mutable external-repository and performance acceptance; retain native TypeScript checks as external authority and preserve the 30-second production readiness budget without inventing a larger timeout.
+- [x] 15.8c Make every public MCP tool discoverable and state the one-capture-group declaration regex contract in `tools/list`; return capture-count-specific `INVALID_INPUT` details.
 - [ ] 15.8 Obtain independent Sol-xhigh static-correctness and Opus-max runtime/evidence audits; disposition every finding and clear all blockers.
 - [ ] 15.9 Mark v1 PASS again, sync stable specs, and archive only after tasks 11–15 are complete; do not switch canonical Serena.

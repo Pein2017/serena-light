@@ -169,10 +169,15 @@ def test_two_authenticated_streamable_http_sessions_have_distinct_leases() -> No
             "get_diagnostics_for_symbol",
             "replace_symbol_body",
         }
+        assert all(isinstance(tool.get("description"), str) and tool["description"] for tool in tools)
         activation = next(tool for tool in tools if tool["name"] == "activate_workspace")
         activation_schema = _mapping(activation["inputSchema"])
         assert activation_schema["required"] == ["absolute_path"]
         assert "lease_id" not in _mapping(activation_schema["properties"])
+        declaration = next(tool for tool in tools if tool["name"] == "find_declaration")
+        declaration_properties = _mapping(_mapping(declaration["inputSchema"])["properties"])
+        regex_schema = _mapping(declaration_properties["regex"])
+        assert "exactly one capture group" in str(regex_schema["description"])
         lease_a = _call_tool(client, authorization, session_a, 3, "acquire_lease")
         lease_b = _call_tool(client, authorization, session_b, 4, "acquire_lease")
         status_a = _call_tool(client, authorization, session_a, 5, "get_daemon_status")

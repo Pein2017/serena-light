@@ -231,6 +231,14 @@ files served through configured, inferred, or transient engine projects.
 - **WHEN** a create, change, or delete changes or may change the configured-program generation beyond the adapter index generation
 - **THEN** global queries wait for the new-generation barrier or return `NOT_READY` and never return stale empty success
 
+#### Scenario: An already-open document changes outside Serena Light
+- **WHEN** freshness observes a change to a URI that the adapter still has open
+- **THEN** the adapter sends a full-text `didChange` from the observed snapshot, or `didClose` if that snapshot cannot be represented, before a current-generation semantic success is authorized
+
+#### Scenario: Watcher reconciliation cannot settle
+- **WHEN** watcher delivery, open-document reconciliation, executor admission, or its retained future fails or times out
+- **THEN** the operation returns retryable `BUSY` or `NOT_READY`, retains the exact event batch for retry, and an unchanged later scan cannot authorize success until that batch settles
+
 #### Scenario: Omitted trusted file changes
 - **WHEN** a trusted file outside the configured program changes without changing native program membership
 - **THEN** its path-scoped document generation is invalidated without falsely invalidating or expanding configured-program global readiness
@@ -269,6 +277,10 @@ files served through configured, inferred, or transient engine projects.
   attempt fails
 - **THEN** the daemon service retains that detached runtime as pending cleanup,
   reports the build non-idle, and retries it on a later sweep
+
+#### Scenario: Immediate release decides a stop that has not settled
+- **WHEN** a last-holder immediate release detaches a runtime but its stop attempt fails
+- **THEN** the response reports `runtime_stopped=false` and `runtime_stop_pending=true`, migration status remains non-idle, and later unrelated roots continue operating while a sweep retries cleanup
 
 ### Requirement: Build identity isolates daemon generations
 The connector and daemon SHALL compute the same build identity from sorted

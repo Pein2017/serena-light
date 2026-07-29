@@ -28,9 +28,11 @@ Gate: all tasks 11–14 in `build-serena-light-v1` pass at their declared eviden
 layer. Unit/in-process, real connector plus deterministic LSP, real daemon fault,
 and real LSP/repository evidence must be named separately; only the stdio gate
 currently combines the production connector executable with the shared daemon.
-No canonical-name change is permitted. The accepted code findings and repair
-evidence are current through local commit `4f97e12`; only final independent
-reaudit and release are still open. See
+No canonical-name change is permitted. The current candidate also reconciles
+changed open documents before generation success, retains and reports failed
+runtime-stop ownership, translates LSP failures at the service boundary, and
+snapshot-isolates mutable external acceptance. Only final current-build client
+acceptance, independent reaudit, and release are still open. See
 [the final acceptance record](../openspec/changes/build-serena-light-v1/final-acceptance.md).
 
 ## Phase B: reaccept and release v1
@@ -44,24 +46,21 @@ complete fault matrix passes. Then obtain
 independent `sol-xhigh` static-correctness and `opus-max` runtime/evidence
 audits, disposition every finding, mark v1 PASS, sync stable specs, and archive.
 
-**Progress as of 2026-07-29:** the first two required audits returned HOLD, and
-a later Sol-xhigh audit at `5e0f3e2` found same-scan healthy-family event loss,
-an adapter-removal cleanup-owner race, and shutdown leakage under ordinary queue
-saturation. Those findings and the adjacent detached-runtime owner gap are
-repaired at `4f97e12`; the complete 524-test suite,
-connector/edit contract selection, static/dependency/provenance gates, and
-separately labelled real-process rollover acceptance pass. Current-build fresh
-Codex and CC Agent clients pass all four required roots and release cleanly; a
-fresh real-stdio client also proves the declaration schema and a cross-library
-definition call at the same identity. Native Claude and the three-client hash
-edit receipts remain labelled as historical rather than being promoted to the
-current repair snapshot. Final dual audit and release remain pending. The
-earlier Opus-max runtime/evidence lane passed at `6a0c58e`,
-but an exact-current-head rerun did not complete because its OAuth token expired;
-that historical PASS is not promoted to the current repair snapshot.
+**Progress as of 2026-07-29:** exact-head Sol-xhigh and Opus-max audits at
+`8f51d9e` both returned HOLD. Their open-document freshness, runtime-stop,
+typed-LSP-boundary, declaration-evidence, and mutable-acceptance findings are
+implemented in candidate build
+`c85f2b4fac40069593d42b0631a0626b8a5330b732414065f0cfeb801506d34a`.
+The deterministic default suite passes 515 tests and explicitly skips 22
+snapshot-gated external tests; fixed-snapshot Python real-repository acceptance
+passes 4 tests, real Pyright integration passes 2, fixed-snapshot TypeScript
+acceptance/integration/admission passes 15, and three fresh transformers
+first-call performance runs pass. Final current-build clients, dual audit, and
+release remain pending.
 
-Gate: every blocker is cleared and task 15 is complete. Local commits are kept;
-no push and no canonical Serena switch.
+Gate: every blocker is cleared and task 15 is complete. Sync/archive and the
+authorized GitHub push occur only after both final audits pass; no canonical
+Serena switch is part of this roadmap.
 
 ## Phase C: agent-facing position queries
 

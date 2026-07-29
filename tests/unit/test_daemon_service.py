@@ -10,6 +10,7 @@ from uuid import UUID
 
 import pytest
 
+from serena_light import cli
 from serena_light.daemon.leases import LEASE_EXPIRY_SECONDS, WARM_GRACE_SECONDS, LeaseLifecycle
 from serena_light.daemon.server import LeaseExpiredError
 from serena_light.daemon.service import WorkspaceDaemonService
@@ -373,11 +374,13 @@ def test_immediate_release_stops_only_when_last_same_root_holder_leaves() -> Non
         first_release = await service.release_lease(lease_id=first, immediate=True)
         assert first_release["active_holders"] == 1
         assert first_release["runtime_stopped"] is False
+        assert first_release["runtime_stop_pending"] is False
         assert stopped == []
 
         second_release = await service.release_lease(lease_id=second, immediate=True)
         assert second_release["active_holders"] == 0
         assert second_release["runtime_stopped"] is True
+        assert second_release["runtime_stop_pending"] is False
         assert registry.runtime_state("/data/project") is None
 
     run(scenario())
@@ -385,6 +388,14 @@ def test_immediate_release_stops_only_when_last_same_root_holder_leaves() -> Non
 
 
 def test_detached_runtime_stop_failure_remains_owned_until_later_sweep() -> None:
+    """A failed detached stop is retried best-effort and never re-raises.
+
+    The lease/registry binding is already released before the stop is
+    attempted, so a stop failure must not surface as a bare exception out of
+    ``release_lease`` -- only ``daemon_idle``/``migration_status`` may reflect
+    the still-pending cleanup (finding 1).
+    """
+
     clock = FakeClock()
     registry = WorkspaceRuntimeRegistry[str, Runtime, UUID](lambda identity: Runtime(identity))
     attempts: list[Runtime] = []
@@ -405,17 +416,136 @@ def test_detached_runtime_stop_failure_remains_owned_until_later_sweep() -> None
         lease_id = await acquire(service, "owner")
         await service.activate_workspace(lease_id=lease_id, absolute_path="/data/project")
 
-        with pytest.raises(RuntimeError, match="cleanup admission rejected"):
-            await service.release_lease(lease_id=lease_id, immediate=True)
+        released = await service.release_lease(lease_id=lease_id, immediate=True)
+        assert released["runtime_stopped"] is False
+        assert released["runtime_stop_pending"] is True
 
         assert registry.runtime_state("/data/project") is None
         assert service.daemon_idle() is False
+        assert (await service.migration_status())["daemon_idle"] is False
 
         await service.sweep()
         assert service.daemon_idle() is True
+        assert (await service.migration_status())["daemon_idle"] is True
 
     run(scenario())
     assert [runtime.identity for runtime in attempts] == ["/data/project", "/data/project"]
+
+
+def test_release_workspace_reports_pending_stop_truthfully_on_failure() -> None:
+    """``release_workspace`` must not claim success when its own stop fails."""
+
+    clock = FakeClock()
+    registry = WorkspaceRuntimeRegistry[str, Runtime, UUID](lambda identity: Runtime(identity))
+
+    def always_fail(_runtime: Runtime) -> None:
+        raise RuntimeError("cleanup wedged")
+
+    service = WorkspaceDaemonService[str, Runtime](
+        lifecycle=LeaseLifecycle[str, Runtime](clock=clock),
+        registry=registry,
+        resolver=resolution,
+        runtime_stopper=always_fail,
+    )
+
+    async def scenario() -> None:
+        lease_id = await acquire(service, "owner")
+        await service.activate_workspace(lease_id=lease_id, absolute_path="/data/project")
+
+        released = await service.release_workspace(lease_id=lease_id, immediate=True)
+        assert released["runtime_stopped"] is False
+        assert released["runtime_stop_pending"] is True
+        assert service.daemon_idle() is False
+        assert (await service.migration_status())["daemon_idle"] is False
+
+    run(scenario())
+
+
+def test_wedged_pending_cleanup_never_raises_and_does_not_poison_other_root() -> None:
+    """An always-failing detached stop stays best-effort forever.
+
+    Retrying it from an unrelated root's release must not raise, and that
+    unrelated release/activation must succeed normally (finding 1).
+    """
+
+    clock = FakeClock()
+    registry = WorkspaceRuntimeRegistry[str, Runtime, UUID](lambda identity: Runtime(identity))
+
+    def always_fail(_runtime: Runtime) -> None:
+        raise RuntimeError("cleanup wedged")
+
+    service = WorkspaceDaemonService[str, Runtime](
+        lifecycle=LeaseLifecycle[str, Runtime](clock=clock),
+        registry=registry,
+        resolver=resolution,
+        runtime_stopper=always_fail,
+    )
+
+    async def scenario() -> None:
+        wedged_lease = await acquire(service, "wedged")
+        await service.activate_workspace(lease_id=wedged_lease, absolute_path="/data/wedged")
+        await service.release_lease(lease_id=wedged_lease, immediate=True)
+        assert service.daemon_idle() is False
+
+        for _ in range(3):
+            await service.sweep()
+            assert service.daemon_idle() is False
+
+        other_lease = await acquire(service, "clean")
+        activation = await service.activate_workspace(lease_id=other_lease, absolute_path="/data/other")
+        workspace = activation["workspace"]
+        assert isinstance(workspace, Mapping)
+        assert cast(Mapping[str, object], workspace)["identity"] == "/data/other"
+
+        other_release = await service.release_lease(lease_id=other_lease, immediate=True)
+        # The stopper fails unconditionally, so this call's own target is
+        # truthfully reported as still pending -- not falsely "stopped" -- but
+        # the call itself completed normally instead of raising.
+        assert other_release["runtime_stopped"] is False
+        assert other_release["runtime_stop_pending"] is True
+        assert registry.runtime_state("/data/other") is None
+        # The wedged root's cleanup is still pending -- an unrelated root's
+        # own operations succeeded without ever observing its failure.
+        assert service.daemon_idle() is False
+
+    run(scenario())
+
+
+def test_periodic_sweep_survives_an_always_failing_pending_stop() -> None:
+    """A wedged runtime must not terminate ``_sweep_periodically`` (finding 1)."""
+
+    clock = FakeClock()
+    registry = WorkspaceRuntimeRegistry[str, Runtime, UUID](lambda identity: Runtime(identity))
+
+    def always_fail(_runtime: Runtime) -> None:
+        raise RuntimeError("cleanup wedged")
+
+    service = WorkspaceDaemonService[str, Runtime](
+        lifecycle=LeaseLifecycle[str, Runtime](clock=clock),
+        registry=registry,
+        resolver=resolution,
+        runtime_stopper=always_fail,
+    )
+
+    async def scenario() -> None:
+        lease_id = await acquire(service, "wedged")
+        await service.activate_workspace(lease_id=lease_id, absolute_path="/data/wedged")
+        await service.release_lease(lease_id=lease_id, immediate=True)
+        assert service.daemon_idle() is False
+
+        sweep_task = asyncio.create_task(
+            cli._sweep_periodically(service, 0.001, idle_exit_seconds=0.05)
+        )
+        try:
+            for _ in range(5):
+                await asyncio.sleep(0.005)
+                assert not sweep_task.done()
+        finally:
+            sweep_task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await sweep_task
+
+    run(scenario())
 
 
 def test_sweep_releases_expired_binding_then_stops_after_grace() -> None:

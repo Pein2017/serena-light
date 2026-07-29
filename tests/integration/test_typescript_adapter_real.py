@@ -20,7 +20,13 @@ from serena_light.workspace.inventory import git_trust_inventory
 
 ROOT = Path("/data/CoordExp/cc-plugin-codex")
 
-pytestmark = pytest.mark.timeout(90)
+pytestmark = [
+    pytest.mark.timeout(90),
+    pytest.mark.external_repo(
+        root=str(ROOT),
+        snapshot_env="SERENA_LIGHT_CC_PLUGIN_CODEX_SNAPSHOT",
+    ),
+]
 
 
 def _path_uri(path: Path) -> str:

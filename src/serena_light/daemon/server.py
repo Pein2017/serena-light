@@ -18,14 +18,14 @@ from collections.abc import Awaitable, Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Protocol, cast
+from typing import Annotated, Any, Protocol, cast
 from uuid import UUID, uuid4
 from weakref import WeakKeyDictionary
 
 import psutil
 from mcp.server.fastmcp import Context, FastMCP
 from mcp.types import LATEST_PROTOCOL_VERSION
-from pydantic import StrictBool
+from pydantic import Field, StrictBool
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.types import ASGIApp, Receive, Scope, Send
@@ -231,16 +231,22 @@ def create_daemon_app(
 
     @mcp.tool(name="get_daemon_status", structured_output=True)
     async def get_daemon_status(context: Context) -> dict[str, object]:
+        """Report this daemon's build identity, health, and current lease summary."""
+
         data = dict(await service.status(mcp_session_id=session_ids.for_context(context)))
         return _success(_with_daemon_health(data, health))
 
     @mcp.tool(name="acquire_lease", structured_output=True)
     async def acquire_lease(context: Context) -> dict[str, object]:
+        """Acquire one daemon lease for the current MCP session."""
+
         data = dict(await service.acquire_lease(mcp_session_id=session_ids.for_context(context)))
         return _success(_with_daemon_health(data, health, versions=False))
 
     @mcp.tool(name="heartbeat", structured_output=True)
     async def heartbeat(lease_id: str) -> dict[str, object]:
+        """Renew an existing daemon lease."""
+
         try:
             validated = _validated_uuid(lease_id, "lease_id")
         except ValueError:
@@ -252,6 +258,8 @@ def create_daemon_app(
 
     @mcp.tool(name="release_lease", structured_output=True)
     async def release_lease(lease_id: str, immediate: bool = False) -> dict[str, object]:
+        """Release a daemon lease and optionally stop its now-unheld workspace runtime."""
+
         try:
             validated = _validated_uuid(lease_id, "lease_id")
         except ValueError:
@@ -269,7 +277,15 @@ def create_daemon_app(
             return _lease_expired()
 
     @mcp.tool(name="activate_workspace", structured_output=True)
-    async def activate_workspace(absolute_path: str, context: Context) -> dict[str, object]:
+    async def activate_workspace(
+        absolute_path: Annotated[
+            str,
+            Field(description="Absolute path inside the Git workspace or allowlisted read-only source root."),
+        ],
+        context: Context,
+    ) -> dict[str, object]:
+        """Bind this lease to the physical workspace containing an absolute path."""
+
         try:
             lease_id = lease_id_from_context(context)
         except ValueError:
@@ -300,6 +316,8 @@ def create_daemon_app(
 
     @mcp.tool(name="release_workspace", structured_output=True)
     async def release_workspace(context: Context, immediate: StrictBool = False) -> dict[str, object]:
+        """Unbind this lease from its workspace while retaining the live lease."""
+
         try:
             lease_id = lease_id_from_context(context)
         except ValueError:
@@ -313,6 +331,8 @@ def create_daemon_app(
 
     @mcp.tool(name="get_runtime_status", structured_output=True)
     async def get_runtime_status(context: Context) -> dict[str, object]:
+        """Report bounded workspace, generation, adapter, and cleanup status for this lease."""
+
         result = await bound_call(context, "get_runtime_status")
         if result.get("ok") is not True:
             return result
@@ -327,6 +347,8 @@ def create_daemon_app(
         max_depth: int = 1,
         max_answer_chars: int = 12_000,
     ) -> dict[str, object]:
+        """Return a bounded semantic symbol tree for one trusted workspace file."""
+
         return await bound_call(
             context,
             "get_symbols_overview",
@@ -345,6 +367,8 @@ def create_daemon_app(
         include_info: bool = False,
         max_answer_chars: int = 12_000,
     ) -> dict[str, object]:
+        """Find symbols by name path in one trusted file, directory, or the whole workspace."""
+
         return await bound_call(
             context,
             "find_symbol",
@@ -359,12 +383,22 @@ def create_daemon_app(
     @mcp.tool(name="find_declaration", structured_output=True)
     async def find_declaration(
         relative_path: str,
-        regex: str,
+        regex: Annotated[
+            str,
+            Field(
+                description=(
+                    "Python MULTILINE/DOTALL regex over the source file with exactly one capture group; "
+                    "that group must select the symbol whose declaration is requested."
+                )
+            ),
+        ],
         context: Context,
         containing_symbol_name_path: str | None = None,
         include_body: bool = False,
         include_info: bool = False,
     ) -> dict[str, object]:
+        """Resolve the declaration of the single symbol captured by a contextual source regex."""
+
         return await bound_call(
             context,
             "find_declaration",
@@ -385,6 +419,8 @@ def create_daemon_app(
         exclude_kinds: list[int] | None = None,
         max_answer_chars: int = 12_000,
     ) -> dict[str, object]:
+        """Find semantic implementations of a symbol identified in one trusted source file."""
+
         return await bound_call(
             context,
             "find_implementations",
@@ -404,6 +440,8 @@ def create_daemon_app(
         max_snippet_chars: int = 240,
         max_answer_chars: int = 12_000,
     ) -> dict[str, object]:
+        """Find bounded semantic references to a symbol identified in one trusted source file."""
+
         return await bound_call(
             context,
             "find_referencing_symbols",
@@ -421,6 +459,8 @@ def create_daemon_app(
         maximum_severity: int = 2,
         max_answer_chars: int = 12_000,
     ) -> dict[str, object]:
+        """Return current-generation advisory LSP diagnostics for one trusted source file."""
+
         return await bound_call(
             context,
             "get_diagnostics_for_file",
@@ -439,6 +479,8 @@ def create_daemon_app(
         maximum_severity: int = 2,
         max_answer_chars: int = 12_000,
     ) -> dict[str, object]:
+        """Return current-generation advisory diagnostics overlapping one semantic symbol."""
+
         return await bound_call(
             context,
             "get_diagnostics_for_symbol",
@@ -457,6 +499,8 @@ def create_daemon_app(
         expected_hash: str,
         context: Context,
     ) -> dict[str, object]:
+        """Hash-guard and atomically replace one complete semantic symbol body in an editable Git root."""
+
         return await bound_call(
             context,
             "replace_symbol_body",

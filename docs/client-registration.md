@@ -100,7 +100,10 @@ agent. This is not fresh-session acceptance; task 10.2 owns that test.
 For a normal stop, exit the client session; its connector releases its lease.
 For an immediate acceptance cleanup, call `release_workspace(immediate=true)`
 and then stop the client. It stops the runtime only for the final holder; other
-holders remain served. The shared daemon may stay warm after a normal release.
+holders remain served. `runtime_stopped=true` means cleanup actually settled;
+`runtime_stop_pending=true` means the detached runtime remains daemon-owned and
+will be retried while status remains non-idle. The shared daemon may stay warm
+after a normal release.
 
 To roll back a parallel trial, stop the affected client(s), remove only the
 `serena-light` registration you added, and restart those clients. Leave
@@ -109,7 +112,7 @@ daemon remains after clients have stopped, use normal process inspection and
 stop only the identified `serena-light` daemon; never stop canonical Serena as
 part of this rollback.
 
-Fresh Codex and CC Agent query receipts now match current repair identity
+Fresh Codex and CC Agent query receipts match the prior repair identity
 `eaa691e2425e7466f2f9c3d18666a050cfd53e8153de0c6db9a6f50c1538c3f5` across
 `/data/CoordExp`, `cc-plugin-codex`, `/data/ms-swift`, and the read-only conda
 `ms` transformers package. Both clients released each binding immediately;
@@ -117,9 +120,11 @@ the final release reported zero holders and a stopped runtime. A separate fresh
 real-stdio client at the same identity advertised the required
 `find_declaration(relative_path, regex, ...)` schema, resolved
 `GenerationConfig` from `/data/ms-swift` into conda transformers, and released
-with zero holders. One CC Agent's repeated `INVALID_INPUT` declaration attempts
-are therefore classified as malformed client invocations rather than a current
-connector/runtime defect.
+with zero holders. That CC Agent made five declaration calls whose regexes all
+had zero capture groups, so `INVALID_INPUT` was correct. The current MCP schema
+now describes every tool and states the one-capture-group contract directly.
+These receipts must not be promoted to the current candidate identity before
+fresh-client reacceptance.
 
 The earlier native Claude Code and three-client guarded-edit receipts match
 historical post-restoration build identity
@@ -127,7 +132,8 @@ historical post-restoration build identity
 remain historical. All model-facing clients retained the ambient external-network
 `9090` proxy. Clean and poisoned internal environments are instead exercised by
 the real service-executable stdio acceptance, which passes the exact environment
-to the connector child and verifies loopback bypass. The current exact-build
+to the connector child and verifies loopback bypass. The prior exact-build
 real-stdio suite also covers the restored guarded edit; it does not relabel the
-older three-client edits as current. The final dual audit remains open.
+older three-client edits as current. Current-build clients and the final dual
+audit remain open.
 Canonical-name switching is unapproved.

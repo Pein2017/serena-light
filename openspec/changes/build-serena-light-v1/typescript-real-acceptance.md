@@ -1,5 +1,22 @@
 # TypeScript Real Acceptance (OpenSpec 9.3)
 
+## Current snapshot-bound candidate status
+
+**PASS: 15 passed in 20.12s.** Candidate build `c85f2b4fac40...` removes this module
+from the deterministic default suite unless
+`SERENA_LIGHT_CC_PLUGIN_CODEX_SNAPSHOT` matches the exact observed Git HEAD,
+tracked binary diff, and untracked file/symlink content before and after every
+test. The same gate covers real TypeScript integration and the real-root scope
+probe. A supplied mismatch or any mid-test mutation fails; it is never `xfail`.
+
+`/data/CoordExp/cc-plugin-codex` initially changed repeatedly, then remained
+stable at snapshot
+`git:7caa1823bd246deb0d690c83263bc4d4a80480c9:bb7e2813111fc635dc5ff6a3cf5ecd63d58247e9104d825dcdeb2cf292814a04`
+through six semantic/diagnostic cases, the repository-native TypeScript
+authority check, three real TypeScript integration cases, and six admission
+probe cases. The gate verified the same identity after every test. Historical
+passes below remain evidence for older builds only.
+
 ## Post-audit current-build rerun
 
 **PASS at build `f4ee8a248a8c...`: 6 passed.** This 2026-07-29 post-restoration

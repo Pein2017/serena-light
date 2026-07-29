@@ -25,6 +25,7 @@ from serena_light.daemon.leases import (
 )
 from serena_light.daemon.server import LeaseExpiredError
 from serena_light.lsp.adapter import AdapterError
+from serena_light.lsp.client import LspProtocolError, LspResponseError
 from serena_light.lsp.executor import ExecutorBusyError
 from serena_light.tools.envelopes import (
     ErrorCode,
@@ -44,6 +45,11 @@ from serena_light.workspace.registry import (
     WorkspaceRuntimeRegistry,
 )
 from serena_light.workspace.runtime import WorkspaceRuntimeError
+
+# The only semantic operation that can install a write.  An ordinary LSP
+# failure elsewhere is a read that provably never wrote anything, so it must
+# not be declared with a code that could imply otherwise.
+_LSP_WRITE_OPERATIONS = frozenset({"replace_symbol_body"})
 
 
 class WorkspaceResolver[IdentityT](Protocol):
@@ -89,7 +95,7 @@ class WorkspaceDaemonService[IdentityT: Hashable, RuntimeT]:
 
         return {
             "active_holders": self._lifecycle.active_lease_count(),
-            "daemon_idle": self._lifecycle.daemon_idle(),
+            "daemon_idle": self.daemon_idle(),
         }
 
     async def acquire_lease(self, *, mcp_session_id: str) -> Mapping[str, object]:
@@ -118,9 +124,9 @@ class WorkspaceDaemonService[IdentityT: Hashable, RuntimeT]:
         async with self._binding_lock:
             result = self._lifecycle.release_lease(daemon_lease_id, immediate=immediate)
             runtimes_to_stop = self._apply_result_locked(result)
-        await self._stop_runtimes(runtimes_to_stop)
+        stopped = await self._stop_runtimes(runtimes_to_stop)
         self._report_decision(result.decision, immediate=immediate)
-        return _release_data(daemon_lease_id, result, immediate=immediate)
+        return _release_data(daemon_lease_id, result, immediate=immediate, stopped=stopped)
 
     async def release_workspace(self, *, lease_id: str, immediate: bool = False) -> Mapping[str, object]:
         """Drop the current binding while retaining the same live lease UUID."""
@@ -137,14 +143,14 @@ class WorkspaceDaemonService[IdentityT: Hashable, RuntimeT]:
             else:
                 runtimes_to_stop = self._apply_result_locked(result)
                 expiry_error = None
-        await self._stop_runtimes(runtimes_to_stop)
+        stopped = await self._stop_runtimes(runtimes_to_stop)
         self._report_decision(
             expiry_error.decision if expiry_error is not None else result.decision,
             immediate=immediate,
         )
         if expiry_error is not None:
             raise LeaseExpiredError(str(expiry_error)) from expiry_error
-        return _release_workspace_data(daemon_lease_id, result, immediate=immediate)
+        return _release_workspace_data(daemon_lease_id, result, immediate=immediate, stopped=stopped)
 
     async def activate_workspace(self, *, lease_id: str, absolute_path: str) -> Mapping[str, object]:
         """Resolve, refresh, then atomically bind one live daemon lease."""
@@ -386,6 +392,20 @@ class WorkspaceDaemonService[IdentityT: Hashable, RuntimeT]:
             return result
         return error(ErrorCode.UNSUPPORTED, details={"tool": operation, "reason": "malformed_runtime_result"}).to_dict()
 
+    @staticmethod
+    def _lsp_failure_envelope(operation: str) -> Mapping[str, object]:
+        """Translate an ordinary LSP response/protocol failure by write risk.
+
+        A write operation must fail conservatively: it may already have
+        installed a replacement, so ``UNCERTAIN`` is the only honest code.  A
+        read never installs anything, so it is declared ``UNSUPPORTED`` with a
+        bounded reason -- never a code that could imply a possible write.
+        """
+
+        if operation in _LSP_WRITE_OPERATIONS:
+            return error(ErrorCode.UNCERTAIN, retry=None).to_dict()
+        return error(ErrorCode.UNSUPPORTED, details={"tool": operation, "reason": "lsp_failure"}).to_dict()
+
     async def _runtime_value(
         self, runtime: RuntimeT, operation: str, kwargs: Mapping[str, object]
     ) -> Mapping[str, object]:
@@ -411,6 +431,11 @@ class WorkspaceDaemonService[IdentityT: Hashable, RuntimeT]:
         # meaning before the generic OSError fallback below.
         except TimeoutError as exc:
             return from_timeout(exc).to_dict()
+        # An ordinary LSP response/protocol failure (semantic lookup or
+        # pre-install edit resolution) is a runtime/service boundary concern,
+        # not a programming error; translate it without exposing its message.
+        except (LspResponseError, LspProtocolError):
+            return self._lsp_failure_envelope(operation)
         except OSError:
             return error(ErrorCode.UNCERTAIN, retry=None).to_dict()
         if isawaitable(result):
@@ -431,6 +456,8 @@ class WorkspaceDaemonService[IdentityT: Hashable, RuntimeT]:
                 return from_adapter_error(exc).to_dict()
             except TimeoutError as exc:
                 return from_timeout(exc).to_dict()
+            except (LspResponseError, LspProtocolError):
+                return self._lsp_failure_envelope(operation)
             except OSError:
                 return error(ErrorCode.UNCERTAIN).to_dict()
         if callable(to_dict := getattr(result, "to_dict", None)):
@@ -464,26 +491,42 @@ class WorkspaceDaemonService[IdentityT: Hashable, RuntimeT]:
         detached = self._registry.retire_idle(decision.identity, decision.runtime_to_stop)
         return [] if detached is None else [detached]
 
-    async def _stop_runtimes(self, runtimes: list[RuntimeT]) -> None:
+    async def _stop_runtimes(self, runtimes: list[RuntimeT]) -> bool:
+        """Best-effort stop of every pending runtime, old or newly retired.
+
+        A stop failure never raises here: it would otherwise contaminate
+        whichever unrelated lease/root operation happened to trigger this
+        retry, or terminate the periodic sweep loop, after that operation's
+        own binding/lifecycle change had already committed.  A failed runtime
+        simply remains pending for the next retry, and non-idleness is the
+        only public signal (see ``daemon_idle``/``migration_status``).
+
+        Returns whether every runtime passed in *this* call (the caller's own
+        detached targets) is confirmed stopped by the time this call returns.
+        Old pending entries retried alongside are always best-effort and
+        never affect this return value -- only the caller's own targets do.
+        """
+
+        own_targets = {id(runtime) for runtime in runtimes}
         async with self._runtime_stop_lock:
             for runtime in runtimes:
                 self._pending_runtime_stops.setdefault(id(runtime), runtime)
             pending = tuple(self._pending_runtime_stops.items())
             if not pending:
-                return
+                return True
             results = await asyncio.gather(
                 *(asyncio.to_thread(self._runtime_stopper, runtime) for _, runtime in pending),
                 return_exceptions=True,
             )
-            failures: list[BaseException] = []
+            own_targets_stopped = True
             for (marker, runtime), result in zip(pending, results, strict=True):
                 if isinstance(result, BaseException):
                     self._pending_runtime_stops[marker] = runtime
-                    failures.append(result)
+                    if marker in own_targets:
+                        own_targets_stopped = False
                 else:
                     self._pending_runtime_stops.pop(marker, None)
-            if failures:
-                raise failures[0]
+            return own_targets_stopped
 
 
 def _lease_uuid(value: str) -> UUID:
@@ -519,11 +562,31 @@ def _binding_data[IdentityT, RuntimeT](binding: WorkspaceBinding[IdentityT, Runt
     }
 
 
+def _stop_fields[IdentityT, RuntimeT](
+    decision: LeaseLifecycleDecision[IdentityT, RuntimeT] | None,
+    *,
+    stopped: bool,
+) -> dict[str, object]:
+    """Report public stop truth: decided, and actually confirmed, separately.
+
+    ``stopped`` reflects only the caller's own detached target(s) (see
+    ``_stop_runtimes``); a decision with no target to stop is neither stopped
+    nor pending.
+    """
+
+    decided = decision is not None and decision.runtime_to_stop is not None
+    return {
+        "runtime_stopped": decided and stopped,
+        "runtime_stop_pending": decided and not stopped,
+    }
+
+
 def _release_data[IdentityT, RuntimeT](
     lease_id: UUID,
     result: ReleaseResult[IdentityT, RuntimeT],
     *,
     immediate: bool,
+    stopped: bool,
 ) -> dict[str, object]:
     decision = result.decision
     return {
@@ -533,7 +596,7 @@ def _release_data[IdentityT, RuntimeT](
         "reason": None if decision is None else decision.reason.value,
         "active_holders": None if decision is None else decision.active_holders,
         "grace_deadline": None if decision is None else decision.grace_deadline,
-        "runtime_stopped": decision is not None and decision.runtime_to_stop is not None,
+        **_stop_fields(decision, stopped=stopped),
     }
 
 
@@ -542,6 +605,7 @@ def _release_workspace_data[IdentityT, RuntimeT](
     result: ReleaseResult[IdentityT, RuntimeT],
     *,
     immediate: bool,
+    stopped: bool,
 ) -> dict[str, object]:
     decision = result.decision
     return {
@@ -552,5 +616,5 @@ def _release_workspace_data[IdentityT, RuntimeT](
         "reason": None if decision is None else decision.reason.value,
         "active_holders": None if decision is None else decision.active_holders,
         "grace_deadline": None if decision is None else decision.grace_deadline,
-        "runtime_stopped": decision is not None and decision.runtime_to_stop is not None,
+        **_stop_fields(decision, stopped=stopped),
     }

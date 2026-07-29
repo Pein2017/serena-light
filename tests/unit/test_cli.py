@@ -6,15 +6,19 @@ import os
 import socket
 import sys
 import threading
+import time
 from collections.abc import Mapping
+from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any
-from uuid import uuid4
+from typing import Any, cast
+from uuid import UUID, uuid4
 
 import pytest
 
 from serena_light import __version__, cli
+from serena_light.daemon.leases import LeaseLifecycle
+from serena_light.daemon.service import WorkspaceDaemonService
 from serena_light.runtime_files import (
     BEARER_NAME,
     DISCOVERY_NAME,
@@ -26,6 +30,8 @@ from serena_light.runtime_files import (
     prepare_runtime_layout,
     write_discovery_metadata,
 )
+from serena_light.workspace.identity import WorkspaceKind, WorkspacePolicy
+from serena_light.workspace.registry import ResolvedWorkspace, WorkspaceRuntimeRegistry
 
 
 def _metadata(*, daemon_id: str | None = None) -> DiscoveryMetadata:
@@ -503,3 +509,80 @@ def test_sweep_failure_requests_server_exit_and_still_runs_cleanup() -> None:
 
     assert server.should_exit
     assert events == ["started", "stopped"]
+
+
+@dataclass(eq=False, slots=True)
+class _FailOnceRuntime:
+    """A detached runtime whose first stop is rejected, then succeeds."""
+
+    stop_calls: int = 0
+
+    def stop(self) -> None:
+        self.stop_calls += 1
+        if self.stop_calls == 1:
+            raise RuntimeError("stop rejected")
+
+
+def _single_root_resolution(path: Path) -> ResolvedWorkspace[cli.PhysicalWorkspaceKey]:
+    return ResolvedWorkspace(identity=(WorkspaceKind.GIT, path), working_subdirectory=path)
+
+
+def test_runtime_owner_stop_retains_ownership_until_stop_succeeds() -> None:
+    policy = cast(WorkspacePolicy, object())
+    runtime = _FailOnceRuntime()
+    owner = cli._RuntimeOwner(policy, builder=lambda _identity, _policy: runtime)
+    created = owner.create((WorkspaceKind.GIT, Path("/data/one")))
+    assert created is runtime
+
+    with pytest.raises(RuntimeError, match="stop rejected"):
+        owner.stop(runtime)
+    assert runtime.stop_calls == 1
+
+    owner.stop(runtime)
+    assert runtime.stop_calls == 2
+
+    # Ownership was already released by the successful stop above; a further
+    # call is a no-op and must not invoke the underlying runtime again.
+    owner.stop(runtime)
+    assert runtime.stop_calls == 2
+
+
+def test_runtime_owner_and_service_compose_fail_once_stop_without_false_idle() -> None:
+    """Two real ``_RuntimeOwner.stop`` calls compose with service retry.
+
+    The first ``release_lease`` triggers a real stop that fails; the service
+    must not raise and must report non-idle.  A later ``sweep`` retries with a
+    second real stop call that succeeds, and only then does the daemon become
+    idle (findings 1 and 2).
+    """
+
+    policy = cast(WorkspacePolicy, object())
+    runtime = _FailOnceRuntime()
+    owner = cli._RuntimeOwner(policy, builder=lambda _identity, _policy: runtime)
+    registry = WorkspaceRuntimeRegistry[cli.PhysicalWorkspaceKey, cli._Runtime, UUID](owner.create)
+    service = WorkspaceDaemonService[cli.PhysicalWorkspaceKey, cli._Runtime](
+        lifecycle=LeaseLifecycle(clock=time.monotonic),
+        registry=registry,
+        resolver=_single_root_resolution,
+        runtime_stopper=owner.stop,
+    )
+
+    async def scenario() -> None:
+        grant = await service.acquire_lease(mcp_session_id="session")
+        lease_id = grant["lease_id"]
+        assert isinstance(lease_id, str)
+        await service.activate_workspace(lease_id=lease_id, absolute_path="/data/one")
+
+        released = await service.release_lease(lease_id=lease_id, immediate=True)
+        # The first real stop call failed, so the release must truthfully
+        # report its own target as still pending, never as stopped.
+        assert released["runtime_stopped"] is False
+        assert released["runtime_stop_pending"] is True
+        assert runtime.stop_calls == 1
+        assert service.daemon_idle() is False
+
+        await service.sweep()
+        assert runtime.stop_calls == 2
+        assert service.daemon_idle() is True
+
+    asyncio.run(scenario())

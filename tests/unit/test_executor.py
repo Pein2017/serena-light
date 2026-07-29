@@ -23,10 +23,10 @@ def test_cleanup_reserve_is_independent_of_the_ordinary_queue_bound() -> None:
         with pytest.raises(ExecutorBusyError):
             executor.submit(lambda: None)
 
-        cleanup_python = executor._submit_cleanup(lambda: order.append("python-cleanup"))
-        cleanup_typescript = executor._submit_cleanup(lambda: order.append("typescript-cleanup"))
+        cleanup_python = executor.submit_cleanup(lambda: order.append("python-cleanup"))
+        cleanup_typescript = executor.submit_cleanup(lambda: order.append("typescript-cleanup"))
         with pytest.raises(ExecutorBusyError):
-            executor._submit_cleanup(lambda: order.append("overflow-cleanup"))
+            executor.submit_cleanup(lambda: order.append("overflow-cleanup"))
         assert executor.snapshot().queue_size == 1
         release.set()
 

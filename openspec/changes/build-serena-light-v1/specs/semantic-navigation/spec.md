@@ -118,7 +118,15 @@ exactly one capture group, optionally restricted to one containing symbol body.
 
 #### Scenario: Declaration locator is invalid
 - **WHEN** the regex has zero or multiple capture groups
-- **THEN** `find_declaration` returns `INVALID_INPUT` before dispatching an LSP request
+- **THEN** `find_declaration` returns `INVALID_INPUT` before dispatching an LSP request and identifies the regex capture-count reason
+
+#### Scenario: Agent discovers the declaration locator contract
+- **WHEN** a client lists the public tools
+- **THEN** every tool has a non-empty agent-facing description and the `find_declaration.regex` schema states that exactly one capture group selects the queried symbol
+
+#### Scenario: Language server returns an ordinary protocol error
+- **WHEN** a semantic read receives an LSP response or protocol failure
+- **THEN** the service boundary returns a bounded non-leaking `UNSUPPORTED` envelope; the same failure during guarded editing returns `UNCERTAIN` and the edit is never replayed
 
 #### Scenario: Declaration locator is ambiguous
 - **WHEN** the capture group matches more than once in the selected file or containing symbol body

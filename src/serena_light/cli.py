@@ -227,11 +227,12 @@ class _RuntimeOwner:
             with self._lock:
                 if runtime not in self._runtimes:
                     return
-            try:
-                runtime.stop()
-            finally:
-                with self._lock:
-                    self._runtimes.discard(runtime)
+            # Only discard on a successful stop.  A failed stop keeps the
+            # runtime owned so a later retry re-attempts a real stop instead
+            # of silently no-op'ing and publishing false idleness.
+            runtime.stop()
+            with self._lock:
+                self._runtimes.discard(runtime)
 
     async def stop_all(self) -> None:
         with self._lock:

@@ -22,7 +22,7 @@ from typing import IO, Any, Protocol, TypeVar, cast
 
 from serena_light.lsp.client import LspTransportClosed, SyncLspClient
 from serena_light.lsp.executor import BoundedLspExecutor
-from serena_light.lsp.positions import PositionEncoding
+from serena_light.lsp.positions import FileSnapshot, PositionEncoding, PositionError
 from serena_light.lsp.state import LspState
 from serena_light.processes import (
     Command,
@@ -30,9 +30,11 @@ from serena_light.processes import (
     terminate_process_tree_with_kill_fallback,
 )
 from serena_light.workspace.scope import (
+    FileChangeType,
     ReadinessCode,
     ReadinessResult,
     ScopeGenerationTracker,
+    WatchedFileEvent,
 )
 
 T = TypeVar("T")
@@ -585,13 +587,36 @@ class LanguageAdapter:
         return self._executor.submit(self._start_and_snapshot_worker)
 
     def stop(self) -> Future[AdapterSnapshot]:
-        return self._executor._submit_cleanup(self._stop_and_snapshot_worker)
+        return self._executor.submit_cleanup(self._stop_and_snapshot_worker)
 
     def submit_read(self, operation: Callable[[AdapterClient], T]) -> Future[T]:
         return self._executor.submit(lambda: self._execute_worker(operation, read_only=True))
 
     def submit_edit(self, operation: Callable[[AdapterClient], T]) -> Future[T]:
         return self._executor.submit(lambda: self._execute_worker(operation, read_only=False))
+
+    def reconcile_watched_files(
+        self,
+        *,
+        events: Sequence[WatchedFileEvent],
+        created: Sequence[str],
+        versions: Mapping[str, int],
+    ) -> Future[None]:
+        """Publish one watcher batch and reconcile only documents this adapter owns.
+
+        A watcher event does not replace an already-open buffer in every LSP
+        server.  Changed buffers therefore receive a full-text ``didChange``
+        from the exact snapshot read by the executor; unreadable and deleted
+        buffers are closed so a later operation must reopen them.  The bounded
+        controlled open/close policy for newly created files remains separate.
+        """
+
+        batch = tuple(events)
+        controlled_opens = tuple(created)
+        supplied_versions = dict(versions)
+        return self._executor.submit(
+            lambda: self._reconcile_watched_files_worker(batch, controlled_opens, supplied_versions)
+        )
 
     def open_document(
         self,
@@ -844,6 +869,99 @@ class LanguageAdapter:
             client.notify("textDocument/didClose", {"textDocument": {"uri": evicted_uri}})
             with self._state_lock:
                 self._pending_documents.pop(evicted_uri, None)
+
+    def _reconcile_watched_files_worker(
+        self,
+        events: Sequence[WatchedFileEvent],
+        created: Sequence[str],
+        versions: Mapping[str, int],
+    ) -> None:
+        """Deliver watcher facts without allowing an open buffer to stay stale."""
+
+        client = self._ensure_started_worker()
+        changed = frozenset(event.path for event in events if event.change_type is FileChangeType.CHANGED)
+        deleted = frozenset(event.path for event in events if event.change_type is FileChangeType.DELETED)
+        workspace_uri = self.workspace_root.as_uri()
+        changes = [dict(event.as_lsp_change(workspace_uri)) for event in events]
+        with self._operation_lock:
+            client.notify("workspace/didChangeWatchedFiles", {"changes": changes})
+            for uri in tuple(self._open_documents):
+                document = self._lsp_state.document(uri)
+                if document is None:
+                    self._open_documents.pop(uri, None)
+                    continue
+                try:
+                    relative_path = str(document.path.relative_to(self.workspace_root))
+                except ValueError:
+                    self._close_document_worker(client, uri)
+                    continue
+                if relative_path in deleted:
+                    self._close_document_worker(client, uri)
+                    continue
+                if relative_path not in changed:
+                    continue
+                try:
+                    text = FileSnapshot.from_bytes(document.path.read_bytes()).text
+                    version = versions[relative_path]
+                    updated = self._lsp_state.update_document(
+                        uri=uri,
+                        path=document.path,
+                        version=version,
+                    )
+                    if updated is None:
+                        raise ValueError("fresh watcher document version is not newer")
+                except (KeyError, OSError, PositionError, UnicodeError, ValueError):
+                    # A source that disappears or cannot be represented exactly
+                    # is never left open with stale server content.
+                    self._close_document_worker(client, uri)
+                    continue
+                self._lsp_state.advance_source_generation()
+                target = DocumentReadinessTarget(
+                    uri=uri,
+                    relative_path=relative_path,
+                    absolute_path=document.path,
+                    version=version,
+                    document_generation=updated.generation,
+                    path_generation=self._scope.generations.path_scoped.get(relative_path, 0),
+                )
+                with self._state_lock:
+                    self._pending_documents[uri] = target
+                client.notify(
+                    "textDocument/didChange",
+                    {
+                        "textDocument": {"uri": uri, "version": version},
+                        "contentChanges": [{"text": text}],
+                    },
+                )
+                self._open_documents.move_to_end(uri)
+            for relative_path in created:
+                language_id = self.facts.language_id_for(relative_path)
+                path = self.workspace_root / relative_path
+                try:
+                    text = FileSnapshot.from_bytes(path.read_bytes()).text
+                except (OSError, PositionError, UnicodeError):
+                    continue
+                uri = path.as_uri()
+                client.notify(
+                    "textDocument/didOpen",
+                    {
+                        "textDocument": {
+                            "uri": uri,
+                            "languageId": language_id,
+                            "version": 1,
+                            "text": text,
+                        }
+                    },
+                )
+                client.notify("textDocument/didClose", {"textDocument": {"uri": uri}})
+
+    def _close_document_worker(self, client: AdapterClient, uri: str) -> None:
+        """Close one adapter-owned URI and forget any pending readiness witness."""
+
+        self._open_documents.pop(uri, None)
+        with self._state_lock:
+            self._pending_documents.pop(uri, None)
+        client.notify("textDocument/didClose", {"textDocument": {"uri": uri}})
 
     def _warm_global_worker(
         self,

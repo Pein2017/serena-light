@@ -141,8 +141,15 @@ def test_find_declaration_does_not_use_declaration_provider_as_a_fallback_gate()
     assert adapter.requests == []
 
 
-@pytest.mark.parametrize("regex", [r"target", r"(target)(alias)", "("])
-def test_find_declaration_rejects_invalid_capture_contract_before_dispatch(regex: str) -> None:
+@pytest.mark.parametrize(
+    ("regex", "reason"),
+    [
+        (r"target", "expected_exactly_one_capture_group_got_zero"),
+        (r"(target)(alias)", "expected_exactly_one_capture_group_got_2"),
+        ("(", "invalid_python_regex"),
+    ],
+)
+def test_find_declaration_rejects_invalid_capture_contract_before_dispatch(regex: str, reason: str) -> None:
     adapter = FakeAdapter(
         _document("target();\n", [], _capabilities(definition=True, declaration=True, implementation=False))
     )
@@ -150,6 +157,7 @@ def test_find_declaration_rejects_invalid_capture_contract_before_dispatch(regex
     value = DeclarationNavigationService(adapter).find_declaration("src/example.ts", regex).to_dict()
 
     assert value["error"]["code"] == "INVALID_INPUT"
+    assert value["error"]["details"] == {"field": "regex", "reason": reason}
     assert adapter.requests == []
 
 

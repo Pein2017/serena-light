@@ -19,7 +19,13 @@ ROOT = Path("/data/CoordExp/cc-plugin-codex")
 OMITTED_UNICODE_FILE = "tests/runtime/agent-completion-projection.test.mjs"
 UNICODE_SYMBOL_FRAGMENT = "preserves legacy truncation provenance"
 
-pytestmark = pytest.mark.timeout(120)
+pytestmark = [
+    pytest.mark.timeout(120),
+    pytest.mark.external_repo(
+        root=str(ROOT),
+        snapshot_env="SERENA_LIGHT_CC_PLUGIN_CODEX_SNAPSHOT",
+    ),
+]
 
 
 @dataclass(frozen=True, slots=True)

@@ -492,9 +492,15 @@ Git workspaces rebuild the lexical trust inventory and compare create, change,
 delete, symlink, and native-config state. Content changes advance document/path
 generations; membership or config changes also reattribute the affected
 language family and advance trust/program/index generations. Running adapters
-receive `didChangeWatchedFiles`; newly created files receive a bounded
-open/close notification when required. The allowlisted read-only transformers
-root continues targeted-stat checks and is never fully walked per call.
+receive `didChangeWatchedFiles`. If a changed URI is already open, the adapter
+also sends full-text `didChange` from the exact observed snapshot; deleted or
+unreadable open URIs are closed. Newly created files receive a bounded
+open/close notification when required. Freshness retains the watcher/reconcile
+future and settles it before dispatch; admission, timeout, or worker failure
+keeps the exact batch pending and returns retryable `BUSY` or `NOT_READY`, so an
+unchanged scan cannot silently authorize stale success. The allowlisted
+read-only transformers root continues targeted-stat checks and is never fully
+walked per call.
 
 A native-config restart removes the old adapter from publication before stop,
 but retains one explicit pending-restart record that owns the exact stop future,
@@ -515,6 +521,10 @@ bounded terminal state, and leaves a failed admission retryable on a later stop.
 If lease retirement has already detached that runtime from the workspace
 registry, the daemon service retains it in a pending-stop owner set, retries it
 on later sweeps, and keeps the build daemon non-idle until cleanup succeeds.
+Immediate release reports actual stop truth separately from the lifecycle
+decision: `runtime_stopped` is true only after confirmed cleanup, while
+`runtime_stop_pending` exposes unsettled ownership. A failed stop is best-effort
+and cannot terminate the periodic sweep or poison another workspace operation.
 
 Edit membership is checked against the lexical inventory rather than a
 dynamically resolved set. Under the workspace lock, the writer walks every path
@@ -534,7 +544,10 @@ when it can be read safely.
 The runtime/service boundary is the sole exception-to-envelope conversion
 owner. It catches `TimeoutError` before `OSError` and preserves `BUSY`,
 `COOLDOWN`, `TIMED_OUT`, `SCOPE_INCOMPATIBLE`, and `UNCERTAIN` without generic
-rewriting.
+rewriting. Ordinary `LspResponseError` and `LspProtocolError` values are also
+translated there without exposing server messages: semantic reads return
+bounded `UNSUPPORTED`, while the guarded edit returns `UNCERTAIN` and is never
+replayed.
 
 Each adapter opens a URI at most once, sends `didChange` for subsequent content
 versions, and sends `didClose` on stop or least-recently-used eviction. The open
@@ -555,6 +568,11 @@ digest, and omitted count. Adapter transitions use `deque(maxlen=64)`. The
 existing `DebugLogger` records only build/daemon startup and takeover, adapter
 crash/cooldown, lease/grace, and cleanup summaries; it never records tool
 payloads, source text, bearer material, or other secrets.
+
+Every public MCP tool has a concise agent-facing description. The
+`find_declaration.regex` input schema explicitly requires one Python
+MULTILINE/DOTALL capture group selecting the queried symbol; malformed regexes
+return a field-specific capture-count or syntax reason before LSP dispatch.
 
 ### 16. Reproducible build identity and versioned daemon slots
 
@@ -616,6 +634,24 @@ lease acquisition or issue a retirement token, automatic migration never
 signals that daemon and returns `atomic_retirement_unsupported`; retirement
 requires explicit operator coordination. Canonical Serena is never considered
 a cleanup target.
+
+### 17. Mutable external acceptance is snapshot-bound
+
+Deterministic unit, integration, connector, and temporary-real-LSP tests remain
+the default suite's contract owner. Tests that inspect `/data/CoordExp`,
+`cc-plugin-codex`, `/data/ms-swift`, or the installed transformers source tree
+are explicitly marked and skipped unless the operator supplies the exact
+observed snapshot identity. Git identities bind HEAD, the full tracked binary
+diff, and untracked regular-file and symlink content. The non-Git transformers
+identity binds package version plus bounded source-tree content. A mismatch at
+setup or any before/after change fails rather than becoming `xfail` or clean.
+
+The TypeScript 7 repository-native typecheck remains external, authoritative
+acceptance rather than a default Serena Light correctness dependency. The
+transformers semantic/liveness gate permits typed retryable `NOT_READY` before
+exact success within three production calls. A separate opt-in performance
+gate requires first-call success without increasing the production readiness
+budget; observed wall time is evidence, not a newly invented SLO.
 
 ### 12. Result envelopes are stable and typed
 

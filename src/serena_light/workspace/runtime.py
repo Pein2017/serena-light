@@ -32,7 +32,7 @@ from serena_light.lsp.adapter import (
     LanguageAdapter,
     PublishedDiagnosticsWitness,
 )
-from serena_light.lsp.executor import BoundedLspExecutor, EditCommit, EditCommitState
+from serena_light.lsp.executor import BoundedLspExecutor, EditCommit, EditCommitState, ExecutorBusyError
 from serena_light.lsp.normalize import Location, NormalizedSymbol, Position, Range
 from serena_light.lsp.positions import FileSnapshot, LspPosition, PositionError, PositionMapper
 from serena_light.lsp.pyright import PyrightFacts
@@ -151,6 +151,7 @@ MAX_CONTROLLED_OPENS = 32
 
 
 class RuntimeErrorCode(StrEnum):
+    BUSY = "BUSY"
     SCOPE_INCOMPATIBLE = "SCOPE_INCOMPATIBLE"
     NOT_READY = "NOT_READY"
     TIMED_OUT = "TIMED_OUT"
@@ -194,6 +195,14 @@ class RuntimeAdapter(Protocol):
     def submit_read(self, operation: Callable[[AdapterClient], Any]) -> Future[Any]: ...
 
     def submit_edit(self, operation: Callable[[AdapterClient], Any]) -> Future[Any]: ...
+
+    def reconcile_watched_files(
+        self,
+        *,
+        events: Sequence[WatchedFileEvent],
+        created: Sequence[str],
+        versions: Mapping[str, int],
+    ) -> Future[None]: ...
 
     def warm_global(
         self, witness: GlobalReadinessWitness, *, timeout: float | None = None
@@ -477,6 +486,17 @@ class _PendingAdapterRetirement:
     stop_future: Future[AdapterSnapshot] | None
 
 
+@dataclass(slots=True)
+class _PendingWatchedReconcile:
+    """One watcher batch that must settle before unchanged facts can authorize work."""
+
+    family: LanguageFamily
+    adapter: RuntimeAdapter
+    events: tuple[WatchedFileEvent, ...]
+    created: tuple[str, ...]
+    future: Future[None] | Future[Any] | None
+
+
 class _SharedScan:
     """One in-flight scan whose single result every joined caller receives."""
 
@@ -504,6 +524,7 @@ class FreshnessCoordinator:
         self._in_flight: _SharedScan | None = None
         self._states: dict[str, ContentIdentity] = {}
         self._config_states: dict[str, ContentIdentity] = {}
+        self._pending_reconciles: dict[LanguageFamily, _PendingWatchedReconcile] = {}
         self._last = FreshnessScan()
         self._capture_baseline(runtime.inventory)
 
@@ -553,6 +574,7 @@ class FreshnessCoordinator:
         if self._runtime.identity.kind is WorkspaceKind.GIT:
             return FreshnessScan()
         runtime = self._runtime
+        self._settle_pending_reconciles()
         inventory = runtime.inventory
         if not inventory.contains(relative_path):
             return FreshnessScan()
@@ -590,6 +612,7 @@ class FreshnessCoordinator:
         # filesystem facts have been committed.  Resolve that exact pending stop
         # before an unchanged scan can authorize another semantic operation.
         runtime.retry_pending_restarts()
+        self._settle_pending_reconciles()
         previous = runtime.inventory
         rebuilt = runtime.rebuild_inventory()
         before, after = set(previous.paths), set(rebuilt.paths)
@@ -652,7 +675,10 @@ class FreshnessCoordinator:
             *(WatchedFileEvent(path, FileChangeType.DELETED) for path in deleted),
         )
         notified, opened, unopened = self._apply_events(
-            events, created=created, force_notify=restart_families
+            events,
+            created=created,
+            force_notify=restart_families,
+            wait_for_delivery=install_failure is None,
         )
         scan = FreshnessScan(
             created=created,
@@ -675,6 +701,7 @@ class FreshnessCoordinator:
         *,
         created: tuple[str, ...] = (),
         force_notify: Collection[LanguageFamily] = (),
+        wait_for_delivery: bool = True,
     ) -> tuple[tuple[LanguageFamily, ...], tuple[str, ...], tuple[str, ...]]:
         """Advance generations first, then notify running adapters best-effort.
 
@@ -702,13 +729,85 @@ class FreshnessCoordinator:
                 unopened.extend(family_created)
                 continue
             opens = family_created[:MAX_CONTROLLED_OPENS]
-            if runtime.notify_watched_files(adapter, family_events, opens):
+            pending = _PendingWatchedReconcile(family, adapter, family_events, opens, None)
+            self._pending_reconciles[family] = pending
+            try:
+                pending.future = runtime.notify_watched_files(adapter, family_events, opens)
+            except ExecutorBusyError as error:
+                if wait_for_delivery:
+                    raise WorkspaceRuntimeError(
+                        RuntimeErrorCode.BUSY,
+                        f"{family.value} freshness reconciliation could not enter the bounded executor",
+                    ) from error
+            except Exception as error:
+                if wait_for_delivery:
+                    raise WorkspaceRuntimeError(
+                        RuntimeErrorCode.NOT_READY,
+                        f"{family.value} freshness reconciliation could not be submitted ({type(error).__name__})",
+                    ) from error
+            else:
+                if wait_for_delivery:
+                    self._settle_pending_reconciles((family,))
                 notified.append(family)
                 opened.extend(opens)
+                unopened.extend(family_created[MAX_CONTROLLED_OPENS:])
+                continue
+            if not wait_for_delivery:
                 unopened.extend(family_created[MAX_CONTROLLED_OPENS:])
             else:
                 unopened.extend(family_created)
         return tuple(notified), tuple(sorted(opened)), tuple(sorted(unopened))
+
+    def _settle_pending_reconciles(self, families: Collection[LanguageFamily] | None = None) -> None:
+        """Wait or retry every exact watcher task before dispatch can trust unchanged facts."""
+
+        selected = tuple(families) if families is not None else tuple(self._pending_reconciles)
+        for family in selected:
+            pending = self._pending_reconciles.get(family)
+            if pending is None:
+                continue
+            future = pending.future
+            if future is None or future.done():
+                if future is not None:
+                    try:
+                        future.result()
+                    except Exception:
+                        pass
+                    else:
+                        self._pending_reconciles.pop(family, None)
+                        continue
+                try:
+                    pending.future = self._runtime.notify_watched_files(
+                        pending.adapter, pending.events, pending.created
+                    )
+                except ExecutorBusyError as error:
+                    raise WorkspaceRuntimeError(
+                        RuntimeErrorCode.BUSY,
+                        f"{family.value} freshness reconciliation is waiting for executor capacity",
+                    ) from error
+                except Exception as error:
+                    raise WorkspaceRuntimeError(
+                        RuntimeErrorCode.NOT_READY,
+                        (
+                            f"{family.value} freshness reconciliation retry could not be submitted "
+                            f"({type(error).__name__})"
+                        ),
+                    ) from error
+                future = pending.future
+            assert future is not None
+            try:
+                future.result(timeout=self._runtime._future_timeout)
+            except TimeoutError as error:
+                raise WorkspaceRuntimeError(
+                    RuntimeErrorCode.BUSY,
+                    f"{family.value} freshness reconciliation is still pending",
+                ) from error
+            except Exception as error:
+                raise WorkspaceRuntimeError(
+                    RuntimeErrorCode.NOT_READY,
+                    f"{family.value} freshness reconciliation failed ({type(error).__name__})",
+                ) from error
+            self._pending_reconciles.pop(family, None)
 
 
 class WorkspaceRuntime:
@@ -865,6 +964,10 @@ class WorkspaceRuntime:
     ) -> None:
         """Swap inventory and projections, restarting adapters for native-config changes."""
 
+        # Keep this runtime seam correct even when a caller does not arrive via
+        # FreshnessCoordinator: newer facts cannot replace unsettled cleanup
+        # ownership from an earlier restart or retirement.
+        self.retry_pending_restarts()
         paths_by_family = _family_paths(inventory)
         retirements: list[_PendingAdapterRetirement] = []
         restart_adapters: list[_PendingAdapterRestart] = []
@@ -1149,12 +1252,29 @@ class WorkspaceRuntime:
         adapter: RuntimeAdapter,
         events: Sequence[WatchedFileEvent],
         created: Sequence[str],
-    ) -> bool:
+    ) -> Future[None] | Future[Any]:
         """Queue one watcher batch plus bounded open/close for created files.
 
-        Delivery is best-effort and never blocks the caller: the executor is
-        FIFO, so this batch precedes the operation that requested freshness.
+        The coordinator retains and settles the returned future before it lets
+        unchanged filesystem facts authorize semantic or edit work.
         """
+
+        changed_versions: dict[str, int] = {}
+        with self._state_lock:
+            for event in events:
+                if event.change_type is not FileChangeType.CHANGED:
+                    continue
+                version = self._versions.get(event.path, 0) + 1
+                self._versions[event.path] = version
+                changed_versions[event.path] = version
+
+        # LanguageAdapter owns the open-buffer map, so only it can refresh an
+        # existing URI without reopening the configured program.  Keep the
+        # small fallback for injected legacy test adapters; all production
+        # adapters implement the explicit reconciliation seam.
+        reconcile = getattr(adapter, "reconcile_watched_files", None)
+        if callable(reconcile):
+            return reconcile(events=events, created=created, versions=changed_versions)
 
         workspace_uri = self.identity.root.as_uri()
         changes = [dict(event.as_lsp_change(workspace_uri)) for event in events]
@@ -1180,11 +1300,7 @@ class WorkspaceRuntime:
                 )
                 client.notify("textDocument/didClose", {"textDocument": {"uri": uri}})
 
-        try:
-            adapter.submit_read(send)
-        except Exception:
-            return False
-        return True
+        return adapter.submit_read(send)
 
     def _attribute(self, family: LanguageFamily, paths: tuple[str, ...]) -> ScopeProjection:
         attributor = self._attributors.get(family)
@@ -1662,7 +1778,7 @@ class WorkspaceRuntime:
                 code = ErrorCode.UNSUPPORTED
             retry = (
                 RetryMetadata(retryable=True)
-                if code in {ErrorCode.NOT_READY, ErrorCode.TIMED_OUT}
+                if code in {ErrorCode.BUSY, ErrorCode.NOT_READY, ErrorCode.TIMED_OUT}
                 else None
             )
             return error(
@@ -1956,6 +2072,7 @@ class WorkspaceRuntime:
                 "active": executor.active,
                 "stopping": executor.stopping,
             },
+            "stopping": self._stopping,
             "stopped": self._stopped,
         }
 

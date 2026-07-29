@@ -4,26 +4,31 @@ Date: 2026-07-29 UTC
 
 ## Decision
 
-**DUAL AUDIT HOLD — FINAL REAUDIT PENDING.** Sol-xhigh and Opus-max completed the
-required independent review at commit `6a3acb6` and both returned HOLD. Their
-accepted P1 findings cover guarded-edit parent-rename TOCTOU, runtime-source
-build-identity closure, legacy retirement atomicity, native-config freshness,
-typed activation failures, immediate release plumbing, poisoned-proxy process
-evidence, reproducible production-path stdio acceptance, and fresh-client
-receipt scope. Subsequent repair and reacceptance restored public guarded edit
-and exact activation rollback. A Sol-xhigh re-audit of `5e0f3e2` then found
-three remaining P1 failures: healthy-family create/change/delete events from a
-scan could be lost when another family's config restart timed out; adapter
-removal could briefly have no cleanup owner during concurrent runtime stop; and
-an ordinary saturated executor queue could reject shutdown cleanup and publish
-an unretryable stopped state. Local commit `4f97e12` repairs those findings,
-bounds exactly two cleanup-reserve slots without expanding ordinary capacity,
-atomically owns both restart and incompatible-family retirement, and retains a
-detached runtime in daemon-service ownership until a later sweep settles a
-failed stop. V1 remains HOLD until Sol-xhigh and Opus-max both return PASS
-against this exact repaired snapshot. The earlier Opus-max runtime/evidence PASS
-at `6a0c58e` is retained as historical evidence but is not an exact-current-head
-release vote. The canonical MCP registration named `serena` remains unchanged.
+**DUAL AUDIT HOLD — FINAL REAUDIT PENDING.** The first exact-current-head final
+audits at `8f51d9e` both returned HOLD. Sol-xhigh reproduced a current-generation
+false negative after an already-open document changed externally, proved that
+the production runtime owner discarded a failed stop, and found ordinary LSP
+response/protocol failures escaping the typed service boundary. Opus-max
+independently confirmed the stop/sweep/migration truth failures and also found
+that the complete-suite claim depended on live mutable `cc-plugin-codex` and
+transformers state. Both reviews identified inaccurate declaration-client
+evidence: five CC calls, not four, all correctly rejected because their regexes
+had zero capture groups.
+
+The current repair candidate fixes those findings and their adjacent
+agent-usability gaps. Open changed documents receive full-text `didChange` (or
+`didClose`) and watcher futures are retained, settled, and retried before stale
+facts can authorize success. Failed runtime stops remain owned, periodic sweeps
+continue across failures, migration uses service-level idleness, and release
+responses distinguish confirmed stop from pending cleanup. LSP failures are
+translated without leaking server messages or replaying edits. All public tools
+now have descriptions, the declaration regex schema states the one-capture-group
+contract, and invalid details distinguish zero, multiple, and malformed groups.
+Default tests no longer consume mutable external roots: explicit real-root and
+performance gates require exact before/after snapshot equality. V1 remains HOLD
+until this candidate is committed, fully reaccepted, and both Sol-xhigh and
+Opus-max return PASS against that exact commit. The canonical MCP registration
+named `serena` remains unchanged.
 
 ### Superseded pre-audit decision
 
@@ -47,7 +52,60 @@ SUPERSEDED — HOLD after static/runtime audits found release-blocking gaps.
 Neither historical entry is a current release decision and neither may be
 used to archive this change.
 
-## Current repair checkpoint
+## Current second-audit repair candidate
+
+The candidate runtime identity is
+`c85f2b4fac40069593d42b0631a0626b8a5330b732414065f0cfeb801506d34a`;
+the dependency digest remains
+`eff6ebdf252faff7f77cb3a2f3894d17b9a0dfc89b46bd193fafdaa9e9ab4941`.
+The following evidence is current, but does not yet constitute release PASS:
+
+```text
+uv run --frozen pytest -q -p no:cacheprovider tests
+515 passed, 22 skipped, 3 warnings in 173.05s
+(all 22 skips are explicit external_repo/performance gates without snapshot env)
+
+high-risk daemon/freshness/schema selection
+107 passed, 1 warning
+
+snapshot-bound Python real-repository acceptance
+4 passed, 2 deselected in 128.00s
+
+snapshot-bound real Pyright integration
+2 passed in 15.18s
+
+snapshot-bound TypeScript acceptance, integration, and admission
+15 passed in 20.12s
+
+transformers first-call performance gate, three fresh runtimes
+3/3 passed; production-call wall observations 30.77s, 28.33s, 34.16s
+
+uv run --frozen ruff check .
+All checks passed!
+
+uv run --frozen ty check
+All checks passed!
+
+uv run --frozen serena-light-bootstrap --check --json
+PASS (service CPython 3.12.12; dependency digest above)
+
+uv run --frozen serena-light-source-budget --json
+PASS: 14,597 production lines (informational; maximum=null, not gated)
+
+openspec validate build-serena-light-v1 --strict
+Change 'build-serena-light-v1' is valid
+```
+
+The default-suite skips are deliberate evidence isolation, not substituted
+passes. Explicit TypeScript acceptance later found a stable window and passed
+against exact snapshot
+`git:7caa1823bd246deb0d690c83263bc4d4a80480c9:bb7e2813111fc635dc5ff6a3cf5ecd63d58247e9104d825dcdeb2cf292814a04`;
+the before/after gate also covers repository-native typecheck authority. Serena
+Light did not freeze or modify that foreign checkout. Fresh current-build
+Codex, Claude Code, and CC Agent acceptance plus exact-current-head Sol/Opus
+audits remain pending.
+
+## Prior repair checkpoint (superseded by current candidate)
 
 At repair commit `4f97e12`, the complete suite passes 524 tests. In addition to
 the post-restoration gates, it proves that same-root and cross-root refresh
@@ -253,17 +311,21 @@ queries succeeded, transformers returned one bounded `NOT_READY` before global
 symbol success, and every root was released immediately. The final release
 reported `active_holders=0` and `runtime_stopped=true`.
 
-The CC Agent also reported four `find_declaration` calls as `INVALID_INPUT`.
+The CC Agent made five `find_declaration` calls that returned `INVALID_INPUT`.
+A review of its durable call history showed that all five regexes contained
+zero capture groups, while the public contract requires exactly one group to
+select the symbol. The failures were therefore correct input validation, not a
+semantic lookup failure.
+
 A separate fresh current-build stdio client then listed the public schema with
 required string arguments `relative_path` and `regex`, invoked
 `find_declaration` on
 `swift/infer_engine/lmdeploy_engine.py` with
 `from transformers import (GenerationConfig)`, resolved the read-only conda
-transformers declaration, and released with zero holders. The anomaly is thus
-disposed as malformed CC client invocations, not a Serena Light protocol or
-runtime defect. Native Claude and the three model-client hash-edit receipts
-above are not relabelled as current-build evidence; current guarded editing is
-covered by the real-stdio acceptance and complete suite.
+transformers declaration, and released with zero holders. Native Claude and the
+three model-client hash-edit receipts above are not relabelled as current-build
+evidence; current guarded editing is covered by the real-stdio acceptance and
+complete suite.
 
 Model-facing Codex/Claude processes retained the working ambient `9090` proxy
 because their external API traffic requires it. The real service-executable

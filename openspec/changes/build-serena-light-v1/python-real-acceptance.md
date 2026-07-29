@@ -2,6 +2,25 @@
 
 Date: 2026-07-28 UTC
 
+## Current snapshot-bound candidate rerun
+
+**PASS for semantic/liveness at candidate build `c85f2b4fac40...`: 4 passed.**
+The 2026-07-29 rerun supplied exact before/after identities for `/data/CoordExp`,
+`/data/ms-swift`, and transformers 4.57.1. It separately permits typed retryable
+`NOT_READY` before transformers global success within three production calls;
+no larger timeout was introduced.
+
+```text
+4 passed, 2 deselected in 128.00s
+real Pyright integration: 2 passed in 15.18s
+```
+
+The opt-in first-attempt performance test used three fresh runtimes at the same
+transformers snapshot. All three calls returned the exact symbol with phase
+`ready`; observed production-call wall times were 30.77s, 28.33s, and 34.16s.
+These observations prove first-call success for this bounded run, not a new
+end-to-end wall-clock SLO or a statistical reliability claim.
+
 ## Post-audit current-build rerun
 
 **PASS at build `f4ee8a248a8c...`: 4 passed.** This 2026-07-29 post-restoration

@@ -41,6 +41,10 @@ packages = ["src/serena_light"]
 addopts = "-ra --strict-config --strict-markers"
 testpaths = ["tests"]
 timeout = 30
+markers = [
+  "external_repo(root, snapshot_env): real mutable external root; requires a matching immutable snapshot",
+  "performance_external: opt-in external performance acceptance; requires SERENA_LIGHT_RUN_PERFORMANCE_ACCEPTANCE=1",
+]
 
 [tool.ruff]
 target-version = "py312"

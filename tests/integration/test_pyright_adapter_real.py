@@ -8,13 +8,21 @@ from contextlib import contextmanager, suppress
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from serena_light.lsp.client import SyncLspClient
 from serena_light.lsp.pyright import PyrightFacts
-from serena_light.workspace.identity import PinnedMsRoots, WorkspacePolicy
+from serena_light.workspace.identity import TRANSFORMERS_ROOT, PinnedMsRoots, WorkspacePolicy
 from serena_light.workspace.inventory import git_trust_inventory
 from serena_light.workspace.scope import ProjectKind
 
 MS_SWIFT = Path("/data/ms-swift")
+
+pytestmark = [
+    pytest.mark.timeout(90),
+    pytest.mark.external_repo(root=str(MS_SWIFT), snapshot_env="SERENA_LIGHT_MS_SWIFT_SNAPSHOT"),
+    pytest.mark.external_repo(root=str(TRANSFORMERS_ROOT), snapshot_env="SERENA_LIGHT_TRANSFORMERS_SNAPSHOT"),
+]
 
 
 @contextmanager

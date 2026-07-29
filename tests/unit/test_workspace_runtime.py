@@ -36,10 +36,12 @@ from serena_light.workspace.runtime import (
     WorkspaceRuntimeError,
 )
 from serena_light.workspace.scope import (
+    FileChangeType,
     LanguageFamily,
     NativeProgramAttribution,
     ProjectKind,
     ScopeProjection,
+    WatchedFileEvent,
 )
 
 
@@ -92,9 +94,11 @@ class _Adapter:
         self.stop_calls = 0
         self.before_stop_submit: Callable[[], None] | None = None
         self.before_stop_worker: Callable[[], None] | None = None
+        self.before_reconcile_worker: Callable[[], None] | None = None
         self._phase = AdapterPhase.COLD
         self._document_generation = 0
         self._running = False
+        self._open_documents: dict[str, str] = {}
 
     def routes(self, path: str | Path) -> bool:
         suffix = PurePosixPath(str(path)).suffix.lower()
@@ -160,6 +164,7 @@ class _Adapter:
                 self._document_generation += 1
                 self._phase = AdapterPhase.DOCUMENT_READY
                 self._running = True
+                self._open_documents[relative_path] = uri
                 path_generation = self.context.scope_tracker.generations.path_scoped.get(relative_path, 0)
                 target = DocumentReadinessTarget(
                     uri=uri,
@@ -180,6 +185,61 @@ class _Adapter:
     def submit_read(self, operation: Callable[[_Client], Any]) -> Future[Any]:
         return self.context.executor.submit(lambda: operation(self.client))
 
+    def reconcile_watched_files(
+        self,
+        *,
+        events: Sequence[WatchedFileEvent],
+        created: Sequence[str],
+        versions: Mapping[str, int],
+    ) -> Future[None]:
+        """Minimal deterministic model of production open-buffer reconciliation."""
+
+        def send() -> None:
+            if self.before_reconcile_worker is not None:
+                self.before_reconcile_worker()
+            workspace_uri = self.context.workspace_root.as_uri()
+            self.client.notify(
+                "workspace/didChangeWatchedFiles",
+                {"changes": [dict(event.as_lsp_change(workspace_uri)) for event in events]},
+            )
+            changed = {event.path for event in events if event.change_type is FileChangeType.CHANGED}
+            deleted = {event.path for event in events if event.change_type is FileChangeType.DELETED}
+            for relative_path, uri in tuple(self._open_documents.items()):
+                if relative_path in deleted:
+                    self.client.notify("textDocument/didClose", {"textDocument": {"uri": uri}})
+                    del self._open_documents[relative_path]
+                    continue
+                if relative_path not in changed:
+                    continue
+                self._document_generation += 1
+                self.client.notify(
+                    "textDocument/didChange",
+                    {
+                        "textDocument": {"uri": uri, "version": versions[relative_path]},
+                        "contentChanges": [
+                            {"text": (self.context.workspace_root / relative_path).read_text(encoding="utf-8")}
+                        ],
+                    },
+                )
+            for relative_path in created:
+                path = self.context.workspace_root / relative_path
+                uri = path.as_uri()
+                language_id = "python" if path.suffix in {".py", ".pyi"} else "typescript"
+                self.client.notify(
+                    "textDocument/didOpen",
+                    {
+                        "textDocument": {
+                            "uri": uri,
+                            "languageId": language_id,
+                            "version": 1,
+                            "text": path.read_text(encoding="utf-8"),
+                        }
+                    },
+                )
+                self.client.notify("textDocument/didClose", {"textDocument": {"uri": uri}})
+
+        return self.context.executor.submit(send)
+
     def stop(self) -> Future[AdapterSnapshot]:
         self.stop_calls += 1
         if self.before_stop_submit is not None:
@@ -193,7 +253,7 @@ class _Adapter:
             self._running = False
             return self.snapshot()
 
-        return self.context.executor._submit_cleanup(stop_on_executor)
+        return self.context.executor.submit_cleanup(stop_on_executor)
 
 
 def _inventory(root: Path, *paths: str) -> TrustInventory:
@@ -676,6 +736,7 @@ def _git_runtime(
     inventory_factory: Callable[[Any], TrustInventory] | None = None,
     attributions: dict[LanguageFamily, int] | None = None,
     future_timeout: float = 35.0,
+    executor_factory: Callable[[Path], BoundedLspExecutor] | None = None,
 ) -> WorkspaceRuntime:
     def attribute(family: LanguageFamily) -> Callable[[Path, tuple[str, ...]], ScopeProjection]:
         def attributor(_root: Path, paths: tuple[str, ...]) -> ScopeProjection:
@@ -695,6 +756,7 @@ def _git_runtime(
         },
         adapter_factories=_factories(adapters, contexts, symbols=[]),
         future_timeout=future_timeout,
+        executor_factory=executor_factory,
     )
 
 
@@ -733,14 +795,22 @@ def test_freshness_reports_create_change_delete_and_notifies_running_adapters(tm
 
         runtime.executor.submit(lambda: None).result(timeout=5)
         methods = [method for method, _ in python.client.notifications]
-        assert methods == ["workspace/didChangeWatchedFiles", "textDocument/didOpen", "textDocument/didClose"]
+        assert methods == [
+            "workspace/didChangeWatchedFiles",
+            "textDocument/didChange",
+            "textDocument/didOpen",
+            "textDocument/didClose",
+        ]
         changes = cast(Mapping[str, Any], python.client.notifications[0][1])["changes"]
         assert {(item["uri"].rsplit("/", 1)[-1], item["type"]) for item in changes} == {
             ("created.py", 1),
             ("main.py", 2),
             ("gone.py", 3),
         }
-        opened = cast(Mapping[str, Any], python.client.notifications[1][1])["textDocument"]
+        refreshed = cast(Mapping[str, Any], python.client.notifications[1][1])
+        assert refreshed["textDocument"] == {"uri": (tmp_path / "main.py").resolve().as_uri(), "version": 2}
+        assert refreshed["contentChanges"] == [{"text": "value = 22222\n"}]
+        opened = cast(Mapping[str, Any], python.client.notifications[2][1])["textDocument"]
         assert opened["uri"] == (tmp_path / "created.py").resolve().as_uri()
         assert opened["languageId"] == "python"
         assert opened["text"] == "fresh = 1\n"
@@ -755,6 +825,92 @@ def test_freshness_reports_create_change_delete_and_notifies_running_adapters(tm
         assert typescript.configured_program == typescript_before.configured_program
         assert typescript.trust_inventory == typescript_before.trust_inventory
         assert typescript.path_scoped == typescript_before.path_scoped
+    finally:
+        runtime.stop()
+
+
+def test_full_ordinary_queue_keeps_freshness_pending_until_an_unchanged_retry_can_reconcile(tmp_path: Path) -> None:
+    _git_repository(tmp_path)
+    (tmp_path / "main.py").write_text("value = 1\n")
+    adapters: dict[LanguageFamily, _Adapter] = {}
+    contexts: dict[LanguageFamily, AdapterBuildContext] = {}
+    runtime = _git_runtime(
+        tmp_path,
+        adapters,
+        contexts,
+        executor_factory=lambda _root: BoundedLspExecutor(queue_capacity=1, name="freshness-admission"),
+    )
+    entered = threading.Event()
+    release = threading.Event()
+    try:
+        runtime.load_document_symbols("main.py")
+        python = adapters[LanguageFamily.PYTHON]
+        python.client.notifications.clear()
+
+        def block_worker() -> None:
+            entered.set()
+            assert release.wait(5)
+
+        active = runtime.executor.submit(block_worker)
+        assert entered.wait(5)
+        queued = runtime.executor.submit(lambda: None)
+        (tmp_path / "main.py").write_text("value = 22222\n")
+
+        busy = runtime.get_symbols_overview("main.py").to_dict()
+        assert busy["error"]["code"] == "BUSY"
+        assert busy["error"]["retry"]["retryable"] is True
+        assert runtime.freshness._pending_reconciles[LanguageFamily.PYTHON].future is None
+
+        release.set()
+        active.result(timeout=5)
+        queued.result(timeout=5)
+        recovered = runtime.get_symbols_overview("main.py").to_dict()
+
+        assert recovered["ok"] is True
+        assert LanguageFamily.PYTHON not in runtime.freshness._pending_reconciles
+        assert [method for method, _ in python.client.notifications] == [
+            "workspace/didChangeWatchedFiles",
+            "textDocument/didChange",
+        ]
+    finally:
+        release.set()
+        runtime.stop()
+
+
+def test_failed_reconcile_future_blocks_current_generation_until_a_later_retry_succeeds(tmp_path: Path) -> None:
+    _git_repository(tmp_path)
+    (tmp_path / "main.py").write_text("value = 1\n")
+    adapters: dict[LanguageFamily, _Adapter] = {}
+    contexts: dict[LanguageFamily, AdapterBuildContext] = {}
+    runtime = _git_runtime(tmp_path, adapters, contexts)
+    failed_once = True
+    try:
+        runtime.load_document_symbols("main.py")
+        python = adapters[LanguageFamily.PYTHON]
+        python.client.notifications.clear()
+
+        def fail_once() -> None:
+            nonlocal failed_once
+            if failed_once:
+                failed_once = False
+                raise RuntimeError("watcher notification failed")
+
+        python.before_reconcile_worker = fail_once
+        (tmp_path / "main.py").write_text("value = 2\n")
+
+        not_ready = runtime.get_symbols_overview("main.py").to_dict()
+        assert not_ready["error"]["code"] == "NOT_READY"
+        assert LanguageFamily.PYTHON in runtime.freshness._pending_reconciles
+        assert python.client.notifications == []
+
+        recovered = runtime.get_symbols_overview("main.py").to_dict()
+
+        assert recovered["ok"] is True
+        assert LanguageFamily.PYTHON not in runtime.freshness._pending_reconciles
+        assert [method for method, _ in python.client.notifications] == [
+            "workspace/didChangeWatchedFiles",
+            "textDocument/didChange",
+        ]
     finally:
         runtime.stop()
 
@@ -1014,17 +1170,60 @@ def test_config_timeout_does_not_lose_same_scan_healthy_family_events(tmp_path: 
         assert original_python.stop_calls == 1
         assert typescript.context.scope_tracker.generations == after_failure
         methods = [method for method, _ in typescript.client.notifications]
-        assert methods == ["workspace/didChangeWatchedFiles", "textDocument/didOpen", "textDocument/didClose"]
+        assert methods == [
+            "workspace/didChangeWatchedFiles",
+            "textDocument/didChange",
+            "textDocument/didOpen",
+            "textDocument/didClose",
+        ]
         changes = cast(Mapping[str, Any], typescript.client.notifications[0][1])["changes"]
         assert {(item["uri"].rsplit("/", 1)[-1], item["type"]) for item in changes} == {
             ("created.ts", 1),
             ("main.ts", 2),
             ("gone.ts", 3),
         }
-        opened = cast(Mapping[str, Any], typescript.client.notifications[1][1])["textDocument"]
+        refreshed = cast(Mapping[str, Any], typescript.client.notifications[1][1])
+        assert refreshed["textDocument"] == {"uri": (tmp_path / "main.ts").resolve().as_uri(), "version": 2}
+        assert refreshed["contentChanges"] == [{"text": "export const value = 22222;\n"}]
+        opened = cast(Mapping[str, Any], typescript.client.notifications[2][1])["textDocument"]
         assert opened["uri"] == (tmp_path / "created.ts").resolve().as_uri()
     finally:
         release.set()
+        runtime.stop()
+
+
+def test_freshness_refreshes_or_closes_already_open_documents_without_reopening_the_family(tmp_path: Path) -> None:
+    _git_repository(tmp_path)
+    (tmp_path / "changed.py").write_text("OldSymbol = 1\n")
+    (tmp_path / "deleted.py").write_text("DeletedSymbol = 1\n")
+    adapters: dict[LanguageFamily, _Adapter] = {}
+    contexts: dict[LanguageFamily, AdapterBuildContext] = {}
+    runtime = _git_runtime(tmp_path, adapters, contexts)
+    try:
+        runtime.load_document_symbols("changed.py")
+        runtime.load_document_symbols("deleted.py")
+        python = adapters[LanguageFamily.PYTHON]
+        python.client.notifications.clear()
+
+        (tmp_path / "changed.py").write_text("NewSymbol = 1\n")
+        (tmp_path / "deleted.py").unlink()
+        scan = runtime.ensure_fresh()
+        runtime.executor.submit(lambda: None).result(timeout=5)
+
+        assert scan.changed == ("changed.py",)
+        assert scan.deleted == ("deleted.py",)
+        methods = [method for method, _ in python.client.notifications]
+        assert methods == ["workspace/didChangeWatchedFiles", "textDocument/didChange", "textDocument/didClose"]
+        changed = cast(Mapping[str, Any], python.client.notifications[1][1])
+        assert changed["textDocument"] == {
+            "uri": (tmp_path / "changed.py").resolve().as_uri(),
+            "version": 2,
+        }
+        assert changed["contentChanges"] == [{"text": "NewSymbol = 1\n"}]
+        closed = cast(Mapping[str, Any], python.client.notifications[2][1])
+        assert closed["textDocument"] == {"uri": (tmp_path / "deleted.py").resolve().as_uri()}
+        assert "deleted.py" not in python._open_documents
+    finally:
         runtime.stop()
 
 
@@ -1124,12 +1323,14 @@ def test_runtime_stop_retries_cleanup_admission_before_publishing_stopped(tmp_pa
     with pytest.raises(RuntimeError, match="cleanup admission rejected"):
         runtime.stop()
     assert runtime.status()["stopped"] is False
+    assert runtime.status()["stopping"] is True
     with pytest.raises(WorkspaceRuntimeError) as caught:
         runtime.route("main.py")
     assert caught.value.code is RuntimeErrorCode.STOPPED
 
     runtime.stop()
     assert runtime.status()["stopped"] is True
+    assert runtime.status()["stopping"] is True
     assert attempts == 2
     assert adapter.stop_thread is not None
 
@@ -1235,6 +1436,9 @@ def test_read_only_non_git_root_uses_targeted_stat_instead_of_a_full_scan(tmp_pa
         assert rebuilds == rebuilds_after_construction
         after = contexts[LanguageFamily.PYTHON].scope_tracker.generations
         assert after.path_scoped["main.py"] > before.path_scoped.get("main.py", 0)
-        assert [method for method, _ in python.client.notifications] == ["workspace/didChangeWatchedFiles"]
+        assert [method for method, _ in python.client.notifications] == [
+            "workspace/didChangeWatchedFiles",
+            "textDocument/didChange",
+        ]
     finally:
         runtime.stop()

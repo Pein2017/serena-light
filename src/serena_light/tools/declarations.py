@@ -122,9 +122,14 @@ class DeclarationNavigationService:
     ) -> ToolEnvelope:
         """Resolve the one captured occurrence through LSP definition only."""
 
-        pattern = _compile_locator(regex)
-        if pattern is None or not _valid_relative_path(relative_path):
-            return error(ErrorCode.INVALID_INPUT, details={"field": "relative_path or regex"})
+        if not _valid_relative_path(relative_path):
+            return error(
+                ErrorCode.INVALID_INPUT,
+                details={"field": "relative_path", "reason": "expected_normalized_relative_file_path"},
+            )
+        pattern, locator_error = _compile_locator(regex)
+        if pattern is None:
+            return error(ErrorCode.INVALID_INPUT, details={"field": "regex", "reason": locator_error})
         if containing_symbol_name_path is not None and not _valid_name_path(containing_symbol_name_path):
             return error(ErrorCode.INVALID_INPUT, details={"field": "containing_symbol_name_path"})
 
@@ -324,14 +329,18 @@ class DeclarationNavigationService:
         return locations
 
 
-def _compile_locator(value: object) -> re.Pattern[str] | None:
+def _compile_locator(value: object) -> tuple[re.Pattern[str] | None, str | None]:
     if not isinstance(value, str):
-        return None
+        return None, "expected_string"
     try:
         pattern = re.compile(value, _REGEX_FLAGS)
     except re.error:
-        return None
-    return pattern if pattern.groups == 1 else None
+        return None, "invalid_python_regex"
+    if pattern.groups == 0:
+        return None, "expected_exactly_one_capture_group_got_zero"
+    if pattern.groups > 1:
+        return None, f"expected_exactly_one_capture_group_got_{pattern.groups}"
+    return pattern, None
 
 
 def _parse_kinds(values: Sequence[int] | None) -> frozenset[int] | None:

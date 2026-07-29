@@ -132,7 +132,7 @@ class BoundedLspExecutor:
             self._ordinary_queued += 1
         return future
 
-    def _submit_cleanup(self, call: Callable[[], T]) -> Future[T]:
+    def submit_cleanup(self, call: Callable[[], T]) -> Future[T]:
         """Use the bounded cleanup reserve without consuming ordinary capacity."""
 
         future: Future[T] = Future()

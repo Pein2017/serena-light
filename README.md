@@ -40,19 +40,20 @@ The current real-stdio connector independently passes its guarded-edit and
 cross-library declaration contracts.
 Canonical `serena` remains unchanged pending a separate user decision.
 
-**Current state: `DUAL AUDIT HOLD — FINAL REAUDIT PENDING`.** The Sol-xhigh and
-Opus-max audits found release-blocking correctness and evidence gaps after the
-first reacceptance. The latest Sol-xhigh audit of `5e0f3e2` found three further
-freshness and cleanup-ownership failures. They and the adjacent detached-runtime
-owner gap are repaired at local commit `4f97e12`, but exact-current-head
-Sol-xhigh and Opus-max PASS verdicts are still required. Agent-public
+**Current state: `DUAL AUDIT HOLD — FINAL REAUDIT PENDING`.** Exact-head audits
+of `8f51d9e` found stale already-open document reconciliation, failed runtime
+stop ownership, untyped LSP failures, and mutable external acceptance evidence.
+The current candidate repairs those findings, adds truthful pending-stop status
+and agent-facing tool/schema descriptions, and snapshot-gates external roots.
+Exact-current-head Sol-xhigh and Opus-max PASS verdicts are still required.
+Agent-public
 `replace_symbol_body` remains restored after its fault
 matrix, full regression, and three fresh-client hash-edit receipts passed. This
 is **not** v1 PASS. Source ownership/provenance
 passes with 9 copied hashes against official Serena commit
-`9a9d07e83d8c1cba3458992707f440c624446c6d`; production LOC (14,285) is
+`9a9d07e83d8c1cba3458992707f440c624446c6d`; production LOC (14,597) is
 informational only and not gated. The current repair candidate has build
-identity `eaa691e2425e7466f2f9c3d18666a050cfd53e8153de0c6db9a6f50c1538c3f5`.
+identity `c85f2b4fac40069593d42b0631a0626b8a5330b732414065f0cfeb801506d34a`.
 See
 [the final acceptance record](openspec/changes/build-serena-light-v1/final-acceptance.md)
 for the full gate evidence and residual risks.

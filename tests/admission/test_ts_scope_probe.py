@@ -5,7 +5,13 @@ import pytest
 
 from tests.admission.ts_scope_probe import SCHEMA_VERSION, SCOPE_INCOMPATIBLE, run_probe
 
-pytestmark = pytest.mark.timeout(90)
+pytestmark = [
+    pytest.mark.timeout(90),
+    pytest.mark.external_repo(
+        root="/data/CoordExp/cc-plugin-codex",
+        snapshot_env="SERENA_LIGHT_CC_PLUGIN_CODEX_SNAPSHOT",
+    ),
+]
 
 
 @pytest.fixture(scope="module")
