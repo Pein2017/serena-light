@@ -25,9 +25,8 @@ TRANSITIONAL_DISCOVERY_SCHEMA_VERSION = 2
 
 
 class LegacyMigrationDisposition(StrEnum):
-    """Typed result; every value except ``TERMINATED`` means no further signal was sent."""
+    """Typed result; no value ever causes a signal to be sent to the legacy daemon."""
 
-    TERMINATED = "terminated"
     ATOMIC_RETIREMENT_UNSUPPORTED = "atomic_retirement_unsupported"
     DISCOVERY_UNTRUSTED = "discovery_untrusted"
     STATUS_UNAVAILABLE = "status_unavailable"
@@ -36,7 +35,6 @@ class LegacyMigrationDisposition(StrEnum):
     HOLDERS_UNKNOWN = "holders_unknown"
     ACTIVE_HOLDERS = "active_holders"
     PROCESS_IDENTITY_MISMATCH = "process_identity_mismatch"
-    TERMINATION_FAILED = "termination_failed"
 
 
 @dataclass(frozen=True, slots=True)
@@ -55,11 +53,6 @@ class LegacyMigrationResult:
     disposition: LegacyMigrationDisposition
     daemon_id: str | None = None
     pid: int | None = None
-    used_kill: bool = False
-
-    @property
-    def terminated(self) -> bool:
-        return self.disposition is LegacyMigrationDisposition.TERMINATED
 
 
 class LegacyProcessHandle(Protocol):
@@ -68,12 +61,6 @@ class LegacyProcessHandle(Protocol):
     def status(self) -> str: ...
 
     def create_time(self) -> float: ...
-
-    def terminate(self) -> None: ...
-
-    def kill(self) -> None: ...
-
-    def wait(self, timeout: float | None = None) -> int | None: ...
 
 
 type AuthenticatedStatusFetcher = Callable[[DiscoveryMetadata], AuthenticatedLegacyStatus]
@@ -85,8 +72,6 @@ def retire_legacy_v1_daemon(
     *,
     fetch_status: AuthenticatedStatusFetcher,
     process_factory: ProcessFactory = psutil.Process,
-    terminate_timeout: float = 2.0,
-    kill_timeout: float = 2.0,
     expected_uid: int | None = None,
 ) -> LegacyMigrationResult:
     """Inspect one explicit legacy root without signaling its unfreezable daemon.
@@ -98,22 +83,15 @@ def retire_legacy_v1_daemon(
     zero-holder status cannot authorize a signal.
     """
 
-    if not _valid_timeout(terminate_timeout) or not _valid_timeout(kill_timeout):
-        return LegacyMigrationResult(LegacyMigrationDisposition.TERMINATION_FAILED)
     try:
         metadata = _read_legacy_discovery(legacy_runtime_root, expected_uid=expected_uid)
     except (OSError, RuntimeFileError, TypeError, ValueError):
         return LegacyMigrationResult(LegacyMigrationDisposition.DISCOVERY_UNTRUSTED)
-    def outcome(
-        disposition: LegacyMigrationDisposition,
-        *,
-        used_kill: bool = False,
-    ) -> LegacyMigrationResult:
+    def outcome(disposition: LegacyMigrationDisposition) -> LegacyMigrationResult:
         return LegacyMigrationResult(
             disposition,
             daemon_id=metadata.daemon_id,
             pid=metadata.pid,
-            used_kill=used_kill,
         )
 
     try:
@@ -216,7 +194,3 @@ def _process_identity_matches(process: LegacyProcessHandle, expected_create_time
         )
     except (psutil.Error, OSError, ValueError):
         return False
-
-
-def _valid_timeout(value: float) -> bool:
-    return not isinstance(value, bool) and isinstance(value, int | float) and math.isfinite(value) and value > 0

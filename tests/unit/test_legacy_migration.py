@@ -18,11 +18,10 @@ from serena_light.runtime_files import DISCOVERY_NAME, LEGACY_BUILD_IDENTITY, Di
 
 
 class FakeProcess:
-    def __init__(self, *, pid: int, create_time: float, survives_term: bool = False) -> None:
+    def __init__(self, *, pid: int, create_time: float) -> None:
         self.pid = pid
         self._create_time = create_time
         self._running = True
-        self._survives_term = survives_term
         self.calls: list[str] = []
 
     def is_running(self) -> bool:
@@ -36,21 +35,6 @@ class FakeProcess:
     def create_time(self) -> float:
         self.calls.append("create_time")
         return self._create_time
-
-    def terminate(self) -> None:
-        self.calls.append("terminate")
-        if not self._survives_term:
-            self._running = False
-
-    def kill(self) -> None:
-        self.calls.append("kill")
-        self._running = False
-
-    def wait(self, timeout: float | None = None) -> int:
-        self.calls.append(f"wait:{timeout}")
-        if self._running:
-            raise psutil.TimeoutExpired(cast(float, timeout), pid=self.pid)
-        return 0
 
 
 def _legacy_root(tmp_path: Path) -> tuple[Path, dict[str, object]]:
@@ -108,7 +92,6 @@ def test_zero_holder_exact_identity_without_atomic_retirement_never_signals(tmp_
     assert result.disposition is LegacyMigrationDisposition.ATOMIC_RETIREMENT_UNSUPPORTED
     assert result.daemon_id == metadata["daemon_id"]
     assert result.pid == 43123
-    assert result.used_kill is False
     assert fetched == [(metadata["daemon_id"], 43123, 42.5, LEGACY_BUILD_IDENTITY)]
     assert requested_pids == [43123]
     assert process.calls == ["is_running", "status", "create_time"]
@@ -155,7 +138,7 @@ def test_transitional_v2_nonlegacy_build_identity_is_rejected(tmp_path: Path) ->
 
 def test_unfreezable_legacy_lease_race_never_receives_signal(tmp_path: Path) -> None:
     root, metadata = _legacy_root(tmp_path)
-    process = FakeProcess(pid=43123, create_time=42.5, survives_term=True)
+    process = FakeProcess(pid=43123, create_time=42.5)
     holders = 0
 
     def fetch(_metadata: DiscoveryMetadata) -> AuthenticatedLegacyStatus:
@@ -170,13 +153,10 @@ def test_unfreezable_legacy_lease_race_never_receives_signal(tmp_path: Path) -> 
         root,
         fetch_status=fetch,
         process_factory=lambda _pid: process,
-        terminate_timeout=0.25,
-        kill_timeout=0.5,
     )
 
     assert holders == 1
     assert result.disposition is LegacyMigrationDisposition.ATOMIC_RETIREMENT_UNSUPPORTED
-    assert result.used_kill is False
     assert process.calls == ["is_running", "status", "create_time"]
 
 
@@ -221,8 +201,7 @@ def test_pid_reuse_create_time_mismatch_is_revalidated_before_signal(tmp_path: P
     )
 
     assert result.disposition is LegacyMigrationDisposition.PROCESS_IDENTITY_MISMATCH
-    assert "terminate" not in reused.calls
-    assert "kill" not in reused.calls
+    assert reused.calls == ["is_running", "status", "create_time"]
 
 
 @pytest.mark.parametrize("discovery_content", [None, "not-json", "{}"])
