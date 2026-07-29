@@ -6,10 +6,10 @@ active OpenSpec change, OpenSpec wins.
 
 ## Current state
 
-`build-serena-light-v1` is the sole repair owner. Its 2026-07-28 PASS was
+Archived change `2026-07-29-build-serena-light-v1` was the sole repair owner. Its 2026-07-28 PASS was
 superseded by HOLD. The 2026-07-29 Sol-xhigh and Opus-max audits found new
 release-blocking correctness and evidence gaps. Those gaps are now repaired and
-the current state is `PASS — V1 REACCEPTED; ARCHIVE PENDING`. Serena Light remains
+the current state is `PASS — V1 ARCHIVED`. Serena Light remains
 registered in parallel under `serena-light`; canonical `serena` is unchanged.
 Guarded editing (`replace_symbol_body`) is restored after reacceptance.
 
@@ -24,7 +24,7 @@ Guarded editing (`replace_symbol_body`) is restored after reacceptance.
 4. Install service-owned CPython and introduce reproducible build identities,
    versioned daemon slots, nonce-authorized startup, coexistence, and retirement.
 
-Gate: all tasks 11–14 in `build-serena-light-v1` pass at their declared evidence
+Gate: all tasks 11–14 in the archived change pass at their declared evidence
 layer. Unit/in-process, real connector plus deterministic LSP, real daemon fault,
 and real LSP/repository evidence must be named separately; only the stdio gate
 currently combines the production connector executable with the shared daemon.
@@ -32,8 +32,8 @@ No canonical-name change is permitted. The current candidate also reconciles
 changed open documents before generation success, retains and reports failed
 runtime-stop ownership, translates LSP failures at the service boundary, and
 snapshot-isolates mutable external acceptance. Current-build client acceptance
-and independent reaudit are complete; only sync/archive and release are open. See
-[the final acceptance record](../openspec/changes/build-serena-light-v1/final-acceptance.md).
+and independent reaudit are complete. Stable specs are synced and the change is
+archived. See [the final acceptance record](../openspec/changes/archive/2026-07-29-build-serena-light-v1/final-acceptance.md).
 
 ## Phase B: reaccept and release v1
 
@@ -64,11 +64,11 @@ Pyright integration passes 2, and three isolated transformers performance runs
 remain below 40 seconds. Fresh Codex/Terra, native Claude Code/Sonnet, and CC
 Agent/Sonnet pass this exact build across all four roots plus isolated guarded
 edit/restore. Sol-xhigh and Opus-max both returned PASS on exact clean commit
-`c2dffca`; only the mechanical sync/archive and authorized push remain pending.
+`c2dffca`; stable-spec sync and archive are complete, and only the authorized
+push remains pending.
 
-Gate: every blocker is cleared and tasks 15.1–15.8 are complete. Task 15.9 owns
-the remaining sync/archive step; the authorized GitHub push follows it. No
-canonical Serena switch is part of this roadmap.
+Gate: every blocker is cleared and task 15 is complete. The authorized GitHub
+push follows the archive. No canonical Serena switch is part of this roadmap.
 
 ## Phase C: agent-facing position queries
 

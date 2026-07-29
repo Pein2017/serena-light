@@ -14,9 +14,9 @@ current Serena Light repository.
 
 - Audit root: `/data/CoordExp/serena-light`
 - Reference-only Serena checkout: `/data/CoordExp/external/serena`
-- Owning change: `openspec/changes/build-serena-light-v1`
+- Archived owning change: `openspec/changes/archive/2026-07-29-build-serena-light-v1`
 - Primary acceptance claim:
-  `openspec/changes/build-serena-light-v1/final-acceptance.md`
+  `openspec/changes/archive/2026-07-29-build-serena-light-v1/final-acceptance.md`
 - Compatibility contract: `docs/compatibility.json`
 - Client/lifecycle contract: `docs/client-registration.md`
 
@@ -75,7 +75,7 @@ Review all material files under:
 - `tests/`, including unit, integration, admission, and real-repository/fault
   acceptance tests
 - `scripts/`
-- `openspec/changes/build-serena-light-v1/`
+- `openspec/changes/archive/2026-07-29-build-serena-light-v1/`
 - `docs/`, `README.md`, and client registration/configuration artifacts
 - `pyproject.toml`, `uv.lock`, `package.json`, and `package-lock.json`
 - `third_party/` and `THIRD_PARTY_NOTICES.md`
@@ -176,7 +176,7 @@ uv run ruff check src tests scripts
 uv run ty check
 uv run serena-light-bootstrap --check --json
 uv run serena-light-source-budget --json
-openspec validate build-serena-light-v1 --strict
+openspec validate --all --strict
 ```
 
 Do not equate a green suite with a clean audit. Inspect test construction and

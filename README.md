@@ -4,10 +4,10 @@
 the CoordExp environment. It is an independently owned, deliberately small
 derivative of selected MIT-licensed Serena and SolidLSP mechanisms.
 
-The repository is reaccepting its first OpenSpec change. The admission probes,
+The repository has archived its first OpenSpec change. The admission probes,
 provenance census, owned LSP core, workspace/adapter/daemon layers, containment,
 repair-state test/static gates, fresh clients, guarded-edit restoration, and
-the final dual audit pass; OpenSpec sync/archive remains.
+the final dual audit, stable-spec sync, and archive all pass.
 
 ## Scope
 
@@ -25,7 +25,7 @@ editing operations are intentionally out of scope.
 Section 1 passed after the source-scope contract was corrected to keep Git
 trust and each language server's native configured program separate. The
 superseding evidence is recorded in
-`openspec/changes/build-serena-light-v1/scope-admission-report.md`; the older
+`openspec/changes/archive/2026-07-29-build-serena-light-v1/scope-admission-report.md`; the older
 `admission-report.md` is retained as historical evidence for the rejected
 Git-equals-program assumption.
 
@@ -40,7 +40,7 @@ The current real-stdio connector independently passes its guarded-edit and
 cross-library declaration contracts.
 Canonical `serena` remains unchanged pending a separate user decision.
 
-**Current state: `PASS — V1 REACCEPTED; ARCHIVE PENDING`.** Exact-head audits
+**Current state: `PASS — V1 ARCHIVED`.** Exact-head audits
 of `6fce244` confirmed the prior freshness, transport, adapter-admission, native
 source, and hermetic-stdio blockers were closed, then found that a runtime owner
 could still pin one failed cleanup future forever and that the native TypeScript
@@ -59,13 +59,13 @@ Exact-current-head Sol-xhigh and Opus-max both returned PASS on clean commit
 Agent-public
 `replace_symbol_body` remains restored after its fault
 matrix, full regression, and three fresh-client hash-edit receipts passed. This
-is v1 PASS pending only the mechanical OpenSpec sync/archive. Source ownership/provenance
+is v1 PASS. Stable specs are synced and the owning change is archived. Source ownership/provenance
 passes with 9 copied hashes against official Serena commit
 `9a9d07e83d8c1cba3458992707f440c624446c6d`; production LOC (14,837) is
 informational only and not gated. The current repair candidate has build
 identity `d46175203f8b78749d2ae0341ef8157965aea31c454620e8f2840de5a2b8dff7`.
 See
-[the final acceptance record](openspec/changes/build-serena-light-v1/final-acceptance.md)
+[the final acceptance record](openspec/changes/archive/2026-07-29-build-serena-light-v1/final-acceptance.md)
 for the full gate evidence and residual risks.
 
 See [client registration](docs/client-registration.md) for parallel setup and
