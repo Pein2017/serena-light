@@ -7,8 +7,9 @@ import re
 from pathlib import Path
 from typing import Protocol
 
-BUILD_IDENTITY_ALGORITHM_VERSION = 2
+BUILD_IDENTITY_ALGORITHM_VERSION = 3
 PUBLIC_TOOL_SCHEMA_VERSION = "1"
+RUNTIME_SOURCE_SUFFIXES = frozenset({".mjs", ".py"})
 # The dependency slot is content-addressed by resolved lock state, not by
 # unrelated project metadata or developer-tool configuration.  Both lockfiles
 # include their root project's declared dependency set.
@@ -25,12 +26,16 @@ def repository_root() -> Path:
 
 
 def runtime_source_files(root: Path) -> tuple[Path, ...]:
-    """Return the complete sorted Python runtime source closure."""
+    """Return the explicit, sorted packaged runtime-source closure."""
 
     source_root = root / "src" / "serena_light"
     files = tuple(
         sorted(
-            (path for path in source_root.rglob("*.py") if path.is_file()),
+            (
+                path
+                for path in source_root.rglob("*")
+                if path.is_file() and path.suffix in RUNTIME_SOURCE_SUFFIXES
+            ),
             key=lambda path: path.relative_to(root).as_posix(),
         )
     )

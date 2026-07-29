@@ -4,13 +4,18 @@ from pathlib import Path
 
 import pytest
 
-from serena_light.build_identity import compute_build_identity, validate_build_identity
+from serena_light.build_identity import (
+    BUILD_IDENTITY_ALGORITHM_VERSION,
+    compute_build_identity,
+    validate_build_identity,
+)
 
 
 def _repository(root: Path) -> Path:
     source = root / "src" / "serena_light"
     source.mkdir(parents=True)
     (source / "__init__.py").write_text("VERSION = 1\n")
+    (source / "probe.mjs").write_text("export const VERSION = 1;\n")
     for name in ("pyproject.toml", "uv.lock", "package.json", "package-lock.json"):
         (root / name).write_text(name)
     return root
@@ -27,6 +32,16 @@ def test_build_identity_is_stable_and_covers_source_lock_schema_and_algorithm(tm
     assert compute_build_identity(root) != baseline
     source.write_text("VERSION = 1\n")
 
+    runtime_script = root / "src" / "serena_light" / "probe.mjs"
+    runtime_script.write_text("export const VERSION = 2;\n")
+    assert compute_build_identity(root) != baseline
+    runtime_script.write_text("export const VERSION = 1;\n")
+
+    added_runtime_script = root / "src" / "serena_light" / "added.mjs"
+    added_runtime_script.write_text("export const ADDED = true;\n")
+    assert compute_build_identity(root) != baseline
+    added_runtime_script.unlink()
+
     (root / "uv.lock").write_text("changed")
     assert compute_build_identity(root) != baseline
     (root / "uv.lock").write_text("uv.lock")
@@ -34,8 +49,14 @@ def test_build_identity_is_stable_and_covers_source_lock_schema_and_algorithm(tm
     (root / "pyproject.toml").write_text("[tool.ty]\nchanged = true\n")
     assert compute_build_identity(root) == baseline
 
+    (root / "docs").mkdir()
+    (root / "docs" / "design.md").write_text("changed\n")
+    (root / "tests").mkdir()
+    (root / "tests" / "test_runtime.py").write_text("changed\n")
+    assert compute_build_identity(root) == baseline
+
     assert compute_build_identity(root, public_tool_schema_version="2") != baseline
-    assert compute_build_identity(root, algorithm_version=3) != baseline
+    assert compute_build_identity(root, algorithm_version=BUILD_IDENTITY_ALGORITHM_VERSION + 1) != baseline
 
 
 def test_build_identity_sorts_source_paths_independently_of_creation_order(tmp_path: Path) -> None:

@@ -82,7 +82,7 @@ def _status(metadata: dict[str, object], *, active_holders: int | None = 0) -> A
     )
 
 
-def test_zero_holder_exact_identity_terminates_only_discovered_pid(tmp_path: Path) -> None:
+def test_zero_holder_exact_identity_without_atomic_retirement_never_signals(tmp_path: Path) -> None:
     root, metadata = _legacy_root(tmp_path)
     process = FakeProcess(pid=43123, create_time=42.5)
     fetched: list[tuple[str, int, float, str]] = []
@@ -105,13 +105,13 @@ def test_zero_holder_exact_identity_terminates_only_discovered_pid(tmp_path: Pat
 
     result = retire_legacy_v1_daemon(root, fetch_status=fetch, process_factory=process_factory)
 
-    assert result.disposition is LegacyMigrationDisposition.TERMINATED
+    assert result.disposition is LegacyMigrationDisposition.ATOMIC_RETIREMENT_UNSUPPORTED
     assert result.daemon_id == metadata["daemon_id"]
     assert result.pid == 43123
     assert result.used_kill is False
     assert fetched == [(metadata["daemon_id"], 43123, 42.5, LEGACY_BUILD_IDENTITY)]
     assert requested_pids == [43123]
-    assert process.calls == ["is_running", "status", "create_time", "terminate", "wait:2.0"]
+    assert process.calls == ["is_running", "status", "create_time"]
     assert (root / DISCOVERY_NAME).exists()
 
 
@@ -130,8 +130,8 @@ def test_transitional_v2_legacy_identity_is_accepted(tmp_path: Path) -> None:
         process_factory=lambda _pid: process,
     )
 
-    assert result.disposition is LegacyMigrationDisposition.TERMINATED
-    assert process.calls[-2:] == ["terminate", "wait:2.0"]
+    assert result.disposition is LegacyMigrationDisposition.ATOMIC_RETIREMENT_UNSUPPORTED
+    assert process.calls == ["is_running", "status", "create_time"]
 
 
 def test_transitional_v2_nonlegacy_build_identity_is_rejected(tmp_path: Path) -> None:
@@ -153,32 +153,31 @@ def test_transitional_v2_nonlegacy_build_identity_is_rejected(tmp_path: Path) ->
     assert calls == []
 
 
-def test_bounded_term_uses_exact_identity_checked_kill_fallback(tmp_path: Path) -> None:
+def test_unfreezable_legacy_lease_race_never_receives_signal(tmp_path: Path) -> None:
     root, metadata = _legacy_root(tmp_path)
     process = FakeProcess(pid=43123, create_time=42.5, survives_term=True)
+    holders = 0
+
+    def fetch(_metadata: DiscoveryMetadata) -> AuthenticatedLegacyStatus:
+        nonlocal holders
+        status = _status(metadata, active_holders=holders)
+        # The v1 protocol cannot freeze acquisition. A new holder may appear as
+        # soon as the point-in-time status response has been constructed.
+        holders = 1
+        return status
 
     result = retire_legacy_v1_daemon(
         root,
-        fetch_status=lambda _metadata: _status(metadata),
+        fetch_status=fetch,
         process_factory=lambda _pid: process,
         terminate_timeout=0.25,
         kill_timeout=0.5,
     )
 
-    assert result.disposition is LegacyMigrationDisposition.TERMINATED
-    assert result.used_kill is True
-    assert process.calls == [
-        "is_running",
-        "status",
-        "create_time",
-        "terminate",
-        "wait:0.25",
-        "is_running",
-        "status",
-        "create_time",
-        "kill",
-        "wait:0.5",
-    ]
+    assert holders == 1
+    assert result.disposition is LegacyMigrationDisposition.ATOMIC_RETIREMENT_UNSUPPORTED
+    assert result.used_kill is False
+    assert process.calls == ["is_running", "status", "create_time"]
 
 
 @pytest.mark.parametrize(
@@ -277,4 +276,4 @@ def test_migration_never_enumerates_processes(tmp_path: Path, monkeypatch: pytes
         process_factory=exact_process,
     )
 
-    assert result.disposition is LegacyMigrationDisposition.TERMINATED
+    assert result.disposition is LegacyMigrationDisposition.ATOMIC_RETIREMENT_UNSUPPORTED

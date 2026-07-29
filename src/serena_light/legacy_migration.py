@@ -28,6 +28,7 @@ class LegacyMigrationDisposition(StrEnum):
     """Typed result; every value except ``TERMINATED`` means no further signal was sent."""
 
     TERMINATED = "terminated"
+    ATOMIC_RETIREMENT_UNSUPPORTED = "atomic_retirement_unsupported"
     DISCOVERY_UNTRUSTED = "discovery_untrusted"
     STATUS_UNAVAILABLE = "status_unavailable"
     STATUS_INVALID = "status_invalid"
@@ -88,11 +89,13 @@ def retire_legacy_v1_daemon(
     kill_timeout: float = 2.0,
     expected_uid: int | None = None,
 ) -> LegacyMigrationResult:
-    """Retire only the daemon proven idle by one explicit Serena Light legacy root.
+    """Inspect one explicit legacy root without signaling its unfreezable daemon.
 
     ``fetch_status`` owns bearer-authenticated transport.  This primitive never
     searches process names or enumerates processes and never removes runtime
-    artifacts; cleanup remains owned by the daemon.
+    artifacts. The legacy protocol exposes only a point-in-time holder count;
+    without an atomic retirement token that freezes new leases, even an exact
+    zero-holder status cannot authorize a signal.
     """
 
     if not _valid_timeout(terminate_timeout) or not _valid_timeout(kill_timeout):
@@ -131,28 +134,7 @@ def retire_legacy_v1_daemon(
         return outcome(LegacyMigrationDisposition.PROCESS_IDENTITY_MISMATCH)
     if not _process_identity_matches(process, metadata.process_start_time):
         return outcome(LegacyMigrationDisposition.PROCESS_IDENTITY_MISMATCH)
-    try:
-        process.terminate()
-        process.wait(timeout=terminate_timeout)
-        return outcome(LegacyMigrationDisposition.TERMINATED)
-    except psutil.NoSuchProcess:
-        return outcome(LegacyMigrationDisposition.TERMINATED)
-    except (psutil.TimeoutExpired, TimeoutError):
-        pass
-    except (psutil.Error, OSError, ValueError):
-        return outcome(LegacyMigrationDisposition.TERMINATION_FAILED)
-
-    # Revalidate the same process handle immediately before the fallback signal.
-    if not _process_identity_matches(process, metadata.process_start_time):
-        return outcome(LegacyMigrationDisposition.PROCESS_IDENTITY_MISMATCH)
-    try:
-        process.kill()
-        process.wait(timeout=kill_timeout)
-    except psutil.NoSuchProcess:
-        pass
-    except (psutil.Error, OSError, TimeoutError, ValueError):
-        return outcome(LegacyMigrationDisposition.TERMINATION_FAILED, used_kill=True)
-    return outcome(LegacyMigrationDisposition.TERMINATED, used_kill=True)
+    return outcome(LegacyMigrationDisposition.ATOMIC_RETIREMENT_UNSUPPORTED)
 
 
 def _read_legacy_discovery(root: Path, *, expected_uid: int | None) -> DiscoveryMetadata:

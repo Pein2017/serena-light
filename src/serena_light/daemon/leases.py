@@ -261,12 +261,18 @@ class LeaseLifecycle[IdentityT: Hashable, RuntimeT]:
 
         return self.release(lease_id, immediate=immediate)
 
-    def release_workspace(self, lease_id: UUID) -> ReleaseResult[IdentityT, RuntimeT]:
+    def release_workspace(
+        self,
+        lease_id: UUID,
+        *,
+        immediate: bool = False,
+    ) -> ReleaseResult[IdentityT, RuntimeT]:
         """Detach one binding while retaining its live daemon lease.
 
         This is the public counterpart of ``release_lease`` for an MCP client
         that wants to keep heartbeating and activate a different workspace
-        later.  The existing warm-grace policy still owns the released runtime.
+        later. Immediate release stops the runtime only when this was its last
+        holder; otherwise the remaining holders continue serving it.
         """
 
         with self._lock:
@@ -275,7 +281,12 @@ class LeaseLifecycle[IdentityT: Hashable, RuntimeT]:
             binding = lease.binding
             if binding is None:
                 return ReleaseResult(released=False)
-            self._remove_holder_locked(lease.id, binding.identity, now)
+            decision = self._remove_holder_locked(
+                lease.id,
+                binding.identity,
+                now,
+                immediate=immediate,
+            )
             self._active[lease.id] = DaemonLease(
                 id=lease.id,
                 binding=None,
@@ -284,16 +295,16 @@ class LeaseLifecycle[IdentityT: Hashable, RuntimeT]:
                 heartbeat_interval_seconds=lease.heartbeat_interval_seconds,
                 expiry_seconds=lease.expiry_seconds,
             )
-            state = self._workspaces[binding.identity]
             return ReleaseResult(
                 released=True,
                 decision=LeaseLifecycleDecision(
                     reason=LeaseEndReason.RELEASED,
                     identity=binding.identity,
-                    active_holders=len(state.holders),
+                    active_holders=decision.active_holders,
                     binding_to_release=binding,
                     lease_id=lease.id,
-                    grace_deadline=state.grace_deadline,
+                    runtime_to_stop=decision.runtime_to_stop,
+                    grace_deadline=decision.grace_deadline,
                 ),
             )
 
@@ -416,8 +427,30 @@ class LeaseLifecycle[IdentityT: Hashable, RuntimeT]:
         state.grace_deadline = None
         state.holders.add(lease_id)
 
-    def _remove_holder_locked(self, lease_id: UUID, identity: IdentityT, now: float) -> None:
+    def _remove_holder_locked(
+        self,
+        lease_id: UUID,
+        identity: IdentityT,
+        now: float,
+        *,
+        immediate: bool = False,
+    ) -> LeaseLifecycleDecision[IdentityT, RuntimeT]:
         state = self._workspaces[identity]
         state.holders.remove(lease_id)
-        if not state.holders:
-            state.grace_deadline = now + self._warm_grace_seconds
+        active_holders = len(state.holders)
+        runtime_to_stop: RuntimeT | None = None
+        grace_deadline: float | None = None
+        if active_holders == 0:
+            if immediate:
+                runtime_to_stop = state.runtime
+                del self._workspaces[identity]
+            else:
+                grace_deadline = now + self._warm_grace_seconds
+                state.grace_deadline = grace_deadline
+        return LeaseLifecycleDecision(
+            reason=LeaseEndReason.RELEASED,
+            identity=identity,
+            active_holders=active_holders,
+            runtime_to_stop=runtime_to_stop,
+            grace_deadline=grace_deadline,
+        )

@@ -4,6 +4,7 @@ import asyncio
 import json
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import cast
 from uuid import uuid4
 
@@ -219,6 +220,164 @@ def test_release_workspace_keeps_lease_live_and_bindings_isolated() -> None:
         assert (await service.binding_for(lease_id=first)).identity == "/data/three"
 
     asyncio.run(scenario())
+
+
+def test_http_activation_rejections_are_typed_and_keep_the_prior_binding() -> None:
+    created: list[FakeRuntime] = []
+
+    def factory(identity: str) -> FakeRuntime:
+        runtime = FakeRuntime(identity)
+        created.append(runtime)
+        return runtime
+
+    def resolver(path: Path) -> ResolvedWorkspace[str]:
+        if path == Path("/data/missing"):
+            raise WorkspaceError(WorkspaceErrorData(WorkspaceErrorCode.INVALID_PATH, "missing", path=path))
+        if path == Path("/outside/untrusted"):
+            raise WorkspaceError(WorkspaceErrorData(WorkspaceErrorCode.UNTRUSTED_ROOT, "untrusted", path=path))
+        return ResolvedWorkspace(identity=str(path.parent), working_subdirectory=path)
+
+    service = WorkspaceDaemonService[str, FakeRuntime](
+        lifecycle=LeaseLifecycle(clock=lambda: 0.0),
+        registry=WorkspaceRuntimeRegistry(factory),
+        resolver=resolver,
+        runtime_stopper=lambda _runtime: None,
+    )
+    token = "t" * 48
+    authorization = f"Bearer {token}"
+    app = create_daemon_app(service=service, bearer=BearerSecret(token), daemon_id=str(uuid4()))
+
+    with TestClient(app, base_url="http://127.0.0.1:8000", client=("127.0.0.1", 50000)) as client:
+        session = _initialize(client, authorization)
+        lease = _data(_call(client, authorization, session, "acquire_lease"))["lease_id"]
+        assert isinstance(lease, str)
+        _data(
+            _call(
+                client,
+                authorization,
+                session,
+                "activate_workspace",
+                {"absolute_path": "/data/active/subdir"},
+                lease,
+            )
+        )
+
+        for path, code in (
+            ("relative/path", "INVALID_PATH"),
+            ("/data/missing", "INVALID_PATH"),
+            ("/outside/untrusted", "UNTRUSTED_ROOT"),
+        ):
+            rejected = _call(
+                client,
+                authorization,
+                session,
+                "activate_workspace",
+                {"absolute_path": path},
+                lease,
+            )
+            assert rejected["ok"] is False
+            assert _data_map(rejected["error"])["code"] == code
+
+        status = _data(_call(client, authorization, session, "get_runtime_status", lease_id=lease))
+        assert _data_map(status["binding"])["working_subdirectory"] == "/data/active/subdir"
+        assert _data(_call(client, authorization, session, "heartbeat", {"lease_id": lease}))["lease_id"] == lease
+        assert [runtime.identity for runtime in created] == ["/data/active"]
+
+
+def test_http_immediate_workspace_release_stops_only_the_last_holder() -> None:
+    created: list[FakeRuntime] = []
+    stopped: list[FakeRuntime] = []
+
+    def factory(identity: str) -> FakeRuntime:
+        runtime = FakeRuntime(identity)
+        created.append(runtime)
+        return runtime
+
+    service = WorkspaceDaemonService[str, FakeRuntime](
+        lifecycle=LeaseLifecycle(clock=lambda: 0.0),
+        registry=WorkspaceRuntimeRegistry(factory),
+        resolver=lambda path: ResolvedWorkspace(identity=str(path.parent), working_subdirectory=path),
+        runtime_stopper=stopped.append,
+    )
+    token = "t" * 48
+    authorization = f"Bearer {token}"
+    app = create_daemon_app(service=service, bearer=BearerSecret(token), daemon_id=str(uuid4()))
+
+    with TestClient(app, base_url="http://127.0.0.1:8000", client=("127.0.0.1", 50000)) as client:
+        session = _initialize(client, authorization)
+        first = _data(_call(client, authorization, session, "acquire_lease"))["lease_id"]
+        second = _data(_call(client, authorization, session, "acquire_lease"))["lease_id"]
+        assert isinstance(first, str)
+        assert isinstance(second, str)
+        for lease in (first, second):
+            _data(
+                _call(
+                    client,
+                    authorization,
+                    session,
+                    "activate_workspace",
+                    {"absolute_path": "/data/project/subdir"},
+                    lease,
+                )
+            )
+
+        non_last = _data(
+            _call(client, authorization, session, "release_workspace", {"immediate": True}, first)
+        )
+        assert non_last["active_holders"] == 1
+        assert non_last["immediate"] is True
+        assert non_last["runtime_stopped"] is False
+        assert stopped == []
+        assert _data(_call(client, authorization, session, "find_symbol", {"name_path": "Thing"}, second))[
+            "identity"
+        ] == "/data/project"
+
+        last = _data(
+            _call(client, authorization, session, "release_workspace", {"immediate": True}, second)
+        )
+        assert last["active_holders"] == 0
+        assert last["immediate"] is True
+        assert last["runtime_stopped"] is True
+        assert [runtime.identity for runtime in stopped] == ["/data/project"]
+
+
+def test_http_release_workspace_rejects_non_boolean_immediate() -> None:
+    service, _created = _service()
+    token = "t" * 48
+    authorization = f"Bearer {token}"
+    app = create_daemon_app(service=service, bearer=BearerSecret(token), daemon_id=str(uuid4()))
+
+    with TestClient(app, base_url="http://127.0.0.1:8000", client=("127.0.0.1", 50000)) as client:
+        session = _initialize(client, authorization)
+        lease = _data(_call(client, authorization, session, "acquire_lease"))["lease_id"]
+        assert isinstance(lease, str)
+        response = client.post(
+            "/mcp",
+            headers={
+                "Authorization": authorization,
+                "Accept": "application/json, text/event-stream",
+                "Content-Type": "application/json",
+                "Mcp-Session-Id": session,
+                "Mcp-Protocol-Version": "2025-11-25",
+            },
+            json={
+                "jsonrpc": "2.0",
+                "id": uuid4().int,
+                "method": "tools/call",
+                "params": {
+                    "name": "release_workspace",
+                    "arguments": {"immediate": "true"},
+                    "_meta": {"serena_light": {"lease_id": lease}},
+                },
+            },
+        )
+        assert response.status_code == 200
+        result = cast(Mapping[str, object], response.json()["result"])
+
+    assert result["isError"] is True
+    content = result["content"]
+    assert isinstance(content, list)
+    assert "valid boolean" in str(content)
 
 
 def test_runtime_boundary_converts_typed_failures_without_generic_rewriting() -> None:

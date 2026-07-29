@@ -25,6 +25,7 @@ from weakref import WeakKeyDictionary
 import psutil
 from mcp.server.fastmcp import Context, FastMCP
 from mcp.types import LATEST_PROTOCOL_VERSION
+from pydantic import StrictBool
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.types import ASGIApp, Receive, Scope, Send
@@ -86,7 +87,9 @@ class DaemonService(Protocol):
 
     async def activate_workspace(self, *, lease_id: str, absolute_path: str) -> Mapping[str, object]: ...
 
-    async def release_workspace(self, *, lease_id: str) -> Mapping[str, object]: ...
+    async def release_workspace(
+        self, *, lease_id: str, immediate: bool = False
+    ) -> Mapping[str, object]: ...
 
     async def get_runtime_status(self, *, lease_id: str) -> Mapping[str, object]: ...
 
@@ -272,8 +275,8 @@ def create_daemon_app(
         except ValueError:
             return _lease_expired()
         try:
-            return _success(
-                dict(await service.activate_workspace(lease_id=lease_id, absolute_path=absolute_path))
+            return _as_tool_envelope(
+                await service.activate_workspace(lease_id=lease_id, absolute_path=absolute_path)
             )
         except (LeaseExpiredError, LifecycleLeaseExpiredError):
             return _lease_expired()
@@ -296,8 +299,17 @@ def create_daemon_app(
             return _lease_expired()
 
     @mcp.tool(name="release_workspace", structured_output=True)
-    async def release_workspace(context: Context) -> dict[str, object]:
-        return await bound_call(context, "release_workspace")
+    async def release_workspace(context: Context, immediate: StrictBool = False) -> dict[str, object]:
+        try:
+            lease_id = lease_id_from_context(context)
+        except ValueError:
+            return _lease_expired()
+        try:
+            return _as_tool_envelope(
+                await service.release_workspace(lease_id=lease_id, immediate=immediate)
+            )
+        except (LeaseExpiredError, LifecycleLeaseExpiredError):
+            return _lease_expired()
 
     @mcp.tool(name="get_runtime_status", structured_output=True)
     async def get_runtime_status(context: Context) -> dict[str, object]:

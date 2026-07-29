@@ -202,13 +202,15 @@ def _projection(
     family: LanguageFamily,
     trust: tuple[str, ...],
     program: tuple[str, ...] | None = None,
+    *,
+    selected_config_path: str | None = None,
 ) -> ScopeProjection:
     return ScopeProjection.from_attribution(
         trust_inventory_paths=trust,
         attribution=NativeProgramAttribution(
             language=family,
-            project_kind=ProjectKind.WORKSPACE_DEFAULT,
-            selected_config_path=None,
+            project_kind=ProjectKind.CONFIGURED if selected_config_path is not None else ProjectKind.WORKSPACE_DEFAULT,
+            selected_config_path=selected_config_path,
             configured_program_paths=trust if program is None else program,
         ),
     )
@@ -695,6 +697,82 @@ def test_freshness_detects_symlink_substitution_and_native_config_change(tmp_pat
 
         assert config_scan.config_changed == ("pyrightconfig.json",)
         assert config_scan.reattributed == (LanguageFamily.PYTHON,)
+    finally:
+        runtime.stop()
+
+
+def test_nested_native_config_restarts_only_its_running_adapter_before_new_readiness(tmp_path: Path) -> None:
+    _git_repository(tmp_path)
+    package = tmp_path / "package"
+    package.mkdir()
+    (package / "main.ts").write_text("export const value = 1;\n")
+    (tmp_path / "main.py").write_text("value = 1\n")
+    adapters: dict[LanguageFamily, _Adapter] = {}
+    contexts: dict[LanguageFamily, AdapterBuildContext] = {}
+    attributions: dict[LanguageFamily, int] = {}
+
+    def typescript_attribute(_root: Path, paths: tuple[str, ...]) -> ScopeProjection:
+        attributions[LanguageFamily.TYPESCRIPT] = attributions.get(LanguageFamily.TYPESCRIPT, 0) + 1
+        selected = "package/tsconfig.json" if (package / "tsconfig.json").exists() else None
+        return _projection(LanguageFamily.TYPESCRIPT, paths, selected_config_path=selected)
+
+    runtime = WorkspaceRuntime(
+        (WorkspaceKind.GIT, tmp_path),
+        path_policy=_PathPolicy(),
+        inventory_factory=lambda identity: git_trust_inventory(identity.root),
+        attributors={
+            LanguageFamily.PYTHON: lambda _root, paths: _projection(LanguageFamily.PYTHON, paths),
+            LanguageFamily.TYPESCRIPT: typescript_attribute,
+        },
+        adapter_factories=_factories(adapters, contexts, symbols=[]),
+    )
+    try:
+        runtime.load_document_symbols("main.py")
+        runtime.load_document_symbols("package/main.ts")
+        python = adapters[LanguageFamily.PYTHON]
+        original_typescript = adapters[LanguageFamily.TYPESCRIPT]
+        python_generations = python.snapshot().generations
+        original_typescript_program = original_typescript.snapshot().generations.program
+
+        # The candidate was absent at activation.  Its later creation is still
+        # detected because source-directory ancestry is part of the watch set.
+        (package / "tsconfig.json").write_text('{"include": ["*.ts"]}\n')
+        created_config = runtime.ensure_fresh()
+        replacement = adapters[LanguageFamily.TYPESCRIPT]
+
+        assert created_config.config_changed == ("package/tsconfig.json",)
+        assert created_config.reattributed == (LanguageFamily.TYPESCRIPT,)
+        assert replacement is not original_typescript
+        assert original_typescript.stop_thread is not None
+        assert replacement.snapshot().phase is AdapterPhase.COLD
+        assert not replacement.snapshot().running
+        assert replacement.context.projection.selected_config_path == "package/tsconfig.json"
+        assert replacement.context.scope_tracker is original_typescript.context.scope_tracker
+        assert replacement.snapshot().generations.program > original_typescript_program
+        assert adapters[LanguageFamily.PYTHON] is python
+        assert python.snapshot().generations == python_generations
+
+        # A replacement cannot reuse the old adapter's document-ready state.
+        runtime.load_document_symbols("package/main.ts")
+        assert replacement.snapshot().phase is AdapterPhase.DOCUMENT_READY
+        assert replacement.open_versions == [2]
+        replacement_program = replacement.snapshot().generations.program
+
+        (package / "tsconfig.json").write_text('{"include": ["main.ts"], "strict": true}\n')
+        changed_config = runtime.ensure_fresh()
+        second_replacement = adapters[LanguageFamily.TYPESCRIPT]
+
+        assert changed_config.config_changed == ("package/tsconfig.json",)
+        assert changed_config.reattributed == (LanguageFamily.TYPESCRIPT,)
+        assert second_replacement is not replacement
+        assert replacement.stop_thread is not None
+        assert second_replacement.snapshot().phase is AdapterPhase.COLD
+        assert not second_replacement.snapshot().running
+        assert second_replacement.context.scope_tracker is replacement.context.scope_tracker
+        assert second_replacement.snapshot().generations.program > replacement_program
+        assert adapters[LanguageFamily.PYTHON] is python
+        assert python.snapshot().generations == python_generations
+        assert attributions == {LanguageFamily.TYPESCRIPT: 3}
     finally:
         runtime.stop()
 

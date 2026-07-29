@@ -115,27 +115,29 @@ class WorkspaceDaemonService[IdentityT: Hashable, RuntimeT]:
         self._report_decision(result.decision, immediate=immediate)
         return _release_data(daemon_lease_id, result, immediate=immediate)
 
-    async def release_workspace(self, *, lease_id: str) -> Mapping[str, object]:
+    async def release_workspace(self, *, lease_id: str, immediate: bool = False) -> Mapping[str, object]:
         """Drop the current binding while retaining the same live lease UUID."""
 
+        if type(immediate) is not bool:
+            return error(ErrorCode.INVALID_INPUT, details={"field": "immediate"}).to_dict()
         daemon_lease_id = _lease_uuid(lease_id)
         async with self._binding_lock:
             try:
-                result = self._lifecycle.release_workspace(daemon_lease_id)
-            except LifecycleLeaseExpiredError as error:
-                runtimes_to_stop = self._apply_decision_locked(error.decision)
-                expiry_error: LifecycleLeaseExpiredError[IdentityT, RuntimeT] | None = error
+                result = self._lifecycle.release_workspace(daemon_lease_id, immediate=immediate)
+            except LifecycleLeaseExpiredError as exc:
+                runtimes_to_stop = self._apply_decision_locked(exc.decision)
+                expiry_error: LifecycleLeaseExpiredError[IdentityT, RuntimeT] | None = exc
             else:
                 runtimes_to_stop = self._apply_result_locked(result)
                 expiry_error = None
         await self._stop_runtimes(runtimes_to_stop)
         self._report_decision(
             expiry_error.decision if expiry_error is not None else result.decision,
-            immediate=False,
+            immediate=immediate,
         )
         if expiry_error is not None:
             raise LeaseExpiredError(str(expiry_error)) from expiry_error
-        return _release_workspace_data(daemon_lease_id, result)
+        return _release_workspace_data(daemon_lease_id, result, immediate=immediate)
 
     async def activate_workspace(self, *, lease_id: str, absolute_path: str) -> Mapping[str, object]:
         """Resolve off-loop, then acquire-swap and bind one live daemon lease."""
@@ -143,8 +145,13 @@ class WorkspaceDaemonService[IdentityT: Hashable, RuntimeT]:
         daemon_lease_id = _lease_uuid(lease_id)
         activation_path = Path(absolute_path)
         if not activation_path.is_absolute():
-            raise ValueError("absolute_path must be absolute")
-        resolved = await asyncio.to_thread(self._resolve_workspace, activation_path)
+            return error(ErrorCode.INVALID_PATH, details={"path": absolute_path}).to_dict()
+        try:
+            resolved = await asyncio.to_thread(self._resolve_workspace, activation_path)
+        except WorkspaceError as exc:
+            # Resolution precedes registry/lifecycle mutation, so failures keep
+            # the prior binding and lease authority unchanged.
+            return from_workspace_error(exc).to_dict()
 
         runtimes_to_stop: list[RuntimeT] = []
         expiry_error: LifecycleLeaseExpiredError[IdentityT, RuntimeT] | None = None
@@ -155,9 +162,9 @@ class WorkspaceDaemonService[IdentityT: Hashable, RuntimeT]:
                 # Reject a release/expiry that happened while path resolution ran
                 # before acquiring a registry lease or constructing a runtime.
                 self._lifecycle.require_active(daemon_lease_id)
-            except LifecycleLeaseExpiredError as error:
-                expiry_error = error
-                runtimes_to_stop.extend(self._apply_decision_locked(error.decision))
+            except LifecycleLeaseExpiredError as exc:
+                expiry_error = exc
+                runtimes_to_stop.extend(self._apply_decision_locked(exc.decision))
             else:
                 existing_runtime = self._registry.runtime_state(resolved.identity)
                 binding = await asyncio.to_thread(self._registry.activate, daemon_lease_id, resolved)
@@ -165,15 +172,15 @@ class WorkspaceDaemonService[IdentityT: Hashable, RuntimeT]:
                     self._lifecycle.rebind(daemon_lease_id, binding)
                     if existing_runtime is not None:
                         refresh_runtime = binding.runtime
-                except LifecycleLeaseExpiredError as error:
-                    expiry_error = error
+                except LifecycleLeaseExpiredError as exc:
+                    expiry_error = exc
                     # Runtime acquisition completed after authority expired.  It
                     # never entered lifecycle grace ownership, so retire it now.
                     self._registry.release(daemon_lease_id)
                     detached = self._registry.retire_idle(binding.identity, binding.runtime)
                     if detached is not None:
                         runtimes_to_stop.append(detached)
-                    runtimes_to_stop.extend(self._apply_decision_locked(error.decision))
+                    runtimes_to_stop.extend(self._apply_decision_locked(exc.decision))
 
         await self._stop_runtimes(runtimes_to_stop)
         if expiry_error is not None:
@@ -448,13 +455,17 @@ def _release_data[IdentityT, RuntimeT](
 def _release_workspace_data[IdentityT, RuntimeT](
     lease_id: UUID,
     result: ReleaseResult[IdentityT, RuntimeT],
+    *,
+    immediate: bool,
 ) -> dict[str, object]:
     decision = result.decision
     return {
         "lease_id": str(lease_id),
         "released": result.released,
         "bound": False,
+        "immediate": immediate,
         "reason": None if decision is None else decision.reason.value,
         "active_holders": None if decision is None else decision.active_holders,
         "grace_deadline": None if decision is None else decision.grace_deadline,
+        "runtime_stopped": decision is not None and decision.runtime_to_stop is not None,
     }

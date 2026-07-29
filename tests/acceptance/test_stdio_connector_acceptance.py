@@ -3,19 +3,15 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import os
-import shutil
 import signal
-import subprocess
 import sys
-import tempfile
 import time
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import NoReturn, cast
+from typing import cast
 
 import httpx
 import psutil
@@ -23,7 +19,6 @@ import pytest
 from mcp import ClientSession, types
 from mcp.client.stdio import StdioServerParameters, stdio_client
 
-from serena_light import cli
 from serena_light.bootstrap import inspect_runtime, runtime_paths
 from serena_light.build_identity import compute_build_identity
 from serena_light.runtime_files import (
@@ -94,21 +89,6 @@ def _service_connector_executable() -> Path:
     return executable
 
 
-def _wait_for_unowned_daemon_to_retire(runtime_root: Path) -> None:
-    """Avoid taking ownership of a daemon that another interactive client holds."""
-
-    deadline = time.monotonic() + cli.DAEMON_IDLE_EXIT_SECONDS + 3.0
-    while _read_daemon(runtime_root) is not None and time.monotonic() < deadline:
-        time.sleep(0.05)
-    if (metadata := _read_daemon(runtime_root)) is not None:
-        reason = (
-            "shared serena-light daemon is already live "
-            f"(pid={metadata.pid}, daemon_id={metadata.daemon_id}); refusing to disrupt another client"
-        )
-        skip = cast(Callable[[str], NoReturn], pytest.skip)
-        skip(reason)
-
-
 def _migration_status(runtime_root: Path, metadata: DiscoveryMetadata) -> Mapping[str, object]:
     bearer: BearerSecret = read_bearer_secret(runtime_root)
     response = httpx.get(
@@ -148,7 +128,9 @@ def _terminate_owned_daemon(owned: _DaemonProcess, descendants: tuple[_DaemonPro
 
 
 @contextmanager
-def _proxy_environment(monkeypatch: pytest.MonkeyPatch, *, poisoned: bool) -> Iterator[None]:
+def _proxy_environment(monkeypatch: pytest.MonkeyPatch, *, poisoned: bool) -> Iterator[dict[str, str]]:
+    """Return the exact environment explicitly passed to the stdio child."""
+
     with monkeypatch.context() as environment:
         for name in _PROXY_VARIABLES:
             environment.delenv(name, raising=False)
@@ -157,7 +139,31 @@ def _proxy_environment(monkeypatch: pytest.MonkeyPatch, *, poisoned: bool) -> It
                 environment.setenv(name, "http://127.0.0.1:1")
             environment.setenv("NO_PROXY", "")
             environment.setenv("no_proxy", "")
-        yield
+        child_environment = dict(os.environ)
+        if poisoned:
+            assert child_environment["HTTP_PROXY"] == "http://127.0.0.1:1"
+            assert child_environment["NO_PROXY"] == ""
+        else:
+            assert not any(name in child_environment for name in _PROXY_VARIABLES)
+        yield child_environment
+
+
+def _descendants(identity: _DaemonProcess) -> tuple[_DaemonProcess, ...]:
+    if not _is_live(identity):
+        return ()
+    return tuple(
+        _DaemonProcess(f"descendant:{child.pid}", child.pid, child.create_time())
+        for child in psutil.Process(identity.pid).children(recursive=True)
+        if child.status() != psutil.STATUS_ZOMBIE
+    )
+
+
+def _process_tree(process: psutil.Process) -> tuple[_DaemonProcess, ...]:
+    return tuple(
+        _DaemonProcess(f"child:{child.pid}", child.pid, child.create_time())
+        for child in process.children(recursive=True)
+        if child.status() != psutil.STATUS_ZOMBIE
+    )
 
 
 def _data(result: types.CallToolResult) -> Mapping[str, object]:
@@ -173,14 +179,17 @@ def _data(result: types.CallToolResult) -> Mapping[str, object]:
 async def _run_fresh_stdio_client(
     workspace: Path,
     *,
+    child_environment: Mapping[str, str],
     release_workspace: bool,
-    edit_source: Path | None = None,
+    expected_workspace_root: Path,
 ) -> str:
     parameters = StdioServerParameters(
         command=str(_service_connector_executable()),
         args=[],
         cwd=workspace,
+        env=dict(child_environment),
     )
+    assert parameters.env == child_environment
     async with stdio_client(parameters, errlog=sys.stderr) as (read_stream, write_stream), ClientSession(
         read_stream, write_stream
     ) as client:
@@ -198,22 +207,7 @@ async def _run_fresh_stdio_client(
         assert Path(cast(str, binding["working_subdirectory"])).resolve() == workspace
         runtime = _mapping(status["runtime"])
         identity = _mapping(runtime["identity"])
-        assert Path(cast(str, identity["root"])).resolve() == workspace
-        if edit_source is not None:
-            original = edit_source.read_bytes()
-            edited = _data(
-                await client.call_tool(
-                    "replace_symbol_body",
-                    {
-                        "name_path": "target",
-                        "relative_path": edit_source.name,
-                        "body": "def target() -> int:\n    return 2",
-                        "expected_hash": hashlib.sha256(original).hexdigest(),
-                    },
-                )
-            )
-            assert edited["relative_path"] == edit_source.name
-            assert edit_source.read_text() == "def target() -> int:\n    return 2\n"
+        assert Path(cast(str, identity["root"])).resolve() == expected_workspace_root
         daemon_id = status["daemon_id"]
         assert isinstance(daemon_id, str)
         if release_workspace:
@@ -231,24 +225,32 @@ def test_real_stdio_connector_contains_proxy_environment_edits_and_releases_to_w
     assert Path(cast(str, runtime["runtime"])).resolve() == runtime_paths(REPOSITORY_ROOT)["runtime"].resolve()
     _service_connector_executable()
     runtime_root = _current_runtime_root()
-    _wait_for_unowned_daemon_to_retire(runtime_root)
 
     daemon_ids: list[str] = []
     owned: _DaemonProcess | None = None
     descendants: tuple[_DaemonProcess, ...] = ()
-    edit_workspace = Path(tempfile.mkdtemp(prefix="serena-light-edit-", dir="/data"))
-    edit_source = edit_workspace / "example.py"
-    subprocess.run(["git", "init", "-q"], cwd=edit_workspace, check=True)
-    (edit_workspace / "pyrightconfig.json").write_text('{"include":["example.py"]}\n')
-    edit_source.write_text("def target() -> int:\n    return 1\n")
+    borrowed = _read_daemon(runtime_root)
+    borrowed_identity = (
+        None
+        if borrowed is None
+        else _DaemonProcess(borrowed.daemon_id, borrowed.pid, borrowed.process_start_time)
+    )
+    borrowed_descendants = () if borrowed_identity is None else _descendants(borrowed_identity)
+    test_children = _process_tree(psutil.Process())
+    baseline_holders: int | None = None
+    if borrowed is not None:
+        status = _migration_status(runtime_root, borrowed)
+        baseline_holders = cast(int, status["active_holders"])
+        assert isinstance(baseline_holders, int)
     try:
         for poisoned in (False, True):
-            with _proxy_environment(monkeypatch, poisoned=poisoned):
+            with _proxy_environment(monkeypatch, poisoned=poisoned) as child_environment:
                 daemon_id = asyncio.run(
                     _run_fresh_stdio_client(
-                        edit_workspace if poisoned else REPOSITORY_ROOT,
+                        REPOSITORY_ROOT if not poisoned else REPOSITORY_ROOT / "src",
+                        child_environment=child_environment,
                         release_workspace=poisoned,
-                        edit_source=None,
+                        expected_workspace_root=REPOSITORY_ROOT,
                     )
                 )
             daemon_ids.append(daemon_id)
@@ -259,18 +261,19 @@ def test_real_stdio_connector_contains_proxy_environment_edits_and_releases_to_w
             candidate = _DaemonProcess(metadata.daemon_id, metadata.pid, metadata.process_start_time)
             assert _is_live(candidate)
             lifetime = _migration_status(runtime_root, metadata)
-            assert lifetime["active_holders"] == 0
+            expected_holders = 0 if borrowed_identity is None or candidate != borrowed_identity else baseline_holders
+            assert lifetime["active_holders"] == expected_holders
             assert lifetime["daemon_idle"] is False
             if owned is None:
-                owned = candidate
-                descendants = tuple(
-                    _DaemonProcess(f"descendant:{child.pid}", child.pid, child.create_time())
-                    for child in psutil.Process(candidate.pid).children(recursive=True)
-                    if child.status() != psutil.STATUS_ZOMBIE
-                )
+                if borrowed_identity is None or candidate != borrowed_identity:
+                    owned = candidate
+                    descendants = _descendants(candidate)
+                else:
+                    assert _descendants(candidate) == borrowed_descendants
+            assert _descendants(candidate) == (descendants if owned is not None else borrowed_descendants)
+            assert _process_tree(psutil.Process()) == test_children, "stdio connector left a child process behind"
     finally:
         if owned is not None:
             _terminate_owned_daemon(owned, descendants)
-        shutil.rmtree(edit_workspace)
 
     assert daemon_ids[0] == daemon_ids[1], "the second fresh stdio client should reuse the warm service daemon"

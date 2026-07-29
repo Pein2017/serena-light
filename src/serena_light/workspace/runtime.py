@@ -558,12 +558,7 @@ class FreshnessCoordinator:
         self._config_states = self._observe_configs(inventory)
 
     def _observe_configs(self, inventory: TrustInventory) -> dict[str, ContentIdentity]:
-        candidates = set()
-        for family, names in _NATIVE_CONFIG_WATCH.items():
-            candidates.update(names)
-            projection = self._runtime.projections.get(family)
-            if projection is not None and projection.selected_config_path:
-                candidates.add(projection.selected_config_path)
+        candidates = _native_config_candidates(inventory, self._runtime.projections)
         return {state.path: state.content_identity for state in inventory.targeted_states(sorted(candidates))}
 
     def _scan_git(self) -> FreshnessScan:
@@ -593,15 +588,23 @@ class FreshnessCoordinator:
         # Attribute affected families before installation; typed per-family
         # failures are installed as unavailable state without blocking healthy
         # families or reverting the rebuilt lexical inventory.
+        affected = _affected_families((*created, *deleted, *symlinked), config_changed)
         projections = (
-            runtime.build_projections(rebuilt, _affected_families((*created, *deleted, *symlinked), config_changed))
-            if membership_changed or config_changed
-            else {}
+            runtime.build_projections(rebuilt, affected) if membership_changed or config_changed else {}
         )
         with self._lock:
             self._states = {path: state.content_identity for path, state in states.items()}
             self._config_states = configs
-        runtime.install_freshness(rebuilt, projections)
+        # Native config discovery happens before an LSP starts.  A running
+        # adapter cannot be allowed to report readiness for a newly attributed
+        # program until it has restarted against that native configuration.
+        restart_families = _affected_families((), config_changed)
+        runtime.install_freshness(
+            rebuilt,
+            projections,
+            restart_families=restart_families,
+            config_paths=config_changed,
+        )
         reattributed = tuple(sorted(projections))
 
         events = (
@@ -609,7 +612,9 @@ class FreshnessCoordinator:
             *(WatchedFileEvent(path, FileChangeType.CHANGED) for path in changed),
             *(WatchedFileEvent(path, FileChangeType.DELETED) for path in deleted),
         )
-        notified, opened, unopened = self._apply_events(events, created=created)
+        notified, opened, unopened = self._apply_events(
+            events, created=created, force_notify=restart_families
+        )
         return FreshnessScan(
             created=created,
             changed=changed,
@@ -623,7 +628,11 @@ class FreshnessCoordinator:
         )
 
     def _apply_events(
-        self, events: tuple[WatchedFileEvent, ...], *, created: tuple[str, ...] = ()
+        self,
+        events: tuple[WatchedFileEvent, ...],
+        *,
+        created: tuple[str, ...] = (),
+        force_notify: Collection[LanguageFamily] = (),
     ) -> tuple[tuple[LanguageFamily, ...], tuple[str, ...], tuple[str, ...]]:
         """Advance generations first, then notify running adapters best-effort.
 
@@ -636,6 +645,7 @@ class FreshnessCoordinator:
         """
 
         runtime = self._runtime
+        forced = frozenset(force_notify)
         notified: list[LanguageFamily] = []
         opened: list[str] = []
         unopened: list[str] = []
@@ -646,7 +656,7 @@ class FreshnessCoordinator:
             tracker.apply_did_change_watched_files(family_events)
             family_created = tuple(path for path in created if _family_of(path) is family)
             adapter = runtime.adapters.get(family)
-            if adapter is None or not adapter.snapshot().running:
+            if adapter is None or (not adapter.snapshot().running and family not in forced):
                 unopened.extend(family_created)
                 continue
             opens = family_created[:MAX_CONTROLLED_OPENS]
@@ -799,12 +809,27 @@ class WorkspaceRuntime:
         return rebuilt
 
     def install_freshness(
-        self, inventory: TrustInventory, attributions: Mapping[LanguageFamily, FamilyAttribution]
+        self,
+        inventory: TrustInventory,
+        attributions: Mapping[LanguageFamily, FamilyAttribution],
+        *,
+        restart_families: Collection[LanguageFamily] = (),
+        config_paths: Collection[str] = (),
     ) -> None:
-        """Swap inventory and projections together, then advance generations."""
+        """Swap inventory and projections, restarting adapters for native-config changes."""
 
         paths_by_family = _family_paths(inventory)
         to_stop: list[RuntimeAdapter] = []
+        to_build: list[tuple[LanguageFamily, ScopeProjection, ScopeGenerationTracker | None]] = []
+        restart = frozenset(restart_families)
+        config_events = {
+            family: tuple(
+                WatchedFileEvent(path, FileChangeType.CHANGED, may_change_program=True)
+                for path in config_paths
+                if PurePosixPath(path).name in _NATIVE_CONFIG_WATCH[family]
+            )
+            for family in restart
+        }
         with self._state_lock:
             self.inventory = inventory
             for family, attribution in attributions.items():
@@ -820,6 +845,18 @@ class WorkspaceRuntime:
                     continue
                 assert projection is not None
                 self._family_errors.pop(family, None)
+                if family in restart:
+                    tracker = self._trackers.get(family)
+                    if tracker is not None:
+                        before_program = tracker.generations.configured_program
+                        tracker.update_projection(projection)
+                        if tracker.generations.configured_program == before_program:
+                            tracker.apply_did_change_watched_files(config_events[family])
+                    adapter = self._adapters.pop(family, None)
+                    if adapter is not None:
+                        to_stop.append(adapter)
+                    to_build.append((family, projection, tracker))
+                    continue
                 tracker = self._trackers.get(family)
                 if tracker is not None:
                     tracker.update_projection(projection)
@@ -836,6 +873,24 @@ class WorkspaceRuntime:
                 self._adapters[family] = adapter
         for adapter in to_stop:
             adapter.stop().result(timeout=self._future_timeout)
+        # Keep the replacement absent until the old process has actually
+        # stopped.  This prevents a concurrent caller from observing the new
+        # projection through the old native configuration.
+        with self._state_lock:
+            for family, projection, tracker in to_build:
+                try:
+                    adapter, tracker = self._build_adapter(
+                        family, projection, paths_by_family[family], scope_tracker=tracker
+                    )
+                except Exception as error:
+                    self._family_errors[family] = WorkspaceRuntimeError(
+                        RuntimeErrorCode.SCOPE_INCOMPATIBLE,
+                        f"{family.value} adapter construction failed ({type(error).__name__})",
+                    )
+                    self._trackers.pop(family, None)
+                    continue
+                self._trackers[family] = tracker
+                self._adapters[family] = adapter
 
     def notify_watched_files(
         self,
@@ -903,8 +958,10 @@ class WorkspaceRuntime:
         family: LanguageFamily,
         projection: ScopeProjection,
         trusted_paths: tuple[str, ...],
+        *,
+        scope_tracker: ScopeGenerationTracker | None = None,
     ) -> tuple[RuntimeAdapter, ScopeGenerationTracker]:
-        tracker = ScopeGenerationTracker(projection)
+        tracker = scope_tracker or ScopeGenerationTracker(projection)
         context = AdapterBuildContext(
             family=family,
             workspace_root=self.identity.root,
@@ -1866,6 +1923,33 @@ def _family_of(relative_path: str) -> LanguageFamily | None:
         if suffix in extensions:
             return family
     return None
+
+
+def _native_config_candidates(
+    inventory: TrustInventory, projections: Mapping[LanguageFamily, ScopeProjection]
+) -> frozenset[str]:
+    """Stat every native config that could govern a trusted source path.
+
+    The trust inventory deliberately excludes non-source files.  Derive the
+    bounded watch set from each trusted source's directory ancestry instead of
+    assuming that native configuration only lives at the workspace root.  An
+    absent candidate is retained in the state map, so creating a nearer config
+    is visible on the next scan without a background watcher.
+    """
+
+    candidates: set[str] = set()
+    for family, paths in _family_paths(inventory).items():
+        names = _NATIVE_CONFIG_WATCH[family]
+        for source in paths:
+            directory = PurePosixPath(source).parent
+            while directory != PurePosixPath("."):
+                candidates.update((directory / name).as_posix() for name in names)
+                directory = directory.parent
+            candidates.update(names)
+        projection = projections.get(family)
+        if projection is not None and projection.selected_config_path:
+            candidates.add(projection.selected_config_path)
+    return frozenset(candidates)
 
 
 def _projection_error(family: LanguageFamily, projection: ScopeProjection) -> WorkspaceRuntimeError:

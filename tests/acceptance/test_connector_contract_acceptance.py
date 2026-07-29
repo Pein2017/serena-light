@@ -270,8 +270,10 @@ class _ObservedService:
     async def activate_workspace(self, *, lease_id: str, absolute_path: str) -> Mapping[str, object]:
         return await self._service.activate_workspace(lease_id=lease_id, absolute_path=absolute_path)
 
-    async def release_workspace(self, *, lease_id: str) -> Mapping[str, object]:
-        return await self._service.release_workspace(lease_id=lease_id)
+    async def release_workspace(
+        self, *, lease_id: str, immediate: bool = False
+    ) -> Mapping[str, object]:
+        return await self._service.release_workspace(lease_id=lease_id, immediate=immediate)
 
     async def get_runtime_status(self, *, lease_id: str) -> Mapping[str, object]:
         return await self._service.get_runtime_status(lease_id=lease_id)

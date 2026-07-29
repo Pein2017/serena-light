@@ -355,6 +355,113 @@ def test_concurrent_change_during_symbol_resolution_is_conflict_visible(tmp_path
     assert not list(tmp_path.glob(".*.serena-light-*.tmp"))
 
 
+def test_parent_replacement_before_install_fails_without_mutating_either_tree(tmp_path: Path) -> None:
+    root = tmp_path / "root"
+    parent = root / "package"
+    parent.mkdir(parents=True)
+    path = parent / "sample.py"
+    original = b"class A:\n    def target(self):\n        return 1\n"
+    path.write_bytes(original)
+    moved_parent = root / "package-moved"
+    target = AuthorizedEdit(
+        path,
+        "package/sample.py",
+        WorkspaceMetadata(str(root), "git", str(root)),
+        root,
+    )
+    notifier = _Notifier()
+    commit = EditCommit()
+    commit.mark_running()
+
+    def replace_parent_after_temp_fsync(file_descriptor: int) -> None:
+        os.fsync(file_descriptor)
+        parent.rename(moved_parent)
+        parent.mkdir()
+        path.write_bytes(original)
+
+    result = _editor(
+        path,
+        _Symbols(_nested_target_symbols),
+        notifier,
+        authorizer=_Authorizer(target),
+        flush_call=replace_parent_after_temp_fsync,
+        commit=commit,
+    ).replace_symbol_body(
+        "A/target",
+        "package/sample.py",
+        "def target(self):\n        return 2\n",
+        _sha256(original),
+    ).to_dict()
+
+    assert result["error"]["code"] == "INVALID_PATH"
+    assert result["error"]["details"]["stage"] == "pre_install_validation"
+    assert path.read_bytes() == original
+    assert (moved_parent / "sample.py").read_bytes() == original
+    assert notifier.calls == []
+    assert commit.state is EditCommitState.RUNNING
+    assert not list(parent.glob(".*.serena-light-*.tmp"))
+    assert not list(moved_parent.glob(".*.serena-light-*.tmp"))
+
+
+def test_parent_replacement_during_install_never_reports_success_for_the_recreated_target(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "root"
+    parent = root / "package"
+    parent.mkdir(parents=True)
+    path = parent / "sample.py"
+    original = b"class A:\n    def target(self):\n        return 1\n"
+    path.write_bytes(original)
+    moved_parent = root / "package-moved"
+    target = AuthorizedEdit(
+        path,
+        "package/sample.py",
+        WorkspaceMetadata(str(root), "git", str(root)),
+        root,
+    )
+    notifier = _Notifier()
+    commit = EditCommit()
+    commit.mark_running()
+    real_replace = os.replace
+
+    def replace_after_parent_replacement(
+        source: str | bytes | os.PathLike[str] | os.PathLike[bytes],
+        destination: str | bytes | os.PathLike[str] | os.PathLike[bytes],
+        *,
+        src_dir_fd: int | None = None,
+        dst_dir_fd: int | None = None,
+    ) -> None:
+        parent.rename(moved_parent)
+        parent.mkdir()
+        path.write_bytes(original)
+        real_replace(source, destination, src_dir_fd=src_dir_fd, dst_dir_fd=dst_dir_fd)
+
+    monkeypatch.setattr(os, "replace", replace_after_parent_replacement)
+    result = _editor(
+        path,
+        _Symbols(_nested_target_symbols),
+        notifier,
+        authorizer=_Authorizer(target),
+        commit=commit,
+    ).replace_symbol_body(
+        "A/target",
+        "package/sample.py",
+        "def target(self):\n        return 2\n",
+        _sha256(original),
+    ).to_dict()
+
+    assert result["error"]["code"] == "UNCERTAIN"
+    assert result["error"]["details"]["uncertain_stage"] == "post_install_path_validation"
+    assert result["error"]["details"]["requires_current_reread"] is True
+    assert result["error"]["details"]["current_hash"] == _sha256(original)
+    assert path.read_bytes() == original
+    assert (moved_parent / "sample.py").read_bytes() != original
+    assert notifier.calls == []
+    assert commit.state is EditCommitState.INSTALLED
+    assert not list(parent.glob(".*.serena-light-*.tmp"))
+    assert not list(moved_parent.glob(".*.serena-light-*.tmp"))
+
+
 def test_external_deletion_after_authorization_is_not_recreated(tmp_path: Path) -> None:
     path = tmp_path / "sample.py"
     original = b"def target():\n    return 1\n"

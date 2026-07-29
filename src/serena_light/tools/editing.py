@@ -210,7 +210,9 @@ def replace_symbol_body(
             )
         except _ConcurrentChange as exc:
             return _stale(target, expected_hash, exc.current_hash)
-        except _InstalledUncertain:
+        except _InvalidTarget:
+            return _invalid_target(target, stage="pre_install_validation")
+        except _InstalledUncertain as exc:
             # The bytes are already installed, so the caller must re-read rather
             # than replay; the durability of the rename is what is unknown.
             return _uncertain(
@@ -219,7 +221,7 @@ def replace_symbol_body(
                 symbol_identity,
                 old_hash=old_hash,
                 new_hash=new_hash,
-                stage="directory_fsync",
+                stage=exc.stage,
             )
 
         try:
@@ -289,6 +291,14 @@ class _ConcurrentChange(RuntimeError):
 class _InstalledUncertain(RuntimeError):
     """The replacement reached the filesystem but its durability is unknown."""
 
+    def __init__(self, stage: str = "directory_fsync") -> None:
+        super().__init__(stage)
+        self.stage = stage
+
+
+class _InvalidTarget(RuntimeError):
+    """The guarded physical target is no longer unambiguous."""
+
 
 def _open_target_directory(target: AuthorizedEdit) -> int:
     """Open the target's parent, walking in-root components without following links."""
@@ -315,24 +325,57 @@ def _read_target(target: AuthorizedEdit) -> _TargetSnapshot | ErrorEnvelope:
         return _invalid_target(target)
     try:
         try:
-            file_fd = os.open(target.path.name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=directory_fd)
-        except OSError:
+            return _read_target_in_directory(target, directory_fd)
+        except _InvalidTarget:
             return _invalid_target(target)
-        try:
-            before = os.fstat(file_fd)
-            if not stat.S_ISREG(before.st_mode):
-                return _invalid_target(target)
-            chunks: list[bytes] = []
-            while chunk := os.read(file_fd, 1024 * 1024):
-                chunks.append(chunk)
-            after = os.fstat(file_fd)
-            if _stat_identity(before) != _stat_identity(after):
-                return _invalid_target(target)
-            return _TargetSnapshot(b"".join(chunks), stat.S_IMODE(after.st_mode))
-        finally:
-            os.close(file_fd)
     finally:
         os.close(directory_fd)
+
+
+def _read_target_in_directory(target: AuthorizedEdit, directory_fd: int) -> _TargetSnapshot:
+    """Read one stable regular-file entry through an already guarded parent."""
+
+    try:
+        file_fd = os.open(target.path.name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=directory_fd)
+    except OSError as exc:
+        raise _InvalidTarget from exc
+    try:
+        before = os.fstat(file_fd)
+        if not stat.S_ISREG(before.st_mode):
+            raise _InvalidTarget
+        chunks: list[bytes] = []
+        while chunk := os.read(file_fd, 1024 * 1024):
+            chunks.append(chunk)
+        after = os.fstat(file_fd)
+        if _stat_identity(before) != _stat_identity(after):
+            raise _InvalidTarget
+        entry = os.stat(target.path.name, dir_fd=directory_fd, follow_symlinks=False)
+        if _stat_identity(after) != _stat_identity(entry):
+            raise _InvalidTarget
+        return _TargetSnapshot(b"".join(chunks), stat.S_IMODE(after.st_mode))
+    except OSError as exc:
+        raise _InvalidTarget from exc
+    finally:
+        os.close(file_fd)
+
+
+def _require_current_lexical_parent(target: AuthorizedEdit, pinned_directory_fd: int) -> None:
+    """Prove the guarded lexical parent still names the pinned directory."""
+
+    try:
+        current_directory_fd = _open_target_directory(target)
+    except OSError as exc:
+        raise _InvalidTarget from exc
+    try:
+        try:
+            pinned = os.fstat(pinned_directory_fd)
+            current = os.fstat(current_directory_fd)
+        except OSError as exc:
+            raise _InvalidTarget from exc
+        if _inode_identity(pinned) != _inode_identity(current):
+            raise _InvalidTarget
+    finally:
+        os.close(current_directory_fd)
 
 
 def _resolve_unique_symbol(
@@ -419,14 +462,26 @@ def _atomic_replace(
         os.close(file_fd)
         file_fd = None
 
-        current = _read_target(target)
-        if isinstance(current, ErrorEnvelope):
-            raise _ConcurrentChange("")
+        # The temporary and final rename stay anchored to this pinned parent.
+        # Validate the target through that same descriptor, and bracket the read
+        # with lexical identity checks so a renamed/recreated hierarchy cannot
+        # redirect only the conflict check.
+        _require_current_lexical_parent(target, directory_fd)
+        current = _read_target_in_directory(target, directory_fd)
         if current.raw_bytes != expected_raw:
             raise _ConcurrentChange(_sha256(current.raw_bytes))
+        _require_current_lexical_parent(target, directory_fd)
         os.replace(temporary, target.path.name, src_dir_fd=directory_fd, dst_dir_fd=directory_fd)
         if commit is not None:
             commit.mark_installed()
+        # ``os.replace`` remains anchored to the pinned descriptor.  Recheck the
+        # lexical path before declaring success: a parent replacement in the
+        # final gap otherwise writes only the moved-away directory. The rename
+        # has already happened, so a failed proof is UNCERTAIN, never INVALID_PATH.
+        try:
+            _require_current_lexical_parent(target, directory_fd)
+        except _InvalidTarget as exc:
+            raise _InstalledUncertain("post_install_path_validation") from exc
         try:
             directory_flush_call(directory_fd)
         except OSError as exc:
@@ -482,6 +537,10 @@ def _stat_identity(value: os.stat_result) -> tuple[int, int, int, int, int, int]
     return (value.st_dev, value.st_ino, value.st_size, value.st_mtime_ns, value.st_ctime_ns, value.st_mode)
 
 
+def _inode_identity(value: os.stat_result) -> tuple[int, int]:
+    return (value.st_dev, value.st_ino)
+
+
 def _sha256(content: bytes) -> str:
     return hashlib.sha256(content).hexdigest()
 
@@ -532,9 +591,9 @@ def _uncertain(
     )
 
 
-def _invalid_target(target: AuthorizedEdit) -> ErrorEnvelope:
+def _invalid_target(target: AuthorizedEdit, *, stage: str = "current_file_reread") -> ErrorEnvelope:
     return error(
         ErrorCode.INVALID_PATH,
-        details={"path": str(target.path), "stage": "current_file_reread"},
+        details={"path": str(target.path), "stage": stage},
         workspace=target.workspace,
     )

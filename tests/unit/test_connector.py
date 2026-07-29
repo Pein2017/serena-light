@@ -49,6 +49,14 @@ def ok_result(**data: object) -> types.CallToolResult:
     )
 
 
+def error_result(code: str) -> types.CallToolResult:
+    return types.CallToolResult(
+        content=[types.TextContent(type="text", text=code)],
+        structuredContent={"ok": False, "error": {"code": code}},
+        isError=True,
+    )
+
+
 def tool(name: str) -> types.Tool:
     return types.Tool(name=name, description=name, inputSchema={"type": "object"})
 
@@ -235,6 +243,44 @@ def test_withheld_edit_returns_typed_unsupported_without_daemon_invocation(
             assert session.call_names == []
         finally:
             await connector.aclose()
+
+    run(scenario())
+
+
+def test_public_workspace_calls_forward_immediate_and_do_not_recover_typed_activation_errors() -> None:
+    async def scenario() -> None:
+        discovered = endpoint()
+        observed: list[tuple[str, Mapping[str, object] | None]] = []
+
+        async def behavior(name: str, arguments: Mapping[str, object] | None) -> types.CallToolResult:
+            observed.append((name, arguments))
+            if name == ACTIVATE_WORKSPACE_TOOL and arguments == {"absolute_path": "/data/new"}:
+                return error_result("UNTRUSTED_ROOT")
+            return ok_result(name=name)
+
+        session = FakeSession(discovered, call_behavior=behavior)
+        factory = FakeFactory([session])
+        connector = Connector(FakeDiscovery(discovered), factory, startup_cwd=Path("/data/CoordExp"))
+        try:
+            await connector.start()
+            activated = await connector.call_tool(ACTIVATE_WORKSPACE_TOOL, {"absolute_path": "/data/old"})
+            assert activated.structuredContent is not None
+            assert activated.structuredContent["ok"] is True
+            rejected = await connector.call_tool(ACTIVATE_WORKSPACE_TOOL, {"absolute_path": "/data/new"})
+            assert rejected.isError
+            assert connector.last_validated_binding == Path("/data/old")
+            released = await connector.call_tool("release_workspace", {"immediate": True})
+            assert released.structuredContent is not None
+            assert released.structuredContent["ok"] is True
+        finally:
+            await connector.aclose()
+
+        assert observed == [
+            (ACTIVATE_WORKSPACE_TOOL, {"absolute_path": "/data/old"}),
+            (ACTIVATE_WORKSPACE_TOOL, {"absolute_path": "/data/new"}),
+            ("release_workspace", {"immediate": True}),
+        ]
+        assert len(factory.connected) == 1
 
     run(scenario())
 

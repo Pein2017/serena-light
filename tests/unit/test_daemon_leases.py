@@ -89,6 +89,30 @@ def test_release_workspace_preserves_live_lease_and_starts_warm_grace() -> None:
         lifecycle.binding_for(lease.id)
 
 
+def test_immediate_workspace_release_stops_only_the_last_holder() -> None:
+    clock = FakeClock()
+    runtime = object()
+    lifecycle = LeaseLifecycle[str, object](clock=clock)
+    first = lifecycle.issue(binding("/data/project", runtime))
+    second = lifecycle.issue(binding("/data/project", runtime))
+
+    first_release = lifecycle.release_workspace(first.id, immediate=True)
+    assert first_release.released
+    assert first_release.decision is not None
+    assert first_release.decision.active_holders == 1
+    assert first_release.decision.runtime_to_stop is None
+    assert lifecycle.require_active(first.id).binding is None
+    assert lifecycle.binding_for(second.id).runtime is runtime
+
+    second_release = lifecycle.release_workspace(second.id, immediate=True)
+    assert second_release.released
+    assert second_release.decision is not None
+    assert second_release.decision.active_holders == 0
+    assert second_release.decision.runtime_to_stop is runtime
+    assert second_release.decision.grace_deadline is None
+    assert lifecycle.require_active(second.id).binding is None
+
+
 def test_releasing_unbound_lease_has_no_workspace_effect() -> None:
     lifecycle = LeaseLifecycle[str, object](clock=FakeClock())
     lease = lifecycle.acquire_lease()
