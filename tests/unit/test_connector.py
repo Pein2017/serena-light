@@ -211,7 +211,7 @@ def test_control_plane_tools_are_not_agent_visible() -> None:
         )
         try:
             result = await connector.list_tools()
-            assert [item.name for item in result.tools] == ["find_symbol"]
+            assert [item.name for item in result.tools] == ["find_symbol", "replace_symbol_body"]
             assert session.activations == []
             assert connector.last_validated_binding is None
         finally:
@@ -468,8 +468,7 @@ def test_read_retry_is_attempted_at_most_once() -> None:
 def test_edit_loss_recovers_binding_but_returns_uncertain_without_replay(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # Containment hides editing from negotiated clients, but the recovery core
-    # remains covered so restoring advertisement cannot reintroduce replay.
+    # The recovery core must never replay an edit whose response was lost.
     monkeypatch.setattr(connector_module, "WITHHELD_TOOLS", frozenset())
 
     async def scenario() -> None:

@@ -150,7 +150,7 @@ class _StdioClient:
                 listed = await session.list_tools()
                 tool_names = {tool.name for tool in listed.tools}
                 assert "get_runtime_status" in tool_names
-                assert "replace_symbol_body" not in tool_names
+                assert "replace_symbol_body" in tool_names
                 self._started.set_result(_data(await session.call_tool("get_runtime_status")))
                 while (command := await self._commands.get()) is not None:
                     callback, future = command
