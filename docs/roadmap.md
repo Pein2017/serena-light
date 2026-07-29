@@ -6,10 +6,13 @@ active OpenSpec change, OpenSpec wins.
 
 ## Current state
 
-`build-serena-light-v1` is the sole repair owner. Its 2026-07-28 PASS is
-superseded and the release is HOLD. Serena Light remains registered in parallel
-under `serena-light`; canonical `serena` is unchanged. Guarded editing is
-temporarily hidden from new clients.
+`build-serena-light-v1` is the sole repair owner. Its 2026-07-28 PASS was
+superseded by HOLD; as of 2026-07-29 the repair and edit reacceptance gates
+(tasks 11-14 and 15.1-15.7) have passed, so the state is
+`REPAIR AND EDIT REACCEPTANCE PASSED — DUAL AUDITS PENDING`, not v1
+PASS. Serena Light remains registered in parallel under `serena-light`;
+canonical `serena` is unchanged. Guarded editing (`replace_symbol_body`) is
+agent-public again; clients started during containment require a restart.
 
 ## Phase A: contain and repair v1
 
@@ -23,7 +26,9 @@ temporarily hidden from new clients.
    versioned daemon slots, nonce-authorized startup, coexistence, and retirement.
 
 Gate: all tasks 11–14 in `build-serena-light-v1` pass through real daemon and
-connector tests. No canonical-name change is permitted.
+connector tests. No canonical-name change is permitted. **Passed as of
+2026-07-29**; see
+[the final acceptance record](../openspec/changes/build-serena-light-v1/final-acceptance.md).
 
 ## Phase B: reaccept and release v1
 
@@ -33,6 +38,12 @@ package with fresh Codex, Claude Code, and CC Agent clients. Restore
 `replace_symbol_body` only after its complete fault matrix passes. Then obtain
 independent `sol-xhigh` static-correctness and `opus-max` runtime/evidence
 audits, disposition every finding, mark v1 PASS, sync stable specs, and archive.
+
+**Progress as of 2026-07-29:** clean and poisoned-proxy acceptance across all
+four targets has passed for fresh Codex, Claude Code, and CC Agent clients;
+`replace_symbol_body` restoration plus real hash edit/release also passed
+(tasks 15.1-15.7). The independent Sol-xhigh/Opus-max audits (15.8) remain
+outstanding; task 15 is not yet complete and v1 is not yet PASS.
 
 Gate: every blocker is cleared and task 15 is complete. Local commits are kept;
 no push and no canonical Serena switch.

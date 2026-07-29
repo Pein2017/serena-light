@@ -203,7 +203,7 @@ def test_control_plane_tools_are_not_agent_visible() -> None:
         )
         try:
             result = await connector.list_tools()
-            assert [item.name for item in result.tools] == ["find_symbol"]
+            assert [item.name for item in result.tools] == ["find_symbol", "replace_symbol_body"]
             assert session.activations == []
             assert connector.last_validated_binding is None
         finally:
@@ -212,7 +212,11 @@ def test_control_plane_tools_are_not_agent_visible() -> None:
     run(scenario())
 
 
-def test_withheld_edit_returns_typed_unsupported_without_daemon_invocation() -> None:
+def test_withheld_edit_returns_typed_unsupported_without_daemon_invocation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(connector_module, "WITHHELD_TOOLS", frozenset({"replace_symbol_body"}))
+
     async def scenario() -> None:
         discovered = endpoint()
         session = FakeSession(discovered)

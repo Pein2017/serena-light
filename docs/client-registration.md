@@ -4,15 +4,28 @@
 `serena` entry unchanged. Use the distinct name `serena-light`; do not replace,
 rename, or remove `serena`.
 
-The connector executable is
-`/data/CoordExp/serena-light/.venv/bin/serena-light` with no arguments. Using
-the absolute repository-owned environment avoids dependence on a client's
-ambient `PATH` or `/root` configuration. It inherits the
-client process's startup cwd and automatically activates that root. This is the
-equivalent of the old Serena `--project-from-cwd` behavior, but it is connector
-behavior: do **not** pass `--project-from-cwd`, `--context`, or old Serena
-dashboard/logging arguments. A later shell `cd` is not observed; cross-root use
-requires `activate_workspace` with an absolute path.
+The connector executable used by live Codex/Claude configurations is the
+service-owned, build-identity-scoped path
+`/data/CoordExp/.codex/runtime/serena-light/deps/34cb251193d096e79e3d63381b0aa17c0c8aa12f0f4392e2517b371fe824379f/python/bin/serena-light`
+with no arguments — **not** the repository `.venv`. The dependency-digest
+segment (`34cb2511...`) and the current build identity
+(`6abd545dbc1d232b662ff06e1f777a6091356994c5cff12c3fde2c89a1736599`) are tied
+to a versioned daemon slot. A source/schema-only rollover reuses the dependency
+directory but gets a new build slot; a lock change also installs a new digest
+directory. Old build slots coexist until their holders and grace expire, so
+re-check the registration path after a dependency-lock change rather than
+assuming the digest is permanent. Using an absolute service-owned path avoids
+dependence on a client's ambient `PATH` or `/root` configuration.
+
+Registering the connector does not bind a workspace. MCP tool listing (the
+handshake a client performs to discover `serena-light`'s tools) never binds
+anything. Binding happens lazily: the **first workspace-dependent tool call**
+auto-binds the connector process's inherited startup cwd, equivalent to the
+old Serena `--project-from-cwd` behavior but implemented as connector
+behavior — do **not** pass `--project-from-cwd`, `--context`, or old Serena
+dashboard/logging arguments. A later shell `cd` is not observed. To use a
+nested Git root or switch to a different root entirely, call
+`activate_workspace` with an absolute path explicitly.
 
 ## Codex
 
@@ -21,7 +34,7 @@ running the acceptance procedure:
 
 ```toml
 [mcp_servers.serena-light]
-command = "/data/CoordExp/serena-light/.venv/bin/serena-light"
+command = "/data/CoordExp/.codex/runtime/serena-light/deps/34cb251193d096e79e3d63381b0aa17c0c8aa12f0f4392e2517b371fe824379f/python/bin/serena-light"
 args = []
 ```
 
@@ -41,7 +54,7 @@ Merge this sibling entry into its `mcpServers` object for parallel acceptance:
 {
   "mcpServers": {
     "serena-light": {
-      "command": "/data/CoordExp/serena-light/.venv/bin/serena-light",
+      "command": "/data/CoordExp/.codex/runtime/serena-light/deps/34cb251193d096e79e3d63381b0aa17c0c8aa12f0f4392e2517b371fe824379f/python/bin/serena-light",
       "args": []
     }
   }
@@ -64,7 +77,7 @@ only the `cc_for_pein` plugin server:
 {
   "mcpServers": {
     "serena-light": {
-      "command": "/data/CoordExp/serena-light/.venv/bin/serena-light",
+      "command": "/data/CoordExp/.codex/runtime/serena-light/deps/34cb251193d096e79e3d63381b0aa17c0c8aa12f0f4392e2517b371fe824379f/python/bin/serena-light",
       "args": []
     }
   }
@@ -89,6 +102,10 @@ daemon remains after clients have stopped, use normal process inspection and
 stop only the identified `serena-light` daemon; never stop canonical Serena as
 part of this rollback.
 
-Fresh-session tool, cwd, navigation, diagnostics, hash-guarded edit, daemon
-reuse, and cleanup acceptance passed on 2026-07-28 for Codex, Claude Code, and
-CC Agent. Canonical-name switching remains separately unapproved.
+Fresh-session tool, cwd, navigation, diagnostics, warm-daemon reuse across
+versioned build slots, and cleanup acceptance pass for Codex, Claude Code, and
+CC Agent as of 2026-07-29. `replace_symbol_body` is agent-public again after
+the full fault matrix and a poisoned-proxy real stdio hash edit/release passed.
+Clients that negotiated tools while containment was active must be restarted
+before the restored tool appears. Canonical-name switching remains separately
+unapproved.

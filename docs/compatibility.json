@@ -28,7 +28,7 @@
     {"name": "find_implementations", "visibility": "agent_public", "serena_name": "find_implementations", "required_args": ["name_path", "relative_path"], "classification": "supported", "delta": "capability-gated typed result"},
     {"name": "get_diagnostics_for_file", "visibility": "agent_public", "serena_name": "get_diagnostics_for_file", "required_args": ["relative_path"], "classification": "shimmed", "delta": "generation-aware status replaces line-range interface"},
     {"name": "get_diagnostics_for_symbol", "visibility": "agent_public", "serena_name": "get_diagnostics_for_symbol", "required_args": ["relative_path", "name_path"], "classification": "shimmed", "delta": "path plus symbol required; no reference-file expansion"},
-    {"name": "replace_symbol_body", "visibility": "agent_public", "serena_name": "replace_symbol_body", "required_args": ["name_path", "relative_path", "body", "expected_hash"], "classification": "shimmed", "delta": "whole-file expected_hash is mandatory; atomic, no-replay edit"}
+    {"name": "replace_symbol_body", "visibility": "agent_public", "serena_name": "replace_symbol_body", "required_args": ["name_path", "relative_path", "body", "expected_hash"], "classification": "shimmed", "delta": "whole-file expected_hash is mandatory; atomic, no-replay edit; restored after the full fault matrix and a real poisoned-proxy stdio hash edit/release passed"}
   ],
   "session_start": {
     "serena": {"consumer": "serena-hooks activate --client=codex", "classification": "dropped", "reason": "serena-light binds inherited connector cwd without a hook"},
@@ -45,5 +45,5 @@
     {"family": "broad or non-v1 editing", "tools": ["insert_after_symbol", "insert_before_symbol", "rename_symbol", "safe_delete_symbol", "restart_language_server"], "classification": "dropped"},
     {"family": "JetBrains", "tools": ["jet_brains_debug", "jet_brains_find_declaration", "jet_brains_find_implementations", "jet_brains_find_referencing_symbols", "jet_brains_find_symbol", "jet_brains_get_symbols_overview", "jet_brains_inline_symbol", "jet_brains_list_inspections", "jet_brains_move", "jet_brains_rename", "jet_brains_run_inspections", "jet_brains_safe_delete", "jet_brains_type_hierarchy"], "classification": "dropped"}
   ],
-  "acceptance": {"fresh_session_accepted": true, "canonical_switch_approved": false}
+  "acceptance": {"fresh_session_accepted": true, "canonical_switch_approved": false, "edit_reacceptance_passed": true, "dual_audits_pending": true}
 }

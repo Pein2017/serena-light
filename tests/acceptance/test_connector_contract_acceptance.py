@@ -817,7 +817,10 @@ def test_second_lease_on_the_same_root_reuses_the_runtime_and_refreshes_it(tmp_p
         asyncio.run(scenario())
 
 
-def test_stdio_proxy_withholds_editing_and_preserves_typed_boundary_errors(tmp_path: Path) -> None:
+def test_stdio_proxy_withholds_editing_and_preserves_typed_boundary_errors(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(connector_module, "WITHHELD_TOOLS", frozenset({"replace_symbol_body"}))
     with _acceptance(tmp_path) as harness:
         foreign_operand = os.path.relpath(harness.foreign / "other.py", harness.root)
 

@@ -3,9 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import os
+import shutil
 import signal
+import subprocess
 import sys
+import tempfile
 import time
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
@@ -166,11 +170,16 @@ def _data(result: types.CallToolResult) -> Mapping[str, object]:
     return cast(Mapping[str, object], data)
 
 
-async def _run_fresh_stdio_client(*, release_workspace: bool) -> str:
+async def _run_fresh_stdio_client(
+    workspace: Path,
+    *,
+    release_workspace: bool,
+    edit_source: Path | None = None,
+) -> str:
     parameters = StdioServerParameters(
         command=str(_service_connector_executable()),
         args=[],
-        cwd=REPOSITORY_ROOT,
+        cwd=workspace,
     )
     async with stdio_client(parameters, errlog=sys.stderr) as (read_stream, write_stream), ClientSession(
         read_stream, write_stream
@@ -181,15 +190,30 @@ async def _run_fresh_stdio_client(*, release_workspace: bool) -> str:
         listed = await client.list_tools()
         tool_names = {tool.name for tool in listed.tools}
         assert "get_runtime_status" in tool_names
-        assert "replace_symbol_body" not in tool_names
+        assert "replace_symbol_body" in tool_names
 
         status = _data(await client.call_tool("get_runtime_status"))
         assert status["build_identity"] == compute_build_identity(REPOSITORY_ROOT)
         binding = _mapping(status["binding"])
-        assert Path(cast(str, binding["working_subdirectory"])).resolve() == REPOSITORY_ROOT
+        assert Path(cast(str, binding["working_subdirectory"])).resolve() == workspace
         runtime = _mapping(status["runtime"])
         identity = _mapping(runtime["identity"])
-        assert Path(cast(str, identity["root"])).resolve() == REPOSITORY_ROOT
+        assert Path(cast(str, identity["root"])).resolve() == workspace
+        if edit_source is not None:
+            original = edit_source.read_bytes()
+            edited = _data(
+                await client.call_tool(
+                    "replace_symbol_body",
+                    {
+                        "name_path": "target",
+                        "relative_path": edit_source.name,
+                        "body": "def target() -> int:\n    return 2",
+                        "expected_hash": hashlib.sha256(original).hexdigest(),
+                    },
+                )
+            )
+            assert edited["relative_path"] == edit_source.name
+            assert edit_source.read_text() == "def target() -> int:\n    return 2\n"
         daemon_id = status["daemon_id"]
         assert isinstance(daemon_id, str)
         if release_workspace:
@@ -198,7 +222,7 @@ async def _run_fresh_stdio_client(*, release_workspace: bool) -> str:
         return daemon_id
 
 
-def test_real_stdio_connector_contains_proxy_environment_and_releases_to_warm_grace(
+def test_real_stdio_connector_contains_proxy_environment_edits_and_releases_to_warm_grace(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Clean and poisoned clients must not route loopback MCP through ambient proxies."""
@@ -212,10 +236,21 @@ def test_real_stdio_connector_contains_proxy_environment_and_releases_to_warm_gr
     daemon_ids: list[str] = []
     owned: _DaemonProcess | None = None
     descendants: tuple[_DaemonProcess, ...] = ()
+    edit_workspace = Path(tempfile.mkdtemp(prefix="serena-light-edit-", dir="/data"))
+    edit_source = edit_workspace / "example.py"
+    subprocess.run(["git", "init", "-q"], cwd=edit_workspace, check=True)
+    (edit_workspace / "pyrightconfig.json").write_text('{"include":["example.py"]}\n')
+    edit_source.write_text("def target() -> int:\n    return 1\n")
     try:
         for poisoned in (False, True):
             with _proxy_environment(monkeypatch, poisoned=poisoned):
-                daemon_id = asyncio.run(_run_fresh_stdio_client(release_workspace=poisoned))
+                daemon_id = asyncio.run(
+                    _run_fresh_stdio_client(
+                        edit_workspace if poisoned else REPOSITORY_ROOT,
+                        release_workspace=poisoned,
+                        edit_source=edit_source if poisoned else None,
+                    )
+                )
             daemon_ids.append(daemon_id)
 
             metadata = _read_daemon(runtime_root)
@@ -236,5 +271,6 @@ def test_real_stdio_connector_contains_proxy_environment_and_releases_to_warm_gr
     finally:
         if owned is not None:
             _terminate_owned_daemon(owned, descendants)
+        shutil.rmtree(edit_workspace)
 
     assert daemon_ids[0] == daemon_ids[1], "the second fresh stdio client should reuse the warm service daemon"
