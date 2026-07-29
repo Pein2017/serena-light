@@ -73,6 +73,7 @@ def test_direct_external_imports_have_direct_dependency_owners() -> None:
         "lsprotocol",
         "mcp",
         "psutil",
+        "pydantic",
         "starlette",
         "uvicorn",
     ]

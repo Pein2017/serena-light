@@ -42,12 +42,23 @@ pytestmark = pytest.mark.timeout(180)
 class _ProcessEvidence:
     peak_tree_rss_bytes: int = 0
     cleanup_ok: bool = False
+    cleanup_live: tuple[str, ...] = ()
 
 
 class _ProcessSampler:
     def __init__(self) -> None:
         self.evidence = _ProcessEvidence()
         self._parent = psutil.Process()
+        self._baseline: dict[int, float] = {}
+        try:
+            baseline_children = self._parent.children(recursive=True)
+        except (psutil.AccessDenied, psutil.NoSuchProcess):
+            baseline_children = []
+        for child in baseline_children:
+            try:
+                self._baseline[child.pid] = child.create_time()
+            except (psutil.AccessDenied, psutil.NoSuchProcess):
+                continue
         self._stop = threading.Event()
         self._observed: dict[int, float] = {}
         self._thread = threading.Thread(target=self._sample, name="python-real-acceptance-rss", daemon=True)
@@ -61,7 +72,9 @@ class _ProcessSampler:
         deadline = time.monotonic() + 5.0
         while self._live_observed() and time.monotonic() < deadline:
             time.sleep(0.05)
-        self.evidence.cleanup_ok = not self._live_observed()
+        live = self._live_observed()
+        self.evidence.cleanup_ok = not live
+        self.evidence.cleanup_live = tuple(self._process_description(pid) for pid in live)
 
     def _sample(self) -> None:
         while not self._stop.is_set():
@@ -72,9 +85,20 @@ class _ProcessSampler:
                 children = []
             for child in children:
                 try:
-                    self._observed[child.pid] = child.create_time()
+                    create_time = child.create_time()
+                    command = child.cmdline()
                 except (psutil.AccessDenied, psutil.NoSuchProcess):
                     continue
+                if not any(
+                    part.endswith(
+                        ("/pyright/langserver.index.js", "/typescript-language-server/lib/cli.mjs")
+                    )
+                    for part in command
+                ):
+                    continue
+                if self._baseline.get(child.pid) == create_time:
+                    continue
+                self._observed[child.pid] = create_time
                 total += self._safe_rss(child)
             self.evidence.peak_tree_rss_bytes = max(self.evidence.peak_tree_rss_bytes, total)
             self._stop.wait(0.05)
@@ -96,6 +120,14 @@ class _ProcessSampler:
             except (psutil.AccessDenied, psutil.NoSuchProcess):
                 continue
         return tuple(sorted(live))
+
+    @staticmethod
+    def _process_description(pid: int) -> str:
+        try:
+            process = psutil.Process(pid)
+            return f"pid={pid} cmd={process.cmdline()}"
+        except (psutil.AccessDenied, psutil.NoSuchProcess):
+            return f"pid={pid} disappeared"
 
 
 @contextmanager
@@ -219,7 +251,7 @@ def test_coordexp_python_configured_program_acceptance(record_property: Any) -> 
     record_property("peak_tree_rss_bytes", process.peak_tree_rss_bytes)
     record_property("trust_count", _dict(before["trust_inventory"])["count"])
     record_property("configured_program_count", _dict(before["configured_program"])["count"])
-    assert process.cleanup_ok, "real CoordExp acceptance left an owned LSP descendant"
+    assert process.cleanup_ok, f"real CoordExp acceptance left owned descendants: {process.cleanup_live}"
     assert process.peak_tree_rss_bytes < RSS_LIMIT_BYTES
     assert readiness_seconds <= READINESS_LIMIT_SECONDS
     _assert_global_symbol(result, "PipelinePlanner", "public_data/pipeline/planner.py", status=after)
@@ -242,7 +274,7 @@ def test_ms_swift_definition_and_diagnostics_use_conda_ms(record_property: Any) 
         status = _adapter_status(runtime, LanguageFamily.PYTHON)
 
     record_property("peak_tree_rss_bytes", process.peak_tree_rss_bytes)
-    assert process.cleanup_ok, "real ms-swift acceptance left an owned LSP descendant"
+    assert process.cleanup_ok, f"real ms-swift acceptance left owned descendants: {process.cleanup_live}"
     assert definition["ok"] is True, definition
     locations = [_dict(item) for item in _list(_dict(definition["data"])["locations"])]
     assert any(
@@ -290,7 +322,7 @@ def test_transformers_projection_global_symbol_and_all_edits_read_only(record_pr
     record_property("global_readiness_seconds", readiness_seconds)
     record_property("peak_tree_rss_bytes", process.peak_tree_rss_bytes)
     record_property("configured_program_count", projection.configured_program.count)
-    assert process.cleanup_ok, "real transformers acceptance left an owned LSP descendant"
+    assert process.cleanup_ok, f"real transformers acceptance left owned descendants: {process.cleanup_live}"
     assert readiness_seconds <= READINESS_LIMIT_SECONDS
     assert edit["ok"] is False, edit
     assert _dict(edit["error"])["code"] == "READ_ONLY_ROOT"
