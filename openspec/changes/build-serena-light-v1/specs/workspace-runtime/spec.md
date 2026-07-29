@@ -258,11 +258,17 @@ files served through configured, inferred, or transient engine projects.
 - **THEN** guarded byte identity reports the path as changed, advances the
   required generation, and reconciles the adapter before semantic success
 
-#### Scenario: A source changes while byte identity is observed
-- **WHEN** the file, its lexical entry, or an ancestor directory changes while
-  freshness streams its bytes
+#### Scenario: Consecutive byte observations disagree or path identity changes
+- **WHEN** two guarded full-file byte passes disagree, or the file, its lexical
+  entry, or an ancestor directory changes across either pass
 - **THEN** the scan returns retryable `NOT_READY` before committing inventory,
   state, generations, or watcher events; a later preflight observes afresh
+
+#### Scenario: A foreign write occurs after the final verified byte
+- **WHEN** a non-cooperating external writer changes a file only after the
+  second matching guarded pass has crossed that byte
+- **THEN** the already-linearized operation is not retroactively invalidated,
+  and the next synchronous preflight must observe the new byte identity
 
 #### Scenario: Stable config deletion or source symlink rejection is observed
 - **WHEN** a native config is stably absent or a formerly trusted source is

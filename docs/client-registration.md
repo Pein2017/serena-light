@@ -9,7 +9,7 @@ service-owned, build-identity-scoped path
 `/data/CoordExp/.codex/runtime/serena-light/deps/eff6ebdf252faff7f77cb3a2f3894d17b9a0dfc89b46bd193fafdaa9e9ab4941/python/bin/serena-light`
 with no arguments — **not** the repository `.venv`. The dependency-digest
 segment (`eff6ebdf...`) and the current repair-candidate build identity
-(`500f841f5826bd15a5332f6e30a968d846c600d0ce9cb6e3b6715f0243514c0d`) are tied
+(`d46175203f8b78749d2ae0341ef8157965aea31c454620e8f2840de5a2b8dff7`) are tied
 to a versioned daemon slot. A source/schema-only rollover reuses the dependency
 directory but gets a new build slot; a lock change also installs a new digest
 directory. Old build slots coexist until their holders and grace expire, so
@@ -113,7 +113,7 @@ stop only the identified `serena-light` daemon; never stop canonical Serena as
 part of this rollback.
 
 Fresh Codex/Terra, native Claude Code/Sonnet 2.1.220, and CC Agent/Sonnet clients
-pass the current candidate identity
+passed the prior single-byte-pass candidate identity
 `500f841f5826bd15a5332f6e30a968d846c600d0ce9cb6e3b6715f0243514c0d`.
 All three explicitly switched across `/data/CoordExp`, `cc-plugin-codex`,
 `/data/ms-swift`, and the read-only conda `ms` transformers package; each
@@ -123,7 +123,9 @@ separate isolated Git fixture, verified the replacement, restored the original
 body using the new current hash, confirmed clean content, and released with
 `runtime_stop_pending=false`. The native run was a new non-persistent `claude
 -p` session with built-in file/shell/edit tools disabled, not a CC Agent. All
-three test-only fixtures were removed after exact restoration. The Terra
+three test-only fixtures were removed after exact restoration. Those receipts
+remain historical until they are repeated for the current double-pass build
+`d46175203f8b78749d2ae0341ef8157965aea31c454620e8f2840de5a2b8dff7`. The Terra
 fixture moved `79cd2a41...` to `4e465daf...` and back; the native and CC Agent
 fixtures moved `098c7ba9...` to `b60bef43...` and back. One interrupted CC
 setup turn created the latter clean baseline before the newly spawned CC Agent

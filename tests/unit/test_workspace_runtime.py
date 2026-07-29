@@ -1235,7 +1235,26 @@ def test_unstable_byte_observation_fails_before_freshness_state_is_committed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _git_repository(tmp_path)
-    (tmp_path / "main.py").write_text("value = 1\n")
+    target = tmp_path / "main.py"
+    file_size = 2 * 1024 * 1024
+    prefix = b"value = 1\n#"
+    target.write_bytes(prefix + b"x" * (file_size - len(prefix)))
+    real_fstat = os.fstat
+    real_stat = os.stat
+    real_lstat = os.lstat
+    real_read = os.read
+    target_inode = target.stat().st_ino
+    monkeypatch.setattr(inventory_module.os, "fstat", lambda fd: _stat_with_fixed_times(real_fstat(fd)))
+    monkeypatch.setattr(
+        inventory_module.os,
+        "stat",
+        lambda path, *args, **kwargs: _stat_with_fixed_times(real_stat(path, *args, **kwargs)),
+    )
+    monkeypatch.setattr(
+        inventory_module.os,
+        "lstat",
+        lambda path, *args, **kwargs: _stat_with_fixed_times(real_lstat(path, *args, **kwargs)),
+    )
     adapters: dict[LanguageFamily, _Adapter] = {}
     contexts: dict[LanguageFamily, AdapterBuildContext] = {}
     runtime = _git_runtime(tmp_path, adapters, contexts)
@@ -1245,26 +1264,37 @@ def test_unstable_byte_observation_fails_before_freshness_state_is_committed(
         python.client.notifications.clear()
         inventory_before = runtime.inventory
         generations_before = python.snapshot().generations
-        real_observe = inventory_module._observe_candidate
-        unstable_once = True
+        triggered = False
 
-        def observe(root: Path, relative: str) -> tuple[str | None, os.stat_result | None, str | None]:
-            if relative == "main.py" and unstable_once:
-                return "unstable", None, None
-            return real_observe(root, relative)
+        def racing_read(file_descriptor: int, size: int) -> bytes:
+            nonlocal triggered
+            chunk = real_read(file_descriptor, size)
+            if chunk and not triggered and real_fstat(file_descriptor).st_ino == target_inode:
+                triggered = True
+                changed_prefix = b"value = 2\n#"
+                with target.open("r+b") as stream:
+                    stream.write(changed_prefix + b"y" * (1024 * 1024 - len(changed_prefix)))
+                    stream.flush()
+                    os.fsync(stream.fileno())
+            return chunk
 
-        monkeypatch.setattr(inventory_module, "_observe_candidate", observe)
+        monkeypatch.setattr(inventory_module.os, "read", racing_read)
 
         with pytest.raises(WorkspaceRuntimeError) as caught:
             runtime.ensure_fresh()
 
+        assert triggered
         assert caught.value.code is RuntimeErrorCode.NOT_READY
         assert runtime.inventory is inventory_before
         assert python.snapshot().generations == generations_before
         assert python.client.notifications == []
 
-        unstable_once = False
-        assert not runtime.ensure_fresh().dirty
+        recovered = runtime.ensure_fresh()
+        assert recovered.changed == ("main.py",)
+        assert [method for method, _ in python.client.notifications] == [
+            "workspace/didChangeWatchedFiles",
+            "textDocument/didChange",
+        ]
     finally:
         runtime.stop()
 
@@ -1849,6 +1879,91 @@ def test_read_only_non_git_root_uses_targeted_stat_instead_of_a_full_scan(tmp_pa
         assert rebuilds == rebuilds_after_construction
         after = contexts[LanguageFamily.PYTHON].scope_tracker.generations
         assert after.path_scoped["main.py"] > before.path_scoped.get("main.py", 0)
+        assert [method for method, _ in python.client.notifications] == [
+            "workspace/didChangeWatchedFiles",
+            "textDocument/didChange",
+        ]
+    finally:
+        runtime.stop()
+
+
+def test_read_only_non_git_unstable_hash_fails_closed_and_recovers_without_a_full_scan(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "main.py"
+    file_size = 2 * 1024 * 1024
+    prefix = b"value = 1\n#"
+    source.write_bytes(prefix + b"x" * (file_size - len(prefix)))
+    real_fstat = os.fstat
+    real_stat = os.stat
+    real_lstat = os.lstat
+    real_read = os.read
+    source_inode = source.stat().st_ino
+    monkeypatch.setattr(inventory_module.os, "fstat", lambda fd: _stat_with_fixed_times(real_fstat(fd)))
+    monkeypatch.setattr(
+        inventory_module.os,
+        "stat",
+        lambda path, *args, **kwargs: _stat_with_fixed_times(real_stat(path, *args, **kwargs)),
+    )
+    monkeypatch.setattr(
+        inventory_module.os,
+        "lstat",
+        lambda path, *args, **kwargs: _stat_with_fixed_times(real_lstat(path, *args, **kwargs)),
+    )
+    adapters: dict[LanguageFamily, _Adapter] = {}
+    contexts: dict[LanguageFamily, AdapterBuildContext] = {}
+    rebuilds = 0
+
+    def counted_inventory(identity: Any) -> TrustInventory:
+        nonlocal rebuilds
+        rebuilds += 1
+        return _inventory(identity.root, "main.py")
+
+    runtime = WorkspaceRuntime(
+        (WorkspaceKind.ALLOWLISTED_NON_GIT, tmp_path),
+        path_policy=_PathPolicy(),
+        inventory_factory=counted_inventory,
+        attributors={LanguageFamily.PYTHON: lambda _root, paths: _projection(LanguageFamily.PYTHON, paths)},
+        adapter_factories=_factories(adapters, contexts),
+    )
+    try:
+        runtime.load_document_symbols("main.py")
+        python = adapters[LanguageFamily.PYTHON]
+        python.client.notifications.clear()
+        inventory_before = runtime.inventory
+        states_before = dict(runtime.freshness._states)
+        generations_before = python.snapshot().generations
+        rebuilds_before = rebuilds
+        triggered = False
+
+        def racing_read(file_descriptor: int, size: int) -> bytes:
+            nonlocal triggered
+            chunk = real_read(file_descriptor, size)
+            if chunk and not triggered and real_fstat(file_descriptor).st_ino == source_inode:
+                triggered = True
+                changed_prefix = b"value = 2\n#"
+                with source.open("r+b") as stream:
+                    stream.write(changed_prefix + b"y" * (1024 * 1024 - len(changed_prefix)))
+                    stream.flush()
+                    os.fsync(stream.fileno())
+            return chunk
+
+        monkeypatch.setattr(inventory_module.os, "read", racing_read)
+
+        with pytest.raises(WorkspaceRuntimeError) as caught:
+            runtime.freshness.ensure_path_fresh("main.py")
+
+        assert triggered
+        assert caught.value.code is RuntimeErrorCode.NOT_READY
+        assert runtime.inventory is inventory_before
+        assert runtime.freshness._states == states_before
+        assert python.snapshot().generations == generations_before
+        assert python.client.notifications == []
+        assert rebuilds == rebuilds_before
+
+        recovered = runtime.freshness.ensure_path_fresh("main.py")
+        assert recovered.changed == ("main.py",)
+        assert rebuilds == rebuilds_before
         assert [method for method, _ in python.client.notifications] == [
             "workspace/didChangeWatchedFiles",
             "textDocument/didChange",

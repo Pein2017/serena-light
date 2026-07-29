@@ -47,20 +47,22 @@ could still pin one failed cleanup future forever and that the native TypeScript
 gate used ambient Node/npm. They also required exact-build native Claude Code
 evidence. A later exact-head Sol audit then reproduced a same-size/same-stat
 freshness miss; Opus passed the runtime repair and identified only diagnostic
-test/documentation cleanup. The current candidate adds guarded streaming byte
-identity for Git sources and native configs while keeping external transformers
-checks caller-targeted. Fresh Codex/Terra, native Claude Code/Sonnet, and CC
-Agent/Sonnet all pass this exact build across four roots plus isolated
-hash-guarded edit/restore.
+test/documentation cleanup. A later Sol audit showed that one streaming pass
+could still miss a concurrent same-stat rewrite to an already-read region. The
+current candidate therefore requires two matching guarded byte-identity passes
+for Git sources and native configs while keeping external transformers checks
+caller-targeted. Fresh Codex/Terra, native Claude Code/Sonnet, and CC
+Agent/Sonnet acceptance is being repeated for this exact build across four
+roots plus isolated hash-guarded edit/restore.
 Exact-current-head Sol-xhigh and Opus-max PASS verdicts are still required.
 Agent-public
 `replace_symbol_body` remains restored after its fault
 matrix, full regression, and three fresh-client hash-edit receipts passed. This
 is **not** v1 PASS. Source ownership/provenance
 passes with 9 copied hashes against official Serena commit
-`9a9d07e83d8c1cba3458992707f440c624446c6d`; production LOC (14,822) is
+`9a9d07e83d8c1cba3458992707f440c624446c6d`; production LOC (14,837) is
 informational only and not gated. The current repair candidate has build
-identity `500f841f5826bd15a5332f6e30a968d846c600d0ce9cb6e3b6715f0243514c0d`.
+identity `d46175203f8b78749d2ae0341ef8157965aea31c454620e8f2840de5a2b8dff7`.
 See
 [the final acceptance record](openspec/changes/build-serena-light-v1/final-acceptance.md)
 for the full gate evidence and residual risks.

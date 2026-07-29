@@ -496,12 +496,14 @@ one in-flight scan; there is no time cache that can authorize stale success.
 Git workspaces rebuild the lexical trust inventory and compare create, change,
 delete, symlink, and native-config state. Every trusted supported source and
 native-config candidate is observed through guarded directory descriptors,
-`O_NOFOLLOW`, a streaming SHA-256, and before/after descriptor and lexical-entry
-identity checks. A same-size, same-stat in-place rewrite therefore changes the
-freshness identity. A file or parent that changes during observation returns
-retryable `NOT_READY` before inventory, generations, or events are committed;
-stable source deletion, config absence, or a stably rejected source symlink remains an
-ordinary committable membership/config change. Content changes advance
+`O_NOFOLLOW`, two consecutive streaming SHA-256 passes, and descriptor,
+lexical-entry, and parent identity checks after each pass. A completed
+same-size/same-stat rewrite therefore changes the freshness identity, while a
+concurrent rewrite of bytes already consumed by the first pass makes the two
+digests disagree. Either instability returns retryable `NOT_READY` before
+inventory, generations, or events are committed; stable source deletion,
+config absence, or a stably rejected source symlink remains an ordinary
+committable membership/config change. Content changes advance
 document/path generations; membership or config changes also reattribute the
 affected language family and advance trust/program/index generations. Running
 adapters receive `didChangeWatchedFiles`. If a changed URI is already open, the adapter
@@ -511,9 +513,16 @@ open/close notification when required. Freshness retains the watcher/reconcile
 future and settles it before dispatch; admission, timeout, or worker failure
 keeps the exact batch pending and returns retryable `BUSY` or `NOT_READY`, so an
 unchanged scan cannot silently authorize stale success. Git preflight is
-`O(total trusted source bytes)` with streaming `O(1)` memory per file. The
+`O(2 * total trusted source bytes)` with streaming `O(1)` memory per file. The
 allowlisted read-only transformers root uses the same byte identity only for
 the caller-named path and is never fully walked per call.
+
+The second matching pass is the per-path observation boundary. Serena Light
+does not claim a cross-process filesystem lock or a globally atomic multi-file
+snapshot: a non-cooperating foreign writer that changes a byte only after its
+final verified read is caught by the next synchronous preflight. This is the
+same unavoidable boundary as a write immediately after preflight and before
+the semantic request.
 
 One changed batch is applied in two phases across language families. First,
 every affected tracker advances its path/program generation without touching

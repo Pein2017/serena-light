@@ -4,7 +4,7 @@ Date: 2026-07-28 UTC
 
 ## Current snapshot-bound candidate rerun
 
-**PASS for semantic/liveness at candidate build `500f841f5826...`: 7 passed
+**PASS for semantic/liveness at candidate build `d46175203f8b...`: 7 passed
 with 1 intentional performance skip.** The 2026-07-29 rerun supplied exact
 before/after identities for `/data/CoordExp`, `/data/ms-swift`, and transformers
 4.57.1 and included the two real Pyright integration cases. It separately
@@ -12,13 +12,13 @@ permits typed retryable `NOT_READY` before transformers global success within
 three production calls; no larger timeout was introduced.
 
 ```text
-5 passed, 1 skipped in 126.43s (production acceptance)
-2 passed in 15.99s (real Pyright integration)
+5 passed, 1 skipped in 130.95s (production acceptance)
+2 passed in 16.71s (real Pyright integration)
 ```
 
 The opt-in first-attempt performance test used three fresh runtimes at the same
 transformers snapshot. All three calls returned the exact symbol with phase
-`ready`; isolated pytest runs completed in 31.48s, 30.72s, and 32.57s.
+`ready`; isolated pytest runs completed in 31.47s, 32.08s, and 30.09s.
 These observations prove first-call success for this bounded run, not a new
 end-to-end wall-clock SLO or a statistical reliability claim.
 

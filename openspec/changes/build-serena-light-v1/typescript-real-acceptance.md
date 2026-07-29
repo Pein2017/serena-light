@@ -2,8 +2,9 @@
 
 ## Current snapshot-bound candidate status
 
-**PASS: 15 passed in 23.04s.** Candidate build `500f841f5826...` removes this module
-from the deterministic default suite unless
+**PASS: 23 passed in 23.02s.** Candidate build `d46175203f8b...` removes these real
+TypeScript acceptance, integration, and admission cases from the deterministic
+default suite unless
 `SERENA_LIGHT_CC_PLUGIN_CODEX_SNAPSHOT` matches the exact observed Git HEAD,
 tracked binary diff, untracked file/symlink content, and the ignored TypeScript
 launcher/native-executable authority before and after every test. The same gate

@@ -43,9 +43,9 @@ class TargetedPathState:
     ``os.replace``: a replacement can keep both size and mtime while being a
     different file, and only the inode reliably reports that substitution.
 
-    ``digest`` is a guarded streaming hash of the bytes observed through the
-    lexical path.  It closes the same-size, same-stat in-place-write gap that
-    remains after the inode and timestamp facts below.
+    ``digest`` is accepted only when two guarded streaming passes through the
+    lexical path agree.  It closes completed same-stat rewrites and detects a
+    concurrent write to bytes already consumed by the first pass.
     """
 
     path: str
@@ -313,8 +313,8 @@ def _observe_candidate(root: Path, relative: str) -> tuple[str | None, os.stat_r
 
     The first lexical inspection admits a candidate to a trust inventory.  The
     guarded descriptor walk here proves that the exact path is still a regular
-    in-root file while its bytes are read, then proves that neither its entry
-    nor its lexical parent changed before the observation is returned.
+    in-root file while two complete byte passes agree, then proves that neither
+    its entry nor its lexical parent changed before the observation is returned.
     """
 
     reason, inspected = _inspect_candidate(root, relative)
@@ -339,9 +339,16 @@ def _observe_candidate(root: Path, relative: str) -> tuple[str | None, os.stat_r
             before = os.fstat(file_fd)
             if not stat.S_ISREG(before.st_mode) or _stat_identity(inspected) != _stat_identity(before):
                 return "unstable", None, None
-            digest = hashlib.sha256()
-            while chunk := os.read(file_fd, 1024 * 1024):
-                digest.update(chunk)
+            first_digest = _stream_digest(file_fd)
+            first_after = os.fstat(file_fd)
+            first_entry = os.stat(parts[-1], dir_fd=directory_fd, follow_symlinks=False)
+            if (
+                _stat_identity(before) != _stat_identity(first_after)
+                or _stat_identity(first_after) != _stat_identity(first_entry)
+                or not _same_guarded_directory(root, parts[:-1], directory_fd)
+            ):
+                return "unstable", None, None
+            second_digest = _stream_digest(file_fd)
             after = os.fstat(file_fd)
             entry = os.stat(parts[-1], dir_fd=directory_fd, follow_symlinks=False)
         except OSError:
@@ -351,10 +358,11 @@ def _observe_candidate(root: Path, relative: str) -> tuple[str | None, os.stat_r
         if (
             _stat_identity(before) != _stat_identity(after)
             or _stat_identity(after) != _stat_identity(entry)
+            or first_digest != second_digest
             or not _same_guarded_directory(root, parts[:-1], directory_fd)
         ):
             return "unstable", None, None
-        return None, after, digest.hexdigest()
+        return None, after, second_digest
     finally:
         os.close(directory_fd)
 
@@ -374,6 +382,16 @@ def _same_guarded_directory(root: Path, parts: tuple[str, ...], expected_fd: int
     finally:
         os.close(current_fd)
     return (expected.st_dev, expected.st_ino) == (current.st_dev, current.st_ino)
+
+
+def _stream_digest(file_fd: int) -> str:
+    """Hash one complete descriptor pass from offset zero with bounded memory."""
+
+    os.lseek(file_fd, 0, os.SEEK_SET)
+    digest = hashlib.sha256()
+    while chunk := os.read(file_fd, 1024 * 1024):
+        digest.update(chunk)
+    return digest.hexdigest()
 
 
 def _stat_identity(value: os.stat_result) -> tuple[int, int, int, int, int, int]:

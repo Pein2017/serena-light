@@ -48,20 +48,21 @@ audits, disposition every finding, mark v1 PASS, sync stable specs, and archive.
 
 **Progress as of 2026-07-29:** exact-head audits at `483e7a4` confirmed all
 earlier cleanup, authority, stdio, and client-evidence blockers closed. Opus-max
-passed the runtime/evidence repair; Sol-xhigh reproduced one new P1 where a
-same-size in-place rewrite could retain the stat-only freshness identity. Build
-`500f841f5826bd15a5332f6e30a968d846c600d0ce9cb6e3b6715f0243514c0d`
-adds guarded streaming byte identity for every trusted Git source and native
-config, fails closed before scan commit on unstable reads, and keeps the
-transformers non-Git root caller-targeted. The deterministic suite passes 541
-tests and explicitly skips 22 snapshot-gated external tests; fixed-snapshot
-TypeScript acceptance/integration/admission passes 15, Python/Pyright passes 7
-with one intentional performance skip, and three isolated transformers
-performance runs remain below 40 seconds. Fresh-client reruns and the final dual
-performance runs remain below 40 seconds. Fresh Codex/Terra, native Claude
-Code/Sonnet, and CC Agent/Sonnet now pass the exact build across all four roots
-plus isolated edit/restore; only the final dual re-audit and release remain
-pending.
+passed the runtime/evidence repair; Sol-xhigh first reproduced a stat-only
+same-size rewrite miss, then showed that one streaming pass could still miss a
+concurrent rewrite to an already-read region. Build
+`d46175203f8b78749d2ae0341ef8157965aea31c454620e8f2840de5a2b8dff7`
+requires two matching guarded byte passes for every trusted Git source and
+native config, fails closed before scan commit on unstable reads, covers the
+caller-targeted transformers non-Git branch, and documents the operation
+linearization boundary. The deterministic default suite passes 543 tests and
+explicitly skips 22 snapshot-gated external tests; the snapshot-bound complete
+suite passes 564 tests with only the opt-in performance case skipped.
+Fixed-snapshot TypeScript acceptance/integration/admission passes 23, Python
+production acceptance passes 5 with one intentional performance skip, real
+Pyright integration passes 2, and three isolated transformers performance runs
+remain below 40 seconds. Fresh-client acceptance and final dual re-audit for
+this exact build remain pending.
 
 Gate: every blocker is cleared and task 15 is complete. Sync/archive and the
 authorized GitHub push occur only after both final audits pass; no canonical

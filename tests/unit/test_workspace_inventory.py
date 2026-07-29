@@ -215,6 +215,52 @@ def test_content_identity_hash_detects_different_bytes_with_the_same_stat_tuple(
     assert after.content_identity != before.content_identity
 
 
+def test_targeted_state_refuses_a_concurrent_same_stat_write_to_an_already_read_region(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = _repository(tmp_path)
+    target = root / "module.py"
+    target.write_bytes(b"x" * (2 * 1024 * 1024))
+    inventory = git_trust_inventory(root)
+    real_fstat = os.fstat
+    real_stat = os.stat
+    real_lstat = os.lstat
+    real_read = os.read
+    monkeypatch.setattr(inventory_module.os, "fstat", lambda fd: _stat_with_fixed_times(real_fstat(fd)))
+    monkeypatch.setattr(
+        inventory_module.os,
+        "stat",
+        lambda path, *args, **kwargs: _stat_with_fixed_times(real_stat(path, *args, **kwargs)),
+    )
+    monkeypatch.setattr(
+        inventory_module.os,
+        "lstat",
+        lambda path, *args, **kwargs: _stat_with_fixed_times(real_lstat(path, *args, **kwargs)),
+    )
+    baseline = inventory.targeted_states(["module.py"])[0]
+    triggered = False
+
+    def racing_read(file_descriptor: int, size: int) -> bytes:
+        nonlocal triggered
+        chunk = real_read(file_descriptor, size)
+        if chunk and not triggered:
+            triggered = True
+            with target.open("r+b") as stream:
+                stream.write(b"y" * (1024 * 1024))
+                stream.flush()
+                os.fsync(stream.fileno())
+        return chunk
+
+    monkeypatch.setattr(inventory_module.os, "read", racing_read)
+    observed = inventory.targeted_states(["module.py"])[0]
+
+    assert triggered
+    assert target.read_bytes() != b"x" * (2 * 1024 * 1024)
+    assert baseline.trusted
+    assert not observed.trusted
+    assert observed.reason == "unstable"
+
+
 def test_targeted_state_refuses_guarded_hash_races(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     root = _repository(tmp_path)
     package = root / "package"
