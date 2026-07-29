@@ -19,7 +19,7 @@
     {"name": "heartbeat", "visibility": "connector_internal", "serena_name": null, "required_args": ["lease_id"], "classification": "supported", "delta": "new daemon control-plane lease renewal"},
     {"name": "release_lease", "visibility": "connector_internal", "serena_name": null, "required_args": ["lease_id"], "classification": "supported", "delta": "new daemon control-plane lease release"},
     {"name": "activate_workspace", "visibility": "agent_public", "serena_name": "activate_project", "required_args": ["absolute_path"], "classification": "shimmed", "delta": "absolute path and session-scoped binding replace project name/path and global active project"},
-    {"name": "release_workspace", "visibility": "agent_public", "serena_name": null, "required_args": [], "classification": "supported", "delta": "new lease-scoped lifecycle control"},
+    {"name": "release_workspace", "visibility": "agent_public", "serena_name": null, "required_args": [], "optional_args": ["immediate"], "classification": "supported", "delta": "detaches the binding while retaining the lease; immediate=true skips grace only for the final holder"},
     {"name": "get_runtime_status", "visibility": "agent_public", "serena_name": "get_current_config", "required_args": [], "classification": "shimmed", "delta": "typed daemon, lease, capability, scope, and generation status replaces agent configuration"},
     {"name": "get_symbols_overview", "visibility": "agent_public", "serena_name": "get_symbols_overview", "required_args": ["relative_path"], "classification": "supported", "delta": "typed envelope; max_depth replaces depth"},
     {"name": "find_symbol", "visibility": "agent_public", "serena_name": "find_symbol", "required_args": ["name_path"], "classification": "shimmed", "delta": "name_path replaces name_path_pattern; typed envelope"},
@@ -45,5 +45,5 @@
     {"family": "broad or non-v1 editing", "tools": ["insert_after_symbol", "insert_before_symbol", "rename_symbol", "safe_delete_symbol", "restart_language_server"], "classification": "dropped"},
     {"family": "JetBrains", "tools": ["jet_brains_debug", "jet_brains_find_declaration", "jet_brains_find_implementations", "jet_brains_find_referencing_symbols", "jet_brains_find_symbol", "jet_brains_get_symbols_overview", "jet_brains_inline_symbol", "jet_brains_list_inspections", "jet_brains_move", "jet_brains_rename", "jet_brains_run_inspections", "jet_brains_safe_delete", "jet_brains_type_hierarchy"], "classification": "dropped"}
   ],
-  "acceptance": {"fresh_session_accepted": false, "canonical_switch_approved": false, "edit_reacceptance_pending": true, "dual_audit_hold": true}
+  "acceptance": {"fresh_session_accepted": true, "canonical_switch_approved": false, "edit_reacceptance_pending": true, "dual_audit_hold": true}
 }

@@ -28,23 +28,28 @@ Gate: all tasks 11–14 in `build-serena-light-v1` pass at their declared eviden
 layer. Unit/in-process, real connector plus deterministic LSP, real daemon fault,
 and real LSP/repository evidence must be named separately; only the stdio gate
 currently combines the production connector executable with the shared daemon.
-No canonical-name change is permitted. The accepted code findings were repaired
-at local commit `d129dee`; remaining real-layer reacceptance is still open. See
+No canonical-name change is permitted. The accepted code findings and repair
+evidence are current through local commit `b140025`; remaining client/release
+reacceptance is still open. See
 [the final acceptance record](../openspec/changes/build-serena-light-v1/final-acceptance.md).
 
 ## Phase B: reaccept and release v1
 
-Run clean and poisoned-proxy acceptance across `/data/CoordExp`,
+Run fresh Codex, Claude Code, and CC Agent acceptance across `/data/CoordExp`,
 `/data/CoordExp/cc-plugin-codex`, `/data/ms-swift`, and the pinned transformers
-package with fresh Codex, Claude Code, and CC Agent clients. Restore
-`replace_symbol_body` only after its complete fault matrix passes. Then obtain
+package while retaining the model clients' required external-network proxy.
+Run clean and poisoned environments directly through the real stdio connector
+to test the localhost boundary. Restore `replace_symbol_body` only after its
+complete fault matrix passes. Then obtain
 independent `sol-xhigh` static-correctness and `opus-max` runtime/evidence
 audits, disposition every finding, mark v1 PASS, sync stable specs, and archive.
 
 **Progress as of 2026-07-29:** both required auditors returned HOLD. Their
-accepted code findings are repaired and targeted checks pass, while real daemon
-rollover/edit fault coverage, the current-build fresh-client matrix, final dual
-audit, and release remain pending.
+accepted code findings are repaired; the 506-test suite, explicit 75-test
+connector/edit contract selection, static/dependency/provenance gates, and
+separately labelled real-process rollover acceptance pass. Current-build fresh
+Codex, native Claude, and CC Agent clients also pass all four required roots;
+public edit restoration and rerun, final dual audit, and release remain pending.
 
 Gate: every blocker is cleared and task 15 is complete. Local commits are kept;
 no push and no canonical Serena switch.

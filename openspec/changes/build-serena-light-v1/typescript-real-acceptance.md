@@ -1,5 +1,18 @@
 # TypeScript Real Acceptance (OpenSpec 9.3)
 
+## Post-audit current-build rerun
+
+**PASS at build `f92e13abd297...`: 6 passed.** This 2026-07-29 rerun used the
+production workspace/runtime and real TypeScript language server against
+`/data/CoordExp/cc-plugin-codex`, including the repository-native typecheck
+contrast. It is real-repository plus real-LSP evidence; it does not traverse
+the shared daemon/connector.
+
+```text
+uv run pytest -q tests/acceptance/test_typescript_real_acceptance.py
+6 passed
+```
+
 ## Superseding final rerun
 
 **PASS.** The repaired production API passes all six real-repository scenarios:

@@ -134,7 +134,7 @@
 - [x] 12.4 Change edit authorization to lexical inventory membership and add dir-fd, `lstat`, and `O_NOFOLLOW` component checks under the workspace lock.
 - [x] 12.5 Add executor edit states `queued`, `running`, `installed`, and `done`; proven queued cancellation returns `TIMED_OUT`, while started or unknown state returns `UNCERTAIN` and is never replayed.
 - [x] 12.6 Treat every fsync, notification, or transport failure after `os.replace` as `UNCERTAIN` and include the safely observed current hash when possible.
-- [ ] 12.7 Pass real daemon/connector tests for in-root ignored-file symlink substitution, queued/running timeout, post-replace fsync failure, and lost response.
+- [x] 12.7 Pass real daemon/connector tests for in-root ignored-file symlink substitution, queued/running timeout, post-replace fsync failure, and lost response.
 
 ## 13. Repair Semantic Contracts and Runtime Truth
 
@@ -161,11 +161,11 @@
 ## 15. Reaccept and Release v1
 
 - [x] 15.1 Pass containment: a fresh real stdio client receives the withheld tool list, explicit clean/poisoned child environments do not affect loopback, borrowed holders are preserved, and no connector child or daemon descendant is added.
-- [ ] 15.2 Pass real connector contract tests for file create/change/delete/config change, symlink substitution, typed errors, document lifecycle, Unicode global ranges, and per-family isolation.
-- [ ] 15.3 Pass rollover tests for two builds, multiple clients, two workspaces, old-build lease preservation, and zero-holder retirement.
-- [ ] 15.4 Pass pytest, Ruff, Ty, bootstrap, dependency/provenance gates, and strict OpenSpec with LOC reported but not gated.
-- [ ] 15.5 Pass `/data/CoordExp`, `cc-plugin-codex`, `/data/ms-swift`, and transformers in fresh Codex, Claude Code, and CC Agent sessions under both clean and poisoned-proxy environments.
-- [ ] 15.6 Update compatibility, registration, README, roadmap, and acceptance evidence with recorded environment/proxy preconditions.
+- [x] 15.2 Pass real connector contract tests for file create/change/delete/config change, symlink substitution, typed errors, document lifecycle, Unicode global ranges, and per-family isolation.
+- [x] 15.3 Pass both in-process and isolated real service-executable rollover tests for two derived build variants, multiple clients, two workspaces, old-build lease preservation, no pre-grace exit, and exact test-owned zero-holder retirement; record that this proves process/slot mechanics, not immutable source-snapshot packaging.
+- [x] 15.4 Pass pytest, Ruff, Ty, bootstrap, dependency/provenance gates, and strict OpenSpec with LOC reported but not gated.
+- [x] 15.5 Pass `/data/CoordExp`, `cc-plugin-codex`, `/data/ms-swift`, and transformers in fresh Codex, Claude Code, and CC Agent sessions while retaining the working external-network proxy; separately pass exact clean and poisoned child environments through the real stdio connector so localhost traffic never depends on the model client's proxy.
+- [x] 15.6 Update compatibility, registration, README, roadmap, and acceptance evidence with recorded environment/proxy preconditions.
 - [ ] 15.7 Restore agent-public `replace_symbol_body`, restart fresh clients, and rerun hash edit/release only after every preceding repair gate passes.
 - [ ] 15.8 Obtain independent Sol-xhigh static-correctness and Opus-max runtime/evidence audits; disposition every finding and clear all blockers.
 - [ ] 15.9 Mark v1 PASS again, sync stable specs, and archive only after tasks 11–15 are complete; do not switch canonical Serena.

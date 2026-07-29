@@ -565,6 +565,13 @@ Under the slot startup lock, the connector creates a one-use nonce; the daemon
 must validate and consume it before discovery becomes visible. There is no
 ordinary public daemon-start surface that bypasses this handshake.
 
+A dedicated pytest acceptance may select a non-overlapping temporary runtime
+root, a bounded short grace, and an alphanumeric build variant. The variant
+identity is derived from the real source/lock/schema identity, so daemon-side
+recomputation still detects source drift; arbitrary identities are not
+accepted. This seam exists only to prove real connector/daemon slot coexistence
+and natural retirement. It does not claim immutable source-snapshot packaging.
+
 Service Python is installed at
 `/data/CoordExp/.codex/runtime/serena-light/python`; daemon and service-venv
 executables must not resolve through `/root/.local/share/uv`. Daemon and LSP

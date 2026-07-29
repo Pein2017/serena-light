@@ -13,8 +13,9 @@ evidence, reproducible production-path stdio acceptance, and fresh-client
 receipt scope. The code findings are repaired at local commit `d129dee`; legacy
 retirement was deliberately narrowed to authenticated inspection plus
 fail-closed `atomic_retirement_unsupported` because v1 has no atomic lease
-freeze. Agent-public `replace_symbol_body` remains withheld for new clients
-until the remaining real-layer and current-build client gates pass. This is not
+freeze. The repaired implementation and evidence are current through local
+commit `b140025`. Agent-public `replace_symbol_body` remains withheld for new
+clients until the post-restoration test and fresh-client gates pass. This is not
 v1 PASS. The canonical MCP registration named `serena` remains unchanged.
 
 ### Superseded pre-audit decision
@@ -41,8 +42,8 @@ used to archive this change.
 
 ## Current repair checkpoint
 
-At commit `d129dee`, the combined correctness/containment subset passes 143
-tests. It includes explicit child environments for clean and poisoned-proxy
+At commit `b140025`, the complete suite passes 506 tests. It includes explicit
+child environments for clean and poisoned-proxy
 stdio clients, borrowed-daemon holder preservation, no retained connector
 child/daemon descendant, `.mjs` build-identity closure, no-signal legacy lease
 race, typed activation rollback, final/non-final immediate release, nested
@@ -51,18 +52,14 @@ replacement races. Post-install ambiguity is `UNCERTAIN` with a mandatory
 reread; it is never reported as a clean edit or replayed.
 
 ```text
-uv run pytest -q \
-  tests/unit/test_build_identity.py tests/unit/test_legacy_migration.py \
-  tests/unit/test_symbol_editing.py tests/unit/test_workspace_runtime.py \
-  tests/unit/test_workspace_runtime_semantics.py tests/unit/test_daemon_leases.py \
-  tests/unit/test_daemon_semantic_api.py tests/unit/test_daemon_server.py \
-  tests/unit/test_connector.py tests/integration/test_bounded_freshness_guarded_edit.py \
-  tests/integration/test_shared_daemon_lifecycle.py tests/integration/test_daemon_http.py \
-  tests/integration/test_connector_proxy.py \
-  tests/acceptance/test_connector_contract_acceptance.py \
-  tests/acceptance/test_versioned_rollover_acceptance.py \
-  tests/acceptance/test_stdio_connector_acceptance.py
-143 passed
+uv run pytest -q tests
+506 passed
+
+uv run pytest -q tests/acceptance/test_connector_contract_acceptance.py \
+  tests/acceptance/test_lifecycle_failure_matrix.py tests/unit/test_adapter.py \
+  tests/unit/test_workspace_runtime.py tests/unit/test_workspace_runtime_semantics.py \
+  tests/acceptance/test_typescript_real_acceptance.py
+75 passed
 
 uv run ruff check .
 All checks passed!
@@ -72,16 +69,50 @@ All checks passed!
 
 uv run serena-light-bootstrap --check --json
 PASS
+
+uv run serena-light-source-budget --json
+PASS: 13,816 production lines (informational; maximum=null, not gated)
+
+openspec validate build-serena-light-v1 --strict
+Change 'build-serena-light-v1' is valid
 ```
 
 The repaired build identity is
-`efc38e91a11f88f29b57700d3cdd154ca67beb421dabe28d92e24648310bc5aa`.
+`f92e13abd297ca1786bada925660062df2e61b3454127cf4bf28ad54295af1a7`.
 The current dependency digest is
 `eff6ebdf252faff7f77cb3a2f3894d17b9a0dfc89b46bd193fafdaa9e9ab4941`;
 Pydantic 2.13.4 is declared directly because production imports `StrictBool`.
-These results close the accepted code findings and containment task 15.1; they
-do not close the full suite, real daemon rollover/edit fault matrix,
-current-build fresh-client matrix, or final dual audit.
+The source/provenance gate reports 13,816 production lines (informational), no
+forbidden or undeclared imports, bidirectional census/manifest agreement, nine
+verified copied hashes, and official Serena commit
+`9a9d07e83d8c1cba3458992707f440c624446c6d`.
+These results close the accepted code findings, containment, connector/edit
+fault contracts, and the complete repair-state quality gate. The connector
+contract uses the real connector and daemon HTTP service with the real
+`WorkspaceRuntime` plus deterministic LSP adapters; document lifecycle and
+family isolation are also covered in the named runtime suites, while the
+Unicode real-engine range check uses the TypeScript real-repository acceptance.
+These layers are intentionally not described as one subprocess end-to-end
+test. The current-build fresh-client matrix also passes as recorded below;
+public edit restoration, its post-restoration rerun, and final dual audit remain
+open.
+
+The isolated real-process rollover gate launches the locked service connector
+and two detached `serena_light.cli daemon` processes for three clients and two
+workspaces. Its two acceptance variants are derived from the real
+source/lock/schema identity, run under a temporary root that must not overlap
+production, retain the old build's holders while the new build serves, and
+naturally retire only after a bounded test grace. It proves connector/daemon
+process and slot mechanics; it does not claim frozen source-copy packaging.
+
+```text
+uv run pytest -q tests/acceptance/test_real_versioned_rollover_acceptance.py
+1 passed
+
+uv run pytest -q tests/acceptance/test_python_real_acceptance.py \
+  tests/acceptance/test_typescript_real_acceptance.py
+10 passed
+```
 
 ## Superseded pre-audit receipts
 
@@ -162,22 +193,33 @@ layer and require current-build reruns before release.
 
 ## Fresh clients and connector acceptance
 
-Existing fresh Codex and native Claude Code clean-env acceptance passed on
-earlier build identities. The repaired stdio acceptance now explicitly passes
-the clean or poisoned environment to the child and proves internal loopback
-bypass without skipping when an exact-build daemon is already live. A
-fresh CC Agent launched from `/data/CoordExp` auto-bound that root after a
-service-owned `GIT_CONFIG_GLOBAL` trust fix, then explicitly activated
-`/data/CoordExp/serena-light`, retrieved a real Pyright symbol for
-`write_service_git_config`, and released. During containment,
-`replace_symbol_body` was absent from its advertised 10-tool list. Historically,
-after every preceding gate appeared to pass, the tool was restored and a
-poisoned-proxy stdio
-client edited an isolated `/data` Git fixture by exact whole-file hash, then
-released; the test reclaimed its exact daemon and removed the fixture. A fresh
-CC Agent then observed the restored tool, matched historical build identity
-`6abd545dbc1d232b662ff06e1f777a6091356994c5cff12c3fde2c89a1736599`,
-repeated the nested-root Pyright lookup, and released without editing.
+Fresh Codex (`gpt-5.6-terra`), native Claude Code (`claude-sonnet-5/high`), and
+CC Agent (`claude-sonnet-5/high`) clients all matched repaired build identity
+`f92e13abd297ca1786bada925660062df2e61b3454127cf4bf28ad54295af1a7`.
+Each client used only parallel Serena Light to activate and query all four
+required roots: `PipelinePlanner` in `/data/CoordExp`, a TypeScript/MJS overview
+in `cc-plugin-codex`, a Pyright overview in `/data/ms-swift`, and
+`PreTrainedModel` in the conda `ms` transformers package. Every query returned
+`ok`; transformers reported `allowlisted_non_git` and read-only; each client
+released with `immediate=true`. During containment, `replace_symbol_body` was
+absent from every fresh tool list. The first non-interactive native Claude and
+safe-profile CC Agent attempts were denied by their client permission policies
+before any MCP call; fresh retries used an explicit read-only Serena Light
+allowlist and are the accepted receipts.
+
+Model-facing Codex/Claude processes retained the working ambient `9090` proxy
+because their external API traffic requires it. The real service-executable
+stdio acceptance separately launches exact clean and fully poisoned child
+environments, proves both reuse the same loopback daemon without proxy routing,
+and leaves no connector child or new daemon descendant. This is the declared
+proxy split; a poisoned model process is not a meaningful localhost test because
+it prevents the client from reaching its external model service.
+
+Historically, after every preceding gate appeared to pass, the tool was restored
+and a poisoned-proxy stdio client edited an isolated `/data` Git fixture by exact
+whole-file hash, then released; that receipt belongs to build
+`6abd545dbc1d232b662ff06e1f777a6091356994c5cff12c3fde2c89a1736599` and does
+not authorize edit restoration on the repaired build.
 
 ### Proxy and Git configuration boundary
 
@@ -198,7 +240,7 @@ configuration is untouched.
   `SCOPE_INCOMPATIBLE` and preserves the previous binding. A fixture-owned
   `pyrightconfig.json` proves the supported explicit boundary; no automatic
   overlay is generated.
-- Production LOC (13,529) is informational only; ownership, forbidden
+- Production LOC (13,816) is informational only; ownership, forbidden
   imports, direct dependencies, census/manifest consistency, copied hashes,
   and the pinned Serena commit remain hard gates.
 - TypeScript LSP diagnostics remain advisory when the repository uses a newer

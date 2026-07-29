@@ -9,7 +9,7 @@ service-owned, build-identity-scoped path
 `/data/CoordExp/.codex/runtime/serena-light/deps/eff6ebdf252faff7f77cb3a2f3894d17b9a0dfc89b46bd193fafdaa9e9ab4941/python/bin/serena-light`
 with no arguments — **not** the repository `.venv`. The dependency-digest
 segment (`eff6ebdf...`) and the current repaired build identity
-(`efc38e91a11f88f29b57700d3cdd154ca67beb421dabe28d92e24648310bc5aa`) are tied
+(`f92e13abd297ca1786bada925660062df2e61b3454127cf4bf28ad54295af1a7`) are tied
 to a versioned daemon slot. A source/schema-only rollover reuses the dependency
 directory but gets a new build slot; a lock change also installs a new digest
 directory. Old build slots coexist until their holders and grace expire, so
@@ -109,9 +109,12 @@ daemon remains after clients have stopped, use normal process inspection and
 stop only the identified `serena-light` daemon; never stop canonical Serena as
 part of this rollback.
 
-Historical fresh-session tool, cwd, navigation, diagnostics, warm-daemon reuse,
-and cleanup receipts exist for Codex, Claude Code, and CC Agent, but they
-precede the current repaired build identity and do not satisfy task 15.5. The
-final dual audit returned HOLD. `replace_symbol_body` remains withheld for new
-clients pending full reacceptance. Canonical-name switching remains separately
-unapproved.
+Fresh Codex, native Claude Code, and CC Agent receipts now match repaired build
+identity `f92e13abd297ca1786bada925660062df2e61b3454127cf4bf28ad54295af1a7` and
+cover `/data/CoordExp`, `cc-plugin-codex`, `/data/ms-swift`, and the read-only
+conda `ms` transformers package. Model-facing clients retained the ambient
+external-network `9090` proxy. Clean and poisoned internal environments are
+instead exercised by the real service-executable stdio acceptance, which passes
+the exact environment to the connector child and verifies loopback bypass.
+`replace_symbol_body` remains withheld until the post-restoration gate, and the
+final dual audit remains open. Canonical-name switching is unapproved.

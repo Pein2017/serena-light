@@ -2,6 +2,21 @@
 
 Date: 2026-07-28 UTC
 
+## Post-audit current-build rerun
+
+**PASS at build `f92e13abd297...`: 4 passed.** This 2026-07-29 rerun used the
+production workspace/runtime and real Pyright against `/data/CoordExp`,
+`/data/ms-swift`, and the exact transformers root. It is real-repository plus
+real-LSP evidence; it does not traverse the shared daemon/connector. Process
+evidence attributes only newly observed locked language-server commands, so
+delayed children from earlier fault harnesses cannot be misreported as this
+runtime's descendants.
+
+```text
+uv run pytest -q tests/acceptance/test_python_real_acceptance.py
+4 passed
+```
+
 ## Superseding final rerun
 
 **Overall: PASS.** The final production-API run completed all four scenarios:
