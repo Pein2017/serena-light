@@ -20,6 +20,7 @@ from serena_light.runtime_files import (
     DISCOVERY_NAME,
     BearerSecret,
     DiscoveryMetadata,
+    RuntimeFileError,
     StartupNonce,
     create_bearer_secret,
     prepare_runtime_layout,
@@ -36,6 +37,35 @@ def _metadata(*, daemon_id: str | None = None) -> DiscoveryMetadata:
         protocol_version="2025-11-25",
         server_version=__version__,
     )
+
+
+def test_acceptance_overrides_are_complete_isolated_and_source_derived(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    with pytest.raises(RuntimeFileError, match="complete set"):
+        cli._acceptance_overrides({cli.ACCEPTANCE_RUNTIME_ROOT_ENV: str(tmp_path)})
+
+    environment = {
+        cli.PYTEST_CURRENT_TEST_ENV: "isolated acceptance",
+        cli.ACCEPTANCE_RUNTIME_ROOT_ENV: str(tmp_path / "runtime"),
+        cli.ACCEPTANCE_BUILD_VARIANT_ENV: "old",
+        cli.ACCEPTANCE_WARM_GRACE_SECONDS_ENV: "1.5",
+        cli.ACCEPTANCE_IDLE_EXIT_SECONDS_ENV: "0.25",
+    }
+    acceptance = cli._acceptance_overrides(environment)
+    assert acceptance is not None
+    monkeypatch.setattr(cli, "compute_build_identity", lambda: "a" * 64)
+    first = cli._acceptance_build_identity(acceptance)
+
+    changed_variant = cli._acceptance_overrides({**environment, cli.ACCEPTANCE_BUILD_VARIANT_ENV: "new"})
+    assert changed_variant is not None
+    assert cli._acceptance_build_identity(changed_variant) != first
+
+    monkeypatch.setattr(cli, "compute_build_identity", lambda: "b" * 64)
+    assert cli._acceptance_build_identity(acceptance) != first
+
+    with pytest.raises(RuntimeFileError, match="must not overlap"):
+        cli._acceptance_overrides({**environment, cli.ACCEPTANCE_RUNTIME_ROOT_ENV: str(cli.RUNTIME_ROOT)})
 
 
 def test_daemon_command_uses_current_interpreter_module_and_sanitized_environment(tmp_path: Path) -> None:

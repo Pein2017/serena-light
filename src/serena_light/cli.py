@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
+import math
 import os
 import socket
 import sys
@@ -68,7 +70,18 @@ SERVER_STARTUP_POLL_SECONDS = 0.01
 BUILD_IDENTITY_ENV = "SERENA_LIGHT_BUILD_IDENTITY"
 BUILD_ROOT_ENV = "SERENA_LIGHT_BUILD_ROOT"
 STARTUP_NONCE_ENV = "SERENA_LIGHT_STARTUP_NONCE"
+ACCEPTANCE_RUNTIME_ROOT_ENV = "SERENA_LIGHT_ACCEPTANCE_RUNTIME_ROOT"
+ACCEPTANCE_BUILD_VARIANT_ENV = "SERENA_LIGHT_ACCEPTANCE_BUILD_VARIANT"
+ACCEPTANCE_WARM_GRACE_SECONDS_ENV = "SERENA_LIGHT_ACCEPTANCE_WARM_GRACE_SECONDS"
+ACCEPTANCE_IDLE_EXIT_SECONDS_ENV = "SERENA_LIGHT_ACCEPTANCE_IDLE_EXIT_SECONDS"
+PYTEST_CURRENT_TEST_ENV = "PYTEST_CURRENT_TEST"
 _DAEMON_ENV_ALLOWLIST = frozenset({"LANG", "LC_ALL", "LC_CTYPE", "TZ", "TMPDIR"})
+_ACCEPTANCE_OVERRIDE_ENV = (
+    ACCEPTANCE_RUNTIME_ROOT_ENV,
+    ACCEPTANCE_BUILD_VARIANT_ENV,
+    ACCEPTANCE_WARM_GRACE_SECONDS_ENV,
+    ACCEPTANCE_IDLE_EXIT_SECONDS_ENV,
+)
 
 
 class _Runtime(Protocol):
@@ -95,6 +108,79 @@ type AsyncCallback = Callable[[], Awaitable[None]]
 class _DiscoveredDaemon:
     metadata: DiscoveryMetadata
     bearer: BearerSecret
+
+
+@dataclass(frozen=True, slots=True)
+class _AcceptanceOverrides:
+    """Fail-closed process-boundary injection for isolated pytest acceptance."""
+
+    runtime_root: Path
+    build_variant: str
+    warm_grace_seconds: float
+    idle_exit_seconds: float
+    pytest_current_test: str
+
+
+def _acceptance_overrides(environ: Mapping[str, str] | None = None) -> _AcceptanceOverrides | None:
+    ambient = os.environ if environ is None else environ
+    supplied = {name: ambient.get(name) for name in _ACCEPTANCE_OVERRIDE_ENV}
+    if all(value is None for value in supplied.values()):
+        return None
+    if any(value is None for value in supplied.values()):
+        raise RuntimeFileError("isolated acceptance overrides must be supplied as one complete set")
+    pytest_current_test = ambient.get(PYTEST_CURRENT_TEST_ENV, "")
+    if not pytest_current_test:
+        raise RuntimeFileError("isolated acceptance overrides require a pytest-owned process")
+
+    runtime_value = supplied[ACCEPTANCE_RUNTIME_ROOT_ENV]
+    variant_value = supplied[ACCEPTANCE_BUILD_VARIANT_ENV]
+    warm_value = supplied[ACCEPTANCE_WARM_GRACE_SECONDS_ENV]
+    idle_value = supplied[ACCEPTANCE_IDLE_EXIT_SECONDS_ENV]
+    assert runtime_value is not None
+    assert variant_value is not None
+    assert warm_value is not None
+    assert idle_value is not None
+    runtime_root = Path(runtime_value)
+    if not runtime_root.is_absolute() or runtime_root == Path("/"):
+        raise RuntimeFileError("isolated acceptance runtime root must be a non-root absolute path")
+    isolated = runtime_root.resolve(strict=False)
+    production = RUNTIME_ROOT.resolve(strict=False)
+    if isolated == production or isolated.is_relative_to(production) or production.is_relative_to(isolated):
+        raise RuntimeFileError("isolated acceptance runtime root must not overlap the production runtime root")
+    if not variant_value.isascii() or not variant_value.isalnum() or len(variant_value) > 32:
+        raise RuntimeFileError("isolated acceptance build variant must be 1-32 ASCII alphanumeric characters")
+    try:
+        warm_grace_seconds = float(warm_value)
+        idle_exit_seconds = float(idle_value)
+    except ValueError as exc:
+        raise RuntimeFileError("isolated acceptance timing overrides must be numeric") from exc
+    if (
+        not math.isfinite(warm_grace_seconds)
+        or not math.isfinite(idle_exit_seconds)
+        or warm_grace_seconds <= 0
+        or idle_exit_seconds <= 0
+        or warm_grace_seconds > 30
+        or idle_exit_seconds > 30
+    ):
+        raise RuntimeFileError("isolated acceptance timing overrides must be in (0, 30]")
+    return _AcceptanceOverrides(
+        runtime_root=isolated,
+        build_variant=variant_value,
+        warm_grace_seconds=warm_grace_seconds,
+        idle_exit_seconds=idle_exit_seconds,
+        pytest_current_test=pytest_current_test,
+    )
+
+
+def _acceptance_build_identity(acceptance: _AcceptanceOverrides) -> str:
+    """Derive a test slot while retaining the real source/lock/schema identity."""
+
+    digest = hashlib.sha256()
+    digest.update(b"serena-light-acceptance-variant-v1\0")
+    digest.update(compute_build_identity().encode("ascii"))
+    digest.update(b"\0")
+    digest.update(acceptance.build_variant.encode("ascii"))
+    return digest.hexdigest()
 
 
 class _RuntimeOwner:
@@ -185,6 +271,7 @@ def _daemon_environment(
     build_root: Path,
     startup_nonce: StartupNonce,
     service_home: Path,
+    acceptance: _AcceptanceOverrides | None = None,
 ) -> dict[str, str]:
     """Build the minimal proxy-free environment inherited by daemon and LSP children."""
 
@@ -201,12 +288,25 @@ def _daemon_environment(
             STARTUP_NONCE_ENV: startup_nonce.value,
         }
     )
+    if acceptance is not None:
+        environment.update(
+            {
+                ACCEPTANCE_RUNTIME_ROOT_ENV: str(acceptance.runtime_root),
+                ACCEPTANCE_BUILD_VARIANT_ENV: acceptance.build_variant,
+                ACCEPTANCE_WARM_GRACE_SECONDS_ENV: str(acceptance.warm_grace_seconds),
+                ACCEPTANCE_IDLE_EXIT_SECONDS_ENV: str(acceptance.idle_exit_seconds),
+                PYTEST_CURRENT_TEST_ENV: acceptance.pytest_current_test,
+            }
+        )
     return environment
 
 
-def _spawn_daemon(build_root: Path) -> object:
+def _spawn_daemon(build_root: Path, acceptance: _AcceptanceOverrides | None = None) -> object:
     build_identity = validate_build_identity(build_root.name)
-    layout = prepare_runtime_layout(RUNTIME_ROOT, build_identity)
+    runtime_root = RUNTIME_ROOT if acceptance is None else acceptance.runtime_root
+    if acceptance is not None and build_identity != _acceptance_build_identity(acceptance):
+        raise RuntimeFileError("isolated acceptance build root does not match its selected identity")
+    layout = prepare_runtime_layout(runtime_root, build_identity)
     if layout.build_root != build_root:
         raise RuntimeFileError("daemon build root does not match the shared runtime layout")
     event = "daemon_takeover" if (build_root / DISCOVERY_NAME).exists() else "daemon_startup"
@@ -221,6 +321,7 @@ def _spawn_daemon(build_root: Path) -> object:
             build_root=build_root,
             startup_nonce=nonce,
             service_home=layout.home_root,
+            acceptance=acceptance,
         ),
     )
 
@@ -287,27 +388,50 @@ def _daemon_is_healthy(candidate: _DiscoveredDaemon) -> bool:
     return True
 
 
-def _ensure_daemon_sync(runtime_root: Path = RUNTIME_ROOT) -> None:
+def _ensure_daemon_sync(
+    runtime_root: Path = RUNTIME_ROOT,
+    acceptance: _AcceptanceOverrides | None = None,
+) -> None:
     connect_or_start(
         runtime_root=runtime_root,
         discover=lambda: _read_daemon(runtime_root),
         is_healthy=_daemon_is_healthy,
-        spawn=lambda: _spawn_daemon(runtime_root),
+        spawn=lambda: _spawn_daemon(runtime_root, acceptance),
         cleanup_failed_spawn=cleanup_failed_detached_process,
         timeout_seconds=DAEMON_STARTUP_TIMEOUT_SECONDS,
     )
 
 
-async def _ensure_daemon(runtime_root: Path = RUNTIME_ROOT) -> None:
-    await asyncio.to_thread(_ensure_daemon_sync, runtime_root)
+async def _ensure_daemon(
+    runtime_root: Path = RUNTIME_ROOT,
+    acceptance: _AcceptanceOverrides | None = None,
+) -> None:
+    await asyncio.to_thread(_ensure_daemon_sync, runtime_root, acceptance)
 
 
-async def _run_connector(runtime_root: Path | None = None) -> None:
-    if runtime_root is None:
+async def _run_connector(
+    runtime_root: Path | None = None,
+    *,
+    acceptance: _AcceptanceOverrides | None = None,
+) -> None:
+    if acceptance is not None:
+        if runtime_root is not None:
+            raise RuntimeFileError("isolated acceptance selects its own build root")
+        runtime_root = prepare_runtime_layout(
+            acceptance.runtime_root,
+            _acceptance_build_identity(acceptance),
+        ).build_root
+    elif runtime_root is None:
         await asyncio.to_thread(_migrate_legacy_root_sync)
         build_identity = compute_build_identity()
         runtime_root = prepare_runtime_layout(RUNTIME_ROOT, build_identity).build_root
-    ensure = lambda: _ensure_daemon(runtime_root)  # noqa: E731 - protocol callback retains the selected root
+    if acceptance is None:
+        ensure = lambda: _ensure_daemon(runtime_root)  # noqa: E731 - callback retains the selected root
+    else:
+        ensure = lambda: _ensure_daemon(  # noqa: E731 - callback retains the isolated acceptance owner
+            runtime_root,
+            acceptance,
+        )
     await ensure()
     discovery = RuntimeDiscoveryProvider(
         runtime_root=runtime_root,
@@ -442,16 +566,22 @@ def _remove_stale_discovery(runtime_root: Path) -> None:
 
 
 async def _run_daemon() -> None:
+    acceptance = _acceptance_overrides()
     expected_identity = validate_build_identity(os.environ.get(BUILD_IDENTITY_ENV, ""))
-    actual_identity = compute_build_identity()
+    actual_identity = (
+        compute_build_identity()
+        if acceptance is None
+        else _acceptance_build_identity(acceptance)
+    )
     if actual_identity != expected_identity:
         raise RuntimeFileError("daemon source changed after connector selected the build identity")
-    expected_root = prepare_runtime_layout(RUNTIME_ROOT, actual_identity).build_root
+    runtime_base = RUNTIME_ROOT if acceptance is None else acceptance.runtime_root
+    expected_root = prepare_runtime_layout(runtime_base, actual_identity).build_root
     supplied_root = Path(os.environ.get(BUILD_ROOT_ENV, ""))
     if not supplied_root.is_absolute() or supplied_root != expected_root:
         raise RuntimeFileError("daemon build root does not match its verified build identity")
     runtime_root = prepare_runtime_directory(expected_root)
-    logger = DebugLogger(prepare_runtime_layout(RUNTIME_ROOT, actual_identity).logs_root)
+    logger = DebugLogger(prepare_runtime_layout(runtime_base, actual_identity).logs_root)
     logger.report("daemon_starting", f"build={actual_identity[:12]}")
     nonce = StartupNonce(os.environ.get(STARTUP_NONCE_ENV, ""))
     consume_startup_nonce(runtime_root, nonce)
@@ -464,7 +594,14 @@ async def _run_daemon() -> None:
     policy = WorkspacePolicy(ms_roots=PinnedMsRoots.resolve())
     runtime_owner = _RuntimeOwner(policy, debug_reporter=logger.report)
     registry = WorkspaceRuntimeRegistry(runtime_owner.create)
-    lifecycle = LeaseLifecycle(clock=time.monotonic)
+    lifecycle = (
+        LeaseLifecycle(clock=time.monotonic)
+        if acceptance is None
+        else LeaseLifecycle(
+            clock=time.monotonic,
+            warm_grace_seconds=acceptance.warm_grace_seconds,
+        )
+    )
     service = WorkspaceDaemonService(
         lifecycle=lifecycle,
         registry=registry,
@@ -520,6 +657,9 @@ async def _run_daemon() -> None:
             service=service,
             on_started=publish_discovery,
             on_stopping=cleanup,
+            idle_exit_seconds=(
+                DAEMON_IDLE_EXIT_SECONDS if acceptance is None else acceptance.idle_exit_seconds
+            ),
         )
     finally:
         if bound_socket.fileno() >= 0:
@@ -535,7 +675,11 @@ def connector_main(argv: Sequence[str] | None = None) -> int:
     """Run the per-client stdio MCP connector."""
 
     _parse_no_arguments("serena-light", argv)
-    asyncio.run(_run_connector())
+    acceptance = _acceptance_overrides()
+    if acceptance is None:
+        asyncio.run(_run_connector())
+    else:
+        asyncio.run(_run_connector(acceptance=acceptance))
     return 0
 
 
