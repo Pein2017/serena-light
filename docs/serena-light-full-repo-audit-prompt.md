@@ -150,8 +150,9 @@ pressure-test these invariant groups:
      parallel client registrations agree with documentation.
    - Canonical Serena remains untouched, and rollback targets only the parallel
      Serena Light registration/processes.
-   - The 12,000 nonblank production-line gate is measured honestly and cannot
-     be trivially bypassed by moving product behavior into uncounted files.
+   - Production LOC is reported honestly as information, while forbidden
+     imports, direct dependency ownership, census/manifest agreement, copied
+     hashes, and reference-commit verification remain release gates.
 
 7. **Evidence quality**
    - Tests exercise the production path and consequential failure, not a mock

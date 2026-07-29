@@ -88,11 +88,13 @@ class FakeRuntimeProvider:
         client_factories: list[Callable[[], FakeClient]],
         *,
         processes: list[subprocess.Popen[bytes] | None] | None = None,
+        stop_failures: int = 0,
     ) -> None:
         self._factories = deque(client_factories)
         self._processes = deque(processes or [])
         self.clients: list[FakeClient] = []
         self.stop_count = 0
+        self._stop_failures = stop_failures
         self.notification_handler: Callable[[str, Any], None] | None = None
         self.terminal_handler: Callable[[BaseException], None] | None = None
 
@@ -116,6 +118,9 @@ class FakeRuntimeProvider:
 
     def stop(self, runtime: AdapterRuntime) -> None:
         self.stop_count += 1
+        if self._stop_failures:
+            self._stop_failures -= 1
+            raise RuntimeError("fake provider stop failed")
         runtime.client.shutdown()
 
     def publish(self, *, uri: str, version: int | None, diagnostics: list[object] | None = None) -> None:
@@ -236,12 +241,103 @@ def test_stop_uses_owned_cleanup_capacity_when_ordinary_queue_is_saturated() -> 
         release.set()
 
         blocked.result(timeout=5)
-        assert queued.result(timeout=5) == "ordinary"
+        with pytest.raises(ExecutorBusyError, match="sealed for stop"):
+            queued.result(timeout=5)
         assert stopped.result(timeout=5).phase is AdapterPhase.COLD
         assert provider.stop_count == 1
         assert provider.clients[0].shutdown_count == 1
     finally:
         release.set()
+        harness.executor.close()
+
+
+def test_stop_seals_ordinary_admission_before_its_cleanup_worker_runs() -> None:
+    provider = FakeRuntimeProvider([lambda: FakeClient(_initialize_result())])
+    harness = AdapterHarness(provider)
+    entered = threading.Event()
+    release = threading.Event()
+    try:
+        harness.adapter.start().result(timeout=1)
+
+        def block_worker() -> None:
+            entered.set()
+            assert release.wait(5)
+
+        blocked = harness.executor.submit(block_worker)
+        assert entered.wait(5)
+        queued_before_stop = harness.adapter.submit_read(lambda _client: "must not run")
+
+        stopped = harness.adapter.stop()
+        assert not stopped.done()
+        with pytest.raises(ExecutorBusyError, match="sealed for stop"):
+            harness.adapter.submit_read(lambda _client: "after stop")
+        with pytest.raises(ExecutorBusyError, match="sealed for stop"):
+            harness.adapter.submit_edit(lambda _client: "after stop")
+        assert harness.adapter.stop() is stopped
+
+        release.set()
+        blocked.result(timeout=5)
+        with pytest.raises(ExecutorBusyError, match="sealed for stop"):
+            queued_before_stop.result(timeout=5)
+        assert stopped.result(timeout=5).phase is AdapterPhase.COLD
+        assert len(provider.clients) == 1
+        assert provider.stop_count == 1
+    finally:
+        release.set()
+        harness.executor.close()
+
+
+def test_stop_cleanup_admission_failure_keeps_ordinary_work_sealed_and_is_retryable() -> None:
+    provider = FakeRuntimeProvider([lambda: FakeClient(_initialize_result())])
+    harness = AdapterHarness(provider)
+    entered = threading.Event()
+    release = threading.Event()
+    try:
+        harness.adapter.start().result(timeout=1)
+
+        def block_worker() -> None:
+            entered.set()
+            assert release.wait(5)
+
+        blocked = harness.executor.submit(block_worker)
+        assert entered.wait(5)
+        reserved = [
+            harness.executor.submit_cleanup(lambda: None),
+            harness.executor.submit_cleanup(lambda: None),
+        ]
+        with pytest.raises(ExecutorBusyError, match="cleanup reserve is full"):
+            harness.adapter.stop()
+        with pytest.raises(ExecutorBusyError, match="sealed for stop"):
+            harness.adapter.submit_read(lambda _client: "after failed stop")
+        with pytest.raises(ExecutorBusyError, match="sealed for stop"):
+            harness.adapter.submit_edit(lambda _client: "after failed stop")
+
+        release.set()
+        blocked.result(timeout=5)
+        for future in reserved:
+            future.result(timeout=5)
+        assert harness.adapter.stop().result(timeout=5).phase is AdapterPhase.COLD
+        assert provider.stop_count == 1
+    finally:
+        release.set()
+        harness.executor.close()
+
+
+def test_stop_retries_a_completed_failed_cleanup_future() -> None:
+    provider = FakeRuntimeProvider([lambda: FakeClient(_initialize_result())], stop_failures=1)
+    harness = AdapterHarness(provider)
+    try:
+        harness.adapter.start().result(timeout=1)
+        first_stop = harness.adapter.stop()
+        with pytest.raises(RuntimeError, match="fake provider stop failed"):
+            first_stop.result(timeout=1)
+
+        retried_stop = harness.adapter.stop()
+        assert retried_stop is not first_stop
+        assert retried_stop.result(timeout=1).phase is AdapterPhase.COLD
+        assert provider.stop_count == 2
+        assert provider.clients[0].shutdown_count == 1
+    finally:
         harness.executor.close()
 
 

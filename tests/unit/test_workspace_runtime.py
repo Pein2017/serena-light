@@ -12,6 +12,7 @@ from typing import Any, cast
 import pytest
 
 from serena_light.lsp.adapter import (
+    AdapterErrorCode,
     AdapterGenerations,
     AdapterPhase,
     AdapterSnapshot,
@@ -20,8 +21,11 @@ from serena_light.lsp.adapter import (
     DocumentReadinessProbe,
     DocumentReadinessTarget,
     EngineMetadata,
+    GlobalReadinessWitness,
     RawLspProviders,
+    ReadinessWitnessError,
 )
+from serena_light.lsp.client import LspProtocolError, LspResponseError, LspTransportClosed
 from serena_light.lsp.executor import BoundedLspExecutor
 from serena_light.lsp.positions import FileSnapshot, PositionEncoding
 from serena_light.tools.navigation import DocumentSymbolInput
@@ -95,6 +99,7 @@ class _Adapter:
         self.before_stop_submit: Callable[[], None] | None = None
         self.before_stop_worker: Callable[[], None] | None = None
         self.before_reconcile_worker: Callable[[], None] | None = None
+        self.warm_global_error: BaseException | None = None
         self._phase = AdapterPhase.COLD
         self._document_generation = 0
         self._running = False
@@ -108,6 +113,8 @@ class _Adapter:
 
     def snapshot(self) -> AdapterSnapshot:
         scope = self.context.scope_tracker.generations
+        if self._phase is AdapterPhase.READY and scope.observed_configured_program < scope.configured_program:
+            self._phase = AdapterPhase.GLOBAL_WARMING
         raw = RawLspProviders(
             definition=True,
             implementation=self.context.family is LanguageFamily.TYPESCRIPT,
@@ -184,6 +191,21 @@ class _Adapter:
 
     def submit_read(self, operation: Callable[[_Client], Any]) -> Future[Any]:
         return self.context.executor.submit(lambda: operation(self.client))
+
+    def warm_global(
+        self, witness: GlobalReadinessWitness, *, timeout: float | None = None
+    ) -> Future[tuple[Mapping[str, object], ...]]:
+        del witness, timeout
+
+        def warm() -> tuple[Mapping[str, object], ...]:
+            if self.warm_global_error is not None:
+                raise self.warm_global_error
+            generation = self.context.scope_tracker.generations.configured_program
+            assert self.context.scope_tracker.observe_configured_program(generation)
+            self._phase = AdapterPhase.READY
+            return tuple(self.client.symbols)
+
+        return self.context.executor.submit(warm)
 
     def reconcile_watched_files(
         self,
@@ -911,6 +933,128 @@ def test_failed_reconcile_future_blocks_current_generation_until_a_later_retry_s
             "workspace/didChangeWatchedFiles",
             "textDocument/didChange",
         ]
+    finally:
+        runtime.stop()
+
+
+def test_two_family_reconcile_failure_invalidates_all_families_and_retries_exact_batch(tmp_path: Path) -> None:
+    _git_repository(tmp_path)
+    (tmp_path / "main.py").write_text("value = 1\n")
+    (tmp_path / "main.ts").write_text("export const value = 1;\n")
+    adapters: dict[LanguageFamily, _Adapter] = {}
+    contexts: dict[LanguageFamily, AdapterBuildContext] = {}
+    runtime = _git_runtime(tmp_path, adapters, contexts)
+    failed_once = True
+    try:
+        runtime.load_document_symbols("main.py")
+        runtime.load_document_symbols("main.ts")
+        for family, adapter in adapters.items():
+            generation = contexts[family].scope_tracker.generations.configured_program
+            assert contexts[family].scope_tracker.observe_configured_program(generation)
+            adapter._phase = AdapterPhase.READY
+            adapter.client.notifications.clear()
+
+        python = adapters[LanguageFamily.PYTHON]
+        typescript = adapters[LanguageFamily.TYPESCRIPT]
+        typescript_before = contexts[LanguageFamily.TYPESCRIPT].scope_tracker.generations
+
+        def fail_once() -> None:
+            nonlocal failed_once
+            if failed_once:
+                failed_once = False
+                raise RuntimeError("first-family watcher notification failed")
+
+        python.before_reconcile_worker = fail_once
+        (tmp_path / "main.py").write_text("value = 22222\n")
+        (tmp_path / "main.ts").write_text("export const value = 22222;\n")
+
+        with pytest.raises(WorkspaceRuntimeError) as caught:
+            runtime.ensure_fresh()
+
+        assert caught.value.code is RuntimeErrorCode.NOT_READY
+        typescript_after = contexts[LanguageFamily.TYPESCRIPT].scope_tracker.generations
+        assert typescript_after.configured_program == typescript_before.configured_program + 1
+        assert typescript_after.observed_configured_program == typescript_before.observed_configured_program
+        assert typescript.snapshot().phase is AdapterPhase.GLOBAL_WARMING
+        assert runtime.freshness._pending_reconciles[LanguageFamily.PYTHON].future is None
+        assert LanguageFamily.TYPESCRIPT not in runtime.freshness._pending_reconciles
+        assert [method for method, _ in typescript.client.notifications] == [
+            "workspace/didChangeWatchedFiles",
+            "textDocument/didChange",
+        ]
+
+        assert runtime.ensure_fresh() == FreshnessScan()
+        assert runtime.freshness._pending_reconciles == {}
+        assert [method for method, _ in python.client.notifications] == [
+            "workspace/didChangeWatchedFiles",
+            "textDocument/didChange",
+        ]
+        assert [method for method, _ in typescript.client.notifications] == [
+            "workspace/didChangeWatchedFiles",
+            "textDocument/didChange",
+        ]
+    finally:
+        runtime.stop()
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        LspResponseError(-32603, "server rejected global warm-up"),
+        LspProtocolError("malformed global warm-up response"),
+        LspTransportClosed("global warm-up transport closed"),
+    ],
+)
+def test_cold_global_lookup_propagates_non_readiness_lsp_failures(tmp_path: Path, failure: BaseException) -> None:
+    _git_repository(tmp_path)
+    (tmp_path / "main.py").write_text("Target = 1\n")
+    adapters: dict[LanguageFamily, _Adapter] = {}
+    contexts: dict[LanguageFamily, AdapterBuildContext] = {}
+    symbols = ({"name": "Target", "kind": 13},)
+    runtime = WorkspaceRuntime(
+        (WorkspaceKind.GIT, tmp_path),
+        path_policy=_PathPolicy(),
+        inventory_factory=lambda identity: git_trust_inventory(identity.root),
+        attributors={
+            LanguageFamily.PYTHON: lambda _root, paths: _projection(LanguageFamily.PYTHON, paths)
+        },
+        adapter_factories=_factories(adapters, contexts, symbols=symbols),
+        future_timeout=0.1,
+    )
+    try:
+        adapters[LanguageFamily.PYTHON].warm_global_error = failure
+
+        with pytest.raises(type(failure), match=str(failure).split(" (")[0]):
+            runtime.find_symbol("Target")
+    finally:
+        runtime.stop()
+
+
+def test_cold_global_lookup_keeps_readiness_witness_failure_as_not_ready(tmp_path: Path) -> None:
+    _git_repository(tmp_path)
+    (tmp_path / "main.py").write_text("Target = 1\n")
+    adapters: dict[LanguageFamily, _Adapter] = {}
+    contexts: dict[LanguageFamily, AdapterBuildContext] = {}
+    symbols = ({"name": "Target", "kind": 13},)
+    runtime = WorkspaceRuntime(
+        (WorkspaceKind.GIT, tmp_path),
+        path_policy=_PathPolicy(),
+        inventory_factory=lambda identity: git_trust_inventory(identity.root),
+        attributors={LanguageFamily.PYTHON: lambda _root, paths: _projection(LanguageFamily.PYTHON, paths)},
+        adapter_factories=_factories(adapters, contexts, symbols=symbols),
+        future_timeout=0.01,
+    )
+    try:
+        adapters[LanguageFamily.PYTHON].warm_global_error = ReadinessWitnessError(
+            AdapterErrorCode.NOT_READY,
+            "sentinel is not indexed yet",
+            retry_after_seconds=0.1,
+        )
+
+        result = runtime.find_symbol("Target").to_dict()
+
+        assert result["error"]["code"] == "NOT_READY"
+        assert result["error"]["retry"]["retryable"] is True
     finally:
         runtime.stop()
 

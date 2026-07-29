@@ -502,6 +502,15 @@ unchanged scan cannot silently authorize stale success. The allowlisted
 read-only transformers root continues targeted-stat checks and is never fully
 walked per call.
 
+One changed batch is applied in two phases across language families. First,
+every affected tracker advances its path/program generation without touching
+an adapter. Second, the coordinator publishes exact pending ownership for all
+runnable families, admits every delivery, and only then awaits results. A
+failure in the first family therefore cannot leave a later family at a stale
+current generation. Failed deliveries retain their exact batch with a
+retryable empty-future state; `notified` means admitted for asynchronous
+delivery and settled for synchronous delivery.
+
 A native-config restart removes the old adapter from publication before stop,
 but retains one explicit pending-restart record that owns the exact stop future,
 projection, tracker, and cleanup obligation. Timeout publishes a retryable
@@ -525,6 +534,12 @@ Immediate release reports actual stop truth separately from the lifecycle
 decision: `runtime_stopped` is true only after confirmed cleanup, while
 `runtime_stop_pending` exposes unsettled ownership. A failed stop is best-effort
 and cannot terminate the periodic sweep or poison another workspace operation.
+Calling an adapter's stop operation synchronously seals every ordinary
+submission path before cleanup is queued, and each queued ordinary worker
+rechecks the seal before it can lazily start a provider. Cleanup-reserve
+admission and a completed failed stop future remain retryable, but the adapter
+never reopens ordinary admission and retains its runtime owner until provider
+shutdown succeeds.
 
 Edit membership is checked against the lexical inventory rather than a
 dynamically resolved set. Under the workspace lock, the writer walks every path
@@ -544,10 +559,12 @@ when it can be read safely.
 The runtime/service boundary is the sole exception-to-envelope conversion
 owner. It catches `TimeoutError` before `OSError` and preserves `BUSY`,
 `COOLDOWN`, `TIMED_OUT`, `SCOPE_INCOMPATIBLE`, and `UNCERTAIN` without generic
-rewriting. Ordinary `LspResponseError` and `LspProtocolError` values are also
-translated there without exposing server messages: semantic reads return
-bounded `UNSUPPORTED`, while the guarded edit returns `UNCERTAIN` and is never
-replayed.
+rewriting. Ordinary `LspResponseError`, `LspProtocolError`, exhausted
+`LspTransportClosed`, and `LspProcessLost` values are also translated there
+without exposing server messages: semantic reads return bounded `UNSUPPORTED`,
+while the guarded edit returns `UNCERTAIN` and is never replayed. Cold global
+warm-up preserves those typed failures to this boundary instead of rewriting
+them as readiness failures.
 
 Each adapter opens a URI at most once, sends `didChange` for subsequent content
 versions, and sends `didClose` on stop or least-recently-used eviction. The open
@@ -640,11 +657,21 @@ a cleanup target.
 Deterministic unit, integration, connector, and temporary-real-LSP tests remain
 the default suite's contract owner. Tests that inspect `/data/CoordExp`,
 `cc-plugin-codex`, `/data/ms-swift`, or the installed transformers source tree
-are explicitly marked and skipped unless the operator supplies the exact
-observed snapshot identity. Git identities bind HEAD, the full tracked binary
-diff, and untracked regular-file and symlink content. The non-Git transformers
-identity binds package version plus bounded source-tree content. A mismatch at
-setup or any before/after change fails rather than becoming `xfail` or clean.
+are explicitly marked and skipped from marker metadata, without resolving or
+hashing the root, unless the operator supplies the exact observed snapshot
+identity. Git identities bind HEAD, the full tracked binary diff, and untracked
+regular-file and symlink content. The `cc-plugin-codex` authority profile also
+binds the ignored `.bin/tsc` launcher chain, TypeScript package/loader files,
+platform-package metadata, and ultimate native `tsc` executable. The non-Git
+transformers identity binds package version plus bounded source-tree content.
+Setup and teardown use the same recorded profile. A mismatch, missing opted-in
+root, or any before/after change fails rather than becoming `xfail` or clean.
+
+The clean/poisoned real-stdio acceptance uses a temporary runtime root, derived
+test build variant, and two test-owned concurrent connector leases. Closing the
+first lease must preserve the second holder and its daemon; cleanup targets only
+the exact isolated PID/create-time owner. It never borrows or makes equality
+claims about a production daemon that other clients may legitimately share.
 
 The TypeScript 7 repository-native typecheck remains external, authoritative
 acceptance rather than a default Serena Light correctness dependency. The

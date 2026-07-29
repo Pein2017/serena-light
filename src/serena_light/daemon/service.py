@@ -24,8 +24,8 @@ from serena_light.daemon.leases import (
     LeaseExpiredError as LifecycleLeaseExpiredError,
 )
 from serena_light.daemon.server import LeaseExpiredError
-from serena_light.lsp.adapter import AdapterError
-from serena_light.lsp.client import LspProtocolError, LspResponseError
+from serena_light.lsp.adapter import AdapterError, LspProcessLost
+from serena_light.lsp.client import LspProtocolError, LspResponseError, LspTransportClosed
 from serena_light.lsp.executor import ExecutorBusyError
 from serena_light.tools.envelopes import (
     ErrorCode,
@@ -432,9 +432,11 @@ class WorkspaceDaemonService[IdentityT: Hashable, RuntimeT]:
         except TimeoutError as exc:
             return from_timeout(exc).to_dict()
         # An ordinary LSP response/protocol failure (semantic lookup or
-        # pre-install edit resolution) is a runtime/service boundary concern,
-        # not a programming error; translate it without exposing its message.
-        except (LspResponseError, LspProtocolError):
+        # pre-install edit resolution), or a transport/process loss the
+        # adapter's own retry already exhausted, is a runtime/service
+        # boundary concern, not a programming error; translate it without
+        # exposing its message.
+        except (LspResponseError, LspProtocolError, LspTransportClosed, LspProcessLost):
             return self._lsp_failure_envelope(operation)
         except OSError:
             return error(ErrorCode.UNCERTAIN, retry=None).to_dict()
@@ -456,7 +458,7 @@ class WorkspaceDaemonService[IdentityT: Hashable, RuntimeT]:
                 return from_adapter_error(exc).to_dict()
             except TimeoutError as exc:
                 return from_timeout(exc).to_dict()
-            except (LspResponseError, LspProtocolError):
+            except (LspResponseError, LspProtocolError, LspTransportClosed, LspProcessLost):
                 return self._lsp_failure_envelope(operation)
             except OSError:
                 return error(ErrorCode.UNCERTAIN).to_dict()

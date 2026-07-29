@@ -32,6 +32,7 @@ from serena_light.lsp.adapter import (
     LanguageAdapter,
     PublishedDiagnosticsWitness,
 )
+from serena_light.lsp.client import LspProtocolError, LspResponseError, LspTransportClosed
 from serena_light.lsp.executor import BoundedLspExecutor, EditCommit, EditCommitState, ExecutorBusyError
 from serena_light.lsp.normalize import Location, NormalizedSymbol, Position, Range
 from serena_light.lsp.positions import FileSnapshot, LspPosition, PositionError, PositionMapper
@@ -521,6 +522,7 @@ class FreshnessCoordinator:
     def __init__(self, runtime: WorkspaceRuntime) -> None:
         self._runtime = runtime
         self._lock = threading.Lock()
+        self._path_refresh_lock = threading.Lock()
         self._in_flight: _SharedScan | None = None
         self._states: dict[str, ContentIdentity] = {}
         self._config_states: dict[str, ContentIdentity] = {}
@@ -573,26 +575,30 @@ class FreshnessCoordinator:
 
         if self._runtime.identity.kind is WorkspaceKind.GIT:
             return FreshnessScan()
-        runtime = self._runtime
-        self._settle_pending_reconciles()
-        inventory = runtime.inventory
-        if not inventory.contains(relative_path):
-            return FreshnessScan()
-        states = inventory.targeted_states([relative_path])
-        if not states:
-            return FreshnessScan()
-        observed = states[0]
-        with self._lock:
-            if self._states.get(observed.path) == observed.content_identity:
+        # Unlike Git scans, targeted external-root stats do not join
+        # ``_in_flight``.  Serialize their compare/commit/delivery sequence so
+        # two paths in one family cannot overwrite one pending batch.
+        with self._path_refresh_lock:
+            runtime = self._runtime
+            self._settle_pending_reconciles()
+            inventory = runtime.inventory
+            if not inventory.contains(relative_path):
                 return FreshnessScan()
-            self._states[observed.path] = observed.content_identity
-        notified, _opened, _unopened = self._apply_events(
-            (WatchedFileEvent(observed.path, FileChangeType.CHANGED),)
-        )
-        scan = FreshnessScan(changed=(observed.path,), notified=notified)
-        with self._lock:
-            self._last = scan
-        return scan
+            states = inventory.targeted_states([relative_path])
+            if not states:
+                return FreshnessScan()
+            observed = states[0]
+            with self._lock:
+                if self._states.get(observed.path) == observed.content_identity:
+                    return FreshnessScan()
+                self._states[observed.path] = observed.content_identity
+            notified, _opened, _unopened = self._apply_events(
+                (WatchedFileEvent(observed.path, FileChangeType.CHANGED),)
+            )
+            scan = FreshnessScan(changed=(observed.path,), notified=notified)
+            with self._lock:
+                self._last = scan
+            return scan
 
     def _capture_baseline(self, inventory: TrustInventory) -> None:
         """Record the stat facts a later scan compares against."""
@@ -718,96 +724,173 @@ class FreshnessCoordinator:
         notified: list[LanguageFamily] = []
         opened: list[str] = []
         unopened: list[str] = []
+        deliveries: list[_PendingWatchedReconcile] = []
+        affected_batches: list[tuple[LanguageFamily, tuple[WatchedFileEvent, ...], tuple[str, ...]]] = []
+
+        # Phase one is only generation bookkeeping.  No adapter access or
+        # submission may fail before every affected family is invalidated.
         for family, tracker in runtime.trackers.items():
             family_events = tuple(event for event in events if _family_of(event.path) is family)
             if not family_events:
                 continue
             tracker.apply_did_change_watched_files(family_events)
             family_created = tuple(path for path in created if _family_of(path) is family)
+            affected_batches.append((family, family_events, family_created))
+
+        # Publish ownership for every runnable delivery before attempting to
+        # admit any one family to the executor.
+        for family, family_events, family_created in affected_batches:
             adapter = runtime.adapters.get(family)
             if adapter is None or (not adapter.snapshot().running and family not in forced):
                 unopened.extend(family_created)
                 continue
             opens = family_created[:MAX_CONTROLLED_OPENS]
             pending = _PendingWatchedReconcile(family, adapter, family_events, opens, None)
-            self._pending_reconciles[family] = pending
-            try:
-                pending.future = runtime.notify_watched_files(adapter, family_events, opens)
-            except ExecutorBusyError as error:
-                if wait_for_delivery:
-                    raise WorkspaceRuntimeError(
-                        RuntimeErrorCode.BUSY,
-                        f"{family.value} freshness reconciliation could not enter the bounded executor",
-                    ) from error
-            except Exception as error:
-                if wait_for_delivery:
+            deliveries.append(pending)
+
+        with self._lock:
+            for pending in deliveries:
+                if pending.family in self._pending_reconciles:
                     raise WorkspaceRuntimeError(
                         RuntimeErrorCode.NOT_READY,
-                        f"{family.value} freshness reconciliation could not be submitted ({type(error).__name__})",
-                    ) from error
+                        f"{pending.family.value} freshness reconciliation already has pending ownership",
+                    )
+                self._pending_reconciles[pending.family] = pending
+
+        # Phase two admits every owned batch before waiting for any one family.
+        # Failures are retained by family and surfaced only after all later
+        # families have either settled or remain explicitly pending.
+        failures: dict[LanguageFamily, WorkspaceRuntimeError] = {}
+        admitted: set[LanguageFamily] = set()
+        for pending in deliveries:
+            family = pending.family
+            family_created = tuple(path for path in created if _family_of(path) is family)
+            try:
+                future = runtime.notify_watched_files(pending.adapter, pending.events, pending.created)
+            except ExecutorBusyError as error:
+                failures[family] = WorkspaceRuntimeError(
+                    RuntimeErrorCode.BUSY,
+                    f"{family.value} freshness reconciliation could not enter the bounded executor",
+                )
+                failures[family].__cause__ = error
+            except Exception as error:
+                failures[family] = WorkspaceRuntimeError(
+                    RuntimeErrorCode.NOT_READY,
+                    f"{family.value} freshness reconciliation could not be submitted ({type(error).__name__})",
+                )
+                failures[family].__cause__ = error
             else:
-                if wait_for_delivery:
-                    self._settle_pending_reconciles((family,))
-                notified.append(family)
-                opened.extend(opens)
-                unopened.extend(family_created[MAX_CONTROLLED_OPENS:])
-                continue
-            if not wait_for_delivery:
-                unopened.extend(family_created[MAX_CONTROLLED_OPENS:])
-            else:
+                with self._lock:
+                    current = self._pending_reconciles.get(family)
+                    if current is pending:
+                        pending.future = future
+                admitted.add(family)
+                if not wait_for_delivery:
+                    notified.append(family)
+                    opened.extend(pending.created)
+                    unopened.extend(family_created[MAX_CONTROLLED_OPENS:])
+            if family not in admitted:
                 unopened.extend(family_created)
+
+        if wait_for_delivery:
+            for pending in deliveries:
+                family = pending.family
+                if family in failures:
+                    continue
+                family_created = tuple(path for path in created if _family_of(path) is family)
+                try:
+                    self._settle_pending_reconciles((family,))
+                except WorkspaceRuntimeError as error:
+                    failures[family] = error
+                    unopened.extend(family_created)
+                else:
+                    notified.append(family)
+                    opened.extend(pending.created)
+                    unopened.extend(family_created[MAX_CONTROLLED_OPENS:])
+
+        for pending in deliveries:
+            failure = failures.get(pending.family)
+            if failure is not None and wait_for_delivery:
+                raise failure
         return tuple(notified), tuple(sorted(opened)), tuple(sorted(unopened))
 
     def _settle_pending_reconciles(self, families: Collection[LanguageFamily] | None = None) -> None:
         """Wait or retry every exact watcher task before dispatch can trust unchanged facts."""
 
-        selected = tuple(families) if families is not None else tuple(self._pending_reconciles)
+        with self._lock:
+            selected = tuple(families) if families is not None else tuple(self._pending_reconciles)
+        failures: list[WorkspaceRuntimeError] = []
         for family in selected:
-            pending = self._pending_reconciles.get(family)
-            if pending is None:
-                continue
-            future = pending.future
-            if future is None or future.done():
-                if future is not None:
-                    try:
-                        future.result()
-                    except Exception:
-                        pass
-                    else:
-                        self._pending_reconciles.pop(family, None)
-                        continue
-                try:
-                    pending.future = self._runtime.notify_watched_files(
-                        pending.adapter, pending.events, pending.created
-                    )
-                except ExecutorBusyError as error:
-                    raise WorkspaceRuntimeError(
-                        RuntimeErrorCode.BUSY,
-                        f"{family.value} freshness reconciliation is waiting for executor capacity",
-                    ) from error
-                except Exception as error:
-                    raise WorkspaceRuntimeError(
-                        RuntimeErrorCode.NOT_READY,
-                        (
-                            f"{family.value} freshness reconciliation retry could not be submitted "
-                            f"({type(error).__name__})"
-                        ),
-                    ) from error
-                future = pending.future
-            assert future is not None
             try:
-                future.result(timeout=self._runtime._future_timeout)
-            except TimeoutError as error:
-                raise WorkspaceRuntimeError(
-                    RuntimeErrorCode.BUSY,
-                    f"{family.value} freshness reconciliation is still pending",
-                ) from error
+                self._settle_pending_reconcile(family)
+            except WorkspaceRuntimeError as error:
+                failures.append(error)
+        if failures:
+            raise failures[0]
+
+    def _settle_pending_reconcile(self, family: LanguageFamily) -> None:
+        """Settle one owned batch, retiring a failed future so a later scan can retry."""
+
+        with self._lock:
+            pending = self._pending_reconciles.get(family)
+            future = pending.future if pending is not None else None
+        if pending is None:
+            return
+        if future is not None and future.done():
+            try:
+                future.result()
             except Exception as error:
+                with self._lock:
+                    current = self._pending_reconciles.get(family)
+                    if current is pending and pending.future is future:
+                        pending.future = None
                 raise WorkspaceRuntimeError(
                     RuntimeErrorCode.NOT_READY,
                     f"{family.value} freshness reconciliation failed ({type(error).__name__})",
                 ) from error
-            self._pending_reconciles.pop(family, None)
+            else:
+                with self._lock:
+                    if self._pending_reconciles.get(family) is pending:
+                        self._pending_reconciles.pop(family, None)
+                return
+        if future is None:
+            try:
+                submitted = self._runtime.notify_watched_files(pending.adapter, pending.events, pending.created)
+            except ExecutorBusyError as error:
+                raise WorkspaceRuntimeError(
+                    RuntimeErrorCode.BUSY,
+                    f"{family.value} freshness reconciliation is waiting for executor capacity",
+                ) from error
+            except Exception as error:
+                raise WorkspaceRuntimeError(
+                    RuntimeErrorCode.NOT_READY,
+                    (f"{family.value} freshness reconciliation retry could not be submitted ({type(error).__name__})"),
+                ) from error
+            with self._lock:
+                current = self._pending_reconciles.get(family)
+                if current is not pending:
+                    return
+                pending.future = submitted
+            future = submitted
+        try:
+            future.result(timeout=self._runtime._future_timeout)
+        except TimeoutError as error:
+            raise WorkspaceRuntimeError(
+                RuntimeErrorCode.BUSY,
+                f"{family.value} freshness reconciliation is still pending",
+            ) from error
+        except Exception as error:
+            with self._lock:
+                current = self._pending_reconciles.get(family)
+                if current is pending and pending.future is future:
+                    pending.future = None
+            raise WorkspaceRuntimeError(
+                RuntimeErrorCode.NOT_READY,
+                f"{family.value} freshness reconciliation failed ({type(error).__name__})",
+            ) from error
+        with self._lock:
+            if self._pending_reconciles.get(family) is pending:
+                self._pending_reconciles.pop(family, None)
 
 
 class WorkspaceRuntime:
@@ -1564,6 +1647,8 @@ class WorkspaceRuntime:
                             document,
                             _global_generations(snapshot),
                         )
+                except (LspResponseError, LspProtocolError, LspTransportClosed):
+                    raise
                 except Exception:
                     next_pending.append((family, adapter))
             pending = next_pending

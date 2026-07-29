@@ -12,7 +12,7 @@ import sys
 import tempfile
 import time
 from collections.abc import Iterator, Mapping
-from contextlib import contextmanager
+from contextlib import AsyncExitStack, contextmanager, suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import cast
@@ -27,7 +27,6 @@ from serena_light import cli
 from serena_light.bootstrap import inspect_runtime, runtime_paths
 from serena_light.build_identity import compute_build_identity
 from serena_light.runtime_files import (
-    RUNTIME_ROOT,
     BearerSecret,
     DiscoveryMetadata,
     RuntimeFileError,
@@ -80,10 +79,6 @@ def _read_daemon(runtime_root: Path) -> DiscoveryMetadata | None:
         )
     except RuntimeFileError:
         return None
-
-
-def _current_runtime_root() -> Path:
-    return prepare_runtime_layout(RUNTIME_ROOT, compute_build_identity(REPOSITORY_ROOT)).build_root
 
 
 def _service_connector_executable() -> Path:
@@ -163,14 +158,6 @@ def _descendants(identity: _DaemonProcess) -> tuple[_DaemonProcess, ...]:
     )
 
 
-def _process_tree(process: psutil.Process) -> tuple[_DaemonProcess, ...]:
-    return tuple(
-        _DaemonProcess(f"child:{child.pid}", child.pid, child.create_time())
-        for child in process.children(recursive=True)
-        if child.status() != psutil.STATUS_ZOMBIE
-    )
-
-
 def _data(result: types.CallToolResult) -> Mapping[str, object]:
     payload = result.structuredContent
     assert result.isError is not True
@@ -245,67 +232,149 @@ async def _run_fresh_stdio_client(
         return daemon_id
 
 
+class _HeldStdioClient:
+    """A test-owned stdio client whose lease remains active until explicitly closed."""
+
+    def __init__(
+        self,
+        workspace: Path,
+        *,
+        child_environment: Mapping[str, str],
+        expected_workspace_root: Path,
+        expected_build_identity: str,
+    ) -> None:
+        self._workspace = workspace
+        self._child_environment = dict(child_environment)
+        self._expected_workspace_root = expected_workspace_root
+        self._expected_build_identity = expected_build_identity
+        self._closed = asyncio.Queue[None]()
+        self._started: asyncio.Future[str] | None = None
+        self._task: asyncio.Task[None] | None = None
+
+    async def start(self) -> str:
+        assert self._task is None
+        self._started = asyncio.get_running_loop().create_future()
+        self._task = asyncio.create_task(self._run())
+        return await self._started
+
+    async def aclose(self) -> None:
+        task, self._task = self._task, None
+        if task is None:
+            return
+        await self._closed.put(None)
+        await task
+
+    async def _run(self) -> None:
+        assert self._started is not None
+        try:
+            async with AsyncExitStack() as stack:
+                parameters = StdioServerParameters(
+                    command=str(_service_connector_executable()),
+                    args=[],
+                    cwd=self._workspace,
+                    env=self._child_environment,
+                )
+                read_stream, write_stream = await stack.enter_async_context(stdio_client(parameters, errlog=sys.stderr))
+                client = await stack.enter_async_context(ClientSession(read_stream, write_stream))
+                initialized = await client.initialize()
+                assert initialized.serverInfo.name == "serena-light"
+                status = _data(await client.call_tool("get_runtime_status"))
+                assert status["build_identity"] == self._expected_build_identity
+                binding = _mapping(status["binding"])
+                assert Path(cast(str, binding["working_subdirectory"])).resolve() == self._workspace
+                runtime = _mapping(status["runtime"])
+                identity = _mapping(runtime["identity"])
+                assert Path(cast(str, identity["root"])).resolve() == self._expected_workspace_root
+                daemon_id = status["daemon_id"]
+                assert isinstance(daemon_id, str)
+                self._started.set_result(daemon_id)
+                await self._closed.get()
+        except BaseException as exc:
+            if not self._started.done():
+                self._started.set_exception(exc)
+                return
+            raise
+
+
 def test_real_stdio_connector_contains_proxy_environment_and_releases_to_warm_grace(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
-    """Clean and poisoned clients must not route loopback MCP through ambient proxies."""
+    """Isolated clean and poisoned clients retain one test-owned warm daemon."""
 
     runtime = inspect_runtime(REPOSITORY_ROOT)
     assert Path(cast(str, runtime["runtime"])).resolve() == runtime_paths(REPOSITORY_ROOT)["runtime"].resolve()
     _service_connector_executable()
-    runtime_root = _current_runtime_root()
+    runtime_root = (tmp_path / "isolated-proxy-runtime").resolve()
+    variant = "isolatedProxyWarmGrace1"
 
-    daemon_ids: list[str] = []
-    owned: _DaemonProcess | None = None
-    descendants: tuple[_DaemonProcess, ...] = ()
-    borrowed = _read_daemon(runtime_root)
-    borrowed_identity = (
-        None
-        if borrowed is None
-        else _DaemonProcess(borrowed.daemon_id, borrowed.pid, borrowed.process_start_time)
-    )
-    borrowed_descendants = () if borrowed_identity is None else _descendants(borrowed_identity)
-    test_children = _process_tree(psutil.Process())
-    baseline_holders: int | None = None
-    if borrowed is not None:
-        status = _migration_status(runtime_root, borrowed)
-        baseline_holders = cast(int, status["active_holders"])
-        assert isinstance(baseline_holders, int)
-    try:
-        for poisoned in (False, True):
-            with _proxy_environment(monkeypatch, poisoned=poisoned) as child_environment:
-                daemon_id = asyncio.run(
-                    _run_fresh_stdio_client(
-                        REPOSITORY_ROOT if not poisoned else REPOSITORY_ROOT / "src",
-                        child_environment=child_environment,
-                        release_workspace=poisoned,
-                        expected_workspace_root=REPOSITORY_ROOT,
-                    )
+    async def scenario() -> None:
+        clients: list[_HeldStdioClient] = []
+        owned: _DaemonProcess | None = None
+        descendants: tuple[_DaemonProcess, ...] = ()
+        try:
+            with _proxy_environment(monkeypatch, poisoned=False) as clean_environment:
+                clean_environment.update(
+                    {
+                        cli.ACCEPTANCE_RUNTIME_ROOT_ENV: str(runtime_root),
+                        cli.ACCEPTANCE_BUILD_VARIANT_ENV: variant,
+                        cli.ACCEPTANCE_WARM_GRACE_SECONDS_ENV: "1",
+                        cli.ACCEPTANCE_IDLE_EXIT_SECONDS_ENV: "8",
+                    }
                 )
-            daemon_ids.append(daemon_id)
+                acceptance = cli._acceptance_overrides(clean_environment)
+                assert acceptance is not None
+                build_identity = cli._acceptance_build_identity(acceptance)
+                build_root = prepare_runtime_layout(runtime_root, build_identity).build_root
+                first = _HeldStdioClient(
+                    REPOSITORY_ROOT,
+                    child_environment=clean_environment,
+                    expected_workspace_root=REPOSITORY_ROOT,
+                    expected_build_identity=build_identity,
+                )
+                first_daemon_id = await first.start()
+            clients.append(first)
+            metadata = _read_daemon(build_root)
+            assert metadata is not None and metadata.daemon_id == first_daemon_id
+            owned = _DaemonProcess(metadata.daemon_id, metadata.pid, metadata.process_start_time)
+            assert _is_live(owned)
+            descendants = _descendants(owned)
+            assert _migration_status(build_root, metadata)["active_holders"] == 1
 
-            metadata = _read_daemon(runtime_root)
-            assert metadata is not None
-            assert metadata.daemon_id == daemon_id
-            candidate = _DaemonProcess(metadata.daemon_id, metadata.pid, metadata.process_start_time)
-            assert _is_live(candidate)
-            lifetime = _migration_status(runtime_root, metadata)
-            expected_holders = 0 if borrowed_identity is None or candidate != borrowed_identity else baseline_holders
-            assert lifetime["active_holders"] == expected_holders
-            assert lifetime["daemon_idle"] is False
-            if owned is None:
-                if borrowed_identity is None or candidate != borrowed_identity:
-                    owned = candidate
-                    descendants = _descendants(candidate)
-                else:
-                    assert _descendants(candidate) == borrowed_descendants
-            assert _descendants(candidate) == (descendants if owned is not None else borrowed_descendants)
-            assert _process_tree(psutil.Process()) == test_children, "stdio connector left a child process behind"
-    finally:
-        if owned is not None:
-            _terminate_owned_daemon(owned, descendants)
+            with _proxy_environment(monkeypatch, poisoned=True) as poisoned_environment:
+                poisoned_environment.update(
+                    {
+                        cli.ACCEPTANCE_RUNTIME_ROOT_ENV: str(runtime_root),
+                        cli.ACCEPTANCE_BUILD_VARIANT_ENV: variant,
+                        cli.ACCEPTANCE_WARM_GRACE_SECONDS_ENV: "1",
+                        cli.ACCEPTANCE_IDLE_EXIT_SECONDS_ENV: "8",
+                    }
+                )
+                second = _HeldStdioClient(
+                    REPOSITORY_ROOT / "src",
+                    child_environment=poisoned_environment,
+                    expected_workspace_root=REPOSITORY_ROOT,
+                    expected_build_identity=build_identity,
+                )
+                second_daemon_id = await second.start()
+            clients.append(second)
+            assert second_daemon_id == first_daemon_id
+            assert _migration_status(build_root, metadata)["active_holders"] == 2
+            assert _is_live(owned)
 
-    assert daemon_ids[0] == daemon_ids[1], "the second fresh stdio client should reuse the warm service daemon"
+            await first.aclose()
+            clients.remove(first)
+            assert _migration_status(build_root, metadata)["active_holders"] == 1
+            assert _is_live(owned), "closing one test-owned holder must preserve the second holder's daemon"
+            assert _descendants(owned) == descendants
+        finally:
+            for client in reversed(clients):
+                with suppress(BaseException):
+                    await client.aclose()
+            if owned is not None:
+                _terminate_owned_daemon(owned, descendants)
+
+    asyncio.run(scenario())
 
 
 def test_real_stdio_connector_performs_hash_edit_and_release_under_poisoned_proxy(

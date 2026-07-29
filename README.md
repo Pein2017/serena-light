@@ -40,20 +40,24 @@ The current real-stdio connector independently passes its guarded-edit and
 cross-library declaration contracts.
 Canonical `serena` remains unchanged pending a separate user decision.
 
-**Current state: `DUAL AUDIT HOLD — FINAL REAUDIT PENDING`.** Exact-head audits
-of `8f51d9e` found stale already-open document reconciliation, failed runtime
-stop ownership, untyped LSP failures, and mutable external acceptance evidence.
-Local repair commit `625187c` repairs those findings, adds truthful pending-stop status
-and agent-facing tool/schema descriptions, and snapshot-gates external roots.
-Exact-current-head Sol-xhigh and Opus-max PASS verdicts are still required.
+**Current state: `DUAL AUDIT HOLD — FINAL REAUDIT PENDING`.** The follow-up
+exact-head audits of `7ba6773` found a post-stop admission race, partial
+multi-family invalidation after watcher failure, incomplete transport-loss
+translation, mutable ignored TypeScript authority outside the external
+snapshot, and a shared-daemon holder race in the stdio acceptance. The current
+candidate seals ordinary adapter admission synchronously, advances every
+affected family before delivery, completes the typed transport boundary,
+content-binds the native TypeScript authority, and uses an isolated test-owned
+daemon/leases for stdio acceptance. Exact-current-head Sol-xhigh and Opus-max
+PASS verdicts are still required.
 Agent-public
 `replace_symbol_body` remains restored after its fault
 matrix, full regression, and three fresh-client hash-edit receipts passed. This
 is **not** v1 PASS. Source ownership/provenance
 passes with 9 copied hashes against official Serena commit
-`9a9d07e83d8c1cba3458992707f440c624446c6d`; production LOC (14,597) is
+`9a9d07e83d8c1cba3458992707f440c624446c6d`; production LOC (14,706) is
 informational only and not gated. The current repair candidate has build
-identity `c85f2b4fac40069593d42b0631a0626b8a5330b732414065f0cfeb801506d34a`.
+identity `f46812e239fbf614c3885b50057734a31ddf7fb27d6e39e7239c01742d3e1fda`.
 See
 [the final acceptance record](openspec/changes/build-serena-light-v1/final-acceptance.md)
 for the full gate evidence and residual risks.

@@ -46,17 +46,18 @@ complete fault matrix passes. Then obtain
 independent `sol-xhigh` static-correctness and `opus-max` runtime/evidence
 audits, disposition every finding, mark v1 PASS, sync stable specs, and archive.
 
-**Progress as of 2026-07-29:** exact-head Sol-xhigh and Opus-max audits at
-`8f51d9e` both returned HOLD. Their open-document freshness, runtime-stop,
-typed-LSP-boundary, declaration-evidence, and mutable-acceptance findings are
-implemented at local repair commit `625187c` in build
-`c85f2b4fac40069593d42b0631a0626b8a5330b732414065f0cfeb801506d34a`.
-The deterministic default suite passes 515 tests and explicitly skips 22
-snapshot-gated external tests; fixed-snapshot Python real-repository acceptance
-passes 4 tests, real Pyright integration passes 2, fixed-snapshot TypeScript
-acceptance/integration/admission passes 15, and three fresh transformers
-first-call performance runs pass. Final current-build clients, dual audit, and
-release remain pending.
+**Progress as of 2026-07-29:** follow-up exact-head Sol-xhigh and Opus-max
+audits at `7ba6773` both returned HOLD. Their adapter admission, multi-family
+freshness, complete transport-envelope, external authority, and hermetic-stdio
+findings are implemented in candidate build
+`f46812e239fbf614c3885b50057734a31ddf7fb27d6e39e7239c01742d3e1fda`.
+The deterministic default suite passes 528 tests and explicitly skips 22
+snapshot-gated external tests; fixed-snapshot Python plus real Pyright passes 7
+tests with the separate performance case intentionally skipped, fixed-snapshot
+TypeScript acceptance/integration/admission passes 15, and three fresh
+transformers first-call performance runs pass. Fresh Codex/Terra and CC/Sonnet
+clients also pass the four-root matrix plus isolated hash edit/restore at the
+exact build. Only dual audit and release remain pending.
 
 Gate: every blocker is cleared and task 15 is complete. Sync/archive and the
 authorized GitHub push occur only after both final audits pass; no canonical

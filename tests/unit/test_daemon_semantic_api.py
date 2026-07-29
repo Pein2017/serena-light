@@ -13,8 +13,8 @@ from starlette.testclient import TestClient
 from serena_light.daemon.leases import LeaseLifecycle
 from serena_light.daemon.server import create_daemon_app
 from serena_light.daemon.service import WorkspaceDaemonService
-from serena_light.lsp.adapter import AdapterError, AdapterErrorCode
-from serena_light.lsp.client import LspProtocolError, LspResponseError
+from serena_light.lsp.adapter import AdapterError, AdapterErrorCode, LspProcessLost
+from serena_light.lsp.client import LspProtocolError, LspResponseError, LspTransportClosed
 from serena_light.lsp.executor import ExecutorBusyError
 from serena_light.runtime_files import BearerSecret
 from serena_light.tools.envelopes import ErrorCode, JsonValue, error, success
@@ -427,6 +427,29 @@ def test_runtime_boundary_converts_typed_failures_without_generic_rewriting() ->
     assert _data_map(lsp_protocol_edit["error"])["code"] == "UNCERTAIN"
     assert "secret" not in json.dumps(lsp_protocol_edit)
 
+    # A transport close/process loss the adapter's own retry already
+    # exhausted is the same boundary concern as an ordinary LSP failure --
+    # not a programming error, and not the generic OSError fallback.
+    transport_closed_read = asyncio.run(call(LspTransportClosed("adapter runtime disappeared: secret")))
+    assert _data_map(transport_closed_read["error"]) == {
+        "code": "UNSUPPORTED",
+        "message": "operation is unsupported",
+        "retry": None,
+        "details": {"tool": "operation", "reason": "lsp_failure"},
+    }
+    assert "secret" not in json.dumps(transport_closed_read)
+
+    process_lost_edit = asyncio.run(
+        call(LspProcessLost("language server exited with status 1: secret"), operation="replace_symbol_body")
+    )
+    assert _data_map(process_lost_edit["error"]) == {
+        "code": "UNCERTAIN",
+        "message": "operation outcome is uncertain",
+        "retry": None,
+        "details": {},
+    }
+    assert "secret" not in json.dumps(process_lost_edit)
+
     uncertain = error(ErrorCode.UNCERTAIN).to_dict()
     assert asyncio.run(call(uncertain)) == uncertain
 
@@ -527,4 +550,91 @@ def test_lsp_response_and_protocol_errors_translate_through_service_and_http_bou
 
         # Each failing operation ran exactly once: no automatic replay of the
         # pre-install edit resolution or the read.
+        assert [call[0] for call in created[0].calls] == ["find_symbol", "replace_symbol_body"]
+
+
+@dataclass(eq=False)
+class LspTransportLostRuntime:
+    """A runtime whose semantic read and edit both surface the exact
+    transport/process-lost exceptions the adapter's own retry already
+    exhausted, instead of a wrapped workspace/adapter error."""
+
+    identity: str
+    calls: list[tuple[str, dict[str, object]]] = field(default_factory=list)
+
+    def find_symbol(self, **kwargs: object) -> object:
+        self.calls.append(("find_symbol", dict(kwargs)))
+        raise LspTransportClosed("adapter runtime disappeared before dispatch: secret-token")
+
+    def replace_symbol_body(self, **kwargs: object) -> object:
+        # Fails after the adapter's own retry is exhausted, before any
+        # replacement is installed -- there is nothing to replay.
+        self.calls.append(("replace_symbol_body", dict(kwargs)))
+        raise LspProcessLost("language server exited with status 1: secret-token")
+
+
+def _lsp_transport_lost_service() -> tuple[
+    WorkspaceDaemonService[str, LspTransportLostRuntime], list[LspTransportLostRuntime]
+]:
+    created: list[LspTransportLostRuntime] = []
+
+    def factory(identity: str) -> LspTransportLostRuntime:
+        runtime = LspTransportLostRuntime(identity)
+        created.append(runtime)
+        return runtime
+
+    service = WorkspaceDaemonService[str, LspTransportLostRuntime](
+        lifecycle=LeaseLifecycle(clock=lambda: 0.0),
+        registry=WorkspaceRuntimeRegistry(factory),
+        resolver=lambda path: ResolvedWorkspace(identity=str(path.parent), working_subdirectory=path),
+        runtime_stopper=lambda _runtime: None,
+    )
+    return service, created
+
+
+def test_exhausted_transport_and_process_lost_translate_through_service_and_http_boundary_without_replay() -> None:
+    service, created = _lsp_transport_lost_service()
+    token = "t" * 48
+    daemon_id = str(uuid4())
+    app = create_daemon_app(service=service, bearer=BearerSecret(token), daemon_id=daemon_id)
+    authorization = f"Bearer {token}"
+
+    with TestClient(app, base_url="http://127.0.0.1:8000", client=("127.0.0.1", 50000)) as client:
+        session = _initialize(client, authorization)
+        lease = _data(_call(client, authorization, session, "acquire_lease"))["lease_id"]
+        assert isinstance(lease, str)
+        _call(client, authorization, session, "activate_workspace", {"absolute_path": "/data/one/subdir"}, lease)
+
+        # A read cannot have installed anything, so an exhausted transport
+        # loss is declared UNSUPPORTED with a bounded reason -- never a code
+        # implying a possible write.
+        read_failure = _call(client, authorization, session, "find_symbol", {"name_path": "Thing"}, lease)
+        assert _data_map(read_failure["error"]) == {
+            "code": "UNSUPPORTED",
+            "message": "operation is unsupported",
+            "retry": None,
+            "details": {"tool": "find_symbol", "reason": "lsp_failure"},
+        }
+        assert "secret-token" not in json.dumps(read_failure)
+
+        # A write must fail conservatively with no retry (it may already be
+        # installed).
+        edit_failure = _call(
+            client,
+            authorization,
+            session,
+            "replace_symbol_body",
+            {"name_path": "Thing", "relative_path": "a.py", "body": "x", "expected_hash": "0" * 64},
+            lease,
+        )
+        assert _data_map(edit_failure["error"]) == {
+            "code": "UNCERTAIN",
+            "message": "operation outcome is uncertain",
+            "retry": None,
+            "details": {},
+        }
+        assert "secret-token" not in json.dumps(edit_failure)
+
+        # Each failing operation ran exactly once: no automatic replay of the
+        # edit or the read after the adapter's own retry was exhausted.
         assert [call[0] for call in created[0].calls] == ["find_symbol", "replace_symbol_body"]

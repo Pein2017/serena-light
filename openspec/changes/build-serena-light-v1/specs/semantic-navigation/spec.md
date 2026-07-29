@@ -125,7 +125,7 @@ exactly one capture group, optionally restricted to one containing symbol body.
 - **THEN** every tool has a non-empty agent-facing description and the `find_declaration.regex` schema states that exactly one capture group selects the queried symbol
 
 #### Scenario: Language server returns an ordinary protocol error
-- **WHEN** a semantic read receives an LSP response or protocol failure
+- **WHEN** a semantic read receives an LSP response/protocol failure or an exhausted transport/process loss, including during cold global warm-up
 - **THEN** the service boundary returns a bounded non-leaking `UNSUPPORTED` envelope; the same failure during guarded editing returns `UNCERTAIN` and the edit is never replayed
 
 #### Scenario: Declaration locator is ambiguous

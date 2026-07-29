@@ -4,31 +4,30 @@ Date: 2026-07-29 UTC
 
 ## Decision
 
-**DUAL AUDIT HOLD — FINAL REAUDIT PENDING.** The first exact-current-head final
-audits at `8f51d9e` both returned HOLD. Sol-xhigh reproduced a current-generation
-false negative after an already-open document changed externally, proved that
-the production runtime owner discarded a failed stop, and found ordinary LSP
-response/protocol failures escaping the typed service boundary. Opus-max
-independently confirmed the stop/sweep/migration truth failures and also found
-that the complete-suite claim depended on live mutable `cc-plugin-codex` and
-transformers state. Both reviews identified inaccurate declaration-client
-evidence: five CC calls, not four, all correctly rejected because their regexes
-had zero capture groups.
+**DUAL AUDIT HOLD — FINAL REAUDIT PENDING.** The follow-up exact-head audits at
+`7ba6773` both returned HOLD after confirming the prior `8f51d9e` blockers were
+fixed. Sol-xhigh found that an admitted adapter stop did not synchronously seal
+ordinary work, exhausted transport/process loss still escaped the typed service
+boundary, and external acceptance did not content-bind ignored native
+TypeScript authority. Opus-max reproduced a two-family freshness failure in
+which the first delivery exception prevented a later family from invalidating,
+and a default stdio test that borrowed the shared production daemon then made
+holder/child equality assertions invalid under legitimate concurrent clients.
 
-Repair commit `625187c` fixes those findings and their adjacent
-agent-usability gaps. Open changed documents receive full-text `didChange` (or
-`didClose`) and watcher futures are retained, settled, and retried before stale
-facts can authorize success. Failed runtime stops remain owned, periodic sweeps
-continue across failures, migration uses service-level idleness, and release
-responses distinguish confirmed stop from pending cleanup. LSP failures are
-translated without leaking server messages or replaying edits. All public tools
-now have descriptions, the declaration regex schema states the one-capture-group
-contract, and invalid details distinguish zero, multiple, and malformed groups.
-Default tests no longer consume mutable external roots: explicit real-root and
-performance gates require exact before/after snapshot equality. V1 remains HOLD
-until this candidate is committed, fully reaccepted, and both Sol-xhigh and
-Opus-max return PASS against that exact commit. The canonical MCP registration
-named `serena` remains unchanged.
+The current candidate fixes all five findings. Adapter stop seals every
+ordinary submit/worker path before cleanup admission and retries failed cleanup
+without reopening it. Freshness advances all affected family generations,
+publishes their pending ownership, and admits every delivery before surfacing
+the first failure. Cold global LSP failures reach the service boundary, which
+now translates response, protocol, transport-closed, and process-lost failures
+without leaking server text or replaying edits. Missing snapshot opt-in skips
+before touching external roots; the `cc-plugin-codex` profile binds the ignored
+launcher chain and ultimate native `tsc`, and teardown reuses the same profile.
+The clean/poisoned stdio test uses an isolated runtime and two test-owned leases
+and proves that closing one holder preserves the other. V1 remains HOLD until
+fresh current-build clients pass and Sol-xhigh plus Opus-max return PASS against
+one exact committed checkpoint. The canonical MCP registration named `serena`
+remains unchanged.
 
 ### Superseded pre-audit decision
 
@@ -52,58 +51,61 @@ SUPERSEDED — HOLD after static/runtime audits found release-blocking gaps.
 Neither historical entry is a current release decision and neither may be
 used to archive this change.
 
-## Current second-audit repair checkpoint (`625187c`)
+## Current third-audit repair candidate
 
 The candidate runtime identity is
-`c85f2b4fac40069593d42b0631a0626b8a5330b732414065f0cfeb801506d34a`;
+`f46812e239fbf614c3885b50057734a31ddf7fb27d6e39e7239c01742d3e1fda`;
 the dependency digest remains
 `eff6ebdf252faff7f77cb3a2f3894d17b9a0dfc89b46bd193fafdaa9e9ab4941`.
 The following evidence is current, but does not yet constitute release PASS:
 
 ```text
 uv run --frozen pytest -q -p no:cacheprovider tests
-515 passed, 22 skipped, 3 warnings in 173.05s
+528 passed, 22 skipped, 3 warnings in 163.35s
 (all 22 skips are explicit external_repo/performance gates without snapshot env)
 
-high-risk daemon/freshness/schema selection
-107 passed, 1 warning
+repair-focused adapter/runtime/service/snapshot/stdio selection
+91 passed, 1 warning in 13.23s
 
-snapshot-bound Python real-repository acceptance
-4 passed, 2 deselected in 128.00s
-
-snapshot-bound real Pyright integration
-2 passed in 15.18s
+snapshot-bound Python real-repository plus real Pyright integration
+7 passed, 1 intentional performance skip in 140.54s
 
 snapshot-bound TypeScript acceptance, integration, and admission
-15 passed in 20.12s
+15 passed in 22.57s
 
 transformers first-call performance gate, three fresh runtimes
-3/3 passed; production-call wall observations 30.77s, 28.33s, 34.16s
+3/3 passed in 29.42s, 33.74s, and 33.62s
 
-uv run --frozen ruff check .
+uv run --frozen ruff check --no-cache src tests scripts
 All checks passed!
 
-uv run --frozen ty check
+uv run --frozen ty check --no-progress
 All checks passed!
 
 uv run --frozen serena-light-bootstrap --check --json
 PASS (service CPython 3.12.12; dependency digest above)
 
 uv run --frozen serena-light-source-budget --json
-PASS: 14,597 production lines (informational; maximum=null, not gated)
+PASS: 14,706 production lines (informational; maximum=null, not gated)
 
 openspec validate build-serena-light-v1 --strict
 Change 'build-serena-light-v1' is valid
 ```
 
 The default-suite skips are deliberate evidence isolation, not substituted
-passes. Explicit TypeScript acceptance later found a stable window and passed
-against exact snapshot
-`git:7caa1823bd246deb0d690c83263bc4d4a80480c9:bb7e2813111fc635dc5ff6a3cf5ecd63d58247e9104d825dcdeb2cf292814a04`;
-the before/after gate also covers repository-native typecheck authority. Serena
-Light did not freeze or modify that foreign checkout. Fresh current-build
-Codex, Claude Code, and CC Agent acceptance plus exact-current-head Sol/Opus
-audits remain pending.
+passes. Explicit TypeScript acceptance passed against exact authority-profile
+snapshot
+`git:7caa1823bd246deb0d690c83263bc4d4a80480c9:a74fd2b2c5c975139c0d184413bfdb14f0a6b3f55c34ea7e6c8c74b53ca4fc90`;
+the before/after gate content-binds repository-native typecheck authority.
+Serena Light did not freeze or modify that foreign checkout. Fresh Codex/Terra
+and CC/Sonnet clients passed the exact candidate build across all four roots.
+Both resolved a declaration from `ms-swift` into transformers as
+`read_only_external`, edited and restored `greet` in separate isolated Git
+fixtures using successive expected hashes, confirmed empty fixture diffs, and
+released with `runtime_stop_pending=false`; the temporary fixtures were then
+removed. Exact-current-head Sol/Opus audits remain pending. The native Claude
+Code receipt remains historical unless a separate current client is required
+by a later gate.
 
 ## Prior repair checkpoint (superseded by current candidate)
 

@@ -239,6 +239,10 @@ files served through configured, inferred, or transient engine projects.
 - **WHEN** watcher delivery, open-document reconciliation, executor admission, or its retained future fails or times out
 - **THEN** the operation returns retryable `BUSY` or `NOT_READY`, retains the exact event batch for retry, and an unchanged later scan cannot authorize success until that batch settles
 
+#### Scenario: One language-family delivery fails before another family
+- **WHEN** one freshness scan changes multiple language families and an earlier family's watcher delivery fails
+- **THEN** every affected family has already advanced its generation, all later-family deliveries are admitted or explicitly retained before the failure is returned, and no family can serve a stale current-generation success
+
 #### Scenario: Omitted trusted file changes
 - **WHEN** a trusted file outside the configured program changes without changing native program membership
 - **THEN** its path-scoped document generation is invalidated without falsely invalidating or expanding configured-program global readiness
@@ -271,6 +275,10 @@ files served through configured, inferred, or transient engine projects.
 - **WHEN** an owned adapter stop cannot enter even the reserved cleanup queue
 - **THEN** shutdown returns a failure without publishing `stopped`, retains the
   exact cleanup owner, and a later shutdown attempt retries admission
+
+#### Scenario: Ordinary work races an admitted adapter stop
+- **WHEN** an ordinary adapter operation was queued before stop or is submitted after stop is requested
+- **THEN** stop seals ordinary admission synchronously, the queued worker rechecks the seal, no provider can start or restart after the request, and a failed cleanup admission/future remains retryable without reopening admission
 
 #### Scenario: Registry retirement detaches a runtime before cleanup fails
 - **WHEN** lease policy atomically removes an idle runtime and its first stop

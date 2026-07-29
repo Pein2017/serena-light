@@ -21,7 +21,7 @@ from types import MappingProxyType
 from typing import IO, Any, Protocol, TypeVar, cast
 
 from serena_light.lsp.client import LspTransportClosed, SyncLspClient
-from serena_light.lsp.executor import BoundedLspExecutor
+from serena_light.lsp.executor import BoundedLspExecutor, ExecutorBusyError
 from serena_light.lsp.positions import FileSnapshot, PositionEncoding, PositionError
 from serena_light.lsp.state import LspState
 from serena_light.processes import (
@@ -554,6 +554,8 @@ class LanguageAdapter:
         self._cooldown_until_monotonic: float | None = None
         self._cooldown_until_timestamp: float | None = None
         self._transitions: deque[PhaseTransition] = deque(maxlen=64)
+        self._ordinary_admission_sealed = False
+        self._stop_future: Future[AdapterSnapshot] | None = None
         self._transition(AdapterPhase.COLD, "registered")
 
     def routes(self, path: str | Path) -> bool:
@@ -584,16 +586,28 @@ class LanguageAdapter:
             )
 
     def start(self) -> Future[AdapterSnapshot]:
-        return self._executor.submit(self._start_and_snapshot_worker)
+        return self._submit_ordinary(self._start_and_snapshot_worker)
 
     def stop(self) -> Future[AdapterSnapshot]:
-        return self._executor.submit_cleanup(self._stop_and_snapshot_worker)
+        with self._state_lock:
+            if self._stop_future is not None:
+                if not self._stop_future.done():
+                    return self._stop_future
+                if not self._stop_future.cancelled() and self._stop_future.exception() is None:
+                    return self._stop_future
+                self._stop_future = None
+            self._ordinary_admission_sealed = True
+            # A requested stop permanently disowns ordinary work even when the
+            # cleanup reserve is full.  Only cleanup admission is retryable.
+            future = self._executor.submit_cleanup(self._stop_and_snapshot_worker)
+            self._stop_future = future
+            return future
 
     def submit_read(self, operation: Callable[[AdapterClient], T]) -> Future[T]:
-        return self._executor.submit(lambda: self._execute_worker(operation, read_only=True))
+        return self._submit_ordinary(lambda: self._execute_worker(operation, read_only=True))
 
     def submit_edit(self, operation: Callable[[AdapterClient], T]) -> Future[T]:
-        return self._executor.submit(lambda: self._execute_worker(operation, read_only=False))
+        return self._submit_ordinary(lambda: self._execute_worker(operation, read_only=False))
 
     def reconcile_watched_files(
         self,
@@ -614,7 +628,7 @@ class LanguageAdapter:
         batch = tuple(events)
         controlled_opens = tuple(created)
         supplied_versions = dict(versions)
-        return self._executor.submit(
+        return self._submit_ordinary(
             lambda: self._reconcile_watched_files_worker(batch, controlled_opens, supplied_versions)
         )
 
@@ -626,7 +640,7 @@ class LanguageAdapter:
         version: int,
         text: str,
     ) -> Future[DocumentReadinessTarget]:
-        return self._executor.submit(
+        return self._submit_ordinary(
             lambda: self._open_document_worker(
                 relative_path=relative_path,
                 uri=uri,
@@ -642,14 +656,32 @@ class LanguageAdapter:
         timeout: float | None = None,
     ) -> Future[tuple[Mapping[str, object], ...]]:
         bounded_timeout = self._bounded_timeout(timeout)
-        return self._executor.submit(lambda: self._warm_global_worker(witness, bounded_timeout))
+        return self._submit_ordinary(lambda: self._warm_global_worker(witness, bounded_timeout))
 
     def probe_document(
         self,
         target: DocumentReadinessTarget,
         probe: DocumentReadinessProbe,
     ) -> Future[DocumentReadinessTarget]:
-        return self._executor.submit(lambda: self._probe_document_worker(target, probe))
+        return self._submit_ordinary(lambda: self._probe_document_worker(target, probe))
+
+    def _submit_ordinary(self, call: Callable[[], T]) -> Future[T]:
+        """Admit ordinary work only while this adapter still owns its runtime."""
+
+        with self._state_lock:
+            self._raise_if_ordinary_admission_sealed_locked()
+            return self._executor.submit(lambda: self._run_admitted_ordinary_worker(call))
+
+    def _run_admitted_ordinary_worker(self, call: Callable[[], T]) -> T:
+        # A caller may have queued this before stop obtained the lock.  Do not
+        # let that stale item lazily start or restart a provider after stop.
+        with self._state_lock:
+            self._raise_if_ordinary_admission_sealed_locked()
+        return call()
+
+    def _raise_if_ordinary_admission_sealed_locked(self) -> None:
+        if self._ordinary_admission_sealed:
+            raise ExecutorBusyError("adapter ordinary admission is sealed for stop")
 
     def wait_for_document(
         self,
@@ -681,6 +713,7 @@ class LanguageAdapter:
 
     def _ensure_started_worker(self) -> AdapterClient:
         with self._state_lock:
+            self._raise_if_ordinary_admission_sealed_locked()
             self._refresh_cooldown_locked()
             if self._phase is AdapterPhase.COOLDOWN:
                 crash = self._crash_snapshot_locked()
@@ -738,7 +771,6 @@ class LanguageAdapter:
             if runtime is None and self._phase is AdapterPhase.COLD:
                 return
             self._transition(AdapterPhase.STOPPING, "explicit stop")
-            self._runtime = None
             self._pending_documents.clear()
             closing_uris = tuple(self._open_documents)
             self._open_documents.clear()
@@ -748,6 +780,8 @@ class LanguageAdapter:
                     runtime.client.notify("textDocument/didClose", {"textDocument": {"uri": uri}})
             self._runtime_provider.stop(runtime)
         with self._state_lock:
+            if self._runtime is runtime:
+                self._runtime = None
             self._transition(AdapterPhase.COLD, "stopped")
 
     def _execute_worker(self, operation: Callable[[AdapterClient], T], *, read_only: bool) -> T:
