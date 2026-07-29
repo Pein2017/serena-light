@@ -242,6 +242,12 @@ attach only to an exact identity match.
 - **THEN** it starts or joins the new build daemon and does not kill or reuse the
   leased old-build daemon
 
+#### Scenario: Executed non-Python helper changes
+- **WHEN** the packaged Pyright `.mjs` helper is modified or a new packaged
+  `.mjs` helper is added
+- **THEN** the computed build identity changes just as it does for a Python
+  runtime-source change
+
 #### Scenario: Source changes during startup
 - **WHEN** daemon recomputation differs from the identity selected by its connector
 - **THEN** startup fails before publishing discovery
@@ -253,6 +259,12 @@ attach only to an exact identity match.
 #### Scenario: Last build lease and warm grace end
 - **WHEN** no holder or warm workspace remains for a build
 - **THEN** that build daemon exits without deleting discovery owned by a successor
+
+#### Scenario: Legacy v1 status reports zero holders
+- **WHEN** authenticated legacy discovery, holder count, PID, and create time
+  match but the protocol cannot atomically freeze new lease acquisition
+- **THEN** migration returns `atomic_retirement_unsupported`, sends no signal,
+  and requires explicit operator coordination
 
 ### Requirement: Runtime executables are service-owned
 The service SHALL install its pinned CPython below
@@ -266,6 +278,13 @@ venv executables MUST NOT resolve below `/root/.local/share/uv`.
 - **THEN** Python is owned below the shared Serena Light runtime, HOME is
   service-owned, executable paths are locked, and no child proxy variable or
   `/root/.local/share/uv` executable is present
+
+#### Scenario: Editable v1 service install rolls over
+- **WHEN** the service-owned executable resolves Serena Light imports to the
+  live repository checkout and covered source bytes change
+- **THEN** the connector selects a new build identity, and rollback requires
+  restoring the intended local source revision rather than reusing a slot as a
+  source snapshot
 
 ### Requirement: Leases bound runtime lifetime
 Each connector SHALL renew a daemon-issued lease every 15 seconds. A lease SHALL
@@ -283,11 +302,14 @@ language servers. Immediate release SHALL bypass the grace period.
 
 #### Scenario: Immediate workspace release
 - **WHEN** the last holder calls `release_workspace(immediate=true)`
-- **THEN** the runtime stops its language servers without waiting for warm grace
+- **THEN** that binding is detached, its daemon lease remains active and
+  unbound, and the runtime stops its language servers without waiting for warm
+  grace
 
 #### Scenario: Non-last holder releases immediately
 - **WHEN** one of multiple same-root holders calls `release_workspace(immediate=true)`
-- **THEN** only that lease is released and the shared runtime remains available to the other holders
+- **THEN** only that binding is detached, its daemon lease remains active and
+  unbound, and the shared runtime remains available to the other holders
 
 #### Scenario: Long operation does not starve heartbeat
 - **WHEN** a workspace LSP operation remains active for more than 60 seconds

@@ -24,9 +24,12 @@ Guarded editing (`replace_symbol_body`) is withheld again for new clients.
 4. Install service-owned CPython and introduce reproducible build identities,
    versioned daemon slots, nonce-authorized startup, coexistence, and retirement.
 
-Gate: all tasks 11–14 in `build-serena-light-v1` pass through real daemon and
-connector tests. No canonical-name change is permitted. **Passed as of
-2026-07-29**; see
+Gate: all tasks 11–14 in `build-serena-light-v1` pass at their declared evidence
+layer. Unit/in-process, real connector plus deterministic LSP, real daemon fault,
+and real LSP/repository evidence must be named separately; only the stdio gate
+currently combines the production connector executable with the shared daemon.
+No canonical-name change is permitted. The accepted code findings were repaired
+at local commit `d129dee`; remaining real-layer reacceptance is still open. See
 [the final acceptance record](../openspec/changes/build-serena-light-v1/final-acceptance.md).
 
 ## Phase B: reaccept and release v1
@@ -38,8 +41,10 @@ package with fresh Codex, Claude Code, and CC Agent clients. Restore
 independent `sol-xhigh` static-correctness and `opus-max` runtime/evidence
 audits, disposition every finding, mark v1 PASS, sync stable specs, and archive.
 
-**Progress as of 2026-07-29:** both required auditors returned HOLD. Repair and
-reacceptance must close their accepted P1 findings before task 15 may pass.
+**Progress as of 2026-07-29:** both required auditors returned HOLD. Their
+accepted code findings are repaired and targeted checks pass, while real daemon
+rollover/edit fault coverage, the current-build fresh-client matrix, final dual
+audit, and release remain pending.
 
 Gate: every blocker is cleared and task 15 is complete. Local commits are kept;
 no push and no canonical Serena switch.

@@ -28,7 +28,7 @@
     {"name": "find_implementations", "visibility": "agent_public", "serena_name": "find_implementations", "required_args": ["name_path", "relative_path"], "classification": "supported", "delta": "capability-gated typed result"},
     {"name": "get_diagnostics_for_file", "visibility": "agent_public", "serena_name": "get_diagnostics_for_file", "required_args": ["relative_path"], "classification": "shimmed", "delta": "generation-aware status replaces line-range interface"},
     {"name": "get_diagnostics_for_symbol", "visibility": "agent_public", "serena_name": "get_diagnostics_for_symbol", "required_args": ["relative_path", "name_path"], "classification": "shimmed", "delta": "path plus symbol required; no reference-file expansion"},
-    {"name": "replace_symbol_body", "visibility": "temporarily_withheld_pending_reacceptance", "serena_name": "replace_symbol_body", "required_args": ["name_path", "relative_path", "body", "expected_hash"], "classification": "shimmed", "delta": "whole-file expected_hash is mandatory; withheld again after the final dual audit found a parent-rename TOCTOU blocker"}
+    {"name": "replace_symbol_body", "visibility": "temporarily_withheld_pending_reacceptance", "serena_name": "replace_symbol_body", "required_args": ["name_path", "relative_path", "body", "expected_hash"], "classification": "shimmed", "delta": "whole-file expected_hash is mandatory; parent-rename races are fail-closed or UNCERTAIN after installation; advertisement remains withheld until full reacceptance"}
   ],
   "session_start": {
     "serena": {"consumer": "serena-hooks activate --client=codex", "classification": "dropped", "reason": "serena-light binds inherited connector cwd without a hook"},

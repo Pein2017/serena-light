@@ -440,8 +440,9 @@ The connector sends a heartbeat every 15 seconds. A lease expires after 60
 seconds without renewal. The last released or expired lease starts a ten-minute
 warm grace; after it elapses the runtime stops its language servers and leaves
 only bounded metadata. `release_workspace(immediate=true)` bypasses the grace
-only when the released lease is the last holder; otherwise it releases that
-connector without stopping the shared runtime.
+only when the released binding is the last holder; otherwise it detaches that
+binding without stopping the shared runtime. In both cases the daemon lease
+remains active and unbound so the connector may activate another root.
 
 A read-only request interrupted by a language-server crash may restart that
 adapter and retry once. Editing calls never retry. Repeated crashes within one
@@ -555,9 +556,11 @@ The shared runtime layout is:
     logs/
 ```
 
-The connector attaches only to an exact build slot. Source, lock, schema, or
-algorithm changes start a new daemon without killing older builds that retain
-leases. The daemon recomputes and verifies identity before publishing discovery.
+The connector attaches only to an exact build slot. Packaged Python modules and
+the executed Pyright helper (`.py` and `.mjs` under `src/serena_light`), lock,
+schema, or algorithm changes start a new daemon without killing older builds
+that retain leases. The daemon recomputes and verifies identity before
+publishing discovery.
 Under the slot startup lock, the connector creates a one-use nonce; the daemon
 must validate and consume it before discovery becomes visible. There is no
 ordinary public daemon-start surface that bypasses this handshake.
@@ -566,14 +569,21 @@ Service Python is installed at
 `/data/CoordExp/.codex/runtime/serena-light/python`; daemon and service-venv
 executables must not resolve through `/root/.local/share/uv`. Daemon and LSP
 children use a service-owned HOME, locked executables, and a minimal environment
-allowlist. Bootstrap itself may retain external proxy variables.
+allowlist. Bootstrap itself may retain external proxy variables. V1's dependency
+slot is an editable installation: the service-owned executable imports the live
+repository source, while build identity detects and rolls over every covered
+source-byte change. A build slot is therefore runtime isolation, not a frozen
+source snapshot; rollback requires checking out the intended local commit.
 
 When a build has no leases and every workspace warm grace has ended, its daemon
 exits. If discovery already names a successor daemon for the same build, the
 old process waits for zero holders and never deletes successor metadata. Legacy
-v1 root migration reads holder state and terminates only a zero-holder daemon
-whose PID and create time still match; canonical Serena is never considered a
-cleanup target.
+v1 discovery, authenticated holder/status data, PID, and create time are
+inspection evidence only. Because the v1 protocol cannot atomically freeze new
+lease acquisition or issue a retirement token, automatic migration never
+signals that daemon and returns `atomic_retirement_unsupported`; retirement
+requires explicit operator coordination. Canonical Serena is never considered
+a cleanup target.
 
 ### 12. Result envelopes are stable and typed
 

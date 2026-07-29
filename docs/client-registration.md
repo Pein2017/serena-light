@@ -6,16 +6,22 @@ rename, or remove `serena`.
 
 The connector executable used by live Codex/Claude configurations is the
 service-owned, build-identity-scoped path
-`/data/CoordExp/.codex/runtime/serena-light/deps/34cb251193d096e79e3d63381b0aa17c0c8aa12f0f4392e2517b371fe824379f/python/bin/serena-light`
+`/data/CoordExp/.codex/runtime/serena-light/deps/eff6ebdf252faff7f77cb3a2f3894d17b9a0dfc89b46bd193fafdaa9e9ab4941/python/bin/serena-light`
 with no arguments — **not** the repository `.venv`. The dependency-digest
-segment (`34cb2511...`) and the current build identity
-(`6abd545dbc1d232b662ff06e1f777a6091356994c5cff12c3fde2c89a1736599`) are tied
+segment (`eff6ebdf...`) and the current repaired build identity
+(`efc38e91a11f88f29b57700d3cdd154ca67beb421dabe28d92e24648310bc5aa`) are tied
 to a versioned daemon slot. A source/schema-only rollover reuses the dependency
 directory but gets a new build slot; a lock change also installs a new digest
 directory. Old build slots coexist until their holders and grace expire, so
 re-check the registration path after a dependency-lock change rather than
 assuming the digest is permanent. Using an absolute service-owned path avoids
 dependence on a client's ambient `PATH` or `/root` configuration.
+
+The v1 dependency slot is an editable install: this service-owned executable
+imports Serena Light from `/data/CoordExp/serena-light/src`. Build identity
+detects covered `.py`/`.mjs` source changes and rolls to a new daemon slot, but
+the slot is not a frozen source copy. Local rollback therefore includes
+checking out the intended commit before restarting clients.
 
 Registering the connector does not bind a workspace. MCP tool listing (the
 handshake a client performs to discover `serena-light`'s tools) never binds
@@ -34,7 +40,7 @@ running the acceptance procedure:
 
 ```toml
 [mcp_servers.serena-light]
-command = "/data/CoordExp/.codex/runtime/serena-light/deps/34cb251193d096e79e3d63381b0aa17c0c8aa12f0f4392e2517b371fe824379f/python/bin/serena-light"
+command = "/data/CoordExp/.codex/runtime/serena-light/deps/eff6ebdf252faff7f77cb3a2f3894d17b9a0dfc89b46bd193fafdaa9e9ab4941/python/bin/serena-light"
 args = []
 ```
 
@@ -54,7 +60,7 @@ Merge this sibling entry into its `mcpServers` object for parallel acceptance:
 {
   "mcpServers": {
     "serena-light": {
-      "command": "/data/CoordExp/.codex/runtime/serena-light/deps/34cb251193d096e79e3d63381b0aa17c0c8aa12f0f4392e2517b371fe824379f/python/bin/serena-light",
+      "command": "/data/CoordExp/.codex/runtime/serena-light/deps/eff6ebdf252faff7f77cb3a2f3894d17b9a0dfc89b46bd193fafdaa9e9ab4941/python/bin/serena-light",
       "args": []
     }
   }
@@ -77,7 +83,7 @@ only the `cc_for_pein` plugin server:
 {
   "mcpServers": {
     "serena-light": {
-      "command": "/data/CoordExp/.codex/runtime/serena-light/deps/34cb251193d096e79e3d63381b0aa17c0c8aa12f0f4392e2517b371fe824379f/python/bin/serena-light",
+      "command": "/data/CoordExp/.codex/runtime/serena-light/deps/eff6ebdf252faff7f77cb3a2f3894d17b9a0dfc89b46bd193fafdaa9e9ab4941/python/bin/serena-light",
       "args": []
     }
   }
@@ -92,8 +98,9 @@ agent. This is not fresh-session acceptance; task 10.2 owns that test.
 ## Stop, rollback, and limits
 
 For a normal stop, exit the client session; its connector releases its lease.
-For an immediate acceptance cleanup, call `release_workspace` and then stop
-the client. The shared daemon may stay warm after the last normal lease.
+For an immediate acceptance cleanup, call `release_workspace(immediate=true)`
+and then stop the client. It stops the runtime only for the final holder; other
+holders remain served. The shared daemon may stay warm after a normal release.
 
 To roll back a parallel trial, stop the affected client(s), remove only the
 `serena-light` registration you added, and restart those clients. Leave
@@ -102,8 +109,9 @@ daemon remains after clients have stopped, use normal process inspection and
 stop only the identified `serena-light` daemon; never stop canonical Serena as
 part of this rollback.
 
-Fresh-session tool, cwd, navigation, diagnostics, warm-daemon reuse across
-versioned build slots, and cleanup acceptance pass for Codex, Claude Code, and
-CC Agent as of 2026-07-29, but the final dual audit subsequently returned HOLD.
-`replace_symbol_body` is withheld again for new clients pending repair and full
-reacceptance. Canonical-name switching remains separately unapproved.
+Historical fresh-session tool, cwd, navigation, diagnostics, warm-daemon reuse,
+and cleanup receipts exist for Codex, Claude Code, and CC Agent, but they
+precede the current repaired build identity and do not satisfy task 15.5. The
+final dual audit returned HOLD. `replace_symbol_body` remains withheld for new
+clients pending full reacceptance. Canonical-name switching remains separately
+unapproved.

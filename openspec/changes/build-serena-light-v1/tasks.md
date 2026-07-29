@@ -129,16 +129,16 @@
 ## 12. Repair Freshness and Guarded Editing
 
 - [x] 12.1 Implement a workspace-owned `FreshnessCoordinator` invoked before every semantic/edit operation and same-root reactivation, with concurrent callers sharing one in-flight scan and no stale-success time cache.
-- [ ] 12.2 For Git roots compare lexical inventory create/change/delete, symlink state, and native configs; update path/document generations for content changes and reattribute only affected language families for membership/config changes.
-- [ ] 12.3 Send `didChangeWatchedFiles` to running adapters and controlled open/close for new files; retain targeted-stat freshness for the read-only transformers non-Git root.
-- [ ] 12.4 Change edit authorization to lexical inventory membership and add dir-fd, `lstat`, and `O_NOFOLLOW` component checks under the workspace lock.
+- [x] 12.2 For Git roots compare lexical inventory create/change/delete, symlink state, and native configs; update path/document generations for content changes and reattribute only affected language families for membership/config changes.
+- [x] 12.3 Send `didChangeWatchedFiles` to running adapters and controlled open/close for new files; retain targeted-stat freshness for the read-only transformers non-Git root.
+- [x] 12.4 Change edit authorization to lexical inventory membership and add dir-fd, `lstat`, and `O_NOFOLLOW` component checks under the workspace lock.
 - [x] 12.5 Add executor edit states `queued`, `running`, `installed`, and `done`; proven queued cancellation returns `TIMED_OUT`, while started or unknown state returns `UNCERTAIN` and is never replayed.
 - [x] 12.6 Treat every fsync, notification, or transport failure after `os.replace` as `UNCERTAIN` and include the safely observed current hash when possible.
 - [ ] 12.7 Pass real daemon/connector tests for in-root ignored-file symlink substitution, queued/running timeout, post-replace fsync failure, and lost response.
 
 ## 13. Repair Semantic Contracts and Runtime Truth
 
-- [ ] 13.1 Wire the existing envelope converters at one runtime/service boundary, catch `TimeoutError` before `OSError`, and preserve all declared typed failure codes.
+- [x] 13.1 Wire the existing envelope converters at one runtime/service boundary, catch `TimeoutError` before `OSError`, and preserve all declared typed failure codes.
 - [x] 13.2 Implement one `didOpen` per URI, subsequent `didChange`, and `didClose` on adapter stop or LRU eviction with at most 128 open documents per adapter.
 - [x] 13.3 Convert global symbol ranges from exact candidate snapshots through the shared `PositionMapper` and test Unicode/CRLF source, decoded-text, and byte offsets.
 - [x] 13.4 Complete inventory-bounded directory `find_symbol`; populate global body/info from verified candidate documents and reject unsupported parameter combinations explicitly.
@@ -152,15 +152,15 @@
 
 - [x] 14.1 Install pinned CPython with `uv python install --install-dir /data/CoordExp/.codex/runtime/serena-light/python`; ensure the service venv and daemon executable do not resolve through `/root/.local/share/uv`.
 - [x] 14.2 Launch daemon/LSP children with service-owned HOME, locked executable paths, minimal environment allowlist, and no proxy variables; bootstrap may retain external-network proxy.
-- [ ] 14.3 Implement the specified build-identity algorithm over runtime source bytes, dependency lock digest, public tool/schema version, and algorithm version.
-- [ ] 14.4 Move discovery, bearer, startup lock, nonce, and logs under `builds/<build_identity>` and make connectors attach only to an exact build.
+- [x] 14.3 Implement the specified build-identity algorithm over packaged `.py`/`.mjs` runtime source bytes, dependency lock digest, public tool/schema version, and algorithm version.
+- [x] 14.4 Move discovery, bearer, startup lock, nonce, and logs under `builds/<build_identity>` and make connectors attach only to an exact build.
 - [x] 14.5 Require daemon-side identity recomputation and a connector-created one-time nonce before discovery publication; remove the ordinary bypassable daemon-start surface.
 - [x] 14.6 Prove two builds, multiple clients, and two workspaces coexist; retire only a zero-holder, post-grace build and never delete successor discovery.
-- [ ] 14.7 Migrate the legacy v1 root by reading holder/status state and terminating only a zero-holder PID+create-time match; do not inspect or terminate canonical Serena processes.
+- [x] 14.7 Inspect the legacy v1 root through authenticated holder/status and exact PID+create-time evidence, but fail closed with `atomic_retirement_unsupported` and send no signal because v1 cannot freeze lease acquisition; never inspect or terminate canonical Serena processes.
 
 ## 15. Reaccept and Release v1
 
-- [ ] 15.1 Pass containment: fresh clients do not see editing, poisoned proxy does not affect loopback, and no new orphan is created.
+- [x] 15.1 Pass containment: a fresh real stdio client receives the withheld tool list, explicit clean/poisoned child environments do not affect loopback, borrowed holders are preserved, and no connector child or daemon descendant is added.
 - [ ] 15.2 Pass real connector contract tests for file create/change/delete/config change, symlink substitution, typed errors, document lifecycle, Unicode global ranges, and per-family isolation.
 - [ ] 15.3 Pass rollover tests for two builds, multiple clients, two workspaces, old-build lease preservation, and zero-holder retirement.
 - [ ] 15.4 Pass pytest, Ruff, Ty, bootstrap, dependency/provenance gates, and strict OpenSpec with LOC reported but not gated.

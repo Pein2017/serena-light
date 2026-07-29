@@ -4,10 +4,9 @@
 the CoordExp environment. It is an independently owned, deliberately small
 derivative of selected MIT-licensed Serena and SolidLSP mechanisms.
 
-The repository is implementing the first OpenSpec change. The locked runtime,
-admission probes, provenance census, owned LSP core, process lifecycle, and
-their regression tests are in place. Workspace, adapter, daemon, and tool
-layers are still under construction.
+The repository is implementing and reaccepting its first OpenSpec change. The
+admission probes, provenance census, owned LSP core, workspace/adapter/daemon
+layers, and containment regressions are in place; release gates remain open.
 
 ## Scope
 
@@ -33,17 +32,19 @@ Git-equals-program assumption.
 
 The owned LSP core, workspace identity/trust/scope model, fixed Pyright and
 TypeScript adapters, shared daemon, connector, readiness generations, and
-process lifecycle are implemented and accepted. Parallel Codex, Claude Code,
-and CC Agent fresh-session acceptance passed; canonical `serena` remains
-unchanged pending a separate user decision.
+process lifecycle are implemented. Historical parallel Codex, Claude Code, and
+CC Agent fresh-session acceptance passed on earlier build identities; the
+current repaired identity still needs the task 15 fresh-client matrix.
+Canonical `serena` remains unchanged pending a separate user decision.
 
 **Current state: `DUAL AUDIT HOLD — REPAIR IN PROGRESS`.** The Sol-xhigh and
 Opus-max audits found release-blocking correctness and evidence gaps after the
-first reacceptance. Agent-public `replace_symbol_body` is withheld again for
-new clients while those findings are repaired and reaccepted. This is **not**
-v1 PASS. Source ownership/provenance
+first reacceptance. The accepted code findings are repaired at local commit
+`d129dee`, but agent-public `replace_symbol_body` remains withheld for new
+clients until the remaining real-layer gates and fresh-client receipts pass.
+This is **not** v1 PASS. Source ownership/provenance
 passes with 9 copied hashes against official Serena commit
-`9a9d07e83d8c1cba3458992707f440c624446c6d`; production LOC (13,529) is
+`9a9d07e83d8c1cba3458992707f440c624446c6d`; production LOC (13,701) is
 informational only and not gated. See
 [the final acceptance record](openspec/changes/build-serena-light-v1/final-acceptance.md)
 for the full gate evidence and residual risks.
