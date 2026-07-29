@@ -49,8 +49,16 @@ binding owner.
 - **THEN** semantic calls remain on the old binding until the client explicitly calls `activate_workspace` with the new absolute path
 
 #### Scenario: Cross-root activation fails
-- **WHEN** validation, runtime acquisition, or lease creation for a new root fails
+- **WHEN** validation, runtime acquisition, lease creation, or mandatory refresh for a new root fails
 - **THEN** the connector retains its previous lease and workspace binding unchanged
+
+#### Scenario: Same-root refresh fails
+- **WHEN** reactivation inside the current Git root cannot complete its mandatory freshness pass
+- **THEN** the existing registry lease, working subdirectory, binding, and holder counts remain unchanged and the call returns a typed failure
+
+#### Scenario: Failed switch borrowed a warm target runtime
+- **WHEN** a cross-root refresh failure used a pre-existing zero-holder runtime still retained for warm grace
+- **THEN** only the provisional candidate lease is aborted; the warm runtime remains retained and is not stopped as an attempt-created orphan
 
 #### Scenario: Expired lease is used
 - **WHEN** an MCP HTTP session remains connected after its connector lease expires
@@ -229,6 +237,14 @@ files served through configured, inferred, or transient engine projects.
 #### Scenario: Same root is activated again
 - **WHEN** a bound session activates another path in the same Git root
 - **THEN** the runtime performs an immediate refresh before returning reuse
+
+#### Scenario: Native-config adapter stop times out
+- **WHEN** a changed native config requires adapter restart but the exact old adapter stop does not reach its bounded terminal state
+- **THEN** that family becomes explicitly `TIMED_OUT` and retryable, remains unpublished, and every later freshness preflight retries the same pending cleanup even if filesystem facts are unchanged
+
+#### Scenario: Runtime retires with a pending adapter restart
+- **WHEN** the last holder releases a runtime after a config restart timed out
+- **THEN** runtime shutdown retains and settles the pending adapter cleanup responsibility, never republishes the old adapter, and never installs a replacement after the runtime is stopped
 
 ### Requirement: Build identity isolates daemon generations
 The connector and daemon SHALL compute the same build identity from sorted

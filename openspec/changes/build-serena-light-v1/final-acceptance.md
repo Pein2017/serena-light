@@ -13,10 +13,19 @@ evidence, reproducible production-path stdio acceptance, and fresh-client
 receipt scope. The code findings are repaired at local commit `d129dee`; legacy
 retirement was deliberately narrowed to authenticated inspection plus
 fail-closed `atomic_retirement_unsupported` because v1 has no atomic lease
-freeze. The repaired implementation, restored public guarded edit, and evidence
-are current through local commit `9ba0d53`. The repair/reacceptance gates pass;
-v1 remains HOLD solely until the required independent final reaudits clear it.
-The canonical MCP registration named `serena` remains unchanged.
+freeze. The first repair/reacceptance cycle restored public guarded edit through
+local commit `9ba0d53`. A subsequent Sol-xhigh audit at `d7abf45` found two
+further P1 failures: a refresh failure could commit a new workspace binding
+before returning, and a native-config adapter-stop timeout could leave one
+language family permanently absent without a retry trigger. Commit `9921257`
+adds exact prepare/commit/abort activation, preserves the prior registry lease
+and warm-runtime ownership on failure, and retains explicit pending-restart
+cleanup and retry ownership. V1 remains HOLD until Sol-xhigh and Opus-max both
+return PASS against the repaired current snapshot. The earlier Opus-max
+runtime/evidence PASS at `6a0c58e` is retained as evidence but is not an
+exact-current-head release vote; its first current-head rerun ended at external
+OAuth authentication. The canonical MCP registration named `serena` remains
+unchanged.
 
 ### Superseded pre-audit decision
 
@@ -42,8 +51,13 @@ used to archive this change.
 
 ## Current repair checkpoint
 
-At post-restoration commit `9ba0d53`, the complete suite passes 507 tests. It
-includes explicit
+At repair commit `9921257`, the complete suite passes 516 tests. In addition to
+the post-restoration gates, it proves that same-root and cross-root refresh
+failure preserve the exact old binding and registry lease, attempt-created
+orphan runtimes are stopped, borrowed warm runtimes retain their grace, native
+config stop timeout is typed and retryable, unaffected families remain stable,
+and runtime shutdown settles pending adapter cleanup without publishing a late
+replacement. It also includes explicit
 child environments for clean and poisoned-proxy
 stdio clients, borrowed-daemon holder preservation, no retained connector
 child/daemon descendant, `.mjs` build-identity closure, no-signal legacy lease
@@ -57,7 +71,7 @@ immediately, and exact-cleans only its isolated daemon and fixture.
 
 ```text
 uv run pytest -q tests
-507 passed
+516 passed
 
 uv run pytest -q tests/acceptance/test_connector_contract_acceptance.py \
   tests/acceptance/test_lifecycle_failure_matrix.py tests/unit/test_adapter.py \
@@ -75,18 +89,18 @@ uv run serena-light-bootstrap --check --json
 PASS
 
 uv run serena-light-source-budget --json
-PASS: 13,816 production lines (informational; maximum=null, not gated)
+PASS: 14,155 production lines (informational; maximum=null, not gated)
 
 openspec validate build-serena-light-v1 --strict
 Change 'build-serena-light-v1' is valid
 ```
 
-The post-restoration build identity is
-`f4ee8a248a8cd2389b7b2d95083fd0d409548421b4933ac29a138ef0badf8721`.
+The post-repair build identity is
+`601e547bb028e20dc9dbb73a3921a54066273269ab3d8a7542d32a2527e25d05`.
 The current dependency digest is
 `eff6ebdf252faff7f77cb3a2f3894d17b9a0dfc89b46bd193fafdaa9e9ab4941`;
 Pydantic 2.13.4 is declared directly because production imports `StrictBool`.
-The source/provenance gate reports 13,816 production lines (informational), no
+The source/provenance gate reports 14,155 production lines (informational), no
 forbidden or undeclared imports, bidirectional census/manifest agreement, nine
 verified copied hashes, and official Serena commit
 `9a9d07e83d8c1cba3458992707f440c624446c6d`.

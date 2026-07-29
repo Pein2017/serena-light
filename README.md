@@ -40,12 +40,14 @@ Canonical `serena` remains unchanged pending a separate user decision.
 
 **Current state: `DUAL AUDIT HOLD — FINAL REAUDIT PENDING`.** The Sol-xhigh and
 Opus-max audits found release-blocking correctness and evidence gaps after the
-first reacceptance. The accepted code findings and evidence are current through
-local commit `9ba0d53`; agent-public `replace_symbol_body` is restored after its
-fault matrix, full regression, and three fresh-client hash-edit receipts passed.
-This is **not** v1 PASS. Source ownership/provenance
+first reacceptance. A later Sol-xhigh audit at `d7abf45` found two additional
+activation/freshness transaction failures; both are repaired at local commit
+`9921257`, but exact-current-head Sol-xhigh and Opus-max PASS verdicts are still
+required. Agent-public `replace_symbol_body` remains restored after its fault
+matrix, full regression, and three fresh-client hash-edit receipts passed. This
+is **not** v1 PASS. Source ownership/provenance
 passes with 9 copied hashes against official Serena commit
-`9a9d07e83d8c1cba3458992707f440c624446c6d`; production LOC (13,816) is
+`9a9d07e83d8c1cba3458992707f440c624446c6d`; production LOC (14,155) is
 informational only and not gated. See
 [the final acceptance record](openspec/changes/build-serena-light-v1/final-acceptance.md)
 for the full gate evidence and residual risks.

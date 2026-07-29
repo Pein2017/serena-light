@@ -166,11 +166,16 @@ same connect-or-start behavior without making systemd a dependency.
 `activate_workspace` accepts an absolute path. For a path inside a Git
 repository, the workspace identity is the resolved Git top-level. Activating
 another directory inside the same Git root only updates the session's working
-subdirectory metadata. A cross-root switch validates and acquires the new
-binding before atomically swapping the connector binding and releasing the old
-lease. Any validation, startup, or acquisition failure preserves the old
-binding. For explicitly trusted non-Git roots, the exact normalized path is the
-identity.
+subdirectory metadata. A cross-root switch prepares a provisional registry
+lease without publishing it, completes mandatory freshness on the candidate
+runtime, then atomically commits only if the prior binding is still current.
+Commit releases the old registry lease; abort releases only the provisional
+candidate and immediately retires a runtime only when that prepare attempt
+created it. A borrowed zero-holder runtime remains under its existing
+warm-grace ownership. Same-root reactivation refreshes before changing only the
+working-subdirectory metadata, retaining the exact registry lease. Any
+validation, startup, acquisition, or refresh failure preserves the old binding.
+For explicitly trusted non-Git roots, the exact normalized path is the identity.
 
 The daemon registry maps workspace identities to `WorkspaceRuntime` objects.
 There is no global active-workspace field. Multiple sessions on one root hold
@@ -490,6 +495,14 @@ language family and advance trust/program/index generations. Running adapters
 receive `didChangeWatchedFiles`; newly created files receive a bounded
 open/close notification when required. The allowlisted read-only transformers
 root continues targeted-stat checks and is never fully walked per call.
+
+A native-config restart removes the old adapter from publication before stop,
+but retains one explicit pending-restart record that owns the exact stop future,
+projection, tracker, and cleanup obligation. Timeout publishes a retryable
+`TIMED_OUT` family state. Every later Git freshness preflight resolves pending
+restarts before an unchanged scan may succeed. Runtime shutdown settles both
+published adapters and pending restart futures before closing the executor and
+cannot publish a replacement after the runtime enters stopped state.
 
 Edit membership is checked against the lexical inventory rather than a
 dynamically resolved set. Under the workspace lock, the writer walks every path

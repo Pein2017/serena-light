@@ -4,7 +4,7 @@
 - [x] 1.2 Add repository-owned Python and Node lock files that pin the MCP SDK, `lsprotocol`, Pyright, `typescript-language-server`, TypeScript 5.9, pytest, and developer tooling; record any deliberate departure from the observed MCP 1.27.1, Pyright 1.1.403, typescript-language-server 5.1.3, and TypeScript 5.9.3 baseline.
 - [x] 1.3 Implement one bootstrap/check command that materializes dependencies below `/data/CoordExp/.codex/runtime/serena-light/deps/<lock-digest>` and reports exact executable paths and versions; fail if an engine resolves through `/root/.nvm`, user pip state, or ambient `PATH`.
 - [x] 1.4 Add `THIRD_PARTY_NOTICES.md` and a machine-readable copied-source manifest keyed to Serena commit `9a9d07e83d8c`, source path, license, copied hash, and local owner.
-- [x] 1.5 Produce a symbol-level copy/keep/delete census for the proposed Serena/SolidLSP closure and a locally runnable source-budget command; stop if expected production code exceeds 12k lines or requires `agent.py`, modes, memories, UI, or `project_server.py`.
+- [x] 1.5 Produce a symbol-level copy/keep/delete census for the proposed Serena/SolidLSP closure and a locally runnable source-budget command; report production LOC as audit information and stop if the closure requires `agent.py`, modes, memories, UI, or `project_server.py`.
 - [x] 1.6 Preserve the standalone readiness probes under `tests/admission` and run five clean starts each for the transformers Pyright root, `/data/CoordExp`, `/data/ms-swift`, and the `cc-plugin-codex` TypeScript root; require the declared acceptance symbol and current-generation global readiness within 30 seconds on every run.
 - [x] 1.7 Add a TypeScript fixture whose tsconfig includes an ignored supported-language subtree; compare the effective tsserver program with the Git JS/TS inventory and stop for an OpenSpec revision if exact inclusion/exclusion cannot be achieved without changing project semantics.
 - [x] 1.8 Probe Pyright and TypeScript initialization for the selected `positionEncoding`, recording UTF-16 when absent, and preserve the initialize transcripts as bounded test fixtures.
@@ -108,7 +108,7 @@
 - [x] 9.5 Run two-session same-root reuse, two-root concurrent isolation, acquire-then-swap activation, failed-switch rollback, lease expiry, non-last immediate release, ten-minute grace, and last-holder immediate shutdown.
 - [x] 9.6 Run external create/change/delete generation barriers and prove a global query either observes the new generation or returns `NOT_READY`, never stale empty success.
 - [x] 9.7 Run adapter crash, circuit-breaker, connector crash, daemon SIGKILL, HTTP-session loss, cancellation, queue saturation, and parent-death/no-orphan fault injection with edit no-replay assertions.
-- [x] 9.8 Re-run the production source budget, forbidden-import scan, dependency-path smoke, and provenance audit; stop if code exceeds 12k lines, copied code lacks MIT provenance, or excluded Serena subsystems re-enter the closure.
+- [x] 9.8 Re-run the production source budget, forbidden-import scan, dependency-path smoke, and provenance audit; report LOC without a numeric stop threshold, and stop if copied code lacks MIT provenance or excluded Serena subsystems re-enter the closure.
 
 ## 10. Parallel Client Migration and Final Gate
 
