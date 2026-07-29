@@ -1,0 +1,40 @@
+schema: spec-driven
+
+context: |
+  Project: serena-light, an internal agent-first semantic code navigation service.
+  Runtime: Python 3.12, the Python MCP SDK, Pyright, a pinned TypeScript language
+    server, and pytest. Python normally runs in the conda ms environment.
+  Ownership: selected Serena and SolidLSP mechanisms may be copied from
+    /data/CoordExp/external/serena at commit 9a9d07e83d8c, then become fully owned
+    here. Preserve MIT notices and exact copied-file provenance; do not design an
+    upstream synchronization workflow.
+  Clients: Codex, Claude Code, and cc-plugin-codex Agents. The service is internal
+    to this machine and does not need a public extension or package configuration
+    surface.
+  Primary goals: a shared localhost daemon, per-session workspace bindings,
+    multi-root isolation, low-friction cwd changes, Python and JS/TS semantic
+    navigation, diagnostics, and hash-guarded symbol-body replacement.
+  Non-goals: JetBrains support, UI/dashboard, memories, telemetry, broad logs,
+    completion, rename, formatting, code actions, hierarchy tools, and line-based
+    insertion or deletion.
+  Trust: query roots are under /data plus the exact conda transformers package;
+    edits are limited to Git workspaces under /data. Site-packages are read-only.
+  Engineering: fail fast, expose capability and readiness explicitly, never turn
+    cold/not-ready/unsupported states into empty semantic results, and stop the
+    fork if the pruned production closure exceeds 12k LOC or requires Serena's
+    agent, modes, or project-server architecture.
+
+rules:
+  proposal:
+    - Include explicit non-goals and admission evidence.
+    - State compatibility and migration boundaries.
+  design:
+    - Define lifecycle, concurrency, trust, capability, readiness, and failure semantics.
+    - Separate copied mechanisms from new owned modules and record provenance duties.
+    - Record empirical constraints and rejected alternatives.
+  specs:
+    - Use normative requirements with observable scenarios.
+    - Cover multi-session reuse, multi-root isolation, cold readiness, and stale-hash edits.
+  tasks:
+    - Keep implementation chunks independently testable and ordered by architectural risk.
+    - Include the admission stop rules and real-repository acceptance smokes.

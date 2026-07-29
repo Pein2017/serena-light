@@ -1,0 +1,459 @@
+"""Transport-neutral, hash-guarded replacement of one complete symbol body.
+
+Workspace identity, language-server dispatch, and transport recovery remain in
+their owning layers.  This module receives those capabilities through three
+small seams and owns only the conflict check plus the atomic file operation.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import os
+import secrets
+import stat
+from collections.abc import Callable, Mapping, Sequence
+from contextlib import suppress
+from dataclasses import dataclass
+from pathlib import Path
+from types import TracebackType
+from typing import Any, Protocol
+
+from serena_light.lsp.positions import FileSnapshot, PositionError
+from serena_light.tools.envelopes import (
+    ErrorCode,
+    ErrorEnvelope,
+    GenerationMetadata,
+    RetryMetadata,
+    ToolEnvelope,
+    WorkspaceMetadata,
+    error,
+    from_workspace_error,
+    success,
+)
+from serena_light.tools.navigation import DocumentNavigation, DocumentSymbolInput, find_symbol
+from serena_light.workspace.identity import WorkspaceError
+
+type WriteCall = Callable[[int, memoryview], int]
+type FlushCall = Callable[[int], None]
+
+
+@dataclass(frozen=True, slots=True)
+class AuthorizedEdit:
+    """The authorizer's canonical target, before any source read or LSP call."""
+
+    path: Path
+    relative_path: str
+    workspace: WorkspaceMetadata | None = None
+
+    def __post_init__(self) -> None:
+        if not self.path.is_absolute():
+            raise ValueError("authorized edit path must be absolute")
+        if not _valid_normalized_relative_path(self.relative_path):
+            raise ValueError("authorized relative path must be normalized")
+
+
+@dataclass(frozen=True, slots=True)
+class ReplacementNotification:
+    """Installed bytes passed exactly once to the owning adapter seam."""
+
+    path: Path
+    relative_path: str
+    uri: str
+    text: str
+    old_hash: str
+    new_hash: str
+    symbol_name_path: str
+
+
+@dataclass(frozen=True, slots=True)
+class NotificationResult:
+    """Adapter state observed after its change notification returns."""
+
+    state: str
+    file_generation: int
+    generations: GenerationMetadata | None = None
+
+    def __post_init__(self) -> None:
+        if not self.state or self.file_generation < 0:
+            raise ValueError("notification state and file generation must be valid")
+
+
+class EditAuthorizer(Protocol):
+    def authorize_edit(self, relative_path: str) -> AuthorizedEdit: ...
+
+
+class CurrentDocumentSymbolProvider(Protocol):
+    def resolve_document_symbols(
+        self,
+        target: AuthorizedEdit,
+        snapshot: FileSnapshot,
+    ) -> DocumentSymbolInput: ...
+
+
+class EditNotifier(Protocol):
+    def notify_replaced(self, notification: ReplacementNotification) -> NotificationResult: ...
+
+
+class OperationLock(Protocol):
+    def __enter__(self) -> object: ...
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_value: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> bool | None: ...
+
+
+def replace_symbol_body(
+    name_path: str | Sequence[str],
+    relative_path: str,
+    body: str,
+    expected_hash: str,
+    *,
+    authorizer: EditAuthorizer,
+    symbol_provider: CurrentDocumentSymbolProvider,
+    notifier: EditNotifier,
+    operation_lock: OperationLock,
+    write_call: WriteCall = os.write,
+    flush_call: FlushCall = os.fsync,
+) -> ToolEnvelope:
+    """Authorize, compare, resolve, atomically install, then notify exactly once."""
+
+    if (
+        not _valid_name_path(name_path)
+        or not isinstance(relative_path, str)
+        or not relative_path
+        or "\x00" in relative_path
+        or not isinstance(body, str)
+        or not _valid_hash(expected_hash)
+    ):
+        return error(ErrorCode.INVALID_INPUT, details={"field": "name_path, relative_path, body, or expected_hash"})
+    expected_hash = expected_hash.lower()
+
+    with operation_lock:
+        target_or_error = _authorize(authorizer, relative_path)
+        if isinstance(target_or_error, ErrorEnvelope):
+            return target_or_error
+        target = target_or_error
+        if target.relative_path != relative_path:
+            return error(ErrorCode.INVALID_PATH, details={"path": relative_path}, workspace=target.workspace)
+
+        current_or_error = _read_target(target)
+        if isinstance(current_or_error, ErrorEnvelope):
+            return current_or_error
+        current = current_or_error
+        old_hash = _sha256(current.raw_bytes)
+        if old_hash != expected_hash:
+            return _stale(target, expected_hash, old_hash)
+
+        try:
+            snapshot = FileSnapshot.from_bytes(current.raw_bytes)
+            supplied = symbol_provider.resolve_document_symbols(target, snapshot)
+            resolved_or_error = _resolve_unique_symbol(target, snapshot, supplied, name_path)
+        except WorkspaceError as exc:
+            return from_workspace_error(exc)
+        except (PositionError, TypeError, ValueError):
+            return error(
+                ErrorCode.INVALID_INPUT,
+                details={"path": target.relative_path, "stage": "symbol_resolution"},
+                workspace=target.workspace,
+            )
+        if isinstance(resolved_or_error, ErrorEnvelope):
+            return resolved_or_error
+        symbol_identity, start_byte, end_byte, document = resolved_or_error
+
+        # An external writer does not share this lock, so verify the exact LSP
+        # snapshot again before any temporary file is created.
+        confirmed_or_error = _read_target(target)
+        if isinstance(confirmed_or_error, ErrorEnvelope):
+            return confirmed_or_error
+        confirmed = confirmed_or_error
+        confirmed_hash = _sha256(confirmed.raw_bytes)
+        if confirmed.raw_bytes != current.raw_bytes:
+            return _stale(target, expected_hash, confirmed_hash)
+
+        try:
+            replacement = _replacement_bytes(snapshot, body, start_byte, end_byte)
+        except (PositionError, UnicodeError, ValueError):
+            return error(
+                ErrorCode.INVALID_INPUT,
+                details={"path": target.relative_path, "stage": "replacement_body"},
+                workspace=target.workspace,
+                adapter=supplied.adapter,
+                generations=supplied.generations,
+            )
+        new_hash = _sha256(replacement)
+
+        try:
+            changed_hash = _atomic_replace(
+                target,
+                replacement,
+                expected_raw=current.raw_bytes,
+                mode=confirmed.mode,
+                write_call=write_call,
+                flush_call=flush_call,
+            )
+        except _ConcurrentChange as exc:
+            return _stale(target, expected_hash, exc.current_hash)
+
+        try:
+            notification = notifier.notify_replaced(
+                ReplacementNotification(
+                    target.path,
+                    target.relative_path,
+                    document.uri,
+                    FileSnapshot.from_bytes(replacement).text,
+                    old_hash,
+                    new_hash,
+                    symbol_identity["name_path"],
+                )
+            )
+            if not isinstance(notification, NotificationResult):
+                raise TypeError("notifier returned an invalid result")
+        except Exception:
+            return error(
+                ErrorCode.UNCERTAIN,
+                retry=RetryMetadata(retryable=False),
+                details={
+                    "relative_path": target.relative_path,
+                    "old_hash": old_hash,
+                    "new_hash": new_hash,
+                    "current_hash": changed_hash,
+                    "symbol": symbol_identity,
+                    "notification_state": "failed",
+                    "requires_current_reread": True,
+                },
+                workspace=target.workspace,
+                adapter=supplied.adapter,
+                generations=supplied.generations,
+            )
+
+        return success(
+            {
+                "relative_path": target.relative_path,
+                "old_hash": old_hash,
+                "new_hash": new_hash,
+                "symbol": symbol_identity,
+                "file_generation": notification.file_generation,
+                "notification_state": notification.state,
+            },
+            workspace=target.workspace,
+            adapter=supplied.adapter,
+            generations=notification.generations or supplied.generations,
+        )
+
+
+def _authorize(authorizer: EditAuthorizer, relative_path: str) -> AuthorizedEdit | ErrorEnvelope:
+    try:
+        target = authorizer.authorize_edit(relative_path)
+    except WorkspaceError as exc:
+        return from_workspace_error(exc)
+    if not isinstance(target, AuthorizedEdit):
+        return error(ErrorCode.INVALID_PATH, details={"path": relative_path})
+    return target
+
+
+@dataclass(frozen=True, slots=True)
+class _TargetSnapshot:
+    raw_bytes: bytes
+    mode: int
+
+
+class _ConcurrentChange(RuntimeError):
+    def __init__(self, current_hash: str) -> None:
+        super().__init__("target changed before atomic replacement")
+        self.current_hash = current_hash
+
+
+def _read_target(target: AuthorizedEdit) -> _TargetSnapshot | ErrorEnvelope:
+    try:
+        directory_fd = os.open(target.path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    except OSError:
+        return _invalid_target(target)
+    try:
+        try:
+            file_fd = os.open(target.path.name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=directory_fd)
+        except OSError:
+            return _invalid_target(target)
+        try:
+            before = os.fstat(file_fd)
+            if not stat.S_ISREG(before.st_mode):
+                return _invalid_target(target)
+            chunks: list[bytes] = []
+            while chunk := os.read(file_fd, 1024 * 1024):
+                chunks.append(chunk)
+            after = os.fstat(file_fd)
+            if _stat_identity(before) != _stat_identity(after):
+                return _invalid_target(target)
+            return _TargetSnapshot(b"".join(chunks), stat.S_IMODE(after.st_mode))
+        finally:
+            os.close(file_fd)
+    finally:
+        os.close(directory_fd)
+
+
+def _resolve_unique_symbol(
+    target: AuthorizedEdit,
+    snapshot: FileSnapshot,
+    supplied: DocumentSymbolInput,
+    name_path: str | Sequence[str],
+) -> tuple[Mapping[str, Any], int, int, DocumentNavigation] | ErrorEnvelope:
+    if not isinstance(supplied, DocumentSymbolInput):
+        raise TypeError("symbol provider returned an invalid result")
+    if (
+        supplied.relative_path != target.relative_path
+        or supplied.uri != target.path.as_uri()
+        or supplied.snapshot.raw_bytes != snapshot.raw_bytes
+    ):
+        raise ValueError("document-symbol response does not describe the authorized snapshot")
+    document = DocumentNavigation.from_input(supplied)
+    result = find_symbol(document, name_path, max_answer_chars=64_000)
+    if isinstance(result, ErrorEnvelope):
+        return result
+    payload = result.to_dict()["data"]
+    if not isinstance(payload, Mapping) or not isinstance(payload.get("symbol"), Mapping):
+        raise TypeError("find_symbol returned invalid symbol data")
+    symbol = payload["symbol"]
+    assert isinstance(symbol, Mapping)
+    source_range = symbol.get("range")
+    if not isinstance(source_range, Mapping):
+        raise TypeError("find_symbol omitted the symbol range")
+    start = _byte_offset(source_range, "start")
+    end = _byte_offset(source_range, "end")
+    identity = {key: symbol[key] for key in ("name", "name_path", "kind")}
+    return identity, start, end, document
+
+
+def _byte_offset(source_range: Mapping[str, Any], endpoint: str) -> int:
+    position = source_range.get(endpoint)
+    if not isinstance(position, Mapping) or not isinstance(position.get("byte_offset"), int):
+        raise TypeError("find_symbol returned an invalid byte offset")
+    return position["byte_offset"]
+
+
+def _replacement_bytes(snapshot: FileSnapshot, body: str, start: int, end: int) -> bytes:
+    newline = _newline_contract(snapshot)
+    normalized_body = body.replace("\r\n", "\n").replace("\r", "\n").replace("\n", newline)
+    encoded = normalized_body.encode(snapshot.encoding)
+    return snapshot.raw_bytes[:start] + encoded + snapshot.raw_bytes[end:]
+
+
+def _newline_contract(snapshot: FileSnapshot) -> str:
+    endings = set(snapshot.line_endings)
+    if not endings:
+        return "\n"
+    if endings == {"\n"}:
+        return "\n"
+    if endings == {"\r\n"}:
+        return "\r\n"
+    raise ValueError("mixed or bare-CR newline contracts are not editable in v1")
+
+
+def _atomic_replace(
+    target: AuthorizedEdit,
+    content: bytes,
+    *,
+    expected_raw: bytes,
+    mode: int,
+    write_call: WriteCall,
+    flush_call: FlushCall,
+) -> str:
+    directory_fd = os.open(target.path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    temporary = f".{target.path.name}.serena-light-{secrets.token_hex(12)}.tmp"
+    file_fd: int | None = None
+    try:
+        file_fd = os.open(
+            temporary,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+            0o600,
+            dir_fd=directory_fd,
+        )
+        _write_all(file_fd, content, write_call)
+        os.fchmod(file_fd, mode)
+        flush_call(file_fd)
+        os.close(file_fd)
+        file_fd = None
+
+        current = _read_target(target)
+        if isinstance(current, ErrorEnvelope):
+            raise _ConcurrentChange("")
+        if current.raw_bytes != expected_raw:
+            raise _ConcurrentChange(_sha256(current.raw_bytes))
+        os.replace(temporary, target.path.name, src_dir_fd=directory_fd, dst_dir_fd=directory_fd)
+        os.fsync(directory_fd)
+        return _sha256(content)
+    finally:
+        if file_fd is not None:
+            with suppress(OSError):
+                os.close(file_fd)
+        with suppress(FileNotFoundError):
+            os.unlink(temporary, dir_fd=directory_fd)
+        os.close(directory_fd)
+
+
+def _write_all(file_fd: int, content: bytes, write_call: WriteCall) -> None:
+    remaining = memoryview(content)
+    while remaining:
+        written = write_call(file_fd, remaining)
+        if written <= 0 or written > len(remaining):
+            raise OSError("temporary write made no valid progress")
+        remaining = remaining[written:]
+
+
+def _valid_name_path(value: str | Sequence[str]) -> bool:
+    if isinstance(value, str):
+        components = tuple(value.lstrip("/").rstrip("/").split("/"))
+    elif isinstance(value, Sequence) and not isinstance(value, bytes | bytearray):
+        components = tuple(value)
+    else:
+        return False
+    return bool(components) and all(isinstance(item, str) and bool(item) for item in components)
+
+
+def _valid_hash(value: object) -> bool:
+    return (
+        isinstance(value, str)
+        and len(value) == 64
+        and all(character in "0123456789abcdefABCDEF" for character in value)
+    )
+
+
+def _valid_normalized_relative_path(value: str) -> bool:
+    return (
+        bool(value)
+        and not value.startswith("/")
+        and "\\" not in value
+        and "\x00" not in value
+        and all(part not in {"", ".", ".."} for part in value.split("/"))
+    )
+
+
+def _stat_identity(value: os.stat_result) -> tuple[int, int, int, int, int, int]:
+    return (value.st_dev, value.st_ino, value.st_size, value.st_mtime_ns, value.st_ctime_ns, value.st_mode)
+
+
+def _sha256(content: bytes) -> str:
+    return hashlib.sha256(content).hexdigest()
+
+
+def _stale(target: AuthorizedEdit, expected_hash: str, current_hash: str) -> ErrorEnvelope:
+    return error(
+        ErrorCode.STALE_HASH,
+        retry=RetryMetadata(retryable=False),
+        details={
+            "relative_path": target.relative_path,
+            "expected_hash": expected_hash,
+            "current_hash": current_hash,
+            "requires_current_reread": True,
+        },
+        workspace=target.workspace,
+    )
+
+
+def _invalid_target(target: AuthorizedEdit) -> ErrorEnvelope:
+    return error(
+        ErrorCode.INVALID_PATH,
+        details={"path": str(target.path), "stage": "current_file_reread"},
+        workspace=target.workspace,
+    )

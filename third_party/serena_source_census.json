@@ -1,0 +1,125 @@
+{
+  "schema_version": 1,
+  "reference_root": "/data/CoordExp/external/serena",
+  "commit": "9a9d07e83d8c1cba3458992707f440c624446c6d",
+  "owned_code_estimate_lines": 7600,
+  "default_action": "delete",
+  "notes": "copy means preserve closely with provenance; reshape means reimplement the mechanism under local ownership; reference means consult only; all unlisted symbols are deleted from the closure",
+  "files": [
+    {
+      "source_path": "src/solidlsp/lsp_protocol_handler/server.py",
+      "copy": ["content_length"],
+      "reshape": ["ProcessLaunchInfo", "LSPError", "create_message"],
+      "reference": ["make_request", "make_notification", "make_response", "make_error_response"],
+      "delete": ["StopLoopException", "MessageType"]
+    },
+    {
+      "source_path": "src/solidlsp/util/subprocess_util.py",
+      "copy": ["LanguageServerSubprocessLauncher", "_signal_process_tree", "terminate_process_tree_with_kill_fallback"],
+      "reshape": ["subprocess_kwargs"],
+      "reference": ["subprocess_run"],
+      "delete": ["convert_shell_cmd"]
+    },
+    {
+      "source_path": "src/solidlsp/initialize_params.py",
+      "copy": [],
+      "reshape": ["InitializeParamsBuilder", "DefaultInitializeParamsBuilder"],
+      "reference": [],
+      "delete": []
+    },
+    {
+      "source_path": "src/solidlsp/ls.py",
+      "copy": [],
+      "reshape": [
+        "LSPFileBuffer",
+        "SolidLanguageServer._store_published_diagnostics",
+        "SolidLanguageServer._canonicalize_published_diagnostics_uri",
+        "SolidLanguageServer._request_document_symbols",
+        "SolidLanguageServer._normalize_symbol_name",
+        "SolidLanguageServer.request_workspace_symbol",
+        "SolidLanguageServer._create_base_initialize_params",
+        "SolidLanguageServer._register_content_modified_retry_methods"
+      ],
+      "reference": [
+        "DocumentSymbols",
+        "SolidLanguageServer.request_definition",
+        "SolidLanguageServer.request_implementation",
+        "SolidLanguageServer.request_references",
+        "SolidLanguageServer.request_hover",
+        "SolidLanguageServer.stop"
+      ],
+      "delete": ["SymbolBody", "SymbolBodyFactory", "ReferenceInSymbol"]
+    },
+    {
+      "source_path": "src/solidlsp/language_servers/pyright_server.py",
+      "copy": [],
+      "reshape": ["PyrightServer._create_base_initialize_params", "PyrightServer._start_server"],
+      "reference": ["PyrightServer.is_ignored_dirname"],
+      "delete": ["PyrightServer._create_dependency_provider"]
+    },
+    {
+      "source_path": "src/solidlsp/language_servers/typescript_language_server.py",
+      "copy": [],
+      "reshape": [
+        "prefer_non_node_modules_definition",
+        "TypeScriptLanguageServer._create_base_initialize_params",
+        "TypeScriptLanguageServer._start_server"
+      ],
+      "reference": [
+        "TypeScriptLanguageServer.wait_for_indexing",
+        "TypeScriptLanguageServer._find_representative_source_file"
+      ],
+      "delete": ["TypeScriptLanguageServer._create_dependency_provider"]
+    },
+    {
+      "source_path": "src/serena/symbol.py",
+      "copy": [],
+      "reshape": [
+        "NamePathMatcher",
+        "LanguageServerSymbol.get_name_path",
+        "LanguageServerSymbol.find",
+        "LanguageServerSymbol.to_dict",
+        "LanguageServerSymbolRetriever.find_declaration"
+      ],
+      "reference": [
+        "LanguageServerSymbolLocation",
+        "PositionInFile",
+        "LanguageServerSymbolRetriever.find",
+        "LanguageServerSymbolRetriever.find_referencing_symbols",
+        "LanguageServerSymbolRetriever.find_implementing_symbols"
+      ],
+      "delete": ["JetBrainsSymbol", "JetBrainsSymbolDictGrouper", "SymbolDictGrouper"]
+    },
+    {
+      "source_path": "src/serena/ls_manager.py",
+      "copy": [],
+      "reshape": ["LanguageServerFileChangeNotifier.poll_and_notify"],
+      "reference": ["LanguageServerManager.sync_file_system_changes"],
+      "delete": ["LanguageServerFactory", "LanguageServerManager"]
+    },
+    {
+      "source_path": "src/serena/util/ls_diagnostics.py",
+      "copy": [],
+      "reshape": ["DiagnosticIdentity", "PublishedDiagnosticsSnapshot", "DiagnosticsDiff"],
+      "reference": ["GroupedDiagnostics"],
+      "delete": ["EditedFilePath"]
+    },
+    {
+      "source_path": "src/serena/util/file_system.py",
+      "copy": [],
+      "reshape": [],
+      "reference": ["GitignoreSpec", "GitignoreParser", "match_path"],
+      "delete": ["ScanResult", "scan_directory", "find_all_non_ignored_files"]
+    }
+  ],
+  "excluded_subsystems": [
+    "src/serena/agent.py",
+    "src/serena/project_server.py",
+    "src/serena/memories/",
+    "src/serena/resources/config/modes/",
+    "src/serena/resources/dashboard/",
+    "src/serena/dashboard.py",
+    "src/serena/gui_log_viewer.py",
+    "src/serena/jetbrains/"
+  ]
+}

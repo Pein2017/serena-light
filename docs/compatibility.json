@@ -1,0 +1,49 @@
+{
+  "schema_version": 1,
+  "scope": "parallel serena-light registration; not canonical-serena replacement",
+  "classification_values": ["supported", "dropped", "shimmed"],
+  "result_envelopes": {
+    "serena": {
+      "classification": "dropped",
+      "shape": "rendered text or tool-specific JSON/text"
+    },
+    "serena-light": {
+      "classification": "supported",
+      "success": {"ok": true, "data": "object", "workspace": "optional object", "adapter": "optional object", "generations": "optional object", "truncation": "optional object"},
+      "error": {"ok": false, "error": {"code": "typed string", "message": "fixed string", "retry": "object or null", "details": "object"}, "workspace": "optional object", "adapter": "optional object", "generations": "optional object"}
+    }
+  },
+  "mcp_tools": [
+    {"name": "get_daemon_status", "visibility": "connector_internal", "serena_name": null, "required_args": [], "classification": "supported", "delta": "new daemon control-plane status"},
+    {"name": "acquire_lease", "visibility": "connector_internal", "serena_name": null, "required_args": [], "classification": "supported", "delta": "new daemon control-plane lease acquisition"},
+    {"name": "heartbeat", "visibility": "connector_internal", "serena_name": null, "required_args": ["lease_id"], "classification": "supported", "delta": "new daemon control-plane lease renewal"},
+    {"name": "release_lease", "visibility": "connector_internal", "serena_name": null, "required_args": ["lease_id"], "classification": "supported", "delta": "new daemon control-plane lease release"},
+    {"name": "activate_workspace", "visibility": "agent_public", "serena_name": "activate_project", "required_args": ["absolute_path"], "classification": "shimmed", "delta": "absolute path and session-scoped binding replace project name/path and global active project"},
+    {"name": "release_workspace", "visibility": "agent_public", "serena_name": null, "required_args": [], "classification": "supported", "delta": "new lease-scoped lifecycle control"},
+    {"name": "get_runtime_status", "visibility": "agent_public", "serena_name": "get_current_config", "required_args": [], "classification": "shimmed", "delta": "typed daemon, lease, capability, scope, and generation status replaces agent configuration"},
+    {"name": "get_symbols_overview", "visibility": "agent_public", "serena_name": "get_symbols_overview", "required_args": ["relative_path"], "classification": "supported", "delta": "typed envelope; max_depth replaces depth"},
+    {"name": "find_symbol", "visibility": "agent_public", "serena_name": "find_symbol", "required_args": ["name_path"], "classification": "shimmed", "delta": "name_path replaces name_path_pattern; typed envelope"},
+    {"name": "find_referencing_symbols", "visibility": "agent_public", "serena_name": "find_referencing_symbols", "required_args": ["name_path", "relative_path"], "classification": "supported", "delta": "typed envelope and bounded snippets"},
+    {"name": "find_declaration", "visibility": "agent_public", "serena_name": "find_declaration", "required_args": ["relative_path", "regex"], "classification": "supported", "delta": "definitionProvider dispatch and typed normalized locations"},
+    {"name": "find_implementations", "visibility": "agent_public", "serena_name": "find_implementations", "required_args": ["name_path", "relative_path"], "classification": "supported", "delta": "capability-gated typed result"},
+    {"name": "get_diagnostics_for_file", "visibility": "agent_public", "serena_name": "get_diagnostics_for_file", "required_args": ["relative_path"], "classification": "shimmed", "delta": "generation-aware status replaces line-range interface"},
+    {"name": "get_diagnostics_for_symbol", "visibility": "agent_public", "serena_name": "get_diagnostics_for_symbol", "required_args": ["relative_path", "name_path"], "classification": "shimmed", "delta": "path plus symbol required; no reference-file expansion"},
+    {"name": "replace_symbol_body", "visibility": "agent_public", "serena_name": "replace_symbol_body", "required_args": ["name_path", "relative_path", "body", "expected_hash"], "classification": "shimmed", "delta": "whole-file expected_hash is mandatory; atomic, no-replay edit"}
+  ],
+  "session_start": {
+    "serena": {"consumer": "serena-hooks activate --client=codex", "classification": "dropped", "reason": "serena-light binds inherited connector cwd without a hook"},
+    "serena-light": {"consumer": "connector startup cwd", "classification": "supported", "behavior": "auto-activate startup cwd; explicit activate_workspace for another root"}
+  },
+  "instruction_consumers": [
+    {"name": "initial_instructions", "classification": "dropped", "reason": "no Serena agent manual or mode system"},
+    {"name": "serena-hooks remind", "classification": "dropped", "reason": "no hook-based instruction injection"},
+    {"name": "client MCP tool metadata", "classification": "supported", "reason": "tool schemas and typed envelopes are the client-facing contract"}
+  ],
+  "excluded_serena_tools": [
+    {"family": "file and shell", "tools": ["read_file", "create_text_file", "list_dir", "find_file", "replace_content", "replace_in_files", "delete_lines", "replace_lines", "insert_at_line", "search_for_pattern", "execute_shell_command"], "classification": "dropped"},
+    {"family": "memory, onboarding, configuration, and project management", "tools": ["onboarding", "initial_instructions", "serena_info", "read_memory", "write_memory", "list_memories", "delete_memory", "rename_memory", "edit_memory", "list_queryable_projects", "query_project", "get_current_config", "remove_project", "open_dashboard"], "classification": "dropped"},
+    {"family": "broad or non-v1 editing", "tools": ["insert_after_symbol", "insert_before_symbol", "rename_symbol", "safe_delete_symbol", "restart_language_server"], "classification": "dropped"},
+    {"family": "JetBrains", "tools": ["jet_brains_debug", "jet_brains_find_declaration", "jet_brains_find_implementations", "jet_brains_find_referencing_symbols", "jet_brains_find_symbol", "jet_brains_get_symbols_overview", "jet_brains_inline_symbol", "jet_brains_list_inspections", "jet_brains_move", "jet_brains_rename", "jet_brains_run_inspections", "jet_brains_safe_delete", "jet_brains_type_hierarchy"], "classification": "dropped"}
+  ],
+  "acceptance": {"fresh_session_accepted": true, "canonical_switch_approved": false}
+}

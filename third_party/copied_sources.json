@@ -1,0 +1,80 @@
+{
+  "schema_version": 1,
+  "reference": {
+    "repository": "/data/CoordExp/external/serena",
+    "commit": "9a9d07e83d8c1cba3458992707f440c624446c6d",
+    "license": "MIT"
+  },
+  "required_entry_fields": [
+    "source_path",
+    "source_symbol",
+    "license",
+    "copied_sha256",
+    "local_owner"
+  ],
+  "copies": [
+    {
+      "source_path": "src/solidlsp/util/subprocess_util.py",
+      "source_symbol": "LanguageServerSubprocessLauncher",
+      "license": "MIT",
+      "copied_sha256": "a2c5390126d070b0dd396887303398da30f1f087fe6ae24c6d935555f5b2313a",
+      "local_owner": "src/serena_light/processes.py"
+    },
+    {
+      "source_path": "src/solidlsp/util/subprocess_util.py",
+      "source_symbol": "_signal_process_tree",
+      "license": "MIT",
+      "copied_sha256": "a3ffa13b38d1cd95ffee338dd80ad0cd4672544387fbcba5980fa434665ffeb0",
+      "local_owner": "src/serena_light/processes.py"
+    },
+    {
+      "source_path": "src/solidlsp/util/subprocess_util.py",
+      "source_symbol": "terminate_process_tree_with_kill_fallback",
+      "license": "MIT",
+      "copied_sha256": "0eb197b152dfabd4d16d53fdb51ae7bfe4ec9411db8fa4701073735eecace413",
+      "local_owner": "src/serena_light/processes.py"
+    },
+    {
+      "source_path": "src/solidlsp/lsp_protocol_handler/server.py",
+      "source_symbol": "create_message",
+      "license": "MIT",
+      "copied_sha256": "24688cdb86d6a44626f81cce7b4f093313c2b5612b60b3a47b4e55ce4910e8cc",
+      "local_owner": "src/serena_light/lsp/client.py"
+    },
+    {
+      "source_path": "src/solidlsp/lsp_protocol_handler/server.py",
+      "source_symbol": "content_length",
+      "license": "MIT",
+      "copied_sha256": "2fc83052326f8c55239c3d4aa145a311c4ba5bdb3a7672103a3ef8943ab25c1d",
+      "local_owner": "src/serena_light/lsp/client.py"
+    },
+    {
+      "source_path": "src/solidlsp/ls_process.py",
+      "source_symbol": "Request",
+      "license": "MIT",
+      "copied_sha256": "8f57576f8e5e86667aa570ebe73746e6175b6c74a0544dad6c12bfee7e4f1bb7",
+      "local_owner": "src/serena_light/lsp/client.py"
+    },
+    {
+      "source_path": "src/solidlsp/ls_process.py",
+      "source_symbol": "LanguageServerInterface._send_request_once",
+      "license": "MIT",
+      "copied_sha256": "9cf09a918e1cfeb395f6fb9d43a4455684d097caec77fdf89e66b6fe75c335e4",
+      "local_owner": "src/serena_light/lsp/client.py"
+    },
+    {
+      "source_path": "src/solidlsp/ls_process.py",
+      "source_symbol": "LanguageServerInterface.send_request",
+      "license": "MIT",
+      "copied_sha256": "599c06b900e98404272baad9151d79c9f15163c6284c08d87a4ea71e9d4d596e",
+      "local_owner": "src/serena_light/lsp/client.py"
+    },
+    {
+      "source_path": "src/solidlsp/ls_process.py",
+      "source_symbol": "LanguageServerInterface._response_handler",
+      "license": "MIT",
+      "copied_sha256": "7b05e6e36a7a394e3d85e578f2bc913a73e8bbe75e0ff67df31ec4705046f7bb",
+      "local_owner": "src/serena_light/lsp/client.py"
+    }
+  ]
+}

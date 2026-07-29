@@ -1,0 +1,53 @@
+[build-system]
+requires = ["hatchling==1.27.0"]
+build-backend = "hatchling.build"
+
+[project]
+name = "serena-light"
+version = "0.1.0"
+description = "Internal shared semantic code navigation service for CoordExp agents"
+readme = "README.md"
+requires-python = "==3.12.*"
+license = { text = "MIT" }
+dependencies = [
+  "lsprotocol==2025.0.0",
+  "mcp==1.27.1",
+  "nodeenv==1.9.1",
+  "psutil==7.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest==8.4.1",
+  "pytest-timeout==2.4.0",
+  "ruff==0.12.5",
+  "ty==0.0.24",
+]
+
+[project.scripts]
+serena-light = "serena_light.cli:connector_main"
+serena-light-daemon = "serena_light.cli:daemon_main"
+serena-light-bootstrap = "serena_light.bootstrap:main"
+serena-light-source-budget = "serena_light.source_budget:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/serena_light"]
+
+[tool.pytest.ini_options]
+addopts = "-ra --strict-config --strict-markers"
+testpaths = ["tests"]
+timeout = 30
+
+[tool.ruff]
+target-version = "py312"
+line-length = 120
+
+[tool.ruff.lint]
+select = ["B", "C4", "E", "F", "I", "PIE", "RUF", "SIM", "UP", "W"]
+
+[tool.ty.environment]
+python-version = "3.12"
+
+[tool.ty.src]
+include = ["src", "tests", "scripts"]
+

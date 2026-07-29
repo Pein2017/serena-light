@@ -1,0 +1,212 @@
+from __future__ import annotations
+
+import asyncio
+import json
+from collections.abc import Mapping
+from dataclasses import dataclass, field
+from typing import cast
+from uuid import uuid4
+
+from starlette.testclient import TestClient
+
+from serena_light.daemon.leases import LeaseLifecycle
+from serena_light.daemon.server import create_daemon_app
+from serena_light.daemon.service import WorkspaceDaemonService
+from serena_light.runtime_files import BearerSecret
+from serena_light.tools.envelopes import JsonValue, success
+from serena_light.workspace.registry import ResolvedWorkspace, WorkspaceRuntimeRegistry
+
+
+@dataclass(eq=False)
+class FakeRuntime:
+    identity: str
+    calls: list[tuple[str, dict[str, object]]] = field(default_factory=list)
+
+    def status(self) -> Mapping[str, object]:
+        return {"identity": self.identity, "executor": {"queue_size": 0}}
+
+    def find_symbol(self, **kwargs: object) -> object:
+        self.calls.append(("find_symbol", dict(kwargs)))
+        return success(cast(JsonValue, {"identity": self.identity, "query": kwargs["name_path"]}))
+
+
+def _service() -> tuple[WorkspaceDaemonService[str, FakeRuntime], list[FakeRuntime]]:
+    created: list[FakeRuntime] = []
+
+    def factory(identity: str) -> FakeRuntime:
+        runtime = FakeRuntime(identity)
+        created.append(runtime)
+        return runtime
+
+    service = WorkspaceDaemonService[str, FakeRuntime](
+        lifecycle=LeaseLifecycle(clock=lambda: 0.0),
+        registry=WorkspaceRuntimeRegistry(factory),
+        resolver=lambda path: ResolvedWorkspace(identity=str(path.parent), working_subdirectory=path),
+        runtime_stopper=lambda _runtime: None,
+    )
+    return service, created
+
+
+def _initialize(client: TestClient, authorization: str) -> str:
+    response = client.post(
+        "/mcp",
+        headers={"Authorization": authorization, "Accept": "application/json, text/event-stream"},
+        json={
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-11-25",
+                "capabilities": {},
+                "clientInfo": {"name": "test", "version": "1"},
+            },
+        },
+    )
+    assert response.status_code == 200, response.text
+    return response.headers["mcp-session-id"]
+
+
+def _call(
+    client: TestClient,
+    authorization: str,
+    session_id: str,
+    name: str,
+    arguments: Mapping[str, object] | None = None,
+    lease_id: str | None = None,
+) -> dict[str, object]:
+    params: dict[str, object] = {"name": name, "arguments": dict(arguments or {})}
+    if lease_id is not None:
+        params["_meta"] = {"serena_light": {"lease_id": lease_id}}
+    response = client.post(
+        "/mcp",
+        headers={
+            "Authorization": authorization,
+            "Accept": "application/json, text/event-stream",
+            "Content-Type": "application/json",
+            "Mcp-Session-Id": session_id,
+            "Mcp-Protocol-Version": "2025-11-25",
+        },
+        json={"jsonrpc": "2.0", "id": uuid4().int, "method": "tools/call", "params": params},
+    )
+    assert response.status_code == 200, response.text
+    return cast(dict[str, object], response.json()["result"]["structuredContent"])
+
+
+def _data(value: Mapping[str, object]) -> Mapping[str, object]:
+    assert value["ok"] is True
+    return cast(Mapping[str, object], value["data"])
+
+
+def test_public_semantic_tools_bind_only_through_meta_and_preserve_envelopes() -> None:
+    service, created = _service()
+    token = "t" * 48
+    daemon_id = str(uuid4())
+    app = create_daemon_app(service=service, bearer=BearerSecret(token), daemon_id=daemon_id)
+    authorization = f"Bearer {token}"
+
+    with TestClient(app, base_url="http://127.0.0.1:8000", client=("127.0.0.1", 50000)) as client:
+        session = _initialize(client, authorization)
+        listed = client.post(
+            "/mcp",
+            headers={
+                "Authorization": authorization,
+                "Accept": "application/json, text/event-stream",
+                "Mcp-Session-Id": session,
+                "Mcp-Protocol-Version": "2025-11-25",
+            },
+            json={"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}},
+        )
+        names = {tool["name"] for tool in listed.json()["result"]["tools"]}
+        assert {
+            "activate_workspace",
+            "release_workspace",
+            "get_runtime_status",
+            "get_symbols_overview",
+            "find_symbol",
+            "find_declaration",
+            "find_implementations",
+            "find_referencing_symbols",
+            "get_diagnostics_for_file",
+            "get_diagnostics_for_symbol",
+            "replace_symbol_body",
+        } <= names
+
+        lease = _data(_call(client, authorization, session, "acquire_lease"))["lease_id"]
+        assert isinstance(lease, str)
+        activation = _data(
+            _call(
+                client,
+                authorization,
+                session,
+                "activate_workspace",
+                {"absolute_path": "/data/one/subdir"},
+                lease,
+            )
+        )
+        assert activation["lease_id"] == lease
+        result = _data(_call(client, authorization, session, "find_symbol", {"name_path": "Thing"}, lease))
+        assert result == {"identity": "/data/one", "query": "Thing"}
+        assert created[0].calls == [
+            (
+                "find_symbol",
+                {
+                    "name_path": "Thing",
+                    "relative_path": None,
+                    "substring_matching": False,
+                    "include_body": False,
+                    "include_info": False,
+                    "max_answer_chars": 12_000,
+                },
+            )
+        ]
+
+        status = _data(_call(client, authorization, session, "get_runtime_status", lease_id=lease))
+        assert status["daemon_id"] == daemon_id
+        assert _data_map(status["binding"])["working_subdirectory"] == "/data/one/subdir"
+        assert _data_map(status["runtime"])["identity"] == "/data/one"
+        assert token not in json.dumps(status)
+
+        missing = _call(client, authorization, session, "find_symbol", {"name_path": "Thing"})
+        assert _data_map(missing["error"])["code"] == "LEASE_EXPIRED"
+
+        unsupported = _call(
+            client,
+            authorization,
+            session,
+            "replace_symbol_body",
+            {"name_path": "Thing", "relative_path": "a.py", "body": "x", "expected_hash": "0" * 64},
+            lease,
+        )
+        assert _data_map(unsupported["error"])["code"] == "UNSUPPORTED"
+
+
+def test_release_workspace_keeps_lease_live_and_bindings_isolated() -> None:
+    service, created = _service()
+
+    async def scenario() -> None:
+        first = cast(str, (await service.acquire_lease(mcp_session_id="a"))["lease_id"])
+        second = cast(str, (await service.acquire_lease(mcp_session_id="b"))["lease_id"])
+        await service.activate_workspace(lease_id=first, absolute_path="/data/one/child")
+        await service.activate_workspace(lease_id=second, absolute_path="/data/two/child")
+
+        await service.semantic_operation(lease_id=first, operation="find_symbol", name_path="One")
+        await service.semantic_operation(lease_id=second, operation="find_symbol", name_path="Two")
+        assert [runtime.calls for runtime in created] == [
+            [("find_symbol", {"name_path": "One"})],
+            [("find_symbol", {"name_path": "Two"})],
+        ]
+
+        released = await service.release_workspace(lease_id=first)
+        assert released["released"] is True
+        assert (await service.heartbeat(lease_id=first))["lease_id"] == first
+        unbound = await service.get_runtime_status(lease_id=first)
+        assert _data_map(unbound["data"])["binding"] is None
+        await service.activate_workspace(lease_id=first, absolute_path="/data/three/child")
+        assert (await service.binding_for(lease_id=first)).identity == "/data/three"
+
+    asyncio.run(scenario())
+
+
+def _data_map(value: object) -> Mapping[str, object]:
+    assert isinstance(value, Mapping)
+    return cast(Mapping[str, object], value)

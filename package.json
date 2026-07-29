@@ -1,0 +1,16 @@
+{
+  "name": "serena-light-engines",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Pinned language engines for serena-light; not a published package",
+  "engines": {
+    "node": "22.22.0",
+    "npm": "11.13.0"
+  },
+  "dependencies": {
+    "npm": "11.13.0",
+    "pyright": "1.1.403",
+    "typescript": "5.9.3",
+    "typescript-language-server": "5.1.3"
+  }
+}

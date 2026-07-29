@@ -1,0 +1,120 @@
+"""Bounded single-worker execution for one workspace adapter."""
+
+from __future__ import annotations
+
+import queue
+import threading
+from collections.abc import Callable
+from concurrent.futures import Future
+from dataclasses import dataclass
+from typing import Any, TypeVar
+
+T = TypeVar("T")
+
+
+class ExecutorBusyError(RuntimeError):
+    """Raised when a workspace LSP queue has reached its fixed bound."""
+
+
+@dataclass(frozen=True)
+class ExecutorSnapshot:
+    queue_size: int
+    queue_capacity: int
+    active: bool
+    stopping: bool
+
+
+@dataclass
+class _WorkItem:
+    future: Future[Any]
+    call: Callable[[], Any]
+
+
+_STOP = object()
+
+
+class BoundedLspExecutor:
+    """Order LSP work without blocking the daemon event loop."""
+
+    def __init__(self, *, queue_capacity: int = 32, name: str = "workspace") -> None:
+        if queue_capacity < 1:
+            raise ValueError("queue_capacity must be positive")
+        self._queue: queue.Queue[_WorkItem | object] = queue.Queue(maxsize=queue_capacity)
+        self._capacity = queue_capacity
+        self._state_lock = threading.Lock()
+        self._active = False
+        self._stopping = False
+        self._thread = threading.Thread(target=self._run, name=f"serena-light-lsp:{name}", daemon=False)
+        self._thread.start()
+
+    def submit(self, call: Callable[[], T]) -> Future[T]:
+        future: Future[T] = Future()
+        with self._state_lock:
+            if self._stopping:
+                raise RuntimeError("LSP executor is stopping")
+            try:
+                self._queue.put_nowait(_WorkItem(future=future, call=call))
+            except queue.Full as exc:
+                raise ExecutorBusyError(f"LSP executor queue is full ({self._capacity})") from exc
+        return future
+
+    def snapshot(self) -> ExecutorSnapshot:
+        with self._state_lock:
+            return ExecutorSnapshot(
+                queue_size=self._queue.qsize(),
+                queue_capacity=self._capacity,
+                active=self._active,
+                stopping=self._stopping,
+            )
+
+    def close(self, *, cancel_queued: bool = True, timeout: float = 5.0) -> None:
+        if timeout <= 0:
+            raise ValueError("timeout must be positive")
+        with self._state_lock:
+            if self._stopping:
+                already_stopping = True
+            else:
+                self._stopping = True
+                already_stopping = False
+        if not already_stopping:
+            if cancel_queued:
+                self._cancel_queued()
+            self._queue.put(_STOP, timeout=timeout)
+        self._thread.join(timeout=timeout)
+        if self._thread.is_alive():
+            raise TimeoutError("LSP executor did not reach its bounded terminal state")
+
+    def _cancel_queued(self) -> None:
+        while True:
+            try:
+                item = self._queue.get_nowait()
+            except queue.Empty:
+                return
+            try:
+                if isinstance(item, _WorkItem):
+                    item.future.cancel()
+            finally:
+                self._queue.task_done()
+
+    def _run(self) -> None:
+        while True:
+            item = self._queue.get()
+            try:
+                if item is _STOP:
+                    return
+                assert isinstance(item, _WorkItem)
+                if not item.future.set_running_or_notify_cancel():
+                    continue
+                with self._state_lock:
+                    self._active = True
+                try:
+                    result = item.call()
+                except BaseException as exc:
+                    item.future.set_exception(exc)
+                else:
+                    item.future.set_result(result)
+                finally:
+                    with self._state_lock:
+                        self._active = False
+            finally:
+                self._queue.task_done()

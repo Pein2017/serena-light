@@ -1,0 +1,187 @@
+{
+  "engine": "python",
+  "engine_path": "/data/CoordExp/.codex/runtime/serena-light/deps/f466e21b2e6356b5623293ac2d60e7fba66eea0bf1c5d6e8aca28b34f8aea865/node-packages/node_modules/pyright/langserver.index.js",
+  "engine_version": "1.1.403",
+  "lock_digest": "f466e21b2e6356b5623293ac2d60e7fba66eea0bf1c5d6e8aca28b34f8aea865",
+  "position_encoding_source": "LSP default (server omitted positionEncoding)",
+  "request": {
+    "capabilities": {
+      "general": {
+        "positionEncodings": [
+          "utf-16",
+          "utf-8",
+          "utf-32"
+        ]
+      },
+      "textDocument": {
+        "definition": {
+          "dynamicRegistration": true
+        },
+        "documentSymbol": {
+          "dynamicRegistration": true,
+          "hierarchicalDocumentSymbolSupport": true
+        },
+        "publishDiagnostics": {
+          "relatedInformation": true
+        },
+        "references": {
+          "dynamicRegistration": true
+        },
+        "synchronization": {
+          "didSave": true,
+          "dynamicRegistration": true
+        }
+      },
+      "window": {
+        "workDoneProgress": true
+      },
+      "workspace": {
+        "configuration": true,
+        "didChangeConfiguration": {
+          "dynamicRegistration": true
+        },
+        "symbol": {
+          "dynamicRegistration": true
+        },
+        "workspaceFolders": true
+      }
+    },
+    "clientInfo": {
+      "name": "serena-light-admission",
+      "version": "0.1.0"
+    },
+    "initializationOptions": {
+      "exclude": [
+        ".codegraph/**",
+        ".dev_scripts/**",
+        ".git/**",
+        ".github/**",
+        ".history/**",
+        ".serena/**",
+        "asset/**",
+        "docs/resources/**",
+        "docs/source/BestPractices/**",
+        "docs/source/Customization/**",
+        "docs/source/GetStarted/**",
+        "docs/source/Instruction/**",
+        "docs/source/Megatron-SWIFT/**",
+        "docs/source/_templates/**",
+        "docs/source_en/BestPractices/**",
+        "docs/source_en/Customization/**",
+        "docs/source_en/GetStarted/**",
+        "docs/source_en/Instruction/**",
+        "docs/source_en/Megatron-SWIFT/**",
+        "docs/source_en/_templates/**",
+        "examples/app/llm/**",
+        "examples/ascend/**",
+        "examples/eval/llm/**",
+        "examples/eval/train_eval/**",
+        "examples/eval/vlm/**",
+        "examples/export/**",
+        "examples/infer/lmdeploy/**",
+        "examples/infer/sglang/**",
+        "examples/infer/transformers/**",
+        "examples/infer/vllm/**",
+        "examples/megatron/**",
+        "examples/models/deepseek_vl2/**",
+        "examples/models/gemma4/**",
+        "examples/models/glm-4.6v/**",
+        "examples/models/gpt_oss/**",
+        "examples/models/hunyuan_ocr/**",
+        "examples/models/internvl3/**",
+        "examples/models/keye/**",
+        "examples/models/llama4/**",
+        "examples/models/minicpmv/**"
+      ],
+      "reportMissingImports": "none"
+    },
+    "processId": 0,
+    "rootPath": "/WORKSPACE",
+    "rootUri": "file:///WORKSPACE",
+    "trace": "off",
+    "workspaceFolders": [
+      {
+        "name": "WORKSPACE",
+        "uri": "file:///WORKSPACE"
+      }
+    ]
+  },
+  "response": {
+    "capabilities": {
+      "callHierarchyProvider": true,
+      "codeActionProvider": {
+        "codeActionKinds": [
+          "quickfix",
+          "source.organizeImports"
+        ],
+        "workDoneProgress": true
+      },
+      "completionProvider": {
+        "completionItem": {
+          "labelDetailsSupport": true
+        },
+        "resolveProvider": true,
+        "triggerCharacters": [
+          ".",
+          "[",
+          "\"",
+          "'"
+        ],
+        "workDoneProgress": true
+      },
+      "declarationProvider": {
+        "workDoneProgress": true
+      },
+      "definitionProvider": {
+        "workDoneProgress": true
+      },
+      "documentHighlightProvider": {
+        "workDoneProgress": true
+      },
+      "documentSymbolProvider": {
+        "workDoneProgress": true
+      },
+      "executeCommandProvider": {
+        "commands": [],
+        "workDoneProgress": true
+      },
+      "hoverProvider": {
+        "workDoneProgress": true
+      },
+      "referencesProvider": {
+        "workDoneProgress": true
+      },
+      "renameProvider": {
+        "prepareProvider": true,
+        "workDoneProgress": true
+      },
+      "signatureHelpProvider": {
+        "triggerCharacters": [
+          "(",
+          ",",
+          ")"
+        ],
+        "workDoneProgress": true
+      },
+      "textDocumentSync": 2,
+      "typeDefinitionProvider": {
+        "workDoneProgress": true
+      },
+      "workspace": {
+        "workspaceFolders": {
+          "changeNotifications": true,
+          "supported": true
+        }
+      },
+      "workspaceSymbolProvider": {
+        "workDoneProgress": true
+      }
+    }
+  },
+  "schema_version": 1,
+  "selected_position_encoding": "utf-16",
+  "truncation": {
+    "initialize_options_exclude_original_count": 146,
+    "initialize_options_exclude_retained_count": 40
+  }
+}
