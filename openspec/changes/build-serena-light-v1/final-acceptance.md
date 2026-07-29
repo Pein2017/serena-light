@@ -220,7 +220,10 @@ Git fixture from hash
 to `ac1d5ed4cc123bfc41942f7da9c929871c83cc682f60e8dd4e15b5d837b14a9f`.
 Each returned the new file generation and completed
 `release_workspace(immediate=true)`; the fixture was reset between clients and
-deleted after the final receipt. No client edited any production repository.
+deleted after the final receipt. Fresh Codex also persisted the fixture in its
+trusted-project list; that exact stale block was removed after the directory was
+deleted, and neither the canonical Serena nor unrelated project entries were
+changed. No client edited any production repository.
 
 Model-facing Codex/Claude processes retained the working ambient `9090` proxy
 because their external API traffic requires it. The real service-executable

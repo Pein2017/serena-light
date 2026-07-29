@@ -7,9 +7,10 @@ actions, or other editing tools in v1.
 
 #### Scenario: Client enumerates tools
 - **WHEN** an MCP client lists serena-light tools
-- **THEN** `replace_symbol_body` is absent while repair acceptance is HOLD and is
-  restored only after the guarded-edit reacceptance gate; excluded editing
-  operations remain absent
+- **THEN** `replace_symbol_body` is absent while the explicit editing-containment
+  gate is active and is restored after the guarded-edit reacceptance gate;
+  excluded editing operations remain absent even if a later independent-audit
+  HOLD still blocks release
 
 #### Scenario: Stale client invokes the tool while containment is active
 - **WHEN** a client negotiated the old declaration before repair containment and
