@@ -8,8 +8,8 @@ The connector executable used by live Codex/Claude configurations is the
 service-owned, build-identity-scoped path
 `/data/CoordExp/.codex/runtime/serena-light/deps/eff6ebdf252faff7f77cb3a2f3894d17b9a0dfc89b46bd193fafdaa9e9ab4941/python/bin/serena-light`
 with no arguments — **not** the repository `.venv`. The dependency-digest
-segment (`eff6ebdf...`) and the current repaired build identity
-(`f92e13abd297ca1786bada925660062df2e61b3454127cf4bf28ad54295af1a7`) are tied
+segment (`eff6ebdf...`) and the current post-restoration build identity
+(`f4ee8a248a8cd2389b7b2d95083fd0d409548421b4933ac29a138ef0badf8721`) are tied
 to a versioned daemon slot. A source/schema-only rollover reuses the dependency
 directory but gets a new build slot; a lock change also installs a new digest
 directory. Old build slots coexist until their holders and grace expire, so
@@ -109,12 +109,13 @@ daemon remains after clients have stopped, use normal process inspection and
 stop only the identified `serena-light` daemon; never stop canonical Serena as
 part of this rollback.
 
-Fresh Codex, native Claude Code, and CC Agent receipts now match repaired build
-identity `f92e13abd297ca1786bada925660062df2e61b3454127cf4bf28ad54295af1a7` and
+Fresh Codex, native Claude Code, and CC Agent receipts match post-restoration
+build identity `f4ee8a248a8cd2389b7b2d95083fd0d409548421b4933ac29a138ef0badf8721` and
 cover `/data/CoordExp`, `cc-plugin-codex`, `/data/ms-swift`, and the read-only
 conda `ms` transformers package. Model-facing clients retained the ambient
 external-network `9090` proxy. Clean and poisoned internal environments are
 instead exercised by the real service-executable stdio acceptance, which passes
 the exact environment to the connector child and verifies loopback bypass.
-`replace_symbol_body` remains withheld until the post-restoration gate, and the
-final dual audit remains open. Canonical-name switching is unapproved.
+Each fresh client also advertised `replace_symbol_body`, performed the same
+isolated hash-guarded edit, and released immediately. The final dual audit
+remains open. Canonical-name switching is unapproved.

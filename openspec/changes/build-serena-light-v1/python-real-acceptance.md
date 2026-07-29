@@ -4,7 +4,8 @@ Date: 2026-07-28 UTC
 
 ## Post-audit current-build rerun
 
-**PASS at build `f92e13abd297...`: 4 passed.** This 2026-07-29 rerun used the
+**PASS at build `f4ee8a248a8c...`: 4 passed.** This 2026-07-29 post-restoration
+full-suite rerun used the
 production workspace/runtime and real Pyright against `/data/CoordExp`,
 `/data/ms-swift`, and the exact transformers root. It is real-repository plus
 real-LSP evidence; it does not traverse the shared daemon/connector. Process

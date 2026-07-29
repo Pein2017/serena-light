@@ -166,6 +166,6 @@
 - [x] 15.4 Pass pytest, Ruff, Ty, bootstrap, dependency/provenance gates, and strict OpenSpec with LOC reported but not gated.
 - [x] 15.5 Pass `/data/CoordExp`, `cc-plugin-codex`, `/data/ms-swift`, and transformers in fresh Codex, Claude Code, and CC Agent sessions while retaining the working external-network proxy; separately pass exact clean and poisoned child environments through the real stdio connector so localhost traffic never depends on the model client's proxy.
 - [x] 15.6 Update compatibility, registration, README, roadmap, and acceptance evidence with recorded environment/proxy preconditions.
-- [ ] 15.7 Restore agent-public `replace_symbol_body`, restart fresh clients, and rerun hash edit/release only after every preceding repair gate passes.
+- [x] 15.7 Restore agent-public `replace_symbol_body`, restart fresh clients, and rerun hash edit/release only after every preceding repair gate passes.
 - [ ] 15.8 Obtain independent Sol-xhigh static-correctness and Opus-max runtime/evidence audits; disposition every finding and clear all blockers.
 - [ ] 15.9 Mark v1 PASS again, sync stable specs, and archive only after tasks 11–15 are complete; do not switch canonical Serena.

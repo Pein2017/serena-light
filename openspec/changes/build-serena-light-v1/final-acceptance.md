@@ -4,7 +4,7 @@ Date: 2026-07-29 UTC
 
 ## Decision
 
-**DUAL AUDIT HOLD — REPAIR IN PROGRESS.** Sol-xhigh and Opus-max completed the
+**DUAL AUDIT HOLD — FINAL REAUDIT PENDING.** Sol-xhigh and Opus-max completed the
 required independent review at commit `6a3acb6` and both returned HOLD. Their
 accepted P1 findings cover guarded-edit parent-rename TOCTOU, runtime-source
 build-identity closure, legacy retirement atomicity, native-config freshness,
@@ -13,10 +13,10 @@ evidence, reproducible production-path stdio acceptance, and fresh-client
 receipt scope. The code findings are repaired at local commit `d129dee`; legacy
 retirement was deliberately narrowed to authenticated inspection plus
 fail-closed `atomic_retirement_unsupported` because v1 has no atomic lease
-freeze. The repaired implementation and evidence are current through local
-commit `b140025`. Agent-public `replace_symbol_body` remains withheld for new
-clients until the post-restoration test and fresh-client gates pass. This is not
-v1 PASS. The canonical MCP registration named `serena` remains unchanged.
+freeze. The repaired implementation, restored public guarded edit, and evidence
+are current through local commit `9ba0d53`. The repair/reacceptance gates pass;
+v1 remains HOLD solely until the required independent final reaudits clear it.
+The canonical MCP registration named `serena` remains unchanged.
 
 ### Superseded pre-audit decision
 
@@ -42,18 +42,22 @@ used to archive this change.
 
 ## Current repair checkpoint
 
-At commit `b140025`, the complete suite passes 506 tests. It includes explicit
+At post-restoration commit `9ba0d53`, the complete suite passes 507 tests. It
+includes explicit
 child environments for clean and poisoned-proxy
 stdio clients, borrowed-daemon holder preservation, no retained connector
 child/daemon descendant, `.mjs` build-identity closure, no-signal legacy lease
 race, typed activation rollback, final/non-final immediate release, nested
 native-config adapter replacement, and both pre-install and post-install parent
 replacement races. Post-install ambiguity is `UNCERTAIN` with a mandatory
-reread; it is never reported as a clean edit or replayed.
+reread; it is never reported as a clean edit or replayed. The added real stdio
+case advertises the restored tool, performs one expected-hash semantic edit in
+an isolated `/data` Git workspace under a fully poisoned child proxy, releases
+immediately, and exact-cleans only its isolated daemon and fixture.
 
 ```text
 uv run pytest -q tests
-506 passed
+507 passed
 
 uv run pytest -q tests/acceptance/test_connector_contract_acceptance.py \
   tests/acceptance/test_lifecycle_failure_matrix.py tests/unit/test_adapter.py \
@@ -77,8 +81,8 @@ openspec validate build-serena-light-v1 --strict
 Change 'build-serena-light-v1' is valid
 ```
 
-The repaired build identity is
-`f92e13abd297ca1786bada925660062df2e61b3454127cf4bf28ad54295af1a7`.
+The post-restoration build identity is
+`f4ee8a248a8cd2389b7b2d95083fd0d409548421b4933ac29a138ef0badf8721`.
 The current dependency digest is
 `eff6ebdf252faff7f77cb3a2f3894d17b9a0dfc89b46bd193fafdaa9e9ab4941`;
 Pydantic 2.13.4 is declared directly because production imports `StrictBool`.
@@ -93,9 +97,9 @@ contract uses the real connector and daemon HTTP service with the real
 family isolation are also covered in the named runtime suites, while the
 Unicode real-engine range check uses the TypeScript real-repository acceptance.
 These layers are intentionally not described as one subprocess end-to-end
-test. The current-build fresh-client matrix also passes as recorded below;
-public edit restoration, its post-restoration rerun, and final dual audit remain
-open.
+test. The fresh-client root matrix, public edit restoration, and three
+post-restoration fresh-client hash edits also pass as recorded below. Only the
+final dual audit remains open.
 
 The isolated real-process rollover gate launches the locked service connector
 and two detached `serena_light.cli daemon` processes for three clients and two
@@ -193,8 +197,9 @@ layer and require current-build reruns before release.
 
 ## Fresh clients and connector acceptance
 
-Fresh Codex (`gpt-5.6-terra`), native Claude Code (`claude-sonnet-5/high`), and
-CC Agent (`claude-sonnet-5/high`) clients all matched repaired build identity
+Before edit restoration, fresh Codex (`gpt-5.6-terra`), native Claude Code
+(`claude-sonnet-5/high`), and CC Agent (`claude-sonnet-5/high`) clients all
+matched repaired containment build identity
 `f92e13abd297ca1786bada925660062df2e61b3454127cf4bf28ad54295af1a7`.
 Each client used only parallel Serena Light to activate and query all four
 required roots: `PipelinePlanner` in `/data/CoordExp`, a TypeScript/MJS overview
@@ -206,6 +211,16 @@ absent from every fresh tool list. The first non-interactive native Claude and
 safe-profile CC Agent attempts were denied by their client permission policies
 before any MCP call; fresh retries used an explicit read-only Serena Light
 allowlist and are the accepted receipts.
+
+After restoration, new clients of all three types matched build identity
+`f4ee8a248a8cd2389b7b2d95083fd0d409548421b4933ac29a138ef0badf8721`,
+advertised `replace_symbol_body`, and independently edited the same isolated
+Git fixture from hash
+`3ac0e0dde718f14d961d87f61fefa93cd4c410adf5e69107b2f2b28a785ae34b`
+to `ac1d5ed4cc123bfc41942f7da9c929871c83cc682f60e8dd4e15b5d837b14a9f`.
+Each returned the new file generation and completed
+`release_workspace(immediate=true)`; the fixture was reset between clients and
+deleted after the final receipt. No client edited any production repository.
 
 Model-facing Codex/Claude processes retained the working ambient `9090` proxy
 because their external API traffic requires it. The real service-executable
@@ -259,6 +274,6 @@ configuration is untouched.
 deliberately dropped UI, memory, mode, JetBrains, broad file-edit, and project
 server surfaces do not block parallel use; they block only an unreviewed claim
 of full Serena compatibility or a canonical-name switch.
-`replace_symbol_body` is marked `temporarily_withheld_pending_reacceptance`
-there. Clients must restart after a later accepted restoration to negotiate the
-tool; no current receipt authorizes its use.
+`replace_symbol_body` is marked `agent_public` there after the post-restoration
+full suite and fresh-client hash-edit receipts. The final audit HOLD blocks v1
+PASS/archive, not current use of the reaccepted guarded-edit contract.

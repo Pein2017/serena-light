@@ -6,8 +6,8 @@ derivative of selected MIT-licensed Serena and SolidLSP mechanisms.
 
 The repository is reaccepting its first OpenSpec change. The admission probes,
 provenance census, owned LSP core, workspace/adapter/daemon layers, containment,
-repair-state test/static gates, and fresh clients pass; edit restoration and the
-final dual audit remain open.
+repair-state test/static gates, fresh clients, and guarded-edit restoration
+pass; only the final dual audit remains open.
 
 ## Scope
 
@@ -38,11 +38,11 @@ Agent fresh-session acceptance passes on the current repaired identity across
 all four required roots.
 Canonical `serena` remains unchanged pending a separate user decision.
 
-**Current state: `DUAL AUDIT HOLD — REPAIR IN PROGRESS`.** The Sol-xhigh and
+**Current state: `DUAL AUDIT HOLD — FINAL REAUDIT PENDING`.** The Sol-xhigh and
 Opus-max audits found release-blocking correctness and evidence gaps after the
 first reacceptance. The accepted code findings and evidence are current through
-local commit `b140025`, but agent-public `replace_symbol_body` remains withheld
-for new clients until the explicit post-restoration gate passes.
+local commit `9ba0d53`; agent-public `replace_symbol_body` is restored after its
+fault matrix, full regression, and three fresh-client hash-edit receipts passed.
 This is **not** v1 PASS. Source ownership/provenance
 passes with 9 copied hashes against official Serena commit
 `9a9d07e83d8c1cba3458992707f440c624446c6d`; production LOC (13,816) is

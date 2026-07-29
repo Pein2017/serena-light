@@ -2,7 +2,8 @@
 
 ## Post-audit current-build rerun
 
-**PASS at build `f92e13abd297...`: 6 passed.** This 2026-07-29 rerun used the
+**PASS at build `f4ee8a248a8c...`: 6 passed.** This 2026-07-29 post-restoration
+full-suite rerun used the
 production workspace/runtime and real TypeScript language server against
 `/data/CoordExp/cc-plugin-codex`, including the repository-native typecheck
 contrast. It is real-repository plus real-LSP evidence; it does not traverse

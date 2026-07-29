@@ -11,8 +11,9 @@ actions, or other editing tools in v1.
   restored only after the guarded-edit reacceptance gate; excluded editing
   operations remain absent
 
-#### Scenario: Stale client invokes the withheld tool
-- **WHEN** a client negotiated the old declaration before repair containment
+#### Scenario: Stale client invokes the tool while containment is active
+- **WHEN** a client negotiated the old declaration before repair containment and
+  invokes it while the repair gate still withholds editing
 - **THEN** the call returns `UNSUPPORTED` with reason
   `temporarily_disabled_pending_reacceptance` and writes nothing
 

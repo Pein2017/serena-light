@@ -9,9 +9,9 @@ active OpenSpec change, OpenSpec wins.
 `build-serena-light-v1` is the sole repair owner. Its 2026-07-28 PASS was
 superseded by HOLD. The 2026-07-29 Sol-xhigh and Opus-max audits found new
 release-blocking correctness and evidence gaps, so the current state is
-`DUAL AUDIT HOLD — REPAIR IN PROGRESS`, not v1 PASS. Serena Light remains
+`DUAL AUDIT HOLD — FINAL REAUDIT PENDING`, not v1 PASS. Serena Light remains
 registered in parallel under `serena-light`; canonical `serena` is unchanged.
-Guarded editing (`replace_symbol_body`) is withheld again for new clients.
+Guarded editing (`replace_symbol_body`) is restored after reacceptance.
 
 ## Phase A: contain and repair v1
 
@@ -29,8 +29,8 @@ layer. Unit/in-process, real connector plus deterministic LSP, real daemon fault
 and real LSP/repository evidence must be named separately; only the stdio gate
 currently combines the production connector executable with the shared daemon.
 No canonical-name change is permitted. The accepted code findings and repair
-evidence are current through local commit `b140025`; remaining client/release
-reacceptance is still open. See
+evidence are current through local commit `9ba0d53`; only final independent
+reaudit and release are still open. See
 [the final acceptance record](../openspec/changes/build-serena-light-v1/final-acceptance.md).
 
 ## Phase B: reaccept and release v1
@@ -45,11 +45,14 @@ independent `sol-xhigh` static-correctness and `opus-max` runtime/evidence
 audits, disposition every finding, mark v1 PASS, sync stable specs, and archive.
 
 **Progress as of 2026-07-29:** both required auditors returned HOLD. Their
-accepted code findings are repaired; the 506-test suite, explicit 75-test
+accepted code findings are repaired; the post-restoration 507-test suite,
+explicit 75-test
 connector/edit contract selection, static/dependency/provenance gates, and
 separately labelled real-process rollover acceptance pass. Current-build fresh
-Codex, native Claude, and CC Agent clients also pass all four required roots;
-public edit restoration and rerun, final dual audit, and release remain pending.
+Codex, native Claude, and CC Agent clients also pass all four required roots.
+All three fresh client types advertise the restored edit, complete the same
+isolated hash transition, and release immediately. Final dual audit and release
+remain pending.
 
 Gate: every blocker is cleared and task 15 is complete. Local commits are kept;
 no push and no canonical Serena switch.
