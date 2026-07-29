@@ -46,18 +46,22 @@ complete fault matrix passes. Then obtain
 independent `sol-xhigh` static-correctness and `opus-max` runtime/evidence
 audits, disposition every finding, mark v1 PASS, sync stable specs, and archive.
 
-**Progress as of 2026-07-29:** exact-head Sol-xhigh and Opus-max audits at
-`6fce244` confirmed the previous five blockers closed, then returned HOLD for a
-runtime owner that cached one failed cleanup future, ambient Node/npm authority,
-and missing exact-build native Claude Code evidence; Sol also identified a
-partial-stdio-startup cleanup gap. Candidate build
-`3756b3b8da6e1e33b91cb2f7c073b2dd04d74e38850f3dfc221a3d31d60f282f`
-repairs those items. The deterministic default suite passes 533 tests and
-explicitly skips 22 snapshot-gated external tests; fixed-snapshot TypeScript
-acceptance/integration/admission passes 15 with locked Node/npm. Fresh
-Codex/Terra, native Claude Code/Sonnet, and CC Agent/Sonnet all pass the
-four-root matrix plus isolated hash edit/restore at the exact build. Only final
-dual re-audit and release remain pending.
+**Progress as of 2026-07-29:** exact-head audits at `483e7a4` confirmed all
+earlier cleanup, authority, stdio, and client-evidence blockers closed. Opus-max
+passed the runtime/evidence repair; Sol-xhigh reproduced one new P1 where a
+same-size in-place rewrite could retain the stat-only freshness identity. Build
+`500f841f5826bd15a5332f6e30a968d846c600d0ce9cb6e3b6715f0243514c0d`
+adds guarded streaming byte identity for every trusted Git source and native
+config, fails closed before scan commit on unstable reads, and keeps the
+transformers non-Git root caller-targeted. The deterministic suite passes 541
+tests and explicitly skips 22 snapshot-gated external tests; fixed-snapshot
+TypeScript acceptance/integration/admission passes 15, Python/Pyright passes 7
+with one intentional performance skip, and three isolated transformers
+performance runs remain below 40 seconds. Fresh-client reruns and the final dual
+performance runs remain below 40 seconds. Fresh Codex/Terra, native Claude
+Code/Sonnet, and CC Agent/Sonnet now pass the exact build across all four roots
+plus isolated edit/restore; only the final dual re-audit and release remain
+pending.
 
 Gate: every blocker is cleared and task 15 is complete. Sync/archive and the
 authorized GitHub push occur only after both final audits pass; no canonical

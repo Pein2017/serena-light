@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import subprocess
 import threading
 import time
@@ -11,6 +12,7 @@ from typing import Any, cast
 
 import pytest
 
+import serena_light.workspace.inventory as inventory_module
 from serena_light.lsp.adapter import (
     AdapterErrorCode,
     AdapterGenerations,
@@ -61,6 +63,23 @@ class _PathPolicy:
             raise ValueError(f"outside inventory: {candidate}")
         assert candidate.is_relative_to(identity.root)
         return candidate
+
+
+def _stat_with_fixed_times(observed: os.stat_result) -> os.stat_result:
+    return os.stat_result(
+        (
+            observed.st_mode,
+            observed.st_ino,
+            observed.st_dev,
+            observed.st_nlink,
+            observed.st_uid,
+            observed.st_gid,
+            observed.st_size,
+            0,
+            0,
+            0,
+        )
+    )
 
 
 class _Client:
@@ -1158,11 +1177,152 @@ def test_freshness_detects_symlink_substitution_and_native_config_change(tmp_pat
         assert "main.py" not in runtime.inventory.paths
         assert ("main.py", "symlink") in {(item.path, item.reason) for item in runtime.inventory.rejected}
 
+        (tmp_path / "main.py").unlink()
+        (tmp_path / "main.py").write_text("value = 1\n")
+        runtime.ensure_fresh()
+
         (tmp_path / "pyrightconfig.json").write_text("{}\n")
         config_scan = runtime.ensure_fresh()
 
         assert config_scan.config_changed == ("pyrightconfig.json",)
         assert config_scan.reattributed == (LanguageFamily.PYTHON,)
+    finally:
+        runtime.stop()
+
+
+@pytest.mark.parametrize("tracked", (True, False), ids=("tracked", "untracked"))
+def test_same_stat_source_rewrite_is_reconciled_before_a_semantic_result(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, tracked: bool
+) -> None:
+    _git_repository(tmp_path)
+    target = tmp_path / "main.py"
+    target.write_text("value = 1\n")
+    if tracked:
+        subprocess.run(["git", "add", "main.py"], cwd=tmp_path, check=True, capture_output=True)
+    real_fstat = os.fstat
+    real_stat = os.stat
+    real_lstat = os.lstat
+    monkeypatch.setattr(inventory_module.os, "fstat", lambda fd: _stat_with_fixed_times(real_fstat(fd)))
+    monkeypatch.setattr(
+        inventory_module.os,
+        "stat",
+        lambda path, *args, **kwargs: _stat_with_fixed_times(real_stat(path, *args, **kwargs)),
+    )
+    monkeypatch.setattr(
+        inventory_module.os,
+        "lstat",
+        lambda path, *args, **kwargs: _stat_with_fixed_times(real_lstat(path, *args, **kwargs)),
+    )
+    adapters: dict[LanguageFamily, _Adapter] = {}
+    contexts: dict[LanguageFamily, AdapterBuildContext] = {}
+    runtime = _git_runtime(tmp_path, adapters, contexts)
+    try:
+        runtime.load_document_symbols("main.py")
+        python = adapters[LanguageFamily.PYTHON]
+        python.client.notifications.clear()
+        target.write_text("value = 2\n")
+
+        scan = runtime.ensure_fresh()
+
+        assert scan.changed == ("main.py",)
+        notification = cast(Mapping[str, Any], python.client.notifications[-1][1])
+        assert notification["contentChanges"] == [{"text": "value = 2\n"}]
+    finally:
+        runtime.stop()
+
+
+def test_unstable_byte_observation_fails_before_freshness_state_is_committed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _git_repository(tmp_path)
+    (tmp_path / "main.py").write_text("value = 1\n")
+    adapters: dict[LanguageFamily, _Adapter] = {}
+    contexts: dict[LanguageFamily, AdapterBuildContext] = {}
+    runtime = _git_runtime(tmp_path, adapters, contexts)
+    try:
+        runtime.load_document_symbols("main.py")
+        python = adapters[LanguageFamily.PYTHON]
+        python.client.notifications.clear()
+        inventory_before = runtime.inventory
+        generations_before = python.snapshot().generations
+        real_observe = inventory_module._observe_candidate
+        unstable_once = True
+
+        def observe(root: Path, relative: str) -> tuple[str | None, os.stat_result | None, str | None]:
+            if relative == "main.py" and unstable_once:
+                return "unstable", None, None
+            return real_observe(root, relative)
+
+        monkeypatch.setattr(inventory_module, "_observe_candidate", observe)
+
+        with pytest.raises(WorkspaceRuntimeError) as caught:
+            runtime.ensure_fresh()
+
+        assert caught.value.code is RuntimeErrorCode.NOT_READY
+        assert runtime.inventory is inventory_before
+        assert python.snapshot().generations == generations_before
+        assert python.client.notifications == []
+
+        unstable_once = False
+        assert not runtime.ensure_fresh().dirty
+    finally:
+        runtime.stop()
+
+
+def test_same_stat_native_config_rewrite_restarts_the_running_adapter(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _git_repository(tmp_path)
+    (tmp_path / "main.py").write_text("value = 1\n")
+    config = tmp_path / "pyrightconfig.json"
+    config.write_text('{"x":1}\n')
+    real_fstat = os.fstat
+    real_stat = os.stat
+    real_lstat = os.lstat
+    monkeypatch.setattr(inventory_module.os, "fstat", lambda fd: _stat_with_fixed_times(real_fstat(fd)))
+    monkeypatch.setattr(
+        inventory_module.os,
+        "stat",
+        lambda path, *args, **kwargs: _stat_with_fixed_times(real_stat(path, *args, **kwargs)),
+    )
+    monkeypatch.setattr(
+        inventory_module.os,
+        "lstat",
+        lambda path, *args, **kwargs: _stat_with_fixed_times(real_lstat(path, *args, **kwargs)),
+    )
+    adapters: dict[LanguageFamily, _Adapter] = {}
+    contexts: dict[LanguageFamily, AdapterBuildContext] = {}
+    runtime = _git_runtime(tmp_path, adapters, contexts)
+    try:
+        runtime.load_document_symbols("main.py")
+        original = adapters[LanguageFamily.PYTHON]
+        config.write_text('{"y":2}\n')
+
+        scan = runtime.ensure_fresh()
+
+        assert scan.config_changed == ("pyrightconfig.json",)
+        assert adapters[LanguageFamily.PYTHON] is not original
+    finally:
+        runtime.stop()
+
+
+def test_native_config_deletion_is_a_stable_change_and_restarts_the_adapter(tmp_path: Path) -> None:
+    _git_repository(tmp_path)
+    (tmp_path / "main.py").write_text("value = 1\n")
+    config = tmp_path / "pyrightconfig.json"
+    config.write_text("{}\n")
+    adapters: dict[LanguageFamily, _Adapter] = {}
+    contexts: dict[LanguageFamily, AdapterBuildContext] = {}
+    runtime = _git_runtime(tmp_path, adapters, contexts)
+    try:
+        runtime.load_document_symbols("main.py")
+        original = adapters[LanguageFamily.PYTHON]
+        config.unlink()
+
+        scan = runtime.ensure_fresh()
+
+        assert scan.config_changed == ("pyrightconfig.json",)
+        assert adapters[LanguageFamily.PYTHON] is not original
     finally:
         runtime.stop()
 

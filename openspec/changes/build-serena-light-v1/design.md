@@ -475,6 +475,11 @@ client that invokes the old declaration receives `UNSUPPORTED` with reason
 `temporarily_disabled_pending_reacceptance`; the implementation remains covered
 by tests and is not deleted.
 
+After gates 15.1-15.6 pass, task 15.7 restores the guarded edit before the
+three fresh-client hash-edit receipts and the independent dual audit. An audit
+HOLD after that restoration blocks release and archive but does not by itself
+re-enter containment or invalidate the already accepted edit fault matrix.
+
 Ambient proxy variables are owned only by external-network callers. Bootstrap
 may inherit them for Python/Node/npm downloads. Connector-to-loopback HTTP,
 daemon health probes, and local acceptance/fault HTTP use clients configured not
@@ -489,18 +494,26 @@ A workspace-owned `FreshnessCoordinator` runs before each semantic or edit
 operation and when the same root is activated again. Concurrent callers share
 one in-flight scan; there is no time cache that can authorize stale success.
 Git workspaces rebuild the lexical trust inventory and compare create, change,
-delete, symlink, and native-config state. Content changes advance document/path
-generations; membership or config changes also reattribute the affected
-language family and advance trust/program/index generations. Running adapters
-receive `didChangeWatchedFiles`. If a changed URI is already open, the adapter
+delete, symlink, and native-config state. Every trusted supported source and
+native-config candidate is observed through guarded directory descriptors,
+`O_NOFOLLOW`, a streaming SHA-256, and before/after descriptor and lexical-entry
+identity checks. A same-size, same-stat in-place rewrite therefore changes the
+freshness identity. A file or parent that changes during observation returns
+retryable `NOT_READY` before inventory, generations, or events are committed;
+stable source deletion, config absence, or a stably rejected source symlink remains an
+ordinary committable membership/config change. Content changes advance
+document/path generations; membership or config changes also reattribute the
+affected language family and advance trust/program/index generations. Running
+adapters receive `didChangeWatchedFiles`. If a changed URI is already open, the adapter
 also sends full-text `didChange` from the exact observed snapshot; deleted or
 unreadable open URIs are closed. Newly created files receive a bounded
 open/close notification when required. Freshness retains the watcher/reconcile
 future and settles it before dispatch; admission, timeout, or worker failure
 keeps the exact batch pending and returns retryable `BUSY` or `NOT_READY`, so an
-unchanged scan cannot silently authorize stale success. The allowlisted
-read-only transformers root continues targeted-stat checks and is never fully
-walked per call.
+unchanged scan cannot silently authorize stale success. Git preflight is
+`O(total trusted source bytes)` with streaming `O(1)` memory per file. The
+allowlisted read-only transformers root uses the same byte identity only for
+the caller-named path and is never fully walked per call.
 
 One changed batch is applied in two phases across language families. First,
 every affected tracker advances its path/program generation without touching

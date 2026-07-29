@@ -104,6 +104,7 @@ from serena_light.workspace.identity import (
 from serena_light.workspace.inventory import (
     JAVASCRIPT_TYPESCRIPT_EXTENSIONS,
     PYTHON_EXTENSIONS,
+    TargetedPathState,
     TrustInventory,
     git_trust_inventory,
     transformers_trust_inventory,
@@ -119,7 +120,7 @@ from serena_light.workspace.scope import (
 
 type PhysicalWorkspaceKey = tuple[WorkspaceKind, Path]
 type ProgramAttributor = Callable[[Path, tuple[str, ...]], ScopeProjection]
-type ContentIdentity = tuple[int | None, int | None, int | None, int | None]
+type ContentIdentity = tuple[int | None, int | None, int | None, int | None, str | None]
 
 _FAMILY_EXTENSIONS: Mapping[LanguageFamily, frozenset[str]] = {
     LanguageFamily.PYTHON: PYTHON_EXTENSIONS,
@@ -594,6 +595,12 @@ class FreshnessCoordinator:
             if not states:
                 return FreshnessScan()
             observed = states[0]
+            if not observed.trusted:
+                raise WorkspaceRuntimeError(
+                    RuntimeErrorCode.NOT_READY,
+                    f"{observed.path} could not be observed safely for freshness",
+                    paths=(observed.path,),
+                )
             with self._lock:
                 if self._states.get(observed.path) == observed.content_identity:
                     return FreshnessScan()
@@ -615,8 +622,11 @@ class FreshnessCoordinator:
         self._config_states = self._observe_configs(inventory)
 
     def _observe_configs(self, inventory: TrustInventory) -> dict[str, ContentIdentity]:
+        return {state.path: state.content_identity for state in self._config_states_for(inventory)}
+
+    def _config_states_for(self, inventory: TrustInventory) -> tuple[TargetedPathState, ...]:
         candidates = _native_config_candidates(inventory, self._runtime.projections)
-        return {state.path: state.content_identity for state in inventory.targeted_states(sorted(candidates))}
+        return inventory.targeted_states(sorted(candidates))
 
     def _scan_git(self) -> FreshnessScan:
         runtime = self._runtime
@@ -630,7 +640,25 @@ class FreshnessCoordinator:
         before, after = set(previous.paths), set(rebuilt.paths)
         created = tuple(sorted(after - before))
         deleted = tuple(sorted(before - after))
-        states = {state.path: state for state in rebuilt.targeted_states(rebuilt.paths)}
+        observed_states = rebuilt.targeted_states(rebuilt.paths)
+        unsafe_sources = tuple(sorted(state.path for state in observed_states if not state.trusted))
+        config_states = self._config_states_for(rebuilt)
+        unsafe_configs = tuple(
+            sorted(
+                state.path
+                for state in config_states
+                if state.reason is not None
+                and state.reason != "missing"
+            )
+        )
+        unsafe = tuple(sorted({*unsafe_sources, *unsafe_configs}))
+        if unsafe:
+            raise WorkspaceRuntimeError(
+                RuntimeErrorCode.NOT_READY,
+                "workspace paths changed or became unsafe during freshness observation",
+                paths=unsafe,
+            )
+        states = {state.path: state for state in observed_states}
         changed = tuple(
             path
             for path in sorted(after & before)
@@ -639,7 +667,7 @@ class FreshnessCoordinator:
         symlinked = tuple(
             sorted(item.path for item in rebuilt.rejected if item.reason.startswith("symlink"))
         )
-        configs = self._observe_configs(rebuilt)
+        configs = {state.path: state.content_identity for state in config_states}
         config_changed = tuple(
             sorted(name for name, value in configs.items() if self._config_states.get(name) != value)
         )

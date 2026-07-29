@@ -252,6 +252,24 @@ files served through configured, inferred, or transient engine projects.
 - **THEN** they share one synchronous in-flight freshness scan and none may
   return success using a stale time-cache entry
 
+#### Scenario: Source bytes change without a stat-identity change
+- **WHEN** a trusted tracked or untracked source is rewritten in place with the
+  same size, inode, and observable timestamp values
+- **THEN** guarded byte identity reports the path as changed, advances the
+  required generation, and reconciles the adapter before semantic success
+
+#### Scenario: A source changes while byte identity is observed
+- **WHEN** the file, its lexical entry, or an ancestor directory changes while
+  freshness streams its bytes
+- **THEN** the scan returns retryable `NOT_READY` before committing inventory,
+  state, generations, or watcher events; a later preflight observes afresh
+
+#### Scenario: Stable config deletion or source symlink rejection is observed
+- **WHEN** a native config is stably absent or a formerly trusted source is
+  stably replaced by a rejected symlink before the scan begins
+- **THEN** the new absence/rejection is committed as a config or membership
+  change rather than being retained forever as an unstable observation
+
 #### Scenario: Same root is activated again
 - **WHEN** a bound session activates another path in the same Git root
 - **THEN** the runtime performs an immediate refresh before returning reuse

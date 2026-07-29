@@ -7,6 +7,7 @@ from typing import Any
 
 import pytest
 
+import serena_light.workspace.inventory as inventory_module
 from serena_light.workspace.inventory import (
     SUPPORTED_EXTENSIONS,
     discover_transformers_root,
@@ -157,3 +158,144 @@ def test_content_identity_reports_an_atomic_replacement_that_keeps_size_and_mtim
     assert (after.size, after.mtime_ns) == (before.size, before.mtime_ns)
     assert after.inode != before.inode
     assert after.content_identity != before.content_identity
+
+
+def _stat_with_fixed_times(observed: os.stat_result) -> os.stat_result:
+    """Preserve every stat fact relevant to this test except its timestamps."""
+
+    return os.stat_result(
+        (
+            observed.st_mode,
+            observed.st_ino,
+            observed.st_dev,
+            observed.st_nlink,
+            observed.st_uid,
+            observed.st_gid,
+            observed.st_size,
+            0,
+            0,
+            0,
+        )
+    )
+
+
+def test_content_identity_hash_detects_different_bytes_with_the_same_stat_tuple(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = _repository(tmp_path)
+    target = root / "module.py"
+    target.write_text("x = 1\n")
+    inventory = git_trust_inventory(root)
+    real_fstat = os.fstat
+    real_stat = os.stat
+    real_lstat = os.lstat
+    monkeypatch.setattr(inventory_module.os, "fstat", lambda fd: _stat_with_fixed_times(real_fstat(fd)))
+    monkeypatch.setattr(
+        inventory_module.os,
+        "stat",
+        lambda path, *args, **kwargs: _stat_with_fixed_times(real_stat(path, *args, **kwargs)),
+    )
+    monkeypatch.setattr(
+        inventory_module.os,
+        "lstat",
+        lambda path, *args, **kwargs: _stat_with_fixed_times(real_lstat(path, *args, **kwargs)),
+    )
+
+    before = inventory.targeted_states(["module.py"])[0]
+    target.write_text("x = 2\n")
+    after = inventory.targeted_states(["module.py"])[0]
+
+    assert (after.size, after.mtime_ns, after.inode, after.ctime_ns) == (
+        before.size,
+        before.mtime_ns,
+        before.inode,
+        before.ctime_ns,
+    )
+    assert after.digest != before.digest
+    assert after.content_identity != before.content_identity
+
+
+def test_targeted_state_refuses_guarded_hash_races(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    root = _repository(tmp_path)
+    package = root / "package"
+    package.mkdir()
+    target = package / "module.py"
+    target.write_bytes(b"x" * (2 * 1024 * 1024))
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "module.py").write_text("outside = True\n")
+    inventory = git_trust_inventory(root)
+    real_read = os.read
+
+    def race(action: str) -> None:
+        if action == "symlink":
+            target.unlink()
+            target.symlink_to(outside / "module.py")
+        elif action == "ancestor":
+            moved = root / "package-old"
+            package.rename(moved)
+            package.symlink_to(outside, target_is_directory=True)
+        elif action == "replacement":
+            replacement = package / "replacement.py"
+            replacement.write_bytes(b"y" * (2 * 1024 * 1024))
+            os.replace(replacement, target)
+        elif action == "truncation":
+            target.write_bytes(b"short\n")
+        elif action == "deletion":
+            target.unlink()
+        elif action == "metadata":
+            current = target.stat()
+            os.utime(target, ns=(current.st_atime_ns, current.st_mtime_ns + 1))
+        else:
+            raise AssertionError(f"unexpected race action: {action}")
+
+    for action in ("symlink", "ancestor", "replacement", "truncation", "deletion", "metadata"):
+        if package.is_symlink():
+            package.unlink()
+            (root / "package-old").rename(package)
+        if not target.exists() or target.is_symlink():
+            if target.is_symlink():
+                target.unlink()
+            target.write_bytes(b"x" * (2 * 1024 * 1024))
+        triggered = False
+
+        def racing_read(file_descriptor: int, size: int, action: str = action) -> bytes:
+            nonlocal triggered
+            chunk = real_read(file_descriptor, size)
+            if chunk and not triggered:
+                triggered = True
+                race(action)
+            return chunk
+
+        monkeypatch.setattr(inventory_module.os, "read", racing_read)
+        state = inventory.targeted_states(["package/module.py"])[0]
+
+        assert triggered
+        assert not state.trusted
+        assert state.reason == "unstable"
+
+
+def test_targeted_state_refuses_an_ancestor_symlink_without_reading_outside_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = _repository(tmp_path)
+    package = root / "package"
+    package.mkdir()
+    target = package / "module.py"
+    target.write_text("inside = True\n")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "module.py").write_text("outside = True\n")
+    inventory = git_trust_inventory(root)
+    moved = root / "package-old"
+    package.rename(moved)
+    package.symlink_to(outside, target_is_directory=True)
+
+    def forbidden_read(*_args: object, **_kwargs: object) -> bytes:
+        raise AssertionError("guarded observation must not read through an ancestor symlink")
+
+    monkeypatch.setattr(inventory_module.os, "read", forbidden_read)
+    state = inventory.targeted_states(["package/module.py"])[0]
+
+    assert not state.trusted
+    assert state.reason in {"unreadable", "unstable"}

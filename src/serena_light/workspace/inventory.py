@@ -16,6 +16,8 @@ from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 
+from serena_light.workspace.identity import open_guarded_directory
+
 PYTHON_EXTENSIONS = frozenset({".py", ".pyi"})
 JAVASCRIPT_TYPESCRIPT_EXTENSIONS = frozenset({".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".mts", ".cts"})
 SUPPORTED_EXTENSIONS = PYTHON_EXTENSIONS | JAVASCRIPT_TYPESCRIPT_EXTENSIONS
@@ -41,10 +43,9 @@ class TargetedPathState:
     ``os.replace``: a replacement can keep both size and mtime while being a
     different file, and only the inode reliably reports that substitution.
 
-    The bound of this signal is the filesystem's timestamp granularity: an
-    external in-place write of identical length within one clock tick is not
-    observable by stat alone.  Every edit this service installs replaces the
-    inode, so that gap belongs to foreign writers only.
+    ``digest`` is a guarded streaming hash of the bytes observed through the
+    lexical path.  It closes the same-size, same-stat in-place-write gap that
+    remains after the inode and timestamp facts below.
     """
 
     path: str
@@ -54,12 +55,13 @@ class TargetedPathState:
     reason: str | None
     inode: int | None = None
     ctime_ns: int | None = None
+    digest: str | None = None
 
     @property
-    def content_identity(self) -> tuple[int | None, int | None, int | None, int | None]:
+    def content_identity(self) -> tuple[int | None, int | None, int | None, int | None, str | None]:
         """The comparable facts that change whenever the file's bytes may have."""
 
-        return (self.size, self.mtime_ns, self.inode, self.ctime_ns)
+        return (self.size, self.mtime_ns, self.inode, self.ctime_ns, self.digest)
 
 
 class SupportedPathTree:
@@ -181,7 +183,7 @@ class TrustInventory:
             except ValueError:
                 states.add(TargetedPathState(str(raw_path), False, None, None, "invalid_relative_path"))
                 continue
-            reason, file_stat = _inspect_candidate(self.root, relative)
+            reason, file_stat, digest = _observe_candidate(self.root, relative)
             if reason is not None:
                 states.add(TargetedPathState(relative, False, None, None, reason))
                 continue
@@ -195,6 +197,7 @@ class TrustInventory:
                     None,
                     file_stat.st_ino,
                     file_stat.st_ctime_ns,
+                    digest,
                 )
             )
         return tuple(sorted(states, key=lambda item: item.path))
@@ -282,28 +285,119 @@ def _candidate_reason(root: Path, relative: str) -> str | None:
 
 
 def _inspect_candidate(root: Path, relative: str) -> tuple[str | None, os.stat_result | None]:
-    lexical = root / relative
+    parts = _normalized_parts(relative)
     try:
-        file_stat = lexical.lstat()
+        directory_fd = open_guarded_directory(root, parts[:-1])
     except FileNotFoundError:
         return "missing", None
     except (OSError, RuntimeError):
         return "unreadable", None
-    if stat.S_ISLNK(file_stat.st_mode):
+    try:
         try:
-            resolved = lexical.resolve(strict=True)
-        except (FileNotFoundError, OSError, RuntimeError):
-            return "symlink", None
-        return ("symlink_escape" if not resolved.is_relative_to(root) else "symlink"), None
+            file_stat = os.lstat(parts[-1], dir_fd=directory_fd)
+        except FileNotFoundError:
+            return "missing", None
+        except OSError:
+            return "unreadable", None
+        if stat.S_ISLNK(file_stat.st_mode):
+            return _symlink_reason(root, relative), None
+    finally:
+        os.close(directory_fd)
     if not stat.S_ISREG(file_stat.st_mode):
         return "non_regular", None
+    return None, file_stat
+
+
+def _observe_candidate(root: Path, relative: str) -> tuple[str | None, os.stat_result | None, str | None]:
+    """Hash one stable regular file without ever traversing a link.
+
+    The first lexical inspection admits a candidate to a trust inventory.  The
+    guarded descriptor walk here proves that the exact path is still a regular
+    in-root file while its bytes are read, then proves that neither its entry
+    nor its lexical parent changed before the observation is returned.
+    """
+
+    reason, inspected = _inspect_candidate(root, relative)
+    if reason is not None:
+        return reason, None, None
+    assert inspected is not None
+    parts = _normalized_parts(relative)
+    try:
+        directory_fd = open_guarded_directory(root, parts[:-1])
+    except FileNotFoundError:
+        return "missing", None, None
+    except (OSError, RuntimeError):
+        return "unstable", None, None
+    try:
+        try:
+            file_fd = os.open(parts[-1], os.O_RDONLY | os.O_NOFOLLOW, dir_fd=directory_fd)
+        except FileNotFoundError:
+            return "missing", None, None
+        except OSError:
+            return "unstable", None, None
+        try:
+            before = os.fstat(file_fd)
+            if not stat.S_ISREG(before.st_mode) or _stat_identity(inspected) != _stat_identity(before):
+                return "unstable", None, None
+            digest = hashlib.sha256()
+            while chunk := os.read(file_fd, 1024 * 1024):
+                digest.update(chunk)
+            after = os.fstat(file_fd)
+            entry = os.stat(parts[-1], dir_fd=directory_fd, follow_symlinks=False)
+        except OSError:
+            return "unstable", None, None
+        finally:
+            os.close(file_fd)
+        if (
+            _stat_identity(before) != _stat_identity(after)
+            or _stat_identity(after) != _stat_identity(entry)
+            or not _same_guarded_directory(root, parts[:-1], directory_fd)
+        ):
+            return "unstable", None, None
+        return None, after, digest.hexdigest()
+    finally:
+        os.close(directory_fd)
+
+
+def _same_guarded_directory(root: Path, parts: tuple[str, ...], expected_fd: int) -> bool:
+    """Prove the lexical parent still names the directory used for the hash."""
+
+    try:
+        current_fd = open_guarded_directory(root, parts)
+    except (OSError, RuntimeError):
+        return False
+    try:
+        expected = os.fstat(expected_fd)
+        current = os.fstat(current_fd)
+    except OSError:
+        return False
+    finally:
+        os.close(current_fd)
+    return (expected.st_dev, expected.st_ino) == (current.st_dev, current.st_ino)
+
+
+def _stat_identity(value: os.stat_result) -> tuple[int, int, int, int, int, int]:
+    """Facts that must remain fixed while a byte observation is in progress."""
+
+    return (
+        value.st_dev,
+        value.st_ino,
+        value.st_mode,
+        value.st_size,
+        value.st_mtime_ns,
+        value.st_ctime_ns,
+    )
+
+
+def _symlink_reason(root: Path, relative: str) -> str:
+    """Classify a rejected leaf link without opening or reading its target."""
+
+    lexical = root / relative
     try:
         resolved = lexical.resolve(strict=True)
     except (FileNotFoundError, OSError, RuntimeError):
-        return "missing", None
-    if not resolved.is_relative_to(root):
-        return "symlink_escape", None
-    return None, file_stat
+        return "symlink"
+    return "symlink_escape" if not resolved.is_relative_to(root) else "symlink"
 
 
 def _non_symlink_directory(path: Path) -> Path:

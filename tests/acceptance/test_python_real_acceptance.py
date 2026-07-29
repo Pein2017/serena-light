@@ -345,10 +345,10 @@ def test_transformers_semantic_liveness_and_all_edits_read_only(record_property:
                 break
 
             failure = _dict(candidate["error"])
+            assert failure["code"] == "NOT_READY", candidate
             retry = _dict(failure["retry"])
             envelope_generations = _dict(candidate["generations"])
             status_generations = _dict(candidate_status["generations"])
-            assert failure["code"] == "NOT_READY", candidate
             assert retry["retryable"] is True, candidate
             assert candidate_status["phase"] in {
                 "starting",

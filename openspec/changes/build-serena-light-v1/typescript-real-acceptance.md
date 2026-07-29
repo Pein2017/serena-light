@@ -2,7 +2,7 @@
 
 ## Current snapshot-bound candidate status
 
-**PASS: 15 passed in 22.15s.** Candidate build `3756b3b8da6e...` removes this module
+**PASS: 15 passed in 23.04s.** Candidate build `500f841f5826...` removes this module
 from the deterministic default suite unless
 `SERENA_LIGHT_CC_PLUGIN_CODEX_SNAPSHOT` matches the exact observed Git HEAD,
 tracked binary diff, untracked file/symlink content, and the ignored TypeScript
