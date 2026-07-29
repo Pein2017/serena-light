@@ -33,22 +33,27 @@ Git-equals-program assumption.
 
 The owned LSP core, workspace identity/trust/scope model, fixed Pyright and
 TypeScript adapters, shared daemon, connector, readiness generations, and
-process lifecycle are implemented. Parallel Codex, native Claude Code, and CC
-Agent fresh-session acceptance passes on the current repaired identity across
-all four required roots.
+process lifecycle are implemented. Fresh Codex and CC Agent sessions pass the
+four-root semantic/status matrix on the current repaired identity; the native
+Claude Code and model-client hash-edit receipts remain explicitly historical.
+The current real-stdio connector independently passes its guarded-edit and
+cross-library declaration contracts.
 Canonical `serena` remains unchanged pending a separate user decision.
 
 **Current state: `DUAL AUDIT HOLD — FINAL REAUDIT PENDING`.** The Sol-xhigh and
 Opus-max audits found release-blocking correctness and evidence gaps after the
-first reacceptance. A later Sol-xhigh audit at `d7abf45` found two additional
-activation/freshness transaction failures; both are repaired at local commit
-`9921257`, but exact-current-head Sol-xhigh and Opus-max PASS verdicts are still
-required. Agent-public `replace_symbol_body` remains restored after its fault
+first reacceptance. The latest Sol-xhigh audit of `5e0f3e2` found three further
+freshness and cleanup-ownership failures. They and the adjacent detached-runtime
+owner gap are repaired at local commit `4f97e12`, but exact-current-head
+Sol-xhigh and Opus-max PASS verdicts are still required. Agent-public
+`replace_symbol_body` remains restored after its fault
 matrix, full regression, and three fresh-client hash-edit receipts passed. This
 is **not** v1 PASS. Source ownership/provenance
 passes with 9 copied hashes against official Serena commit
-`9a9d07e83d8c1cba3458992707f440c624446c6d`; production LOC (14,155) is
-informational only and not gated. See
+`9a9d07e83d8c1cba3458992707f440c624446c6d`; production LOC (14,285) is
+informational only and not gated. The current repair candidate has build
+identity `eaa691e2425e7466f2f9c3d18666a050cfd53e8153de0c6db9a6f50c1538c3f5`.
+See
 [the final acceptance record](openspec/changes/build-serena-light-v1/final-acceptance.md)
 for the full gate evidence and residual risks.
 

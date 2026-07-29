@@ -29,7 +29,7 @@ layer. Unit/in-process, real connector plus deterministic LSP, real daemon fault
 and real LSP/repository evidence must be named separately; only the stdio gate
 currently combines the production connector executable with the shared daemon.
 No canonical-name change is permitted. The accepted code findings and repair
-evidence are current through local commit `9921257`; only final independent
+evidence are current through local commit `4f97e12`; only final independent
 reaudit and release are still open. See
 [the final acceptance record](../openspec/changes/build-serena-light-v1/final-acceptance.md).
 
@@ -45,15 +45,18 @@ independent `sol-xhigh` static-correctness and `opus-max` runtime/evidence
 audits, disposition every finding, mark v1 PASS, sync stable specs, and archive.
 
 **Progress as of 2026-07-29:** the first two required audits returned HOLD, and
-a later Sol-xhigh audit at `d7abf45` found failed-activation rollback and
-native-config restart recovery gaps. Those findings are repaired at `9921257`;
-the complete 516-test suite,
+a later Sol-xhigh audit at `5e0f3e2` found same-scan healthy-family event loss,
+an adapter-removal cleanup-owner race, and shutdown leakage under ordinary queue
+saturation. Those findings and the adjacent detached-runtime owner gap are
+repaired at `4f97e12`; the complete 524-test suite,
 connector/edit contract selection, static/dependency/provenance gates, and
 separately labelled real-process rollover acceptance pass. Current-build fresh
-Codex, native Claude, and CC Agent clients also pass all four required roots.
-All three fresh client types advertise the restored edit, complete the same
-isolated hash transition, and release immediately. Final dual audit and release
-remain pending. The earlier Opus-max runtime/evidence lane passed at `6a0c58e`,
+Codex and CC Agent clients pass all four required roots and release cleanly; a
+fresh real-stdio client also proves the declaration schema and a cross-library
+definition call at the same identity. Native Claude and the three-client hash
+edit receipts remain labelled as historical rather than being promoted to the
+current repair snapshot. Final dual audit and release remain pending. The
+earlier Opus-max runtime/evidence lane passed at `6a0c58e`,
 but an exact-current-head rerun did not complete because its OAuth token expired;
 that historical PASS is not promoted to the current repair snapshot.
 

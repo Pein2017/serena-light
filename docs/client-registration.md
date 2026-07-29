@@ -8,8 +8,8 @@ The connector executable used by live Codex/Claude configurations is the
 service-owned, build-identity-scoped path
 `/data/CoordExp/.codex/runtime/serena-light/deps/eff6ebdf252faff7f77cb3a2f3894d17b9a0dfc89b46bd193fafdaa9e9ab4941/python/bin/serena-light`
 with no arguments — **not** the repository `.venv`. The dependency-digest
-segment (`eff6ebdf...`) and the current post-restoration build identity
-(`f4ee8a248a8cd2389b7b2d95083fd0d409548421b4933ac29a138ef0badf8721`) are tied
+segment (`eff6ebdf...`) and the current repair-candidate build identity
+(`eaa691e2425e7466f2f9c3d18666a050cfd53e8153de0c6db9a6f50c1538c3f5`) are tied
 to a versioned daemon slot. A source/schema-only rollover reuses the dependency
 directory but gets a new build slot; a lock change also installs a new digest
 directory. Old build slots coexist until their holders and grace expire, so
@@ -109,13 +109,25 @@ daemon remains after clients have stopped, use normal process inspection and
 stop only the identified `serena-light` daemon; never stop canonical Serena as
 part of this rollback.
 
-Fresh Codex, native Claude Code, and CC Agent receipts match post-restoration
-build identity `f4ee8a248a8cd2389b7b2d95083fd0d409548421b4933ac29a138ef0badf8721` and
-cover `/data/CoordExp`, `cc-plugin-codex`, `/data/ms-swift`, and the read-only
-conda `ms` transformers package. Model-facing clients retained the ambient
-external-network `9090` proxy. Clean and poisoned internal environments are
-instead exercised by the real service-executable stdio acceptance, which passes
-the exact environment to the connector child and verifies loopback bypass.
-Each fresh client also advertised `replace_symbol_body`, performed the same
-isolated hash-guarded edit, and released immediately. The final dual audit
-remains open. Canonical-name switching is unapproved.
+Fresh Codex and CC Agent query receipts now match current repair identity
+`eaa691e2425e7466f2f9c3d18666a050cfd53e8153de0c6db9a6f50c1538c3f5` across
+`/data/CoordExp`, `cc-plugin-codex`, `/data/ms-swift`, and the read-only conda
+`ms` transformers package. Both clients released each binding immediately;
+the final release reported zero holders and a stopped runtime. A separate fresh
+real-stdio client at the same identity advertised the required
+`find_declaration(relative_path, regex, ...)` schema, resolved
+`GenerationConfig` from `/data/ms-swift` into conda transformers, and released
+with zero holders. One CC Agent's repeated `INVALID_INPUT` declaration attempts
+are therefore classified as malformed client invocations rather than a current
+connector/runtime defect.
+
+The earlier native Claude Code and three-client guarded-edit receipts match
+historical post-restoration build identity
+`f4ee8a248a8cd2389b7b2d95083fd0d409548421b4933ac29a138ef0badf8721` and
+remain historical. All model-facing clients retained the ambient external-network
+`9090` proxy. Clean and poisoned internal environments are instead exercised by
+the real service-executable stdio acceptance, which passes the exact environment
+to the connector child and verifies loopback bypass. The current exact-build
+real-stdio suite also covers the restored guarded edit; it does not relabel the
+older three-client edits as current. The final dual audit remains open.
+Canonical-name switching is unapproved.
