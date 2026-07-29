@@ -169,6 +169,52 @@ def test_path_scoped_provider_loads_one_selected_file_without_workspace_walk() -
     assert provider.calls == ["src/example.py"]
 
 
+def test_directory_scope_searches_only_the_explicit_inventory_selection() -> None:
+    base = _document()
+
+    def document(path: str) -> DocumentSymbolInput:
+        return DocumentSymbolInput(
+            path,
+            f"file:///repo/{path}",
+            base.snapshot,
+            base.raw_symbols,
+            base.position_encoding,
+            base.workspace,
+            base.adapter,
+            base.generations,
+        )
+
+    documents = {
+        "src/a.py": document("src/a.py"),
+        "src/nested/b.py": document("src/nested/b.py"),
+        "sibling/c.py": document("sibling/c.py"),
+    }
+
+    @dataclass
+    class Provider:
+        calls: list[str]
+
+        def load_document_symbols(self, relative_path: str) -> DocumentSymbolInput:
+            self.calls.append(relative_path)
+            return documents[relative_path]
+
+    provider = Provider([])
+    value = DocumentNavigationService(provider).find_symbol_in_documents(
+        ("src/nested/b.py", "src/a.py"),
+        "/Café/launch🚀",
+        relative_scope="src",
+        include_body=True,
+    ).to_dict()
+
+    assert value["ok"] is True
+    assert [item["relative_path"] for item in value["data"]["symbols"]] == [
+        "src/a.py",
+        "src/nested/b.py",
+    ]
+    assert all("def launch🚀" in item["symbol"]["body"] for item in value["data"]["symbols"])
+    assert provider.calls == ["src/a.py", "src/nested/b.py"]
+
+
 def test_overview_and_ambiguity_are_deterministically_bounded() -> None:
     document = DocumentNavigation.from_input(_document())
     overview = get_symbols_overview(document, max_depth=2, max_answer_chars=10).to_dict()

@@ -23,6 +23,10 @@ def run[ResultT](coroutine: Coroutine[Any, Any, ResultT]) -> ResultT:
 @dataclass(eq=False, slots=True)
 class Runtime:
     identity: str
+    freshness_count: int = 0
+
+    def ensure_fresh(self) -> None:
+        self.freshness_count += 1
 
 
 @dataclass(slots=True)
@@ -45,6 +49,7 @@ def make_service(
     clock: FakeClock | None = None,
     factory: Callable[[str], Runtime] | None = None,
     resolver: Callable[[Path], ResolvedWorkspace[str]] = resolution,
+    debug_reporter: Callable[[str, str], object] | None = None,
 ) -> tuple[
     WorkspaceDaemonService[str, Runtime],
     WorkspaceRuntimeRegistry[str, Runtime, UUID],
@@ -67,8 +72,32 @@ def make_service(
         registry=registry,
         resolver=resolver,
         runtime_stopper=stop,
+        debug_reporter=debug_reporter,
     )
     return service, registry, service_clock, stopped, stop_threads
+
+
+def test_debug_reporting_contains_only_bounded_lease_and_cleanup_summaries() -> None:
+    events: list[tuple[str, str]] = []
+    service, _registry, clock, _stopped, _threads = make_service(
+        debug_reporter=lambda event, message: events.append((event, message))
+    )
+
+    async def scenario() -> None:
+        lease_id = await acquire(service, "session-secret")
+        await service.activate_workspace(lease_id=lease_id, absolute_path="/data/private-workspace")
+        await service.release_lease(lease_id=lease_id, immediate=False)
+        clock.advance(600)
+        await service.sweep()
+
+    run(scenario())
+
+    assert events == [
+        ("lease_grace", "reason=released holders=0 immediate=false"),
+        ("workspace_cleanup", "reason=grace_expired holders=0 immediate=false"),
+    ]
+    assert "private-workspace" not in repr(events)
+    assert "session-secret" not in repr(events)
 
 
 async def acquire(service: WorkspaceDaemonService[str, Runtime], correlation: str = "mcp-session") -> str:
@@ -118,6 +147,8 @@ def test_same_root_reuses_runtime_while_cross_root_bindings_remain_isolated() ->
             await service.binding_for(lease_id=third)
         ).runtime
         assert len(created) == 2
+        assert created[0].freshness_count == 1
+        assert created[1].freshness_count == 0
 
     run(scenario())
 

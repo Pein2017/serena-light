@@ -24,6 +24,7 @@ from mcp.server.stdio import stdio_server
 
 from serena_light import __version__
 from serena_light.runtime_files import (
+    LEGACY_BUILD_IDENTITY,
     RUNTIME_ROOT,
     BearerSecret,
     DiscoveryMetadata,
@@ -54,6 +55,7 @@ CONTROL_PLANE_TOOLS = frozenset(
 ACTIVATE_WORKSPACE_TOOL = "activate_workspace"
 RELEASE_WORKSPACE_TOOL = "release_workspace"
 EDIT_TOOLS = frozenset({"replace_symbol_body"})
+WITHHELD_TOOLS = frozenset({"replace_symbol_body"})
 READ_ONLY_TOOLS = frozenset(
     {
         "get_runtime_status",
@@ -97,6 +99,7 @@ class DaemonEndpoint:
     bearer: BearerSecret
     protocol_version: str
     server_version: str
+    build_identity: str = LEGACY_BUILD_IDENTITY
 
     @classmethod
     def from_runtime_files(cls, metadata: DiscoveryMetadata, bearer: BearerSecret) -> Self:
@@ -106,6 +109,7 @@ class DaemonEndpoint:
             bearer=bearer,
             protocol_version=metadata.protocol_version,
             server_version=metadata.server_version,
+            build_identity=metadata.build_identity,
         )
 
 
@@ -330,6 +334,7 @@ class _OwnedMcpDaemonSession:
                 httpx.AsyncClient(
                     headers={"Authorization": f"Bearer {self._endpoint.bearer.value}"},
                     timeout=httpx.Timeout(self._connect_timeout_seconds, read=None),
+                    trust_env=False,
                 )
             )
             read_stream, write_stream, _get_session_id = await stack.enter_async_context(
@@ -346,9 +351,15 @@ class _OwnedMcpDaemonSession:
                 "daemon_id": self._endpoint.daemon_id,
                 "protocol_version": self._endpoint.protocol_version,
                 "server_version": self._endpoint.server_version,
+                "build_identity": self._endpoint.build_identity,
             }
-            if any(health.get(field) != value for field, value in expected_health.items()):
-                raise DaemonIdentityChanged("daemon identity or version differs from validated discovery")
+            mismatched = tuple(
+                field for field, value in expected_health.items() if health.get(field) != value
+            )
+            if mismatched:
+                raise DaemonIdentityChanged(
+                    f"daemon identity or version differs from validated discovery: {mismatched}"
+                )
             self._ready.set_result(None)
             while (command := await self._commands.get()) is not None:
                 worker = asyncio.create_task(self._execute(command, direct))
@@ -431,8 +442,10 @@ class Connector:
         self._endpoint: DaemonEndpoint | None = None
         self._lease: LeaseGrant | None = None
         self._last_binding: Path | None = None
+        self._pending_startup_binding: Path | None = self._startup_cwd
         self._generation = 0
         self._lifecycle_lock = asyncio.Lock()
+        self._binding_lock = asyncio.Lock()
         self._heartbeat_task: asyncio.Task[None] | None = None
         self._background_failure: BaseException | None = None
         self._closed = False
@@ -461,21 +474,22 @@ class Connector:
         await self.aclose()
 
     async def start(self) -> None:
-        """Connect, acquire a lease, and bind the inherited cwd exactly once."""
+        """Connect and acquire a lease without blocking MCP discovery on workspace work."""
 
         async with self._lifecycle_lock:
             if self._closed:
                 raise ConnectorError("connector is closed")
             if self._session is not None:
                 return
-            endpoint, session, lease = await self._open_session(self._startup_cwd)
+            endpoint, session, lease = await self._open_session(None)
             self._install(endpoint, session, lease)
-            self._last_binding = self._startup_cwd
             self._heartbeat_task = asyncio.create_task(self._heartbeat_loop(), name="serena-light-heartbeat")
 
     async def list_tools(self) -> types.ListToolsResult:
         result = await self._read_with_recovery(lambda session, _lease: session.list_tools())
-        visible = [tool for tool in result.tools if tool.name not in CONTROL_PLANE_TOOLS]
+        visible = [
+            tool for tool in result.tools if tool.name not in CONTROL_PLANE_TOOLS | WITHHELD_TOOLS
+        ]
         return result.model_copy(update={"tools": visible})
 
     async def call_tool(
@@ -483,6 +497,10 @@ class Connector:
         name: str,
         arguments: Mapping[str, object] | None = None,
     ) -> types.CallToolResult:
+        if name in WITHHELD_TOOLS:
+            return _temporarily_disabled_result(name)
+        if name not in {ACTIVATE_WORKSPACE_TOOL, RELEASE_WORKSPACE_TOOL}:
+            await self._ensure_startup_binding()
         retryable = name in READ_ONLY_TOOLS
         uncertain_on_loss = name in EDIT_TOOLS or not retryable
 
@@ -500,9 +518,31 @@ class Connector:
             if not isinstance(path, str) or not Path(path).is_absolute():
                 raise InvalidDaemonResponse("successful activate_workspace did not contain absolute_path")
             self._last_binding = Path(path).resolve()
+            self._pending_startup_binding = None
         elif name == RELEASE_WORKSPACE_TOOL and _is_ok(result):
             self._last_binding = None
+            self._pending_startup_binding = None
         return result
+
+    async def _ensure_startup_binding(self) -> None:
+        """Bind inherited cwd once, immediately before the first workspace-dependent call."""
+
+        async with self._binding_lock:
+            binding = self._pending_startup_binding
+            if binding is None:
+                return
+
+            async def activate(session: DaemonSession, lease: LeaseGrant) -> types.CallToolResult:
+                return await session.activate_workspace(lease.lease_id, binding)
+
+            await self._invoke_with_recovery(
+                activate,
+                retryable=True,
+                uncertain_on_loss=False,
+                operation="startup activate_workspace",
+            )
+            self._last_binding = binding
+            self._pending_startup_binding = None
 
     async def aclose(self) -> None:
         """Stop heartbeats, release the connector lease, and close HTTP state."""
@@ -737,6 +777,20 @@ def _uncertain_result(
         ErrorCode.UNCERTAIN,
         retry=RetryMetadata(retryable=False),
         details=details,
+    )
+    payload = envelope.to_dict()
+    return types.CallToolResult(
+        content=[types.TextContent(type="text", text=envelope.to_json())],
+        structuredContent=payload,
+        isError=True,
+    )
+
+
+def _temporarily_disabled_result(operation: str) -> types.CallToolResult:
+    envelope = error(
+        ErrorCode.UNSUPPORTED,
+        retry=RetryMetadata(retryable=False),
+        details={"operation": operation, "reason": "temporarily_disabled_pending_reacceptance"},
     )
     payload = envelope.to_dict()
     return types.CallToolResult(

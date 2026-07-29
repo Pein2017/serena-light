@@ -122,6 +122,8 @@ def test_transformers_discovery_is_exact_and_inventory_is_bounded_no_symlink(
     assert before[0].trusted
     assert before[0].size == len("x = 1\n")
     assert before[0].mtime_ns is not None
+    assert before[0].inode is not None
+    assert before[0].ctime_ns is not None
     (package / "visible.py").unlink()
     assert inventory.targeted_freshness(["visible.py"]) == (type(inventory.rejected[0])("visible.py", "missing"),)
     assert inventory.targeted_states(["visible.py"])[0].reason == "missing"
@@ -135,3 +137,23 @@ def test_transformers_discovery_is_exact_and_inventory_is_bounded_no_symlink(
 def test_supported_extensions_are_the_fixed_python_and_javascript_typescript_set() -> None:
     expected = {".py", ".pyi", ".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".mts", ".cts"}
     assert expected == SUPPORTED_EXTENSIONS
+
+
+def test_content_identity_reports_an_atomic_replacement_that_keeps_size_and_mtime(tmp_path: Path) -> None:
+    root = _repository(tmp_path)
+    target = root / "module.py"
+    target.write_text("x = 1\n")
+    inventory = git_trust_inventory(root)
+    before = inventory.targeted_states(["module.py"])[0]
+
+    replacement = root / "module.py.tmp"
+    replacement.write_text("x = 2\n")
+    assert before.mtime_ns is not None
+    os.utime(replacement, ns=(before.mtime_ns, before.mtime_ns))
+    os.replace(replacement, target)
+    after = inventory.targeted_states(["module.py"])[0]
+
+    # Size and mtime are deliberately identical; only the inode reports the swap.
+    assert (after.size, after.mtime_ns) == (before.size, before.mtime_ns)
+    assert after.inode != before.inode
+    assert after.content_identity != before.content_identity

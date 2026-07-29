@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hmac
 import json
 import math
 import os
@@ -16,12 +17,17 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from uuid import UUID
 
+from serena_light.build_identity import validate_build_identity
+
 RUNTIME_ROOT = Path("/data/CoordExp/.codex/runtime/serena-light")
 DISCOVERY_NAME = "daemon.json"
 BEARER_NAME = "bearer"
+STARTUP_NONCE_NAME = "startup-nonce"
+SERVICE_GIT_CONFIG_NAME = "gitconfig"
 RUNTIME_MODE = 0o700
 PRIVATE_FILE_MODE = 0o600
-DISCOVERY_SCHEMA_VERSION = 1
+DISCOVERY_SCHEMA_VERSION = 2
+LEGACY_BUILD_IDENTITY = "0" * 64
 
 
 class RuntimeFileError(RuntimeError):
@@ -40,6 +46,29 @@ class BearerSecret:
 
 
 @dataclass(frozen=True, slots=True)
+class StartupNonce:
+    value: str
+
+    def __repr__(self) -> str:
+        return "StartupNonce(<redacted>)"
+
+    def __str__(self) -> str:
+        return "<redacted>"
+
+
+@dataclass(frozen=True, slots=True)
+class RuntimeLayout:
+    root: Path
+    python_root: Path
+    deps_root: Path
+    builds_root: Path
+    home_root: Path
+    build_identity: str
+    build_root: Path
+    logs_root: Path
+
+
+@dataclass(frozen=True, slots=True)
 class DiscoveryMetadata:
     schema_version: int
     daemon_id: str
@@ -49,6 +78,7 @@ class DiscoveryMetadata:
     protocol_version: str
     server_version: str
     created_at: float
+    build_identity: str = LEGACY_BUILD_IDENTITY
 
     @classmethod
     def create(
@@ -61,6 +91,7 @@ class DiscoveryMetadata:
         protocol_version: str,
         server_version: str,
         created_at: float | None = None,
+        build_identity: str = LEGACY_BUILD_IDENTITY,
     ) -> DiscoveryMetadata:
         metadata = cls(
             schema_version=DISCOVERY_SCHEMA_VERSION,
@@ -71,12 +102,36 @@ class DiscoveryMetadata:
             protocol_version=protocol_version,
             server_version=server_version,
             created_at=time.time() if created_at is None else created_at,
+            build_identity=build_identity,
         )
         _validate_metadata(metadata)
         return metadata
 
 
 type ProcessIdentityValidator = Callable[[int, float], bool]
+
+
+def prepare_runtime_layout(root: Path, build_identity: str) -> RuntimeLayout:
+    """Create the service-owned base directories and one identity-specific slot."""
+
+    identity = validate_build_identity(build_identity)
+    base = prepare_runtime_directory(root)
+    python_root = _prepare_private_child(base, "python")
+    deps_root = _prepare_private_child(base, "deps")
+    builds_root = _prepare_private_child(base, "builds")
+    home_root = _prepare_private_child(base, "home")
+    build_root = _prepare_private_child(builds_root, identity)
+    logs_root = _prepare_private_child(build_root, "logs")
+    return RuntimeLayout(
+        root=base,
+        python_root=python_root,
+        deps_root=deps_root,
+        builds_root=builds_root,
+        home_root=home_root,
+        build_identity=identity,
+        build_root=build_root,
+        logs_root=logs_root,
+    )
 
 
 def prepare_runtime_directory(root: Path = RUNTIME_ROOT, *, expected_uid: int | None = None) -> Path:
@@ -116,6 +171,56 @@ def create_bearer_secret(root: Path, *, expected_uid: int | None = None) -> Bear
     secret = BearerSecret(secrets.token_urlsafe(48))
     _atomic_private_write(root, BEARER_NAME, (secret.value + "\n").encode(), expected_uid=expected_uid)
     return secret
+
+
+def create_startup_nonce(root: Path, *, expected_uid: int | None = None) -> StartupNonce:
+    nonce = StartupNonce(secrets.token_urlsafe(48))
+    _atomic_private_write(root, STARTUP_NONCE_NAME, (nonce.value + "\n").encode(), expected_uid=expected_uid)
+    return nonce
+
+
+def write_service_git_config(home_root: Path, *, expected_uid: int | None = None) -> Path:
+    """Install the daemon's protected Git trust policy without touching user config.
+
+    WorkspacePolicy still decides which activation roots are usable and keeps
+    edits below ``/data``.  This file only disables Git's owner-UID heuristic
+    inside the isolated daemon environment, where root-owned service processes
+    intentionally serve worktrees owned by the interactive user.
+    """
+
+    content = b"[safe]\n\tdirectory = *\n"
+    _atomic_private_write(
+        home_root,
+        SERVICE_GIT_CONFIG_NAME,
+        content,
+        expected_uid=expected_uid,
+    )
+    return home_root / SERVICE_GIT_CONFIG_NAME
+
+
+def consume_startup_nonce(
+    root: Path,
+    expected: StartupNonce,
+    *,
+    expected_uid: int | None = None,
+) -> None:
+    """Validate and remove the connector-authorized nonce exactly once."""
+
+    raw = _read_private_file(root, STARTUP_NONCE_NAME, expected_uid=expected_uid)
+    try:
+        observed = raw.decode("ascii")
+    except UnicodeDecodeError as exc:
+        raise RuntimeFileError("startup nonce is malformed") from exc
+    if not observed.endswith("\n") or not hmac.compare_digest(observed[:-1], expected.value):
+        raise RuntimeFileError("startup nonce does not match connector authorization")
+    directory_fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        os.unlink(STARTUP_NONCE_NAME, dir_fd=directory_fd)
+        os.fsync(directory_fd)
+    except OSError as exc:
+        raise RuntimeFileError("startup nonce could not be consumed") from exc
+    finally:
+        os.close(directory_fd)
 
 
 def write_discovery_metadata(
@@ -205,6 +310,35 @@ def _validate_metadata(metadata: DiscoveryMetadata) -> None:
         or not metadata.server_version
     ):
         raise RuntimeFileError("discovery versions must be non-empty")
+    try:
+        validate_build_identity(metadata.build_identity)
+    except ValueError as exc:
+        raise RuntimeFileError("discovery build identity is invalid") from exc
+
+
+def _prepare_private_child(parent: Path, name: str) -> Path:
+    if not name or name in {".", ".."} or "/" in name:
+        raise RuntimeFileError("runtime child name is invalid")
+    directory_fd = os.open(parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        with suppress(FileExistsError):
+            os.mkdir(name, RUNTIME_MODE, dir_fd=directory_fd)
+        child_fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=directory_fd)
+        try:
+            info = os.fstat(child_fd)
+            if info.st_uid != os.getuid():
+                raise RuntimeFileError(f"runtime child has wrong owner: {name}")
+            if stat.S_IMODE(info.st_mode) != RUNTIME_MODE:
+                os.fchmod(child_fd, RUNTIME_MODE)
+            if stat.S_IMODE(os.fstat(child_fd).st_mode) != RUNTIME_MODE:
+                raise RuntimeFileError(f"runtime child mode could not be restricted: {name}")
+        finally:
+            os.close(child_fd)
+    except OSError as exc:
+        raise RuntimeFileError(f"runtime child is unavailable or symlinked: {name}") from exc
+    finally:
+        os.close(directory_fd)
+    return parent / name
 
 
 def _atomic_private_write(root: Path, name: str, content: bytes, *, expected_uid: int | None) -> None:

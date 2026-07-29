@@ -29,6 +29,9 @@ class SessionService:
         self.sessions.add(mcp_session_id)
         return {"session_count": len(self.sessions)}
 
+    async def migration_status(self) -> Mapping[str, object]:
+        return {"active_holders": len(self.leases), "daemon_idle": not self.leases}
+
     async def acquire_lease(self, *, mcp_session_id: str) -> Mapping[str, object]:
         self.sessions.add(mcp_session_id)
         lease_id = str(uuid4())
@@ -173,6 +176,7 @@ def test_two_authenticated_streamable_http_sessions_have_distinct_leases() -> No
         lease_a = _call_tool(client, authorization, session_a, 3, "acquire_lease")
         lease_b = _call_tool(client, authorization, session_b, 4, "acquire_lease")
         status_a = _call_tool(client, authorization, session_a, 5, "get_daemon_status")
+        migration = client.get("/migration-status", headers={"Authorization": authorization})
 
         assert lease_a["ok"] is True
         assert lease_b["ok"] is True
@@ -181,6 +185,13 @@ def test_two_authenticated_streamable_http_sessions_have_distinct_leases() -> No
         assert data_a["lease_id"] != data_b["lease_id"]
         assert data_a["daemon_id"] == data_b["daemon_id"] == daemon_id
         assert _mapping(status_a["data"])["session_count"] == 2
+        assert migration.status_code == 200
+        migration_data = _mapping(_mapping(migration.json())["data"])
+        assert migration_data["daemon_id"] == daemon_id
+        assert migration_data["active_holders"] == 2
+        assert migration_data["daemon_idle"] is False
+        assert isinstance(migration_data["pid"], int)
+        assert isinstance(migration_data["process_start_time"], float)
 
         activated = _call_tool(
             client,

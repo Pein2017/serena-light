@@ -4,12 +4,15 @@ import asyncio
 import inspect
 import os
 from collections.abc import Awaitable, Callable, Mapping
+from contextlib import asynccontextmanager
 from pathlib import Path
+from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
 from mcp import types
 
+import serena_light.connector as connector_module
 from serena_light.connector import (
     ACQUIRE_LEASE_TOOL,
     ACTIVATE_WORKSPACE_TOOL,
@@ -23,6 +26,7 @@ from serena_light.connector import (
     DaemonSession,
     InvalidDaemonResponse,
     LeaseGrant,
+    McpSessionFactory,
 )
 from serena_light.runtime_files import BearerSecret
 
@@ -154,6 +158,8 @@ def test_inherited_cwd_is_activated_once_and_later_shell_cd_is_not_observable(tm
         previous = Path.cwd()
         try:
             await connector.start()
+            assert session.activations == []
+            assert connector.last_validated_binding is None
             os.chdir(later)
             await connector.call_tool("find_symbol", {"name_path": "Thing"})
         finally:
@@ -189,14 +195,101 @@ def test_two_connectors_reuse_discovered_daemon_have_distinct_leases_and_no_lsp_
 def test_control_plane_tools_are_not_agent_visible() -> None:
     async def scenario() -> None:
         discovered = endpoint()
-        connector = Connector(FakeDiscovery(discovered), FakeFactory(), startup_cwd=Path("/data/CoordExp"))
+        session = FakeSession(discovered)
+        connector = Connector(
+            FakeDiscovery(discovered),
+            FakeFactory([session]),
+            startup_cwd=Path("/data/CoordExp"),
+        )
         try:
             result = await connector.list_tools()
-            assert [item.name for item in result.tools] == ["find_symbol", "replace_symbol_body"]
+            assert [item.name for item in result.tools] == ["find_symbol"]
+            assert session.activations == []
+            assert connector.last_validated_binding is None
         finally:
             await connector.aclose()
 
     run(scenario())
+
+
+def test_withheld_edit_returns_typed_unsupported_without_daemon_invocation() -> None:
+    async def scenario() -> None:
+        discovered = endpoint()
+        session = FakeSession(discovered)
+        connector = Connector(FakeDiscovery(discovered), FakeFactory([session]), startup_cwd=Path("/data/CoordExp"))
+        try:
+            await connector.start()
+            result = await connector.call_tool("replace_symbol_body", {"expected_hash": "old"})
+            assert result.isError
+            assert result.structuredContent is not None
+            error = result.structuredContent["error"]
+            assert error["code"] == "UNSUPPORTED"
+            assert error["details"] == {
+                "operation": "replace_symbol_body",
+                "reason": "temporarily_disabled_pending_reacceptance",
+            }
+            assert session.call_names == []
+        finally:
+            await connector.aclose()
+
+    run(scenario())
+
+
+def test_mcp_loopback_client_ignores_poisoned_proxy_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, object] = {}
+    discovered = endpoint()
+
+    class HttpClient:
+        async def __aenter__(self) -> HttpClient:
+            return self
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+    class Client:
+        def __init__(self, *_streams: object) -> None:
+            pass
+
+        async def __aenter__(self) -> Client:
+            return self
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+        async def initialize(self) -> object:
+            return SimpleNamespace(protocolVersion=types.LATEST_PROTOCOL_VERSION)
+
+        async def call_tool(
+            self, name: str, _arguments: Mapping[str, object] | None = None
+        ) -> types.CallToolResult:
+            assert name == GET_DAEMON_STATUS_TOOL
+            return ok_result(
+                daemon_id=discovered.daemon_id,
+                protocol_version=discovered.protocol_version,
+                server_version=discovered.server_version,
+                build_identity=discovered.build_identity,
+            )
+
+    @asynccontextmanager
+    async def streamable(*_args: object, **_kwargs: object):
+        yield object(), object(), lambda: "test-session"
+
+    def new_http_client(**kwargs: object) -> HttpClient:
+        captured.update(kwargs)
+        return HttpClient()
+
+    monkeypatch.setenv("HTTP_PROXY", "http://127.0.0.1:1")
+    monkeypatch.setenv("http_proxy", "http://127.0.0.1:1")
+    monkeypatch.setattr(connector_module.httpx, "AsyncClient", new_http_client)
+    monkeypatch.setattr(connector_module, "streamable_http_client", streamable)
+    monkeypatch.setattr(connector_module, "ClientSession", Client)
+
+    async def scenario() -> None:
+        session = await McpSessionFactory().connect(discovered)
+        await session.aclose()
+
+    run(scenario())
+    assert captured["trust_env"] is False
 
 
 def test_heartbeat_is_independent_of_a_blocked_tool_call() -> None:
@@ -322,7 +415,13 @@ def test_read_retry_is_attempted_at_most_once() -> None:
     run(scenario())
 
 
-def test_edit_loss_recovers_binding_but_returns_typed_uncertain_without_replay() -> None:
+def test_edit_loss_recovers_binding_but_returns_uncertain_without_replay(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Containment hides editing from negotiated clients, but the recovery core
+    # remains covered so restoring advertisement cannot reintroduce replay.
+    monkeypatch.setattr(connector_module, "WITHHELD_TOOLS", frozenset())
+
     async def scenario() -> None:
         first_endpoint = endpoint()
         second_endpoint = endpoint()

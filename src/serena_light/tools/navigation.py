@@ -14,7 +14,7 @@ import hashlib
 import json
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any, Protocol
+from typing import Any, Protocol, cast
 
 from serena_light.lsp.normalize import NormalizedSymbol, Position, Range, normalize_document_symbols
 from serena_light.lsp.positions import FileSnapshot, LspPosition, PositionEncoding, PositionError, PositionMapper
@@ -23,6 +23,7 @@ from serena_light.tools.envelopes import (
     ErrorCode,
     ErrorEnvelope,
     GenerationMetadata,
+    JsonValue,
     ToolEnvelope,
     TruncationMetadata,
     WorkspaceMetadata,
@@ -141,6 +142,81 @@ class DocumentNavigationService:
             include_body=include_body,
             include_info=include_info,
             max_answer_chars=max_answer_chars,
+        )
+
+    def find_symbol_in_documents(
+        self,
+        relative_paths: Sequence[str],
+        name_path: str | Sequence[str],
+        *,
+        relative_scope: str,
+        substring_matching: bool = False,
+        include_body: bool = False,
+        include_info: bool = False,
+        max_answer_chars: int = 12_000,
+    ) -> ToolEnvelope:
+        """Search an explicit inventory-selected document set without walking."""
+
+        pattern = _parse_name_path(name_path)
+        if pattern is None or max_answer_chars <= 0 or not _valid_relative_scope(relative_scope):
+            return error(ErrorCode.INVALID_INPUT, details={"field": "relative_path, name_path, or max_answer_chars"})
+        documents: list[DocumentNavigation] = []
+        matches: list[tuple[DocumentNavigation, NormalizedSymbol]] = []
+        for relative_path in sorted(set(relative_paths)):
+            document = self._load(relative_path)
+            if isinstance(document, ErrorEnvelope):
+                return document
+            documents.append(document)
+            symbols = (symbol for root in document.symbols for symbol in root.iter_depth_first())
+            matches.extend(
+                (document, symbol)
+                for symbol in symbols
+                if _matches_name_path(symbol, pattern, substring_matching)
+            )
+        matches.sort(key=lambda item: (item[0].relative_path, *_symbol_order_key(item[1])))
+        workspace = documents[0].workspace if documents else None
+        if not matches:
+            return error(
+                ErrorCode.SYMBOL_NOT_FOUND,
+                details={
+                    "relative_path": relative_scope,
+                    "name_path": pattern.expression,
+                    "scope": "directory",
+                },
+                workspace=workspace,
+            )
+        base: dict[str, Any] = {
+            "relative_path": relative_scope,
+            "scope": "directory",
+            "name_path": pattern.expression,
+            "symbols": [],
+        }
+        if len(_canonical_json(base)) > max_answer_chars:
+            return error(
+                ErrorCode.INVALID_INPUT,
+                details={"field": "max_answer_chars", "minimum_required": len(_canonical_json(base))},
+                workspace=workspace,
+            )
+        kept: list[dict[str, Any]] = []
+        for document, symbol in matches:
+            rendered = {
+                "relative_path": document.relative_path,
+                "sha256": document.sha256,
+                "symbol": _symbol_data(
+                    document,
+                    symbol,
+                    include_body=include_body,
+                    include_info=include_info,
+                ),
+            }
+            if len(_canonical_json({**base, "symbols": [*kept, rendered]})) > max_answer_chars:
+                break
+            kept.append(rendered)
+        omitted = len(matches) - len(kept)
+        return success(
+            cast(JsonValue, {**base, "symbols": kept}),
+            workspace=workspace,
+            truncation=TruncationMetadata(omitted > 0, omitted),
         )
 
     def _load(self, relative_path: str) -> DocumentNavigation | ErrorEnvelope:
@@ -411,6 +487,10 @@ def _valid_relative_path(value: str) -> bool:
         and "\\" not in value
         and all(part not in {"", ".", ".."} for part in value.split("/"))
     )
+
+
+def _valid_relative_scope(value: str) -> bool:
+    return value == "." or _valid_relative_path(value.rstrip("/"))
 
 
 def _invalid_bounds(document: DocumentNavigation) -> ToolEnvelope:

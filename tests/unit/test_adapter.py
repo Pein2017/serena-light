@@ -171,6 +171,7 @@ class AdapterHarness:
         crash_policy: CrashPolicy | None = None,
         clock: Callable[[], float] = time.monotonic,
         timestamp: Callable[[], float] = time.time,
+        debug_reporter: Callable[[str, str], object] | None = None,
     ) -> None:
         self.provider = provider
         self.executor = BoundedLspExecutor(queue_capacity=8, name="adapter-test")
@@ -190,6 +191,7 @@ class AdapterHarness:
             readiness_timeout=0.2,
             clock=clock,
             timestamp=timestamp,
+            debug_reporter=debug_reporter,
         )
 
     def close(self) -> None:
@@ -299,6 +301,22 @@ def test_document_readiness_requires_current_correlated_publication_and_path_gen
             AdapterPhase.DOCUMENT_READY,
         ]
         assert all(transition.timestamp > 0 for transition in snapshot.transitions)
+    finally:
+        harness.close()
+
+
+def test_transition_history_is_bounded_to_the_latest_64_entries() -> None:
+    provider = FakeRuntimeProvider([lambda: FakeClient(_initialize_result())])
+    harness = AdapterHarness(provider)
+    try:
+        for index in range(80):
+            phase = AdapterPhase.STARTING if index % 2 == 0 else AdapterPhase.COLD
+            harness.adapter._transition(phase, f"test-{index}")
+
+        transitions = harness.adapter.snapshot().transitions
+        assert len(transitions) == 64
+        assert transitions[0].reason == "test-16"
+        assert transitions[-1].reason == "test-79"
     finally:
         harness.close()
 
@@ -574,9 +592,13 @@ def test_edit_transport_loss_is_never_retried() -> None:
 
 def test_per_adapter_circuit_breaker_isolated_and_expires() -> None:
     now = [10.0]
+    debug_events: list[tuple[str, str]] = []
     failing_provider = FakeRuntimeProvider(
         [
-            lambda: FakeClient(_initialize_result(), {"workspace/symbol": [LspTransportClosed("crash")]}),
+            lambda: FakeClient(
+                _initialize_result(),
+                {"workspace/symbol": [LspTransportClosed("secret source payload")]},
+            ),
             lambda: FakeClient(_initialize_result(), {"workspace/symbol": [["after cooldown"]]}),
         ]
     )
@@ -588,6 +610,7 @@ def test_per_adapter_circuit_breaker_isolated_and_expires() -> None:
         crash_policy=CrashPolicy(threshold=1, window_seconds=10, cooldown_seconds=5),
         clock=lambda: now[0],
         timestamp=lambda: 1000 + now[0],
+        debug_reporter=lambda event, message: debug_events.append((event, message)),
     )
     healthy = AdapterHarness(healthy_provider)
     try:
@@ -595,6 +618,8 @@ def test_per_adapter_circuit_breaker_isolated_and_expires() -> None:
             failing.adapter.submit_read(lambda client: client.request("workspace/symbol", {})).result(timeout=1)
         assert caught.value.code is AdapterErrorCode.COOLDOWN
         assert failing.adapter.snapshot().phase is AdapterPhase.COOLDOWN
+        assert debug_events == [("adapter_cooldown", "adapter=fake-python crashes=1 phase=cooldown")]
+        assert "secret source payload" not in repr(failing.adapter.snapshot())
         assert healthy.adapter.submit_read(lambda client: client.request("workspace/symbol", {})).result(timeout=1) == [
             "healthy"
         ]
@@ -621,3 +646,126 @@ def test_stop_cleans_only_owned_runtime_and_preserves_executor_ownership() -> No
     assert provider.clients[0].shutdown_count == 1
     assert harness.executor.submit(lambda: "still externally owned").result(timeout=1) == "still externally owned"
     harness.executor.close()
+
+
+def _document_lifecycle_notifications(client: FakeClient) -> list[tuple[str, object]]:
+    return [entry for entry in client.notifications if entry[0].startswith("textDocument/did")]
+
+
+def test_open_document_sends_one_didopen_then_didchange_for_later_versions() -> None:
+    provider = FakeRuntimeProvider([lambda: FakeClient(_initialize_result())])
+    harness = AdapterHarness(provider)
+    try:
+        uri = "file:///workspace/src/example.py"
+        harness.adapter.open_document(
+            relative_path="src/example.py", uri=uri, version=1, text="a = 1\n"
+        ).result(timeout=1)
+        harness.adapter.open_document(
+            relative_path="src/example.py", uri=uri, version=2, text="a = 2\n"
+        ).result(timeout=1)
+
+        notifications = _document_lifecycle_notifications(provider.clients[0])
+        assert notifications == [
+            (
+                "textDocument/didOpen",
+                {
+                    "textDocument": {
+                        "uri": uri,
+                        "languageId": "python",
+                        "version": 1,
+                        "text": "a = 1\n",
+                    }
+                },
+            ),
+            (
+                "textDocument/didChange",
+                {
+                    "textDocument": {"uri": uri, "version": 2},
+                    "contentChanges": [{"text": "a = 2\n"}],
+                },
+            ),
+        ]
+    finally:
+        harness.close()
+
+
+def test_stop_sends_didclose_for_every_open_document_before_shutdown() -> None:
+    provider = FakeRuntimeProvider([lambda: FakeClient(_initialize_result())])
+    harness = AdapterHarness(provider, paths=("src/a.py", "src/b.py"))
+    try:
+        harness.adapter.open_document(
+            relative_path="src/a.py", uri="file:///workspace/src/a.py", version=1, text="a\n"
+        ).result(timeout=1)
+        harness.adapter.open_document(
+            relative_path="src/b.py", uri="file:///workspace/src/b.py", version=1, text="b\n"
+        ).result(timeout=1)
+
+        stopped = harness.adapter.stop().result(timeout=1)
+
+        client = provider.clients[0]
+        close_notifications = [entry for entry in client.notifications if entry[0] == "textDocument/didClose"]
+        assert close_notifications == [
+            ("textDocument/didClose", {"textDocument": {"uri": "file:///workspace/src/a.py"}}),
+            ("textDocument/didClose", {"textDocument": {"uri": "file:///workspace/src/b.py"}}),
+        ]
+        assert stopped.phase is AdapterPhase.COLD
+        assert client.shutdown_count == 1
+    finally:
+        harness.close()
+
+
+def test_lru_eviction_closes_least_recently_used_document_beyond_the_128_cap() -> None:
+    paths = tuple(f"src/file_{index}.py" for index in range(129))
+    provider = FakeRuntimeProvider([lambda: FakeClient(_initialize_result())])
+    harness = AdapterHarness(provider, paths=paths)
+    try:
+        for path in paths[:128]:
+            harness.adapter.open_document(
+                relative_path=path, uri=f"file:///workspace/{path}", version=1, text="x\n"
+            ).result(timeout=1)
+
+        # Touch file_0 again so it becomes most-recently-used; file_1 becomes the LRU victim.
+        harness.adapter.open_document(
+            relative_path=paths[0], uri=f"file:///workspace/{paths[0]}", version=2, text="y\n"
+        ).result(timeout=1)
+
+        harness.adapter.open_document(
+            relative_path=paths[128], uri=f"file:///workspace/{paths[128]}", version=1, text="z\n"
+        ).result(timeout=1)
+
+        close_notifications = [
+            entry for entry in provider.clients[0].notifications if entry[0] == "textDocument/didClose"
+        ]
+        assert close_notifications == [
+            ("textDocument/didClose", {"textDocument": {"uri": f"file:///workspace/{paths[1]}"}}),
+        ]
+    finally:
+        harness.close()
+
+
+def test_transport_restart_clears_open_documents_so_reopen_sends_didopen_again() -> None:
+    provider = FakeRuntimeProvider(
+        [
+            lambda: FakeClient(_initialize_result(), {"workspace/applyEdit": [LspTransportClosed("lost")]}),
+            lambda: FakeClient(_initialize_result()),
+        ]
+    )
+    harness = AdapterHarness(provider)
+    try:
+        uri = "file:///workspace/src/example.py"
+        harness.adapter.open_document(
+            relative_path="src/example.py", uri=uri, version=1, text="a\n"
+        ).result(timeout=1)
+        assert provider.clients[0].notifications[-1][0] == "textDocument/didOpen"
+
+        with pytest.raises(LspTransportClosed):
+            harness.adapter.submit_edit(lambda client: client.request("workspace/applyEdit", {})).result(timeout=1)
+
+        harness.adapter.open_document(
+            relative_path="src/example.py", uri=uri, version=2, text="b\n"
+        ).result(timeout=1)
+
+        assert len(provider.clients) == 2
+        assert provider.clients[1].notifications[-1][0] == "textDocument/didOpen"
+    finally:
+        harness.close()

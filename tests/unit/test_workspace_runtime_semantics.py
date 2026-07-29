@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import threading
 import time
 from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import Future
@@ -101,6 +102,7 @@ class _Adapter:
         self.document_generation = 0
         self.document_loads: list[str] = []
         self.edit_dispatches = 0
+        self.edit_epilogue: Callable[[], None] | None = None
         self.diagnostics = DiagnosticsSnapshot(DiagnosticsState.MISSING, "", None, None, 0, None, ())
 
     def routes(self, path: str | Path) -> bool:
@@ -151,7 +153,15 @@ class _Adapter:
 
     def submit_edit(self, operation: Callable[[_Client], Any]) -> Future[Any]:
         self.edit_dispatches += 1
-        return self.context.executor.submit(lambda: operation(self.client))
+
+        def run_edit() -> Any:
+            result = operation(self.client)
+            # Models a transport that loses the reply after the worker finished.
+            if self.edit_epilogue is not None:
+                self.edit_epilogue()
+            return result
+
+        return self.context.executor.submit(run_edit)
 
     def warm_global(
         self,
@@ -494,6 +504,44 @@ def test_global_find_symbol_only_loads_workspace_symbol_candidates(tmp_path: Pat
         runtime.stop()
 
 
+def test_directory_find_symbol_is_bounded_by_inventory_prefix_without_workspace_walk(tmp_path: Path) -> None:
+    first = tmp_path / "src/a.py"
+    second = tmp_path / "src/nested/b.py"
+    sibling = tmp_path / "sibling/c.py"
+    first.parent.mkdir()
+    second.parent.mkdir(parents=True)
+    sibling.parent.mkdir()
+    for path in (first, second, sibling):
+        path.write_text("class Target: pass\n")
+    runtime, adapter, _policy = _runtime(
+        tmp_path,
+        {"textDocument/documentSymbol": [_symbol("Target")]},
+    )
+    try:
+        result = runtime.find_symbol("Target", relative_path="src", include_body=True).to_dict()
+
+        assert result["ok"] is True
+        assert [item["relative_path"] for item in result["data"]["symbols"]] == [
+            "src/a.py",
+            "src/nested/b.py",
+        ]
+        requests = [params for method, params in adapter.client.requests if method == "textDocument/documentSymbol"]
+        assert len(requests) == 2
+        assert all("sibling/c.py" not in str(params) for params in requests)
+        unsupported = runtime.find_symbol(
+            "Target",
+            relative_path="src",
+            max_candidates_per_adapter=4,
+        ).to_dict()
+        assert unsupported["error"]["code"] == "UNSUPPORTED"
+        document_requests = [
+            method for method, _params in adapter.client.requests if method == "textDocument/documentSymbol"
+        ]
+        assert len(document_requests) == 2
+    finally:
+        runtime.stop()
+
+
 def test_diagnostics_distinguish_not_ready_and_stale_timeout(tmp_path: Path) -> None:
     source = tmp_path / "main.py"
     source.write_text("x = 1\n")
@@ -537,7 +585,8 @@ def test_replace_symbol_body_uses_one_edit_dispatch_and_notifies_after_install(t
         ).to_dict()
         assert result["ok"] is True
         assert adapter.edit_dispatches == 1
-        assert policy.edit_calls == [source]
+        # Authorized once before dispatch and re-walked under the workspace lock.
+        assert policy.edit_calls == [source, source]
         assert source.read_text() == "def target():\n    return 2\n"
         assert [method for method, _ in adapter.client.notifications] == ["textDocument/didChange"]
         assert adapter.client.requests == [("textDocument/documentSymbol", {"textDocument": {"uri": source.as_uri()}})]
@@ -732,5 +781,106 @@ def test_public_tools_map_policy_and_routing_failures_to_envelopes(tmp_path: Pat
         policy.failure = None
         adapter.routes = lambda _path: False  # type: ignore[method-assign]
         assert runtime.get_symbols_overview("main.py").to_dict()["error"]["code"] == "UNSUPPORTED"
+    finally:
+        runtime.stop()
+
+
+def _edit_symbols() -> list[Mapping[str, Any]]:
+    return [
+        {
+            "name": "target",
+            "kind": 12,
+            "range": {"start": {"line": 0, "character": 0}, "end": {"line": 1, "character": 12}},
+            "selectionRange": {"start": {"line": 0, "character": 4}, "end": {"line": 0, "character": 10}},
+        }
+    ]
+
+
+def test_edit_that_times_out_while_queued_is_timed_out_and_can_never_write(tmp_path: Path) -> None:
+    source = tmp_path / "main.py"
+    original = b"def target():\n    return 1\n"
+    source.write_bytes(original)
+    runtime, adapter, _policy = _runtime(
+        tmp_path, {"textDocument/documentSymbol": _edit_symbols()}, future_timeout=0.05
+    )
+    release = threading.Event()
+    try:
+        occupied = runtime.executor.submit(lambda: release.wait(5))
+        result = runtime.replace_symbol_body(
+            "target", "main.py", "def target():\n    return 2", hashlib.sha256(original).hexdigest()
+        ).to_dict()
+
+        assert result["error"]["code"] == "TIMED_OUT"
+        assert result["error"]["details"]["commit_state"] == "queued"
+        release.set()
+        assert occupied.result(timeout=5) is True
+        runtime.executor.submit(lambda: None).result(timeout=5)
+        # A cancelled queued edit provably never reaches the filesystem.
+        assert source.read_bytes() == original
+        assert adapter.client.requests == []
+    finally:
+        release.set()
+        runtime.stop()
+
+
+def test_edit_that_times_out_while_running_is_uncertain_and_is_never_replayed(tmp_path: Path) -> None:
+    source = tmp_path / "main.py"
+    original = b"def target():\n    return 1\n"
+    source.write_bytes(original)
+    started = threading.Event()
+    release = threading.Event()
+
+    def blocking_document_symbol() -> object:
+        started.set()
+        assert release.wait(5)
+        return _edit_symbols()
+
+    runtime, _adapter, _policy = _runtime(
+        tmp_path, {"textDocument/documentSymbol": blocking_document_symbol}, future_timeout=0.05
+    )
+    try:
+        result = runtime.replace_symbol_body(
+            "target", "main.py", "def target():\n    return 2", hashlib.sha256(original).hexdigest()
+        ).to_dict()
+
+        assert started.is_set()
+        assert result["error"]["code"] == "UNCERTAIN"
+        assert result["error"]["retry"] == {"retryable": False}
+        assert result["error"]["details"]["commit_state"] == "running"
+        assert result["error"]["details"]["uncertain_stage"] == "timeout"
+        assert result["error"]["details"]["requires_current_reread"] is True
+    finally:
+        release.set()
+        runtime.stop()
+
+
+def test_lost_response_after_install_is_uncertain_with_the_observed_current_hash(tmp_path: Path) -> None:
+    source = tmp_path / "main.py"
+    original = b"def target():\n    return 1\n"
+    source.write_bytes(original)
+    runtime, adapter, _policy = _runtime(tmp_path, {"textDocument/documentSymbol": _edit_symbols()})
+
+    def lose_response() -> None:
+        raise ConnectionError("daemon connection closed after the edit")
+
+    adapter.edit_epilogue = lose_response
+    try:
+        result = runtime.replace_symbol_body(
+            "target", "main.py", "def target():\n    return 2", hashlib.sha256(original).hexdigest()
+        ).to_dict()
+        installed = source.read_bytes()
+
+        assert installed != original
+        assert result["error"]["code"] == "UNCERTAIN"
+        assert result["error"]["details"]["commit_state"] == "done"
+        assert result["error"]["details"]["uncertain_stage"] == "transport"
+        assert result["error"]["details"]["current_hash"] == hashlib.sha256(installed).hexdigest()
+
+        # The original expected hash must not be able to repeat the edit.
+        adapter.edit_epilogue = None
+        replay = runtime.replace_symbol_body(
+            "target", "main.py", "def target():\n    return 2", hashlib.sha256(original).hexdigest()
+        ).to_dict()
+        assert replay["error"]["code"] == "STALE_HASH"
     finally:
         runtime.stop()

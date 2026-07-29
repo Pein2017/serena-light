@@ -4,6 +4,7 @@ from dataclasses import dataclass, field, replace
 from typing import Any
 
 from serena_light.lsp.normalize import NormalizedSymbol, reparent
+from serena_light.lsp.positions import FileSnapshot, PositionEncoding
 from serena_light.tools.envelopes import AdapterMetadata, GenerationMetadata, WorkspaceMetadata
 from serena_light.tools.global_symbols import (
     ConfiguredProgramScope,
@@ -108,6 +109,8 @@ def _provider(
     batch_generations: GenerationMetadata | None = None,
     truncated: bool = False,
     omitted_count: int = 0,
+    document_bytes: dict[str, bytes] | None = None,
+    position_encoding: PositionEncoding = PositionEncoding.UTF16,
 ) -> FakeProvider:
     actual_state = state or _state()
     document_values = documents or {"src/a.py": [_symbol("Target")]}
@@ -117,6 +120,8 @@ def _provider(
             f"file:///repo/{path}",
             raw,
             actual_state.generations,
+            FileSnapshot.from_bytes((document_bytes or {}).get(path, b"line\r\n" * 12)),
+            position_encoding,
         )
         for path, raw in document_values.items()
     }
@@ -170,6 +175,55 @@ def test_exact_query_filters_fuzzy_and_external_candidates_before_candidate_file
         "document": 5,
         "index": 7,
         "scope": "configured_program",
+    }
+
+
+def test_global_symbol_uses_exact_utf16_crlf_snapshot_for_ranges_body_and_info() -> None:
+    raw = "😀def Target():\r\n    pass\r\n".encode()
+    provider = _provider(
+        candidates=[
+            {
+                "name": "Target",
+                "kind": 12,
+                "location": {
+                    "uri": "file:///repo/src/a.py",
+                    "range": _range(0, 6, 0, 12),
+                },
+            }
+        ],
+        documents={
+            "src/a.py": [
+                {
+                    "name": "Target",
+                    "kind": 12,
+                    "detail": "class detail",
+                    "range": _range(0, 2, 2, 0),
+                    "selectionRange": _range(0, 6, 0, 12),
+                }
+            ]
+        },
+        document_bytes={"src/a.py": raw},
+        position_encoding=PositionEncoding.UTF16,
+    )
+
+    result = GlobalSymbolService((provider,)).find_symbol(
+        "Target",
+        include_body=True,
+        include_info=True,
+    ).to_dict()
+
+    symbol = result["data"]["symbols"][0]
+    assert symbol["body"] == "def Target():\r\n    pass\r\n"
+    assert symbol["location"]["range"] == {
+        "start": {"line": 1, "column": 2, "text_offset": 1, "byte_offset": 4},
+        "end": {"line": 3, "column": 1, "text_offset": 26, "byte_offset": 29},
+    }
+    assert symbol["info"] == {
+        "detail": "class detail",
+        "selection_range": {
+            "start": {"line": 1, "column": 6, "text_offset": 5, "byte_offset": 8},
+            "end": {"line": 1, "column": 12, "text_offset": 11, "byte_offset": 14},
+        },
     }
 
 

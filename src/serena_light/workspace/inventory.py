@@ -35,13 +35,31 @@ class RejectedPath:
 
 @dataclass(frozen=True, slots=True)
 class TargetedPathState:
-    """One bounded stat observation suitable for freshness comparison."""
+    """One bounded stat observation suitable for freshness comparison.
+
+    Inode and ``ctime`` are carried because edits are installed with
+    ``os.replace``: a replacement can keep both size and mtime while being a
+    different file, and only the inode reliably reports that substitution.
+
+    The bound of this signal is the filesystem's timestamp granularity: an
+    external in-place write of identical length within one clock tick is not
+    observable by stat alone.  Every edit this service installs replaces the
+    inode, so that gap belongs to foreign writers only.
+    """
 
     path: str
     trusted: bool
     size: int | None
     mtime_ns: int | None
     reason: str | None
+    inode: int | None = None
+    ctime_ns: int | None = None
+
+    @property
+    def content_identity(self) -> tuple[int | None, int | None, int | None, int | None]:
+        """The comparable facts that change whenever the file's bytes may have."""
+
+        return (self.size, self.mtime_ns, self.inode, self.ctime_ns)
 
 
 class SupportedPathTree:
@@ -168,7 +186,17 @@ class TrustInventory:
                 states.add(TargetedPathState(relative, False, None, None, reason))
                 continue
             assert file_stat is not None
-            states.add(TargetedPathState(relative, True, file_stat.st_size, file_stat.st_mtime_ns, None))
+            states.add(
+                TargetedPathState(
+                    relative,
+                    True,
+                    file_stat.st_size,
+                    file_stat.st_mtime_ns,
+                    None,
+                    file_stat.st_ino,
+                    file_stat.st_ctime_ns,
+                )
+            )
         return tuple(sorted(states, key=lambda item: item.path))
 
 

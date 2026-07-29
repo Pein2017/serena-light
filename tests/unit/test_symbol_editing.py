@@ -12,6 +12,7 @@ from typing import Any
 
 import pytest
 
+from serena_light.lsp.executor import EditCommit, EditCommitState
 from serena_light.lsp.positions import FileSnapshot, PositionEncoding, PositionMapper
 from serena_light.tools.editing import (
     AuthorizedEdit,
@@ -175,6 +176,8 @@ class _Editor:
     lock: _TrackingLock
     write_call: Callable[[int, memoryview], int]
     flush_call: Callable[[int], None]
+    directory_flush_call: Callable[[int], None] = os.fsync
+    commit: EditCommit | None = None
 
     def replace_symbol_body(
         self,
@@ -192,8 +195,10 @@ class _Editor:
             symbol_provider=self.symbols,
             notifier=self.notifier,
             operation_lock=self.lock,
+            commit=self.commit,
             write_call=self.write_call,
             flush_call=self.flush_call,
+            directory_flush_call=self.directory_flush_call,
         )
 
 
@@ -206,6 +211,8 @@ def _editor(
     lock: _TrackingLock | None = None,
     write_call: Callable[[int, memoryview], int] = os.write,
     flush_call: Callable[[int], None] = os.fsync,
+    directory_flush_call: Callable[[int], None] = os.fsync,
+    commit: EditCommit | None = None,
 ) -> _Editor:
     return _Editor(
         authorizer or _Authorizer(_target(path)),
@@ -214,6 +221,8 @@ def _editor(
         lock or _TrackingLock(),
         write_call,
         flush_call,
+        directory_flush_call,
+        commit,
     )
 
 
@@ -443,6 +452,87 @@ def test_notification_failure_is_uncertain_and_old_hash_retry_never_replays(tmp_
     assert second["error"]["code"] == "STALE_HASH"
     assert symbols.calls == 1
     assert len(notifier.calls) == 1
+
+
+def test_post_replace_directory_fsync_failure_is_uncertain_with_the_installed_hash(tmp_path: Path) -> None:
+    path = tmp_path / "sample.py"
+    original = b"class A:\n    def target(self):\n        return 1\n"
+    path.write_bytes(original)
+    commit = EditCommit()
+
+    def failing_directory_flush(_file_fd: int) -> None:
+        raise OSError("directory flush failed")
+
+    symbols = _Symbols(_nested_target_symbols)
+    notifier = _Notifier()
+    result = _editor(
+        path,
+        symbols,
+        notifier,
+        directory_flush_call=failing_directory_flush,
+        commit=commit,
+    ).replace_symbol_body(
+        "A/target", path.name, "def target(self):\n        return 2\n", _sha256(original)
+    ).to_dict()
+    installed = path.read_bytes()
+
+    assert result["error"]["code"] == "UNCERTAIN"
+    assert result["error"]["retry"] == {"retryable": False}
+    assert result["error"]["details"]["uncertain_stage"] == "directory_fsync"
+    assert result["error"]["details"]["current_hash"] == _sha256(installed)
+    assert result["error"]["details"]["requires_current_reread"] is True
+    # The replacement is installed, so the notifier must never see the change and
+    # the commit stays short of done: no caller may replay this edit.
+    assert installed != original
+    assert notifier.calls == []
+    assert commit.state is EditCommitState.INSTALLED
+
+
+def test_commit_state_reaches_done_only_after_a_notified_success(tmp_path: Path) -> None:
+    path = tmp_path / "sample.py"
+    original = b"class A:\n    def target(self):\n        return 1\n"
+    path.write_bytes(original)
+    done = EditCommit()
+    done.mark_running()
+    result = _editor(path, _Symbols(_nested_target_symbols), commit=done).replace_symbol_body(
+        "A/target", path.name, "def target(self):\n        return 2\n", _sha256(original)
+    ).to_dict()
+
+    assert result["ok"] is True
+    assert done.state is EditCommitState.DONE
+
+    stale = EditCommit()
+    stale_result = _editor(path, _Symbols(_unexpected_symbols), commit=stale).replace_symbol_body(
+        "A/target", path.name, "def target(self):\n        return 3\n", _sha256(original)
+    ).to_dict()
+
+    assert stale_result["error"]["code"] == "STALE_HASH"
+    assert stale.state is EditCommitState.QUEUED
+
+
+def test_rooted_target_refuses_a_symlinked_directory_component(tmp_path: Path) -> None:
+    real = tmp_path / "real"
+    real.mkdir()
+    path = real / "sample.py"
+    original = b"class A:\n    def target(self):\n        return 1\n"
+    path.write_bytes(original)
+    linked = tmp_path / "linked"
+    os.symlink(real, linked)
+    target = AuthorizedEdit(
+        linked / "sample.py",
+        "linked/sample.py",
+        WorkspaceMetadata(str(tmp_path), "git", str(tmp_path)),
+        tmp_path,
+    )
+
+    result = _editor(
+        path, _Symbols(_unexpected_symbols), authorizer=_Authorizer(target)
+    ).replace_symbol_body(
+        "A/target", "linked/sample.py", "def target(self):\n        return 2\n", _sha256(original)
+    ).to_dict()
+
+    assert result["error"]["code"] == "INVALID_PATH"
+    assert path.read_bytes() == original
 
 
 def test_lost_success_response_and_daemon_restart_require_current_reread(tmp_path: Path) -> None:

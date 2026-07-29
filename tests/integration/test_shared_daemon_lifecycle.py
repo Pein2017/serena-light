@@ -356,6 +356,8 @@ def test_two_connectors_share_one_runtime_and_nonlast_exit_keeps_daemon_healthy(
             try:
                 await starter.start()
                 await retained.start()
+                await starter.call_tool("get_runtime_status")
+                await retained.call_tool("get_runtime_status")
                 starter_lease = await starter.lease_id()
                 retained_lease = await retained.lease_id()
                 assert starter_lease is not None
@@ -394,6 +396,7 @@ def test_crashed_connector_expires_without_rebind_then_runtime_stops_after_grace
             connector = _connector(endpoint, "/data/root-a")
             try:
                 await connector.start()
+                await connector.call_tool("get_runtime_status")
                 crashed_lease = await connector.lease_id()
                 assert crashed_lease is not None
                 await connector.cancel_heartbeats_without_release()
@@ -443,6 +446,8 @@ def test_logical_long_request_keeps_real_http_heartbeats_status_and_other_root_r
             try:
                 await first.start()
                 await second.start()
+                await first.call_tool("get_runtime_status")
+                await second.call_tool("get_runtime_status")
                 first_runtime = harness.runtimes["/data/root-a"]
                 second_runtime = harness.runtimes["/data/root-b"]
                 blocked = first_runtime.executor.submit(blocking_request)

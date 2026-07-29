@@ -96,7 +96,8 @@ def test_production_runtime_selects_the_configured_program_and_pinned_engine(
     status = acceptance.runtime.status()
     adapter = _mapping(_mapping(status["adapters"])["typescript"])
     engine = _mapping(adapter["engine"])
-    omitted = {_mapping(item)["path"] for item in _sequence(adapter["trusted_not_in_configured_program"])}
+    omitted_status = _mapping(adapter["trusted_not_in_configured_program"])
+    omitted = {_mapping(item)["path"] for item in _sequence(omitted_status["items"])}
 
     assert acceptance.config.language_server_version == "5.1.3"
     assert acceptance.config.typescript_version == "5.9.3"
@@ -213,7 +214,8 @@ def test_omitted_file_is_path_scoped_and_unicode_ranges_are_exact(
     adapter_before = _mapping(_mapping(before["adapters"])["typescript"])
     configured_before = _mapping(adapter_before["configured_program"])
     omitted = {
-        _mapping(item)["path"] for item in _sequence(adapter_before["trusted_not_in_configured_program"])
+        _mapping(item)["path"]
+        for item in _sequence(_mapping(adapter_before["trusted_not_in_configured_program"])["items"])
     }
     assert OMITTED_UNICODE_FILE in omitted
 

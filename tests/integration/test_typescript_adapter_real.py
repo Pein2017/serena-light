@@ -194,7 +194,10 @@ def test_real_status_scope_facts_and_omitted_engine_owned_inferred_path(
     assert {item.path for item in projection.trusted_not_in_configured_program} == (
         set(projection.trust_inventory.paths) - set(projection.configured_program.paths)
     )
-    assert all(item["reason"] == "excluded_by_native_config" for item in status["trusted_not_in_configured_program"])
+    omitted_status = status["trusted_not_in_configured_program"]
+    assert omitted_status["total"] == len(projection.trusted_not_in_configured_program)
+    assert omitted_status["omitted_count"] == max(0, omitted_status["total"] - 50)
+    assert all(item["reason"] == "excluded_by_native_config" for item in omitted_status["items"])
 
     omitted = next(
         path for path in projection.trusted_not_in_configured_program if Path(path.path).suffix.lower() == ".mjs"

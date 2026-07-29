@@ -12,9 +12,13 @@ from starlette.testclient import TestClient
 from serena_light.daemon.leases import LeaseLifecycle
 from serena_light.daemon.server import create_daemon_app
 from serena_light.daemon.service import WorkspaceDaemonService
+from serena_light.lsp.adapter import AdapterError, AdapterErrorCode
+from serena_light.lsp.executor import ExecutorBusyError
 from serena_light.runtime_files import BearerSecret
-from serena_light.tools.envelopes import JsonValue, success
+from serena_light.tools.envelopes import ErrorCode, JsonValue, error, success
+from serena_light.workspace.identity import WorkspaceError, WorkspaceErrorCode, WorkspaceErrorData
 from serena_light.workspace.registry import ResolvedWorkspace, WorkspaceRuntimeRegistry
+from serena_light.workspace.runtime import RuntimeErrorCode, WorkspaceRuntimeError
 
 
 @dataclass(eq=False)
@@ -28,6 +32,16 @@ class FakeRuntime:
     def find_symbol(self, **kwargs: object) -> object:
         self.calls.append(("find_symbol", dict(kwargs)))
         return success(cast(JsonValue, {"identity": self.identity, "query": kwargs["name_path"]}))
+
+
+@dataclass(slots=True)
+class OutcomeRuntime:
+    outcome: object
+
+    def operation(self) -> object:
+        if isinstance(self.outcome, BaseException):
+            raise self.outcome
+        return self.outcome
 
 
 def _service() -> tuple[WorkspaceDaemonService[str, FakeRuntime], list[FakeRuntime]]:
@@ -205,6 +219,46 @@ def test_release_workspace_keeps_lease_live_and_bindings_isolated() -> None:
         assert (await service.binding_for(lease_id=first)).identity == "/data/three"
 
     asyncio.run(scenario())
+
+
+def test_runtime_boundary_converts_typed_failures_without_generic_rewriting() -> None:
+    service, _created = _service()
+
+    async def call(outcome: object) -> Mapping[str, object]:
+        return await service._runtime_result(cast(FakeRuntime, OutcomeRuntime(outcome)), "operation", {})
+
+    for code in WorkspaceErrorCode:
+        converted = asyncio.run(call(WorkspaceError(WorkspaceErrorData(code, "secret"))))
+        assert _data_map(converted["error"])["code"] == code.value
+
+    assert _data_map(asyncio.run(call(ExecutorBusyError("secret")))["error"])["code"] == "BUSY"
+    assert _data_map(
+        asyncio.run(call(AdapterError(AdapterErrorCode.COOLDOWN, "secret", retry_after_seconds=1)))["error"]
+    )["code"] == "COOLDOWN"
+    assert _data_map(
+        asyncio.run(call(WorkspaceRuntimeError(RuntimeErrorCode.SCOPE_INCOMPATIBLE, "secret")))["error"]
+    )["code"] == "SCOPE_INCOMPATIBLE"
+    assert _data_map(asyncio.run(call(TimeoutError("secret")))["error"])["code"] == "TIMED_OUT"
+    assert _data_map(asyncio.run(call(OSError("secret")))["error"])["code"] == "UNCERTAIN"
+    uncertain = error(ErrorCode.UNCERTAIN).to_dict()
+    assert asyncio.run(call(uncertain)) == uncertain
+
+
+def test_runtime_boundary_rejects_malformed_runtime_mappings() -> None:
+    service, _created = _service()
+
+    async def scenario() -> Mapping[str, object]:
+        return await service._runtime_result(
+            cast(FakeRuntime, OutcomeRuntime({"result": "not an envelope"})), "operation", {}
+        )
+
+    converted = asyncio.run(scenario())
+    assert _data_map(converted["error"]) == {
+        "code": "UNSUPPORTED",
+        "message": "operation is unsupported",
+        "retry": None,
+        "details": {"tool": "operation", "reason": "malformed_runtime_result"},
+    }
 
 
 def _data_map(value: object) -> Mapping[str, object]:

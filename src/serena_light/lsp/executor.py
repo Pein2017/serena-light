@@ -7,6 +7,7 @@ import threading
 from collections.abc import Callable
 from concurrent.futures import Future
 from dataclasses import dataclass
+from enum import StrEnum
 from typing import Any, TypeVar
 
 T = TypeVar("T")
@@ -14,6 +15,66 @@ T = TypeVar("T")
 
 class ExecutorBusyError(RuntimeError):
     """Raised when a workspace LSP queue has reached its fixed bound."""
+
+
+class EditCommitState(StrEnum):
+    """The forward-only commit states of one non-replayable executor edit."""
+
+    QUEUED = "queued"
+    RUNNING = "running"
+    INSTALLED = "installed"
+    DONE = "done"
+
+
+_COMMIT_ORDER: tuple[EditCommitState, ...] = (
+    EditCommitState.QUEUED,
+    EditCommitState.RUNNING,
+    EditCommitState.INSTALLED,
+    EditCommitState.DONE,
+)
+
+
+class EditCommit:
+    """Commit progress shared between one queued edit and its waiting caller.
+
+    The caller reads this after a timeout or a lost response to choose between
+    ``TIMED_OUT`` (the work provably never ran, so a later write is impossible)
+    and ``UNCERTAIN`` (the work started, or its state cannot be proven).  Only
+    forward transitions are accepted, so a stale worker can never demote the
+    state a caller has already acted on.
+    """
+
+    __slots__ = ("_lock", "_state")
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._state = EditCommitState.QUEUED
+
+    @property
+    def state(self) -> EditCommitState:
+        with self._lock:
+            return self._state
+
+    @property
+    def installed(self) -> bool:
+        """Whether the replacement provably reached the filesystem."""
+
+        return self.state in {EditCommitState.INSTALLED, EditCommitState.DONE}
+
+    def mark_running(self) -> None:
+        self._advance(EditCommitState.RUNNING)
+
+    def mark_installed(self) -> None:
+        self._advance(EditCommitState.INSTALLED)
+
+    def mark_done(self) -> None:
+        self._advance(EditCommitState.DONE)
+
+    def _advance(self, state: EditCommitState) -> None:
+        with self._lock:
+            if _COMMIT_ORDER.index(state) <= _COMMIT_ORDER.index(self._state):
+                raise ValueError(f"edit commit cannot move from {self._state.value} to {state.value}")
+            self._state = state
 
 
 @dataclass(frozen=True)

@@ -12,7 +12,7 @@ from __future__ import annotations
 import json
 import threading
 import time
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Collection, Mapping, Sequence
 from concurrent.futures import Future
 from contextlib import suppress
 from dataclasses import dataclass
@@ -32,12 +32,13 @@ from serena_light.lsp.adapter import (
     LanguageAdapter,
     PublishedDiagnosticsWitness,
 )
-from serena_light.lsp.executor import BoundedLspExecutor
+from serena_light.lsp.executor import BoundedLspExecutor, EditCommit, EditCommitState
 from serena_light.lsp.normalize import Location, NormalizedSymbol, Position, Range
 from serena_light.lsp.positions import FileSnapshot, LspPosition, PositionError, PositionMapper
 from serena_light.lsp.pyright import PyrightFacts
 from serena_light.lsp.state import DiagnosticsSnapshot, DiagnosticsState, LspState
 from serena_light.lsp.typescript import (
+    NATIVE_CONFIG_NAMES,
     TYPESCRIPT_VERSION,
     TypeScriptAdapterConfig,
     attribute_native_program,
@@ -56,6 +57,7 @@ from serena_light.tools.editing import (
     NotificationResult,
     OperationLock,
     ReplacementNotification,
+    safe_current_hash,
 )
 from serena_light.tools.editing import (
     replace_symbol_body as _replace_symbol_body,
@@ -105,10 +107,47 @@ from serena_light.workspace.inventory import (
     git_trust_inventory,
     transformers_trust_inventory,
 )
-from serena_light.workspace.scope import LanguageFamily, ScopeGenerationTracker, ScopeProjection
+from serena_light.workspace.scope import (
+    FileChangeType,
+    LanguageFamily,
+    ScopeGenerationTracker,
+    ScopeProjection,
+    WatchedFileEvent,
+    bounded_difference_status,
+)
 
 type PhysicalWorkspaceKey = tuple[WorkspaceKind, Path]
 type ProgramAttributor = Callable[[Path, tuple[str, ...]], ScopeProjection]
+type ContentIdentity = tuple[int | None, int | None, int | None, int | None]
+
+_FAMILY_EXTENSIONS: Mapping[LanguageFamily, frozenset[str]] = {
+    LanguageFamily.PYTHON: PYTHON_EXTENSIONS,
+    LanguageFamily.TYPESCRIPT: JAVASCRIPT_TYPESCRIPT_EXTENSIONS,
+}
+
+# Pyright and tsserver own native config selection; these root-relative names
+# only decide when a family must be asked to attribute its program again.  A
+# false positive costs one reattribution, a miss would keep a stale program.
+_NATIVE_CONFIG_WATCH: Mapping[LanguageFamily, tuple[str, ...]] = {
+    LanguageFamily.PYTHON: ("pyrightconfig.json", "pyproject.toml"),
+    LanguageFamily.TYPESCRIPT: tuple(sorted(NATIVE_CONFIG_NAMES)),
+}
+
+_LANGUAGE_IDS: Mapping[str, str] = {
+    ".py": "python",
+    ".pyi": "python",
+    ".ts": "typescript",
+    ".mts": "typescript",
+    ".cts": "typescript",
+    ".tsx": "typescriptreact",
+    ".js": "javascript",
+    ".mjs": "javascript",
+    ".cjs": "javascript",
+    ".jsx": "javascriptreact",
+}
+
+# One freshness pass may not open an unbounded number of newly created files.
+MAX_CONTROLLED_OPENS = 32
 
 
 class RuntimeErrorCode(StrEnum):
@@ -190,6 +229,13 @@ class AdapterBuildContext:
     scope_tracker: ScopeGenerationTracker
     executor: BoundedLspExecutor
     operation_lock: threading.RLock
+    debug_reporter: Callable[[str, str], object] | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class FamilyAttribution:
+    projection: ScopeProjection | None = None
+    error: WorkspaceRuntimeError | None = None
 
 
 type AdapterFactory = Callable[[AdapterBuildContext], RuntimeAdapter]
@@ -376,6 +422,243 @@ class _WorkspaceLanguageAdapter(LanguageAdapter):
         return NotificationResult("notified", document.generation, _path_generations(self.snapshot()))
 
 
+@dataclass(frozen=True, slots=True)
+class FreshnessScan:
+    """What exactly one completed freshness pass observed and did."""
+
+    created: tuple[str, ...] = ()
+    changed: tuple[str, ...] = ()
+    deleted: tuple[str, ...] = ()
+    symlinked: tuple[str, ...] = ()
+    config_changed: tuple[str, ...] = ()
+    reattributed: tuple[LanguageFamily, ...] = ()
+    notified: tuple[LanguageFamily, ...] = ()
+    opened: tuple[str, ...] = ()
+    unopened: tuple[str, ...] = ()
+
+    @property
+    def dirty(self) -> bool:
+        return bool(self.created or self.changed or self.deleted or self.config_changed)
+
+    def as_status(self) -> Mapping[str, object]:
+        return {
+            "created": self.created,
+            "changed": self.changed,
+            "deleted": self.deleted,
+            "symlinked": self.symlinked,
+            "config_changed": self.config_changed,
+            "reattributed": tuple(family.value for family in self.reattributed),
+            "notified": tuple(family.value for family in self.notified),
+            "opened": self.opened,
+            "unopened": self.unopened,
+        }
+
+
+class _SharedScan:
+    """One in-flight scan whose single result every joined caller receives."""
+
+    __slots__ = ("done", "failure", "result")
+
+    def __init__(self) -> None:
+        self.done = threading.Event()
+        self.result: FreshnessScan | None = None
+        self.failure: BaseException | None = None
+
+
+class FreshnessCoordinator:
+    """Run one synchronous lexical freshness pass before a workspace operation.
+
+    There is deliberately no time-based success cache: an operation either runs
+    a scan or joins one that is already running, so a stale filesystem can never
+    authorize a semantic answer.  Every scan runs on the calling thread, never
+    on the shared LSP executor, because notifications and edits are submitted to
+    that single worker and a scan waiting on it would deadlock.
+    """
+
+    def __init__(self, runtime: WorkspaceRuntime) -> None:
+        self._runtime = runtime
+        self._lock = threading.Lock()
+        self._in_flight: _SharedScan | None = None
+        self._states: dict[str, ContentIdentity] = {}
+        self._config_states: dict[str, ContentIdentity] = {}
+        self._last = FreshnessScan()
+        self._capture_baseline(runtime.inventory)
+
+    @property
+    def last_scan(self) -> FreshnessScan:
+        with self._lock:
+            return self._last
+
+    def ensure_fresh(self) -> FreshnessScan:
+        """Rebuild and reconcile the Git lexical inventory before one operation."""
+
+        if self._runtime.identity.kind is not WorkspaceKind.GIT:
+            # The allowlisted read-only root is never fully walked per call; its
+            # freshness is the targeted stat in ensure_path_fresh.
+            return FreshnessScan()
+        with self._lock:
+            shared = self._in_flight
+            if shared is None:
+                shared = self._in_flight = _SharedScan()
+                owned = True
+            else:
+                owned = False
+        if not owned:
+            shared.done.wait()
+            if shared.failure is not None:
+                raise shared.failure
+            assert shared.result is not None
+            return shared.result
+        try:
+            scan = self._scan_git()
+        except BaseException as caught:
+            shared.failure = caught
+            raise
+        else:
+            shared.result = scan
+            return scan
+        finally:
+            with self._lock:
+                self._in_flight = None
+                if shared.failure is None and shared.result is not None:
+                    self._last = shared.result
+            shared.done.set()
+
+    def ensure_path_fresh(self, relative_path: str) -> FreshnessScan:
+        """Stat exactly one operand on the read-only non-Git root."""
+
+        if self._runtime.identity.kind is WorkspaceKind.GIT:
+            return FreshnessScan()
+        runtime = self._runtime
+        inventory = runtime.inventory
+        if not inventory.contains(relative_path):
+            return FreshnessScan()
+        states = inventory.targeted_states([relative_path])
+        if not states:
+            return FreshnessScan()
+        observed = states[0]
+        with self._lock:
+            if self._states.get(observed.path) == observed.content_identity:
+                return FreshnessScan()
+            self._states[observed.path] = observed.content_identity
+        notified, _opened, _unopened = self._apply_events(
+            (WatchedFileEvent(observed.path, FileChangeType.CHANGED),)
+        )
+        scan = FreshnessScan(changed=(observed.path,), notified=notified)
+        with self._lock:
+            self._last = scan
+        return scan
+
+    def _capture_baseline(self, inventory: TrustInventory) -> None:
+        """Record the stat facts a later scan compares against."""
+
+        self._states = {
+            state.path: state.content_identity for state in inventory.targeted_states(inventory.paths)
+        }
+        self._config_states = self._observe_configs(inventory)
+
+    def _observe_configs(self, inventory: TrustInventory) -> dict[str, ContentIdentity]:
+        candidates = set()
+        for family, names in _NATIVE_CONFIG_WATCH.items():
+            candidates.update(names)
+            projection = self._runtime.projections.get(family)
+            if projection is not None and projection.selected_config_path:
+                candidates.add(projection.selected_config_path)
+        return {state.path: state.content_identity for state in inventory.targeted_states(sorted(candidates))}
+
+    def _scan_git(self) -> FreshnessScan:
+        runtime = self._runtime
+        previous = runtime.inventory
+        rebuilt = runtime.rebuild_inventory()
+        before, after = set(previous.paths), set(rebuilt.paths)
+        created = tuple(sorted(after - before))
+        deleted = tuple(sorted(before - after))
+        states = {state.path: state for state in rebuilt.targeted_states(rebuilt.paths)}
+        changed = tuple(
+            path
+            for path in sorted(after & before)
+            if self._states.get(path) != states[path].content_identity
+        )
+        symlinked = tuple(
+            sorted(item.path for item in rebuilt.rejected if item.reason.startswith("symlink"))
+        )
+        configs = self._observe_configs(rebuilt)
+        config_changed = tuple(
+            sorted(name for name, value in configs.items() if self._config_states.get(name) != value)
+        )
+        membership_changed = bool(created or deleted) or set(previous.rejected) != set(rebuilt.rejected)
+        if not (membership_changed or changed or config_changed):
+            return FreshnessScan()
+
+        # Attribute affected families before installation; typed per-family
+        # failures are installed as unavailable state without blocking healthy
+        # families or reverting the rebuilt lexical inventory.
+        projections = (
+            runtime.build_projections(rebuilt, _affected_families((*created, *deleted, *symlinked), config_changed))
+            if membership_changed or config_changed
+            else {}
+        )
+        with self._lock:
+            self._states = {path: state.content_identity for path, state in states.items()}
+            self._config_states = configs
+        runtime.install_freshness(rebuilt, projections)
+        reattributed = tuple(sorted(projections))
+
+        events = (
+            *(WatchedFileEvent(path, FileChangeType.CREATED) for path in created),
+            *(WatchedFileEvent(path, FileChangeType.CHANGED) for path in changed),
+            *(WatchedFileEvent(path, FileChangeType.DELETED) for path in deleted),
+        )
+        notified, opened, unopened = self._apply_events(events, created=created)
+        return FreshnessScan(
+            created=created,
+            changed=changed,
+            deleted=deleted,
+            symlinked=symlinked,
+            config_changed=config_changed,
+            reattributed=reattributed,
+            notified=notified,
+            opened=opened,
+            unopened=unopened,
+        )
+
+    def _apply_events(
+        self, events: tuple[WatchedFileEvent, ...], *, created: tuple[str, ...] = ()
+    ) -> tuple[tuple[LanguageFamily, ...], tuple[str, ...], tuple[str, ...]]:
+        """Advance generations first, then notify running adapters best-effort.
+
+        Each family sees only its own events: membership and config invalidation
+        are already owned by the reattributed projection, so one family's churn
+        must not invalidate another family's configured program.  The generation
+        bookkeeping is synchronous and unconditional, so a notification that
+        cannot be queued degrades to ``NOT_READY`` through the readiness barriers
+        rather than to a stale success.
+        """
+
+        runtime = self._runtime
+        notified: list[LanguageFamily] = []
+        opened: list[str] = []
+        unopened: list[str] = []
+        for family, tracker in runtime.trackers.items():
+            family_events = tuple(event for event in events if _family_of(event.path) is family)
+            if not family_events:
+                continue
+            tracker.apply_did_change_watched_files(family_events)
+            family_created = tuple(path for path in created if _family_of(path) is family)
+            adapter = runtime.adapters.get(family)
+            if adapter is None or not adapter.snapshot().running:
+                unopened.extend(family_created)
+                continue
+            opens = family_created[:MAX_CONTROLLED_OPENS]
+            if runtime.notify_watched_files(adapter, family_events, opens):
+                notified.append(family)
+                opened.extend(opens)
+                unopened.extend(family_created[MAX_CONTROLLED_OPENS:])
+            else:
+                unopened.extend(family_created)
+        return tuple(notified), tuple(sorted(opened)), tuple(sorted(unopened))
+
+
 class WorkspaceRuntime:
     """One shared runtime for exactly one normalized physical workspace key."""
 
@@ -390,6 +673,7 @@ class WorkspaceRuntime:
         adapter_factories: Mapping[LanguageFamily, AdapterFactory] | None = None,
         executor_factory: ExecutorFactory | None = None,
         future_timeout: float = 35.0,
+        debug_reporter: Callable[[str, str], object] | None = None,
     ) -> None:
         if future_timeout <= 0:
             raise ValueError("future_timeout must be positive")
@@ -397,55 +681,49 @@ class WorkspaceRuntime:
         self.key = self.identity.registry_key
         self._path_policy = path_policy
         self._future_timeout = future_timeout
-        self.inventory = inventory or (inventory_factory or _default_inventory)(self.identity)
+        self._debug_reporter = debug_reporter
+        # An explicitly injected inventory is its own rescan source unless the
+        # caller also owns a factory; production supplies neither and therefore
+        # rebuilds from Git on every scan.
+        self._inventory_factory = inventory_factory or (
+            _default_inventory if inventory is None else _fixed_inventory(inventory)
+        )
+        self.inventory = inventory or self._inventory_factory(self.identity)
         if self.inventory.root.resolve(strict=True) != self.identity.root:
             raise ValueError("trust inventory root does not match the physical workspace key")
 
-        family_paths = {
-            LanguageFamily.PYTHON: _paths_for(self.inventory.paths, PYTHON_EXTENSIONS),
-            LanguageFamily.TYPESCRIPT: _paths_for(self.inventory.paths, JAVASCRIPT_TYPESCRIPT_EXTENSIONS),
-        }
+        self._supplied_attributors = dict(attributors or {})
+        self._attributors: dict[LanguageFamily, ProgramAttributor] = {}
+        self._family_errors: dict[LanguageFamily, WorkspaceRuntimeError] = {}
+        family_paths = _family_paths(self.inventory)
         self._projections: dict[LanguageFamily, ScopeProjection] = {}
         for family, paths in family_paths.items():
             if not paths:
                 continue
-            attributor = (attributors or {}).get(family) or _default_attributor(family)
             try:
-                projection = attributor(self.identity.root, paths)
-            except Exception as error:
-                raise WorkspaceRuntimeError(
-                    RuntimeErrorCode.SCOPE_INCOMPATIBLE,
-                    f"{family.value} native-program attribution failed: {error}",
-                ) from error
-            if projection.language is not family:
-                raise ValueError(f"{family.value} attributor returned a projection for {projection.language.value}")
-            if not projection.compatible:
-                raise WorkspaceRuntimeError(
-                    RuntimeErrorCode.SCOPE_INCOMPATIBLE,
-                    f"{family.value} configured program contains paths outside trust",
-                    paths=tuple(item.path for item in projection.configured_program_outside_trust),
-                )
+                projection = self._attribute(family, paths)
+            except WorkspaceRuntimeError as error:
+                self._family_errors[family] = error
+                continue
             self._projections[family] = projection
+            if not projection.compatible:
+                self._family_errors[family] = _projection_error(family, projection)
 
         self._executor = (executor_factory or _default_executor)(self.identity.root)
         self._operation_lock = threading.RLock()
+        self._adapter_factories = dict(adapter_factories or {})
         self._adapters: dict[LanguageFamily, RuntimeAdapter] = {}
+        self._trackers: dict[LanguageFamily, ScopeGenerationTracker] = {}
         self._versions: dict[str, int] = {}
         self._state_lock = threading.RLock()
         self._stopped = False
         try:
             for family, projection in self._projections.items():
-                context = AdapterBuildContext(
-                    family=family,
-                    workspace_root=self.identity.root,
-                    trusted_paths=family_paths[family],
-                    projection=projection,
-                    scope_tracker=ScopeGenerationTracker(projection),
-                    executor=self._executor,
-                    operation_lock=self._operation_lock,
-                )
-                factory = (adapter_factories or {}).get(family) or _default_adapter_factory(family)
-                self._adapters[family] = factory(context)
+                if family in self._family_errors:
+                    continue
+                adapter, tracker = self._build_adapter(family, projection, family_paths[family])
+                self._trackers[family] = tracker
+                self._adapters[family] = adapter
         except BaseException:
             stop_futures: list[Future[AdapterSnapshot]] = []
             for adapter in self._adapters.values():
@@ -456,6 +734,7 @@ class WorkspaceRuntime:
                     future.result(timeout=self._future_timeout)
             self._executor.close(cancel_queued=True)
             raise
+        self._freshness = FreshnessCoordinator(self)
 
     @property
     def executor(self) -> BoundedLspExecutor:
@@ -464,6 +743,180 @@ class WorkspaceRuntime:
     @property
     def projections(self) -> Mapping[LanguageFamily, ScopeProjection]:
         return dict(self._projections)
+
+    @property
+    def adapters(self) -> Mapping[LanguageFamily, RuntimeAdapter]:
+        return dict(self._adapters)
+
+    @property
+    def trackers(self) -> Mapping[LanguageFamily, ScopeGenerationTracker]:
+        return dict(self._trackers)
+
+    @property
+    def freshness(self) -> FreshnessCoordinator:
+        return self._freshness
+
+    def ensure_fresh(self) -> FreshnessScan:
+        """Reconcile the workspace with disk; also the same-root activation hook."""
+
+        self._require_running()
+        return self._freshness.ensure_fresh()
+
+    def rebuild_inventory(self) -> TrustInventory:
+        """Rebuild the lexical inventory from this workspace's owning source."""
+
+        rebuilt = self._inventory_factory(self.identity)
+        if rebuilt.root.resolve(strict=True) != self.identity.root:
+            raise ValueError("rebuilt trust inventory root does not match the physical workspace key")
+        return rebuilt
+
+    def build_projections(
+        self, inventory: TrustInventory, families: Collection[LanguageFamily]
+    ) -> dict[LanguageFamily, FamilyAttribution]:
+        """Reattribute only the named families, without installing the result."""
+
+        family_paths = _family_paths(inventory)
+        rebuilt: dict[LanguageFamily, FamilyAttribution] = {}
+        for family in families:
+            paths = family_paths.get(family, ())
+            if not paths:
+                rebuilt[family] = FamilyAttribution(
+                    error=WorkspaceRuntimeError(
+                        RuntimeErrorCode.SCOPE_INCOMPATIBLE,
+                        f"{family.value} has no trusted source paths",
+                    )
+                )
+                continue
+            try:
+                projection = self._attribute(family, paths)
+            except WorkspaceRuntimeError as error:
+                rebuilt[family] = FamilyAttribution(error=error)
+                continue
+            rebuilt[family] = FamilyAttribution(
+                projection=projection,
+                error=None if projection.compatible else _projection_error(family, projection),
+            )
+        return rebuilt
+
+    def install_freshness(
+        self, inventory: TrustInventory, attributions: Mapping[LanguageFamily, FamilyAttribution]
+    ) -> None:
+        """Swap inventory and projections together, then advance generations."""
+
+        paths_by_family = _family_paths(inventory)
+        to_stop: list[RuntimeAdapter] = []
+        with self._state_lock:
+            self.inventory = inventory
+            for family, attribution in attributions.items():
+                projection = attribution.projection
+                if projection is not None:
+                    self._projections[family] = projection
+                if attribution.error is not None:
+                    self._family_errors[family] = attribution.error
+                    adapter = self._adapters.pop(family, None)
+                    self._trackers.pop(family, None)
+                    if adapter is not None:
+                        to_stop.append(adapter)
+                    continue
+                assert projection is not None
+                self._family_errors.pop(family, None)
+                tracker = self._trackers.get(family)
+                if tracker is not None:
+                    tracker.update_projection(projection)
+                    continue
+                try:
+                    adapter, tracker = self._build_adapter(family, projection, paths_by_family[family])
+                except Exception as error:
+                    self._family_errors[family] = WorkspaceRuntimeError(
+                        RuntimeErrorCode.SCOPE_INCOMPATIBLE,
+                        f"{family.value} adapter construction failed ({type(error).__name__})",
+                    )
+                    continue
+                self._trackers[family] = tracker
+                self._adapters[family] = adapter
+        for adapter in to_stop:
+            adapter.stop().result(timeout=self._future_timeout)
+
+    def notify_watched_files(
+        self,
+        adapter: RuntimeAdapter,
+        events: Sequence[WatchedFileEvent],
+        created: Sequence[str],
+    ) -> bool:
+        """Queue one watcher batch plus bounded open/close for created files.
+
+        Delivery is best-effort and never blocks the caller: the executor is
+        FIFO, so this batch precedes the operation that requested freshness.
+        """
+
+        workspace_uri = self.identity.root.as_uri()
+        changes = [dict(event.as_lsp_change(workspace_uri)) for event in events]
+        opens: list[tuple[str, str, str]] = []
+        for relative in created:
+            language_id = _LANGUAGE_IDS.get(PurePosixPath(relative).suffix.lower())
+            if language_id is None:
+                continue
+            try:
+                text = (self.identity.root / relative).read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError):
+                continue
+            opens.append(((self.identity.root / relative).as_uri(), language_id, text))
+
+        def send(client: AdapterClient) -> None:
+            client.notify("workspace/didChangeWatchedFiles", {"changes": changes})
+            # A created-file notification alone does not make every backend bind
+            # the file, so force one parse with a controlled open/close pair.
+            for uri, language_id, text in opens:
+                client.notify(
+                    "textDocument/didOpen",
+                    {"textDocument": {"uri": uri, "languageId": language_id, "version": 1, "text": text}},
+                )
+                client.notify("textDocument/didClose", {"textDocument": {"uri": uri}})
+
+        try:
+            adapter.submit_read(send)
+        except Exception:
+            return False
+        return True
+
+    def _attribute(self, family: LanguageFamily, paths: tuple[str, ...]) -> ScopeProjection:
+        attributor = self._attributors.get(family)
+        if attributor is None:
+            attributor = self._supplied_attributors.get(family) or _default_attributor(family)
+            self._attributors[family] = attributor
+        try:
+            projection = attributor(self.identity.root, paths)
+        except Exception as error:
+            raise WorkspaceRuntimeError(
+                RuntimeErrorCode.SCOPE_INCOMPATIBLE,
+                f"{family.value} native-program attribution failed ({type(error).__name__})",
+            ) from error
+        if projection.language is not family:
+            raise WorkspaceRuntimeError(
+                RuntimeErrorCode.SCOPE_INCOMPATIBLE,
+                f"{family.value} attributor returned the wrong language family",
+            )
+        return projection
+
+    def _build_adapter(
+        self,
+        family: LanguageFamily,
+        projection: ScopeProjection,
+        trusted_paths: tuple[str, ...],
+    ) -> tuple[RuntimeAdapter, ScopeGenerationTracker]:
+        tracker = ScopeGenerationTracker(projection)
+        context = AdapterBuildContext(
+            family=family,
+            workspace_root=self.identity.root,
+            trusted_paths=trusted_paths,
+            projection=projection,
+            scope_tracker=tracker,
+            executor=self._executor,
+            operation_lock=self._operation_lock,
+            debug_reporter=self._debug_reporter,
+        )
+        factory = self._adapter_factories.get(family) or _default_adapter_factory(family)
+        return factory(context), tracker
 
     def route(self, relative_path: str) -> RuntimeAdapter:
         """Authorize one path and select exactly one fixed adapter without starting it."""
@@ -475,6 +928,7 @@ class WorkspaceRuntime:
 
         normalized = _relative_path(relative_path, allow_parent=True)
         self._require_running()
+        self._freshness.ensure_path_fresh(normalized)
         if ".." in PurePosixPath(normalized).parts and not (self.identity.root / normalized).exists():
             raise ValueError(f"path does not exist: {relative_path!r}")
         inventory_paths = tuple(self.identity.root / path for path in self.inventory.paths)
@@ -485,6 +939,9 @@ class WorkspaceRuntime:
         )
         if ".." in PurePosixPath(normalized).parts:
             raise ValueError(f"path is not normalized within the active workspace: {relative_path!r}")
+        family = _family_of(normalized)
+        if family is not None and family in self._family_errors:
+            raise self._family_errors[family]
         routed = tuple((family, adapter) for family, adapter in self._adapters.items() if adapter.routes(authorized))
         if len(routed) != 1:
             raise WorkspaceRuntimeError(
@@ -531,14 +988,66 @@ class WorkspaceRuntime:
 
         def operation() -> ToolEnvelope:
             if relative_path is not None:
-                self._route(relative_path)
+                if max_candidates_per_adapter != 128:
+                    return error(
+                        ErrorCode.UNSUPPORTED,
+                        details={
+                            "operation": "find_symbol",
+                            "reason": "max_candidates_per_adapter_applies_only_to_global_scope",
+                        },
+                        workspace=_workspace_metadata(self.identity),
+                    )
+                normalized_scope = relative_path.rstrip("/") or "."
+                if normalized_scope not in self.inventory.paths:
+                    try:
+                        selected = self.inventory.paths_under(normalized_scope)
+                    except ValueError:
+                        self._route(normalized_scope)
+                        raise AssertionError("workspace policy accepted an invalid directory scope") from None
+                    if selected:
+                        available = tuple(
+                            path for path in selected if _family_of(path) in self._adapters
+                        )
+                        if not available:
+                            raise WorkspaceRuntimeError(
+                                RuntimeErrorCode.SCOPE_INCOMPATIBLE,
+                                "directory scope contains only unavailable language families",
+                                paths=tuple(
+                                    sorted(
+                                        {
+                                            path
+                                            for family in {_family_of(path) for path in selected}
+                                            if family in self._family_errors
+                                            for path in self._family_errors[family].paths
+                                        }
+                                    )
+                                ),
+                            )
+                        return DocumentNavigationService(self).find_symbol_in_documents(
+                            available,
+                            name_path,
+                            relative_scope=normalized_scope,
+                            substring_matching=substring_matching,
+                            include_body=include_body,
+                            include_info=include_info,
+                            max_answer_chars=max_answer_chars,
+                        )
+                self._route(normalized_scope)
                 return DocumentNavigationService(self).find_symbol(
-                    relative_path,
+                    normalized_scope,
                     name_path,
                     substring_matching=substring_matching,
                     include_body=include_body,
                     include_info=include_info,
                     max_answer_chars=max_answer_chars,
+                )
+            if not self._adapters and self._family_errors:
+                raise WorkspaceRuntimeError(
+                    RuntimeErrorCode.SCOPE_INCOMPATIBLE,
+                    "all attributed language families are unavailable",
+                    paths=tuple(
+                        sorted({path for failure in self._family_errors.values() for path in failure.paths})
+                    ),
                 )
             warmed = self._warm_global_candidates(name_path)
             return GlobalSymbolService(
@@ -546,6 +1055,8 @@ class WorkspaceRuntime:
             ).find_symbol(
                 name_path,
                 substring_matching=substring_matching,
+                include_body=include_body,
+                include_info=include_info,
                 max_candidates_per_adapter=max_candidates_per_adapter,
                 max_answer_chars=max_answer_chars,
             )
@@ -755,8 +1266,10 @@ class WorkspaceRuntime:
 
         def operation() -> ToolEnvelope:
             adapter, authorized = self._edit_adapter(relative_path)
+            commit = EditCommit()
 
             def transaction(client: AdapterClient) -> ToolEnvelope:
+                commit.mark_running()
                 bridge = _EditBridge(self, adapter, client, authorized)
                 return _replace_symbol_body(
                     name_path,
@@ -767,25 +1280,39 @@ class WorkspaceRuntime:
                     symbol_provider=bridge,
                     notifier=bridge,
                     operation_lock=cast(OperationLock, _NoopOperationLock()),
+                    commit=commit,
                 )
 
-            return adapter.submit_edit(transaction).result(timeout=self._future_timeout)
+            future = adapter.submit_edit(transaction)
+            try:
+                return future.result(timeout=self._future_timeout)
+            except TimeoutError:
+                # Cancellation succeeds only while the work is still queued, and
+                # a queued entry can never write later.
+                if future.cancel() and commit.state is EditCommitState.QUEUED:
+                    return error(
+                        ErrorCode.TIMED_OUT,
+                        retry=RetryMetadata(retryable=True),
+                        details={"relative_path": authorized.relative_path, "commit_state": commit.state.value},
+                        workspace=authorized.workspace,
+                    )
+                return _uncertain_edit(authorized, commit, "timeout")
+            except Exception:
+                # Only an installed replacement is uncertain; anything earlier
+                # provably never reached os.replace and keeps its own envelope.
+                if not commit.installed:
+                    raise
+                return _uncertain_edit(authorized, commit, "transport")
 
         return self._tool_envelope(operation)
 
     def _edit_adapter(self, relative_path: str) -> tuple[RuntimeAdapter, AuthorizedEdit]:
         normalized = _relative_path(relative_path, allow_parent=True)
         self._require_running()
+        self._freshness.ensure_path_fresh(normalized)
         if ".." in PurePosixPath(normalized).parts and not (self.identity.root / normalized).exists():
             raise ValueError(f"path does not exist: {relative_path!r}")
-        authorize = getattr(self._path_policy, "authorize_edit", None)
-        if not callable(authorize):
-            raise ValueError("workspace policy does not support edits")
-        authorized = authorize(
-            self.identity,
-            self.identity.root / normalized,
-            tuple(self.identity.root / item for item in self.inventory.paths),
-        )
+        authorized = self.authorize_edit(normalized)
         if ".." in PurePosixPath(normalized).parts:
             raise ValueError(f"path is not normalized within the active workspace: {relative_path!r}")
         routed = tuple(adapter for adapter in self._adapters.values() if adapter.routes(authorized))
@@ -793,10 +1320,29 @@ class WorkspaceRuntime:
             raise WorkspaceRuntimeError(
                 RuntimeErrorCode.UNSUPPORTED, "edit path has no unique adapter", paths=(normalized,)
             )
-        return routed[0], AuthorizedEdit(authorized, normalized, _workspace_metadata(self.identity))
+        return routed[0], AuthorizedEdit(
+            authorized, normalized, _workspace_metadata(self.identity), self.identity.root
+        )
+
+    def authorize_edit(self, relative_path: str) -> Path:
+        """Check lexical membership and every guarded path component once."""
+
+        authorize = getattr(self._path_policy, "authorize_edit", None)
+        if not callable(authorize):
+            raise ValueError("workspace policy does not support edits")
+        inventory = self.inventory
+        return cast(
+            Path,
+            authorize(
+                self.identity,
+                self.identity.root / relative_path,
+                tuple(self.identity.root / item for item in inventory.paths),
+            ),
+        )
 
     def _tool_envelope(self, operation: Callable[[], ToolEnvelope]) -> ToolEnvelope:
         try:
+            self.ensure_fresh()
             return operation()
         except WorkspaceError as caught:
             return from_workspace_error(caught)
@@ -807,6 +1353,10 @@ class WorkspaceRuntime:
                 else ErrorCode.UNSUPPORTED
             )
             return error(code, details={"paths": caught.paths} if caught.paths else {})
+        # TimeoutError is an OSError; it must keep its own code rather than be
+        # rewritten as invalid input by the clause below.
+        except TimeoutError:
+            return error(ErrorCode.TIMED_OUT, retry=RetryMetadata(retryable=True))
         except (OSError, TypeError, ValueError):
             return error(ErrorCode.INVALID_INPUT)
 
@@ -1069,9 +1619,19 @@ class WorkspaceRuntime:
                 "sha256": self.inventory.digest,
                 "rejected": tuple({"path": item.path, "reason": item.reason} for item in self.inventory.rejected),
             },
+            "freshness": self._freshness.last_scan.as_status(),
             "adapters": adapters,
+            "unavailable_language_families": {
+                family.value: _unavailable_family_status(
+                    self._family_errors[family],
+                    self._projections.get(family),
+                )
+                for family in sorted(self._family_errors)
+            },
             "skipped_language_families": tuple(
-                family.value for family in LanguageFamily if family not in self._adapters
+                family.value
+                for family in LanguageFamily
+                if family not in self._projections and family not in self._family_errors
             ),
             "executor": {
                 "queue_size": executor.queue_size,
@@ -1182,6 +1742,8 @@ class _GlobalProvider:
                 uri,
                 self.seed.document.raw_symbols,
                 self.seed.generations,
+                self.seed.document.snapshot,
+                self.seed.document.position_encoding,
             )
         # The core gives us only workspace/symbol candidates that already passed
         # its configured-program authorization; this re-check is fail-closed.
@@ -1193,6 +1755,8 @@ class _GlobalProvider:
             uri,
             document.raw_symbols,
             _global_generations(self._adapter.snapshot()),
+            document.snapshot,
+            document.position_encoding,
         )
 
 
@@ -1229,6 +1793,11 @@ class _EditBridge:
 
     def authorize_edit(self, relative_path: str) -> AuthorizedEdit:
         if relative_path != self._authorized.relative_path:
+            raise ValueError("edit target changed after authorization")
+        # The first authorization ran before this worker owned the workspace
+        # operation lock, so the guarded component walk is repeated here: a path
+        # swapped for a symlink in between must still fail closed.
+        if self._runtime.authorize_edit(relative_path) != self._authorized.path:
             raise ValueError("edit target changed after authorization")
         return self._authorized
 
@@ -1268,6 +1837,62 @@ class _EditBridge:
         if self._target is None:
             raise ValueError("edit notifier ran before document-symbol resolution")
         return self._adapter.notify_edit_with_client(self._client, self._target, notification)
+
+
+def _uncertain_edit(target: AuthorizedEdit, commit: EditCommit, stage: str) -> ErrorEnvelope:
+    """Report a possibly-installed edit that must never be replayed."""
+
+    return error(
+        ErrorCode.UNCERTAIN,
+        retry=RetryMetadata(retryable=False),
+        details={
+            "relative_path": target.relative_path,
+            "commit_state": commit.state.value,
+            "current_hash": safe_current_hash(target),
+            "uncertain_stage": stage,
+            "requires_current_reread": True,
+        },
+        workspace=target.workspace,
+    )
+
+
+def _family_paths(inventory: TrustInventory) -> dict[LanguageFamily, tuple[str, ...]]:
+    return {family: _paths_for(inventory.paths, extensions) for family, extensions in _FAMILY_EXTENSIONS.items()}
+
+
+def _family_of(relative_path: str) -> LanguageFamily | None:
+    suffix = PurePosixPath(relative_path).suffix.lower()
+    for family, extensions in _FAMILY_EXTENSIONS.items():
+        if suffix in extensions:
+            return family
+    return None
+
+
+def _projection_error(family: LanguageFamily, projection: ScopeProjection) -> WorkspaceRuntimeError:
+    return WorkspaceRuntimeError(
+        RuntimeErrorCode.SCOPE_INCOMPATIBLE,
+        f"{family.value} configured program contains paths outside trust",
+        paths=tuple(item.path for item in projection.configured_program_outside_trust),
+    )
+
+
+def _affected_families(
+    membership_paths: Sequence[str], config_paths: Sequence[str]
+) -> frozenset[LanguageFamily]:
+    """Reattribute only families whose membership or native config may have moved."""
+
+    affected = {family for path in membership_paths if (family := _family_of(path)) is not None}
+    for path in config_paths:
+        name = PurePosixPath(path).name
+        affected.update(family for family, names in _NATIVE_CONFIG_WATCH.items() if name in names)
+    return frozenset(affected)
+
+
+def _fixed_inventory(inventory: TrustInventory) -> InventoryFactory:
+    def factory(_identity: WorkspaceIdentity) -> TrustInventory:
+        return inventory
+
+    return factory
 
 
 def _workspace_metadata(identity: WorkspaceIdentity) -> WorkspaceMetadata:
@@ -1496,6 +2121,7 @@ def _default_adapter_factory(family: LanguageFamily) -> AdapterFactory:
             lsp_state=LspState(),
             document_witness=PublishedDiagnosticsWitness(),
             operation_lock=context.operation_lock,
+            debug_reporter=context.debug_reporter,
         )
 
     return build
@@ -1558,13 +2184,11 @@ def _adapter_status(snapshot: AdapterSnapshot, projection: ScopeProjection) -> M
             "count": projection.configured_program.count,
             "sha256": projection.configured_program.sha256,
         },
-        "trusted_not_in_configured_program": tuple(
-            {"path": item.path, "reason": item.reason.value}
-            for item in projection.trusted_not_in_configured_program
+        "trusted_not_in_configured_program": bounded_difference_status(
+            projection.trusted_not_in_configured_program
         ),
-        "configured_program_outside_trust": tuple(
-            {"path": item.path, "reason": item.reason.value}
-            for item in projection.configured_program_outside_trust
+        "configured_program_outside_trust": bounded_difference_status(
+            projection.configured_program_outside_trust
         ),
         "scope_compatible": projection.compatible,
         "overlay_generated": projection.overlay_generated,
@@ -1589,3 +2213,35 @@ def _adapter_status(snapshot: AdapterSnapshot, projection: ScopeProjection) -> M
             for item in snapshot.transitions
         ),
     }
+
+
+def _unavailable_family_status(
+    failure: WorkspaceRuntimeError,
+    projection: ScopeProjection | None,
+) -> Mapping[str, object]:
+    status: dict[str, object] = {
+        "error": {"code": failure.code, "paths": failure.paths},
+        "scope_compatible": False,
+    }
+    if projection is not None:
+        status.update(
+            {
+                "selected_native_config": projection.selected_config_path,
+                "project_kind": projection.project_kind.value,
+                "trust_inventory": {
+                    "count": projection.trust_inventory.count,
+                    "sha256": projection.trust_inventory.sha256,
+                },
+                "configured_program": {
+                    "count": projection.configured_program.count,
+                    "sha256": projection.configured_program.sha256,
+                },
+                "trusted_not_in_configured_program": bounded_difference_status(
+                    projection.trusted_not_in_configured_program
+                ),
+                "configured_program_outside_trust": bounded_difference_status(
+                    projection.configured_program_outside_trust
+                ),
+            }
+        )
+    return status

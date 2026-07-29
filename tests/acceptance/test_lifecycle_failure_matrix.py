@@ -6,6 +6,7 @@ from dataclasses import dataclass
 
 import pytest
 
+from serena_light.lsp.positions import FileSnapshot
 from serena_light.tools.envelopes import AdapterMetadata, GenerationMetadata, WorkspaceMetadata
 from serena_light.tools.global_symbols import (
     ConfiguredProgramScope,
@@ -89,7 +90,13 @@ def test_create_change_delete_global_query_observes_new_generation_or_returns_no
     provider = _BarrierProvider(
         state=_state(stale, ready=False),
         batch=WorkspaceSymbolBatch((), stale),
-        document=DocumentSymbolBatch("src/main.py", "file:///repo/src/main.py", (), stale),
+        document=DocumentSymbolBatch(
+            "src/main.py",
+            "file:///repo/src/main.py",
+            (),
+            stale,
+            FileSnapshot.from_bytes(b""),
+        ),
     )
     before_observation = GlobalSymbolService((provider,)).find_symbol("Target").to_dict()
     assert before_observation["error"]["code"] == "NOT_READY"
@@ -132,6 +139,7 @@ def test_create_change_delete_global_query_observes_new_generation_or_returns_no
             },
         ),
         current,
+        FileSnapshot.from_bytes(b"def Target():\n"),
     )
 
     after_observation = GlobalSymbolService((provider,)).find_symbol("Target").to_dict()

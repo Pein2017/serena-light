@@ -14,14 +14,15 @@ import os
 import stat
 import subprocess
 import time
-from collections.abc import Callable, Iterator, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Protocol, cast
 from uuid import UUID, uuid4
 from weakref import WeakKeyDictionary
 
+import psutil
 from mcp.server.fastmcp import Context, FastMCP
 from mcp.types import LATEST_PROTOCOL_VERSION
 from starlette.requests import Request
@@ -29,8 +30,11 @@ from starlette.responses import JSONResponse
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from serena_light import __version__
+from serena_light.build_identity import validate_build_identity
 from serena_light.daemon.leases import LeaseExpiredError as LifecycleLeaseExpiredError
+from serena_light.processes import terminate_process_tree_with_kill_fallback
 from serena_light.runtime_files import (
+    LEGACY_BUILD_IDENTITY,
     PRIVATE_FILE_MODE,
     BearerSecret,
     DiscoveryMetadata,
@@ -41,6 +45,7 @@ from serena_light.tools.envelopes import ErrorCode, RetryMetadata, error
 
 LOOPBACK_HOST = "127.0.0.1"
 HEALTH_PATH = "/health"
+MIGRATION_STATUS_PATH = "/migration-status"
 MCP_PATH = "/mcp"
 STARTUP_LOCK_NAME = "startup.lock"
 DEFAULT_STARTUP_TIMEOUT_SECONDS = 10.0
@@ -95,6 +100,7 @@ class DaemonHealth:
     daemon_id: str
     server_version: str = __version__
     protocol_version: str = LATEST_PROTOCOL_VERSION
+    build_identity: str = LEGACY_BUILD_IDENTITY
 
     def __post_init__(self) -> None:
         if not isinstance(self.daemon_id, str):
@@ -110,6 +116,10 @@ class DaemonHealth:
             or not self.protocol_version
         ):
             raise DaemonConfigurationError("daemon versions must be non-empty")
+        try:
+            validate_build_identity(self.build_identity)
+        except ValueError as exc:
+            raise DaemonConfigurationError("daemon build identity must be a SHA-256 digest") from exc
 
     def as_data(self) -> dict[str, str]:
         return asdict(self)
@@ -120,6 +130,7 @@ class DetachedProcess:
     """Minimal observation returned without retaining a connector-owned handle."""
 
     pid: int
+    process: subprocess.Popen[bytes] = field(repr=False, compare=False)
 
 
 class _BearerAuthentication:
@@ -170,6 +181,7 @@ def create_daemon_app(
     host: str = LOOPBACK_HOST,
     server_version: str = __version__,
     protocol_version: str = LATEST_PROTOCOL_VERSION,
+    build_identity: str = LEGACY_BUILD_IDENTITY,
 ) -> ASGIApp:
     """Build one stateful MCP 1.27.1 Streamable HTTP ASGI application.
 
@@ -183,6 +195,7 @@ def create_daemon_app(
         daemon_id=daemon_id,
         server_version=server_version,
         protocol_version=protocol_version,
+        build_identity=build_identity,
     )
     mcp = FastMCP(
         name="serena-light",
@@ -196,6 +209,22 @@ def create_daemon_app(
     @mcp.custom_route(HEALTH_PATH, methods=["GET"], include_in_schema=False)
     async def health_route(_request: Request) -> JSONResponse:
         return JSONResponse(_success(health.as_data()))
+
+    @mcp.custom_route(MIGRATION_STATUS_PATH, methods=["GET"], include_in_schema=False)
+    async def migration_status_route(_request: Request) -> JSONResponse:
+        callback = cast(
+            Callable[[], Awaitable[Mapping[str, object]]],
+            cast(Any, service).migration_status,
+        )
+        lifetime = dict(await callback())
+        identity: dict[str, object] = {
+            "daemon_id": health.daemon_id,
+            "pid": os.getpid(),
+            "process_start_time": psutil.Process(os.getpid()).create_time(),
+            "build_identity": health.build_identity,
+        }
+        identity.update(lifetime)
+        return JSONResponse(_success(identity))
 
     @mcp.tool(name="get_daemon_status", structured_output=True)
     async def get_daemon_status(context: Context) -> dict[str, object]:
@@ -459,16 +488,19 @@ def validate_health_identity(metadata: DiscoveryMetadata, payload: Mapping[str, 
     daemon_id = health_data.get("daemon_id")
     server_version = health_data.get("server_version")
     protocol_version = health_data.get("protocol_version")
-    if not all(isinstance(value, str) for value in (daemon_id, server_version, protocol_version)):
+    build_identity = health_data.get("build_identity")
+    if not all(isinstance(value, str) for value in (daemon_id, server_version, protocol_version, build_identity)):
         raise DaemonIdentityError("daemon health identity is malformed")
     assert isinstance(daemon_id, str)
     assert isinstance(server_version, str)
     assert isinstance(protocol_version, str)
+    assert isinstance(build_identity, str)
     try:
         health = DaemonHealth(
             daemon_id=daemon_id,
             server_version=server_version,
             protocol_version=protocol_version,
+            build_identity=build_identity,
         )
     except DaemonConfigurationError as exc:
         raise DaemonIdentityError("daemon health identity is malformed") from exc
@@ -476,6 +508,7 @@ def validate_health_identity(metadata: DiscoveryMetadata, payload: Mapping[str, 
         daemon_id=metadata.daemon_id,
         server_version=metadata.server_version,
         protocol_version=metadata.protocol_version,
+        build_identity=metadata.build_identity,
     )
     if health != expected:
         raise DaemonIdentityError("daemon health identity/version does not match discovery")
@@ -536,6 +569,7 @@ def connect_or_start[CandidateT](
     discover: Callable[[], CandidateT],
     is_healthy: Callable[[CandidateT], bool],
     spawn: Callable[[], object],
+    cleanup_failed_spawn: Callable[[object], None] | None = None,
     timeout_seconds: float = DEFAULT_STARTUP_TIMEOUT_SECONDS,
     poll_seconds: float = DEFAULT_HEALTH_POLL_SECONDS,
 ) -> CandidateT:
@@ -552,15 +586,20 @@ def connect_or_start[CandidateT](
         candidate = _healthy_candidate(discover, is_healthy)
         if candidate is not None:
             return candidate
-        spawn()
-        while True:
-            candidate = _healthy_candidate(discover, is_healthy)
-            if candidate is not None:
-                return candidate
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                raise DaemonStartupError("started daemon did not become healthy before timeout")
-            time.sleep(min(poll_seconds, remaining))
+        spawned = spawn()
+        try:
+            while True:
+                candidate = _healthy_candidate(discover, is_healthy)
+                if candidate is not None:
+                    return candidate
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise DaemonStartupError("started daemon did not become healthy before timeout")
+                time.sleep(min(poll_seconds, remaining))
+        except BaseException:
+            if cleanup_failed_spawn is not None:
+                cleanup_failed_spawn(spawned)
+            raise
 
 
 def spawn_detached_process(
@@ -583,7 +622,20 @@ def spawn_detached_process(
         close_fds=True,
         start_new_session=True,
     )
-    return DetachedProcess(pid=process.pid)
+    return DetachedProcess(pid=process.pid, process=process)
+
+
+def cleanup_failed_detached_process(spawned: object) -> None:
+    """Reclaim only the process handle created by one failed startup attempt."""
+
+    if not isinstance(spawned, DetachedProcess):
+        raise TypeError("failed daemon spawn did not return DetachedProcess")
+    terminate_process_tree_with_kill_fallback(
+        spawned.process,
+        terminate_timeout=2.0,
+        kill_timeout=2.0,
+        process_name="Serena Light daemon startup",
+    )
 
 
 def _healthy_candidate[CandidateT](
@@ -607,6 +659,7 @@ def _with_daemon_health(
     versions: bool = True,
 ) -> dict[str, object]:
     data["daemon_id"] = health.daemon_id
+    data["build_identity"] = health.build_identity
     if versions:
         data["server_version"] = health.server_version
         data["protocol_version"] = health.protocol_version

@@ -170,11 +170,55 @@ def test_edit_rejects_non_git_conda_and_symlink_escape_before_io(tmp_path: Path)
         policy.authorize_edit(identity, external, [external])
     assert conda.value.data.code is WorkspaceErrorCode.READ_ONLY_ROOT
 
+    # The escape is refused as a symlink before any resolution, so the target it
+    # would have named never contributes to the decision.
     escaped = root / "escaped.py"
     os.symlink(external, escaped)
     with pytest.raises(WorkspaceError) as symlink:
         policy.authorize_edit(identity, escaped, [escaped])
-    assert symlink.value.data.code is WorkspaceErrorCode.READ_ONLY_ROOT
+    assert symlink.value.data.code is WorkspaceErrorCode.INVALID_PATH
+
+
+def test_edit_rejects_inventoried_path_replaced_by_symlink_to_ignored_in_root_file(tmp_path: Path) -> None:
+    policy = _policy(tmp_path)
+    root = tmp_path / "data" / "repo"
+    root.mkdir()
+    _git(root)
+    identity = policy.resolve_activation(root)
+    tracked = root / "module.py"
+    tracked.write_text("x = 1\n")
+    ignored = root / "ignored.py"
+    ignored.write_text("y = 2\n")
+    inventory = [tracked]
+
+    assert policy.authorize_edit(identity, tracked, inventory) == tracked
+    tracked.unlink()
+    os.symlink(ignored, tracked)
+
+    # Resolution would give the symlink the ignored file's identity, which is
+    # still in-root; only the lexical membership plus O_NOFOLLOW walk refuses it.
+    with pytest.raises(WorkspaceError) as raised:
+        policy.authorize_edit(identity, tracked, inventory)
+    assert raised.value.data.code is WorkspaceErrorCode.INVALID_PATH
+    assert ignored.read_text() == "y = 2\n"
+
+
+def test_edit_rejects_a_symlinked_parent_directory_component(tmp_path: Path) -> None:
+    policy = _policy(tmp_path)
+    root = tmp_path / "data" / "repo"
+    root.mkdir()
+    _git(root)
+    identity = policy.resolve_activation(root)
+    real = root / "real"
+    real.mkdir()
+    target = real / "module.py"
+    target.write_text("x = 1\n")
+    linked = root / "linked"
+    os.symlink(real, linked)
+
+    with pytest.raises(WorkspaceError) as raised:
+        policy.authorize_edit(identity, linked / "module.py", [linked / "module.py"])
+    assert raised.value.data.code is WorkspaceErrorCode.INVALID_PATH
 
 
 def test_edit_allows_only_resolved_git_inventory_file_below_data(tmp_path: Path) -> None:

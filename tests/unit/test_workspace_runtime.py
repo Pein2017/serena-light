@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import subprocess
 import threading
 from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import Future
@@ -24,10 +25,11 @@ from serena_light.lsp.executor import BoundedLspExecutor
 from serena_light.lsp.positions import FileSnapshot, PositionEncoding
 from serena_light.tools.navigation import DocumentSymbolInput
 from serena_light.workspace.identity import WorkspaceIdentity, WorkspaceKind
-from serena_light.workspace.inventory import SupportedPathTree, TrustInventory
+from serena_light.workspace.inventory import SupportedPathTree, TrustInventory, git_trust_inventory
 from serena_light.workspace.runtime import (
     AdapterBuildContext,
     AdapterFactory,
+    FreshnessScan,
     RuntimeErrorCode,
     WorkspaceRuntime,
     WorkspaceRuntimeError,
@@ -58,13 +60,14 @@ class _Client:
     def __init__(self, symbols: Sequence[Mapping[str, Any]]) -> None:
         self.symbols = symbols
         self.requests: list[tuple[str, object, float | None]] = []
+        self.notifications: list[tuple[str, object]] = []
 
     def request(self, method: str, params: object = None, *, timeout: float | None = None) -> object:
         self.requests.append((method, params, timeout))
         return self.symbols
 
     def notify(self, method: str, params: object = None) -> None:
-        del method, params
+        self.notifications.append((method, params))
 
     def shutdown(self, *, timeout: float = 2.0) -> None:
         del timeout
@@ -170,6 +173,9 @@ class _Adapter:
 
         return self.context.executor.submit(run_atomic_operation)
 
+    def submit_read(self, operation: Callable[[_Client], Any]) -> Future[Any]:
+        return self.context.executor.submit(lambda: operation(self.client))
+
     def stop(self) -> Future[AdapterSnapshot]:
         def stop_on_executor() -> AdapterSnapshot:
             self.stop_thread = threading.current_thread().name
@@ -260,7 +266,7 @@ def test_composes_physical_key_and_skips_empty_language_family(tmp_path: Path) -
         runtime.stop()
 
 
-def test_scope_incompatibility_fails_before_executor_creation(tmp_path: Path) -> None:
+def test_all_incompatible_families_bind_for_status_and_fail_only_selected_scope(tmp_path: Path) -> None:
     (tmp_path / "main.py").write_text("value = 1\n")
     executor_creations = 0
 
@@ -270,20 +276,102 @@ def test_scope_incompatibility_fails_before_executor_creation(tmp_path: Path) ->
     def executor_factory(_root: Path) -> BoundedLspExecutor:
         nonlocal executor_creations
         executor_creations += 1
-        return BoundedLspExecutor(queue_capacity=1, name="must-not-start")
+        return BoundedLspExecutor(queue_capacity=1, name="unavailable-status")
 
-    with pytest.raises(WorkspaceRuntimeError) as caught:
-        WorkspaceRuntime(
-            (WorkspaceKind.GIT, tmp_path),
-            path_policy=_PathPolicy(),
-            inventory=_inventory(tmp_path, "main.py"),
-            attributors={LanguageFamily.PYTHON: incompatible},
-            executor_factory=executor_factory,
-        )
+    runtime = WorkspaceRuntime(
+        (WorkspaceKind.GIT, tmp_path),
+        path_policy=_PathPolicy(),
+        inventory=_inventory(tmp_path, "main.py"),
+        attributors={LanguageFamily.PYTHON: incompatible},
+        executor_factory=executor_factory,
+    )
+    try:
+        status = runtime.status()
+        unavailable_families = cast(Mapping[str, Mapping[str, object]], status["unavailable_language_families"])
+        unavailable = unavailable_families["python"]
+        assert unavailable["error"] == {
+            "code": RuntimeErrorCode.SCOPE_INCOMPATIBLE,
+            "paths": ("ignored/generated.py",),
+        }
+        assert status["adapters"] == {}
 
-    assert caught.value.code is RuntimeErrorCode.SCOPE_INCOMPATIBLE
-    assert caught.value.paths == ("ignored/generated.py",)
-    assert executor_creations == 0
+        with pytest.raises(WorkspaceRuntimeError) as caught:
+            runtime.route("main.py")
+        assert caught.value.code is RuntimeErrorCode.SCOPE_INCOMPATIBLE
+        assert caught.value.paths == ("ignored/generated.py",)
+        assert runtime.find_symbol("Target").to_dict()["error"]["code"] == "SCOPE_INCOMPATIBLE"
+    finally:
+        runtime.stop()
+
+    assert executor_creations == 1
+
+
+def test_healthy_family_serves_while_other_family_is_scope_incompatible(tmp_path: Path) -> None:
+    (tmp_path / "main.py").write_text("value = 1\n")
+    (tmp_path / "main.ts").write_text("export const value = 1\n")
+    adapters: dict[LanguageFamily, _Adapter] = {}
+    contexts: dict[LanguageFamily, AdapterBuildContext] = {}
+
+    runtime = WorkspaceRuntime(
+        (WorkspaceKind.GIT, tmp_path),
+        path_policy=_PathPolicy(),
+        inventory=_inventory(tmp_path, "main.py", "main.ts"),
+        attributors={
+            LanguageFamily.PYTHON: lambda _root, paths: _projection(LanguageFamily.PYTHON, paths),
+            LanguageFamily.TYPESCRIPT: lambda _root, paths: _projection(
+                LanguageFamily.TYPESCRIPT,
+                paths,
+                (*paths, "ignored/generated.ts"),
+            ),
+        },
+        adapter_factories=_factories(adapters, contexts),
+    )
+    try:
+        assert runtime.route("main.py") is adapters[LanguageFamily.PYTHON]
+        assert LanguageFamily.TYPESCRIPT not in adapters
+        with pytest.raises(WorkspaceRuntimeError) as caught:
+            runtime.route("main.ts")
+        assert caught.value.code is RuntimeErrorCode.SCOPE_INCOMPATIBLE
+        unavailable = cast(Mapping[str, object], runtime.status()["unavailable_language_families"])
+        assert "typescript" in unavailable
+    finally:
+        runtime.stop()
+
+
+def test_family_can_recover_and_degrade_independently_after_reattribution(tmp_path: Path) -> None:
+    (tmp_path / "main.py").write_text("value = 1\n")
+    compatible = [False]
+    adapters: dict[LanguageFamily, _Adapter] = {}
+    contexts: dict[LanguageFamily, AdapterBuildContext] = {}
+
+    def attribute(_root: Path, paths: tuple[str, ...]) -> ScopeProjection:
+        program = paths if compatible[0] else (*paths, "ignored/generated.py")
+        return _projection(LanguageFamily.PYTHON, paths, program)
+
+    runtime = WorkspaceRuntime(
+        (WorkspaceKind.GIT, tmp_path),
+        path_policy=_PathPolicy(),
+        inventory=_inventory(tmp_path, "main.py"),
+        attributors={LanguageFamily.PYTHON: attribute},
+        adapter_factories=_factories(adapters, contexts),
+    )
+    try:
+        assert runtime.adapters == {}
+        compatible[0] = True
+        recovered = runtime.build_projections(runtime.inventory, {LanguageFamily.PYTHON})
+        runtime.install_freshness(runtime.inventory, recovered)
+        assert runtime.route("main.py") is adapters[LanguageFamily.PYTHON]
+
+        compatible[0] = False
+        degraded = runtime.build_projections(runtime.inventory, {LanguageFamily.PYTHON})
+        runtime.install_freshness(runtime.inventory, degraded)
+        assert runtime.adapters == {}
+        assert adapters[LanguageFamily.PYTHON].stop_thread is not None
+        with pytest.raises(WorkspaceRuntimeError) as caught:
+            runtime.route("main.py")
+        assert caught.value.code is RuntimeErrorCode.SCOPE_INCOMPATIBLE
+    finally:
+        runtime.stop()
 
 
 def test_constructor_failure_stops_already_built_adapter(tmp_path: Path) -> None:
@@ -354,10 +442,15 @@ def test_routes_over_one_executor_reports_status_and_stops_deterministically(tmp
     assert typescript["derived_tools"]["find_implementations"] is True
     assert typescript["engine"]["version"] == "1.0"
     assert typescript["position_encoding"] == "utf-16"
-    assert typescript["trusted_not_in_configured_program"] == (
+    omitted = typescript["trusted_not_in_configured_program"]
+    assert omitted["items"] == (
         {"path": "extra.ts", "reason": "omitted_by_engine_workspace_program"},
     )
-    assert typescript["configured_program_outside_trust"] == ()
+    assert omitted["total"] == 1
+    assert omitted["omitted_count"] == 0
+    outside = typescript["configured_program_outside_trust"]
+    assert outside["items"] == ()
+    assert outside["total"] == 0
     executor_status = cast(Mapping[str, object], status["executor"])
     assert executor_status["queue_capacity"] == 32
     assert not any(word in repr(status).lower() for word in ("bearer", "password", "secret"))
@@ -440,4 +533,207 @@ def test_document_symbol_provider_preserves_snapshot_and_uses_futures(tmp_path: 
         assert adapter.client.requests[0][0] == "textDocument/documentSymbol"
     finally:
         continue_operation.set()
+        runtime.stop()
+
+
+def _git_repository(root: Path) -> None:
+    subprocess.run(["git", "init", "--quiet", str(root)], check=True)
+
+
+def _git_runtime(
+    root: Path,
+    adapters: dict[LanguageFamily, _Adapter],
+    contexts: dict[LanguageFamily, AdapterBuildContext],
+    *,
+    inventory_factory: Callable[[Any], TrustInventory] | None = None,
+    attributions: dict[LanguageFamily, int] | None = None,
+) -> WorkspaceRuntime:
+    def attribute(family: LanguageFamily) -> Callable[[Path, tuple[str, ...]], ScopeProjection]:
+        def attributor(_root: Path, paths: tuple[str, ...]) -> ScopeProjection:
+            if attributions is not None:
+                attributions[family] = attributions.get(family, 0) + 1
+            return _projection(family, paths)
+
+        return attributor
+
+    return WorkspaceRuntime(
+        (WorkspaceKind.GIT, root),
+        path_policy=_PathPolicy(),
+        inventory_factory=inventory_factory or (lambda identity: git_trust_inventory(identity.root)),
+        attributors={
+            LanguageFamily.PYTHON: attribute(LanguageFamily.PYTHON),
+            LanguageFamily.TYPESCRIPT: attribute(LanguageFamily.TYPESCRIPT),
+        },
+        adapter_factories=_factories(adapters, contexts, symbols=[]),
+    )
+
+
+def test_freshness_reports_create_change_delete_and_notifies_running_adapters(tmp_path: Path) -> None:
+    _git_repository(tmp_path)
+    (tmp_path / "main.py").write_text("value = 1\n")
+    (tmp_path / "gone.py").write_text("removed = 1\n")
+    # A second language family exists so that reattribution can be shown to stay
+    # scoped to the family whose membership actually moved.
+    (tmp_path / "app.ts").write_text("export const value = 1;\n")
+    adapters: dict[LanguageFamily, _Adapter] = {}
+    contexts: dict[LanguageFamily, AdapterBuildContext] = {}
+    attributions: dict[LanguageFamily, int] = {}
+    runtime = _git_runtime(tmp_path, adapters, contexts, attributions=attributions)
+    try:
+        # Loading one document is what makes the fake adapter running, which is
+        # the precondition for receiving watcher notifications at all.
+        runtime.load_document_symbols("main.py")
+        python = adapters[LanguageFamily.PYTHON]
+        python.client.notifications.clear()
+        before = contexts[LanguageFamily.PYTHON].scope_tracker.generations
+        typescript_before = contexts[LanguageFamily.TYPESCRIPT].scope_tracker.generations
+
+        (tmp_path / "main.py").write_text("value = 22222\n")
+        (tmp_path / "created.py").write_text("fresh = 1\n")
+        (tmp_path / "gone.py").unlink()
+        scan = runtime.ensure_fresh()
+
+        assert scan.created == ("created.py",)
+        assert scan.changed == ("main.py",)
+        assert scan.deleted == ("gone.py",)
+        assert scan.reattributed == (LanguageFamily.PYTHON,)
+        assert scan.notified == (LanguageFamily.PYTHON,)
+        assert runtime.inventory.paths == ("app.ts", "created.py", "main.py")
+        assert attributions == {LanguageFamily.PYTHON: 2, LanguageFamily.TYPESCRIPT: 1}
+
+        runtime.executor.submit(lambda: None).result(timeout=5)
+        methods = [method for method, _ in python.client.notifications]
+        assert methods == ["workspace/didChangeWatchedFiles", "textDocument/didOpen", "textDocument/didClose"]
+        changes = cast(Mapping[str, Any], python.client.notifications[0][1])["changes"]
+        assert {(item["uri"].rsplit("/", 1)[-1], item["type"]) for item in changes} == {
+            ("created.py", 1),
+            ("main.py", 2),
+            ("gone.py", 3),
+        }
+        opened = cast(Mapping[str, Any], python.client.notifications[1][1])["textDocument"]
+        assert opened["uri"] == (tmp_path / "created.py").resolve().as_uri()
+        assert opened["languageId"] == "python"
+        assert opened["text"] == "fresh = 1\n"
+
+        after = contexts[LanguageFamily.PYTHON].scope_tracker.generations
+        assert after.trust_inventory > before.trust_inventory
+        assert after.configured_program > before.configured_program
+        assert after.path_scoped["main.py"] > before.path_scoped.get("main.py", 0)
+
+        # Python churn must not invalidate the TypeScript configured program.
+        typescript = contexts[LanguageFamily.TYPESCRIPT].scope_tracker.generations
+        assert typescript.configured_program == typescript_before.configured_program
+        assert typescript.trust_inventory == typescript_before.trust_inventory
+        assert typescript.path_scoped == typescript_before.path_scoped
+    finally:
+        runtime.stop()
+
+
+def test_concurrent_freshness_callers_share_one_scan_and_no_time_cache_authorizes_reuse(
+    tmp_path: Path,
+) -> None:
+    _git_repository(tmp_path)
+    (tmp_path / "main.py").write_text("value = 1\n")
+    adapters: dict[LanguageFamily, _Adapter] = {}
+    contexts: dict[LanguageFamily, AdapterBuildContext] = {}
+    entered = threading.Event()
+    release = threading.Event()
+    rebuilds = 0
+
+    def blocking_inventory(identity: Any) -> TrustInventory:
+        nonlocal rebuilds
+        rebuilds += 1
+        if rebuilds > 1:
+            entered.set()
+            assert release.wait(5)
+        return git_trust_inventory(identity.root)
+
+    runtime = _git_runtime(tmp_path, adapters, contexts, inventory_factory=blocking_inventory)
+    try:
+        results: list[Any] = []
+        first = threading.Thread(target=lambda: results.append(runtime.ensure_fresh()))
+        first.start()
+        assert entered.wait(5)
+        joined = threading.Thread(target=lambda: results.append(runtime.ensure_fresh()))
+        joined.start()
+        # The joined caller must not start a second rebuild while one is running.
+        assert not release.wait(0.2)
+        assert rebuilds == 2
+        release.set()
+        first.join(timeout=5)
+        joined.join(timeout=5)
+
+        assert len(results) == 2
+        assert results[0] is results[1]
+        # A completed scan is never reused: the next operation rebuilds again.
+        runtime.ensure_fresh()
+        assert rebuilds == 3
+    finally:
+        runtime.stop()
+
+
+def test_freshness_detects_symlink_substitution_and_native_config_change(tmp_path: Path) -> None:
+    _git_repository(tmp_path)
+    (tmp_path / "main.py").write_text("value = 1\n")
+    (tmp_path / "other.py").write_text("value = 2\n")
+    adapters: dict[LanguageFamily, _Adapter] = {}
+    contexts: dict[LanguageFamily, AdapterBuildContext] = {}
+    runtime = _git_runtime(tmp_path, adapters, contexts)
+    try:
+        runtime.ensure_fresh()
+        (tmp_path / "main.py").unlink()
+        (tmp_path / "main.py").symlink_to(tmp_path / "other.py")
+        scan = runtime.ensure_fresh()
+
+        assert scan.symlinked == ("main.py",)
+        assert scan.deleted == ("main.py",)
+        assert "main.py" not in runtime.inventory.paths
+        assert ("main.py", "symlink") in {(item.path, item.reason) for item in runtime.inventory.rejected}
+
+        (tmp_path / "pyrightconfig.json").write_text("{}\n")
+        config_scan = runtime.ensure_fresh()
+
+        assert config_scan.config_changed == ("pyrightconfig.json",)
+        assert config_scan.reattributed == (LanguageFamily.PYTHON,)
+    finally:
+        runtime.stop()
+
+
+def test_read_only_non_git_root_uses_targeted_stat_instead_of_a_full_scan(tmp_path: Path) -> None:
+    source = tmp_path / "main.py"
+    source.write_text("value = 1\n")
+    adapters: dict[LanguageFamily, _Adapter] = {}
+    contexts: dict[LanguageFamily, AdapterBuildContext] = {}
+    rebuilds = 0
+
+    def counted_inventory(identity: Any) -> TrustInventory:
+        nonlocal rebuilds
+        rebuilds += 1
+        return _inventory(identity.root, "main.py")
+
+    runtime = WorkspaceRuntime(
+        (WorkspaceKind.ALLOWLISTED_NON_GIT, tmp_path),
+        path_policy=_PathPolicy(),
+        inventory_factory=counted_inventory,
+        attributors={LanguageFamily.PYTHON: lambda _root, paths: _projection(LanguageFamily.PYTHON, paths)},
+        adapter_factories=_factories(adapters, contexts),
+    )
+    try:
+        runtime.load_document_symbols("main.py")
+        python = adapters[LanguageFamily.PYTHON]
+        python.client.notifications.clear()
+        rebuilds_after_construction = rebuilds
+        before = contexts[LanguageFamily.PYTHON].scope_tracker.generations
+
+        assert runtime.ensure_fresh() == FreshnessScan()
+        source.write_text("value = 22222\n")
+        runtime.load_document_symbols("main.py")
+        runtime.executor.submit(lambda: None).result(timeout=5)
+
+        # The allowlisted root is never re-walked; only the named operand is stat-ed.
+        assert rebuilds == rebuilds_after_construction
+        after = contexts[LanguageFamily.PYTHON].scope_tracker.generations
+        assert after.path_scoped["main.py"] > before.path_scoped.get("main.py", 0)
+        assert [method for method, _ in python.client.notifications] == ["workspace/didChangeWatchedFiles"]
+    finally:
         runtime.stop()

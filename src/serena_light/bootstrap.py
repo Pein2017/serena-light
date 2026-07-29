@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import os
 import shutil
@@ -12,8 +11,11 @@ import sys
 from pathlib import Path
 from typing import Any
 
-LOCK_INPUTS = ("pyproject.toml", "uv.lock", "package.json", "package-lock.json")
+from serena_light.build_identity import dependency_lock_digest
+
 RUNTIME_BASE = Path("/data/CoordExp/.codex/runtime/serena-light/deps")
+SERVICE_PYTHON_ROOT = Path("/data/CoordExp/.codex/runtime/serena-light/python")
+SERVICE_PYTHON_VERSION = "3.12.12"
 NODE_VERSION = "22.22.0"
 EXPECTED_VERSIONS = {
     "npm": "11.13.0",
@@ -34,16 +36,10 @@ def repository_root() -> Path:
 
 
 def lock_digest(root: Path) -> str:
-    digest = hashlib.sha256()
-    for name in LOCK_INPUTS:
-        path = root / name
-        if not path.is_file():
-            raise BootstrapError(f"missing lock input: {path}")
-        digest.update(name.encode())
-        digest.update(b"\0")
-        digest.update(path.read_bytes())
-        digest.update(b"\0")
-    return digest.hexdigest()
+    try:
+        return dependency_lock_digest(root)
+    except ValueError as exc:
+        raise BootstrapError(str(exc)) from exc
 
 
 def runtime_paths(root: Path) -> dict[str, Path]:
@@ -83,9 +79,23 @@ def materialize(root: Path, paths: dict[str, Path]) -> None:
     runtime = paths["runtime"]
     runtime.mkdir(parents=True, exist_ok=True, mode=0o700)
     uv = _find_uv()
+    managed_python = _install_or_find_service_python(uv, install=True)
     sync_env = os.environ.copy()
     sync_env["UV_PROJECT_ENVIRONMENT"] = str(runtime / "python")
-    _run([str(uv), "sync", "--frozen", "--all-extras", "--project", str(root)], env=sync_env)
+    sync_env["UV_PYTHON_INSTALL_DIR"] = str(SERVICE_PYTHON_ROOT)
+    _run(
+        [
+            str(uv),
+            "sync",
+            "--frozen",
+            "--all-extras",
+            "--project",
+            str(root),
+            "--python",
+            str(managed_python),
+        ],
+        env=sync_env,
+    )
 
     if not paths["node"].is_file():
         _run(
@@ -120,7 +130,10 @@ def _assert_owned(path: Path, runtime: Path, *, allow_interpreter_symlink: bool 
     lexical = path.absolute()
     if not lexical.is_relative_to(runtime.resolve()):
         raise BootstrapError(f"runtime path escaped lock directory: {resolved}")
-    if not allow_interpreter_symlink and not resolved.is_relative_to(runtime.resolve()):
+    if allow_interpreter_symlink:
+        if not resolved.is_relative_to(SERVICE_PYTHON_ROOT.resolve()):
+            raise BootstrapError(f"runtime interpreter resolves outside service Python root: {resolved}")
+    elif not resolved.is_relative_to(runtime.resolve()):
         raise BootstrapError(f"runtime module resolves outside lock directory: {resolved}")
     if any(resolved.is_relative_to(prefix) for prefix in FORBIDDEN_ENGINE_PREFIXES):
         raise BootstrapError(f"forbidden global runtime path: {resolved}")
@@ -129,6 +142,11 @@ def _assert_owned(path: Path, runtime: Path, *, allow_interpreter_symlink: bool 
 def inspect_runtime(root: Path) -> dict[str, Any]:
     paths = runtime_paths(root)
     runtime = paths["runtime"]
+    # Runtime inspection must remain usable from the daemon's deliberately
+    # minimal environment.  ``uv`` owns materialization only; an already
+    # materialized service must resolve its pinned interpreter without ambient
+    # PATH or user state.
+    service_python = _install_or_find_service_python()
     for name, path in paths.items():
         if name != "runtime":
             _assert_owned(path, runtime, allow_interpreter_symlink=name == "python")
@@ -163,10 +181,51 @@ def inspect_runtime(root: Path) -> dict[str, Any]:
     return {
         "lock_digest": lock_digest(root),
         "runtime": str(runtime),
+        "service_python": str(service_python),
         "paths": {name: str(path.resolve()) for name, path in paths.items() if name != "runtime"},
         "versions": versions,
         "python_imports": python_probe,
     }
+
+
+def _install_or_find_service_python(uv: Path | None = None, *, install: bool = False) -> Path:
+    """Resolve only the pinned interpreter installed below the shared runtime."""
+
+    if install:
+        if uv is None:
+            raise BootstrapError("uv is required to install the locked Python environment")
+        environment = os.environ.copy()
+        environment["UV_PYTHON_INSTALL_DIR"] = str(SERVICE_PYTHON_ROOT)
+        _run(
+            [
+                str(uv),
+                "python",
+                "install",
+                "--install-dir",
+                str(SERVICE_PYTHON_ROOT),
+                SERVICE_PYTHON_VERSION,
+            ],
+            env=environment,
+        )
+    candidates = tuple(
+        sorted(
+            path.resolve()
+            for path in SERVICE_PYTHON_ROOT.glob(
+                f"cpython-{SERVICE_PYTHON_VERSION}-*/bin/python{'.'.join(SERVICE_PYTHON_VERSION.split('.')[:2])}"
+            )
+            if path.is_file()
+        )
+    )
+    if len(candidates) != 1:
+        raise BootstrapError(
+            f"expected one managed Python {SERVICE_PYTHON_VERSION} below service root, found {len(candidates)}"
+        )
+    path = candidates[0]
+    if not path.is_file() or not path.is_relative_to(SERVICE_PYTHON_ROOT.resolve()):
+        raise BootstrapError(f"managed Python escaped service root: {path}")
+    if path.is_relative_to(Path("/root/.local/share/uv")):
+        raise BootstrapError(f"managed Python resolved through root-owned uv state: {path}")
+    return path
 
 
 def build_parser() -> argparse.ArgumentParser:

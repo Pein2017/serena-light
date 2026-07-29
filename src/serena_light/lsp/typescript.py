@@ -36,6 +36,7 @@ from serena_light.workspace.scope import (
     NativeProgramAttribution,
     ProjectKind,
     ScopeProjection,
+    bounded_difference_status,
 )
 
 TYPESCRIPT_LANGUAGE_SERVER_VERSION = EXPECTED_VERSIONS["typescript-language-server"]
@@ -304,13 +305,11 @@ class TypeScriptScopeAttribution:
                 "trust_inventory_sha256": projection.trust_inventory.sha256,
                 "configured_program_count": projection.configured_program.count,
                 "configured_program_sha256": projection.configured_program.sha256,
-                "trusted_not_in_configured_program": tuple(
-                    {"path": item.path, "reason": item.reason.value}
-                    for item in projection.trusted_not_in_configured_program
+                "trusted_not_in_configured_program": bounded_difference_status(
+                    projection.trusted_not_in_configured_program
                 ),
-                "configured_program_outside_trust": tuple(
-                    {"path": item.path, "reason": item.reason.value}
-                    for item in projection.configured_program_outside_trust
+                "configured_program_outside_trust": bounded_difference_status(
+                    projection.configured_program_outside_trust
                 ),
                 "configured_program_rejected": tuple(
                     {"path": item.path, "reason": item.reason.value} for item in self.rejected_configured_paths

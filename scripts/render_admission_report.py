@@ -129,11 +129,10 @@ def _validate_bootstrap(bootstrap: dict[str, Any]) -> None:
 def _validate_source_budget(source_budget: dict[str, Any]) -> None:
     _require_pass(source_budget, "source budget")
     _require_no_failed_gates(source_budget, "source budget")
-    expected = _number(source_budget.get("expected_production_lines"), "expected_production_lines")
-    maximum = _number(source_budget.get("maximum_production_lines"), "maximum_production_lines")
-    current = _number(source_budget.get("current_local_production_lines"), "current_local_production_lines")
-    if expected > maximum or current > maximum:
-        raise AdmissionError("source budget exceeds its maximum production-line budget")
+    _number(source_budget.get("expected_production_lines"), "expected_production_lines")
+    _number(source_budget.get("current_local_production_lines"), "current_local_production_lines")
+    if source_budget.get("maximum_production_lines", object()) is not None:
+        raise AdmissionError("maximum_production_lines must be null because LOC is informational")
 
 
 def _validate_ts_scope(scope: dict[str, Any]) -> None:

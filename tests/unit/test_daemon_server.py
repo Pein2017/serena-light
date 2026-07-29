@@ -15,6 +15,9 @@ from serena_light.daemon.server import (
     DaemonConfigurationError,
     DaemonIdentityError,
     DaemonService,
+    DaemonStartupError,
+    DetachedProcess,
+    cleanup_failed_detached_process,
     connect_or_start,
     create_daemon_app,
     spawn_detached_process,
@@ -106,6 +109,7 @@ def test_health_identity_and_versions_must_match_discovery() -> None:
             "daemon_id": daemon_id,
             "server_version": __version__,
             "protocol_version": "2025-11-25",
+            "build_identity": metadata.build_identity,
         },
     }
     assert validate_health_identity(metadata, payload).daemon_id == daemon_id
@@ -113,6 +117,11 @@ def test_health_identity_and_versions_must_match_discovery() -> None:
     data = payload["data"]
     assert isinstance(data, dict)
     data["server_version"] = "stale"
+    with pytest.raises(DaemonIdentityError, match="does not match"):
+        validate_health_identity(metadata, payload)
+
+    data["server_version"] = __version__
+    data["build_identity"] = "f" * 64
     with pytest.raises(DaemonIdentityError, match="does not match"):
         validate_health_identity(metadata, payload)
 
@@ -192,6 +201,25 @@ def test_stale_discovery_is_replaced_then_reused(tmp_path: Path) -> None:
     assert spawns == 1
 
 
+def test_failed_connect_or_start_reclaims_only_spawned_attempt(tmp_path: Path) -> None:
+    root = _runtime_root(tmp_path)
+    spawned = object()
+    reclaimed: list[object] = []
+
+    with pytest.raises(DaemonStartupError, match="did not become healthy"):
+        connect_or_start(
+            runtime_root=root,
+            discover=lambda: (_ for _ in ()).throw(FileNotFoundError()),
+            is_healthy=lambda _candidate: False,
+            spawn=lambda: spawned,
+            cleanup_failed_spawn=reclaimed.append,
+            timeout_seconds=0.01,
+            poll_seconds=0.001,
+        )
+
+    assert reclaimed == [spawned]
+
+
 def test_detached_spawn_uses_new_session_devnull_and_no_fds(monkeypatch: pytest.MonkeyPatch) -> None:
     captured: dict[str, object] = {}
 
@@ -213,3 +241,28 @@ def test_detached_spawn_uses_new_session_devnull_and_no_fds(monkeypatch: pytest.
     assert captured["close_fds"] is True
     assert captured["start_new_session"] is True
     assert captured["cwd"] == "/"
+
+
+def test_failed_detached_cleanup_uses_retained_owned_process_handle(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    process = cast(Any, object())
+    captured: dict[str, object] = {}
+
+    def cleanup(candidate: object, terminate_timeout: float, process_name: str, *, kill_timeout: float) -> None:
+        captured.update(
+            candidate=candidate,
+            terminate_timeout=terminate_timeout,
+            process_name=process_name,
+            kill_timeout=kill_timeout,
+        )
+
+    monkeypatch.setattr("serena_light.daemon.server.terminate_process_tree_with_kill_fallback", cleanup)
+    cleanup_failed_detached_process(DetachedProcess(pid=43123, process=process))
+
+    assert captured == {
+        "candidate": process,
+        "terminate_timeout": 2.0,
+        "process_name": "Serena Light daemon startup",
+        "kill_timeout": 2.0,
+    }

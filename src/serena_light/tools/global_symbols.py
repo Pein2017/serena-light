@@ -26,6 +26,7 @@ from serena_light.lsp.normalize import (
     Range,
     normalize_document_symbols,
 )
+from serena_light.lsp.positions import FileSnapshot, PositionEncoding, PositionError, PositionMapper
 from serena_light.tools.envelopes import (
     AdapterMetadata,
     ErrorCode,
@@ -38,6 +39,7 @@ from serena_light.tools.envelopes import (
     error,
     success,
 )
+from serena_light.tools.navigation import source_body, source_range
 
 type RawSymbol = Mapping[str, Any]
 
@@ -133,6 +135,8 @@ class DocumentSymbolBatch:
     uri: str
     raw_symbols: Sequence[RawSymbol] | None
     generations: GenerationMetadata
+    snapshot: FileSnapshot
+    position_encoding: PositionEncoding = PositionEncoding.UTF16
     normalize_name: Callable[[str], str] | None = None
     recover_containment: ContainmentRecovery | None = None
 
@@ -199,6 +203,8 @@ class GlobalSymbolService:
         name_path: str | Sequence[str],
         *,
         substring_matching: bool = False,
+        include_body: bool = False,
+        include_info: bool = False,
         max_candidates_per_adapter: int = 128,
         max_answer_chars: int = DEFAULT_MAX_ANSWER_CHARS,
     ) -> ToolEnvelope:
@@ -286,7 +292,26 @@ class GlobalSymbolService:
                         continue
                     if not any(_candidate_verifies_symbol(candidate, symbol) for candidate in file_candidates):
                         continue
-                    rendered.append(_symbol_data(state, relative_path, symbol))
+                    try:
+                        rendered.append(
+                            _symbol_data(
+                                state,
+                                document,
+                                symbol,
+                                include_body=include_body,
+                                include_info=include_info,
+                            )
+                        )
+                    except PositionError:
+                        return error(
+                            ErrorCode.NOT_READY,
+                            retry=RetryMetadata(retryable=True),
+                            details={
+                                "reason": "candidate_snapshot_range_mismatch",
+                                "relative_path": relative_path,
+                            },
+                            workspace=workspace,
+                        )
             current = provider.global_symbol_state()
             if (
                 current.workspace != state.workspace
@@ -303,6 +328,8 @@ class GlobalSymbolService:
         base: dict[str, Any] = {
             "name_path": pattern.expression,
             "substring_matching": substring_matching,
+            "include_body": include_body,
+            "include_info": include_info,
             "scope": "configured_program",
             "adapters": scope_data,
             "symbols": [],
@@ -410,16 +437,32 @@ def _matches_name_path(
     )
 
 
-def _symbol_data(state: GlobalAdapterState, relative_path: str, symbol: NormalizedSymbol) -> dict[str, Any]:
-    return {
+def _symbol_data(
+    state: GlobalAdapterState,
+    document: DocumentSymbolBatch,
+    symbol: NormalizedSymbol,
+    *,
+    include_body: bool,
+    include_info: bool,
+) -> dict[str, Any]:
+    mapper = PositionMapper(document.snapshot, document.position_encoding)
+    data: dict[str, Any] = {
         "name": symbol.name,
         "name_path": "/".join(symbol.name_path),
         "kind": symbol.kind,
-        "relative_path": relative_path,
-        "location": {"uri": symbol.location.uri, "range": _range_data(symbol.location.range)},
+        "relative_path": document.relative_path,
+        "location": {"uri": symbol.location.uri, "range": source_range(mapper, symbol.location.range)},
         "adapter": state.adapter.to_dict(),
         "generations": state.generations.to_dict(),
     }
+    if include_info:
+        data["info"] = {
+            "detail": symbol.detail,
+            "selection_range": source_range(mapper, symbol.selection_range),
+        }
+    if include_body:
+        data["body"] = source_body(mapper, symbol.location.range)
+    return data
 
 
 def _state_data(state: GlobalAdapterState) -> dict[str, Any]:
@@ -565,7 +608,7 @@ def _deduplicate_and_sort(symbols: Sequence[dict[str, Any]]) -> list[dict[str, A
             symbol["adapter"]["name"],
             symbol["relative_path"],
             symbol["location"]["range"]["start"]["line"],
-            symbol["location"]["range"]["start"]["character"],
+            symbol["location"]["range"]["start"]["text_offset"],
             symbol["name_path"],
         ),
     )

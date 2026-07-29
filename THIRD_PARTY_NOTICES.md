@@ -40,3 +40,7 @@ Each `copied_sha256` is the SHA-256 of the exact UTF-8 upstream symbol span from
 its AST `lineno` through `end_lineno`, including original line endings. Once
 copied or rewritten, this code is maintained independently; the reference
 checkout is not an upstream dependency.
+
+The local source-budget command verifies the pinned checkout commit, recomputes
+every copied-symbol hash, and requires the manifest to agree in both directions
+with the `copy` classifications in `third_party/serena_source_census.json`.

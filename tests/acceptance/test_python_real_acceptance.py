@@ -29,7 +29,11 @@ from serena_light.workspace.scope import LanguageFamily
 COORDEXP = Path("/data/CoordExp")
 MS_SWIFT = Path("/data/ms-swift")
 RSS_LIMIT_BYTES = 8 * 1024**3
-READINESS_LIMIT_SECONDS = 30.0
+# Global queries now include the mandatory no-cache Git freshness pass.  The
+# CoordExp root's untracked-aware `git ls-files` scan is about five seconds on
+# this host, so retain the original 30-second LSP budget plus bounded host-load
+# headroom instead of misclassifying the required freshness work as a hang.
+READINESS_LIMIT_SECONDS = 40.0
 
 pytestmark = pytest.mark.timeout(180)
 
@@ -197,8 +201,10 @@ def test_coordexp_python_configured_program_acceptance(record_property: Any) -> 
         assert before["selected_native_config"] == "pyrightconfig.json"
         assert before["scope_compatible"] is True
         assert before["overlay_generated"] is False
-        assert _list(before["configured_program_outside_trust"]) == []
-        differences = [_dict(item) for item in _list(before["trusted_not_in_configured_program"])]
+        assert _list(_dict(before["configured_program_outside_trust"])["items"]) == []
+        differences = [
+            _dict(item) for item in _list(_dict(before["trusted_not_in_configured_program"])["items"])
+        ]
         assert differences
         assert {item["reason"] for item in differences} == {"excluded_by_native_config"}
         for prefix in ignored_prefixes:

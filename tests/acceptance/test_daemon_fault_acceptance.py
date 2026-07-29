@@ -30,6 +30,7 @@ import pytest
 from mcp import types
 from mcp.types import LATEST_PROTOCOL_VERSION
 
+import serena_light.connector as connector_module
 from serena_light import __version__
 from serena_light.connector import Connector, DaemonEndpoint, McpSessionFactory
 from serena_light.daemon.server import LOOPBACK_HOST, spawn_detached_process
@@ -205,18 +206,23 @@ class DaemonProcess:
         if self._block_crash_operations:
             argv.append("--block-crash-operations")
         process = spawn_detached_process(argv, cwd=Path.cwd(), env=dict(os.environ))
-        deadline = time.monotonic() + 10.0
-        while time.monotonic() < deadline:
-            try:
-                candidate = psutil.Process(process.pid)
-                create_time = candidate.create_time()
-                _wait_for_event(self.state_path, "ready", timeout=0.1)
-                self._identity = ProcessIdentity(process.pid, create_time, os.getpgid(process.pid))
-                self._assert_healthy()
-                return
-            except (psutil.Error, OSError, TimeoutError, urllib.error.URLError):
-                time.sleep(0.02)
-        raise TimeoutError("detached acceptance daemon did not become healthy")
+        attempt: ProcessIdentity | None = None
+        try:
+            deadline = time.monotonic() + 10.0
+            while time.monotonic() < deadline:
+                try:
+                    candidate = psutil.Process(process.pid)
+                    attempt = ProcessIdentity(process.pid, candidate.create_time(), os.getpgid(process.pid))
+                    _wait_for_event(self.state_path, "ready", timeout=0.1)
+                    self._assert_healthy()
+                    self._identity = attempt
+                    return
+                except (psutil.Error, OSError, TimeoutError, urllib.error.URLError):
+                    time.sleep(0.02)
+            raise TimeoutError("detached acceptance daemon did not become healthy")
+        except BaseException:
+            self._reclaim_failed_start(process.pid, attempt)
+            raise
 
     def owned_descendants(self) -> tuple[ProcessIdentity, ...]:
         process = psutil.Process(self.identity.pid)
@@ -244,12 +250,33 @@ class DaemonProcess:
         if _live_identity(identity.pid, identity.create_time):
             os.kill(identity.pid, signal.SIGKILL)
 
+    @staticmethod
+    def _reclaim_failed_start(pid: int, identity: ProcessIdentity | None) -> None:
+        """Terminate the detached process group created by a failed start attempt."""
+
+        try:
+            process_group = os.getpgid(pid) if identity is None else identity.process_group
+        except OSError:
+            return
+        try:
+            os.killpg(process_group, signal.SIGTERM)
+        except ProcessLookupError:
+            return
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline:
+            if identity is None or not _live_identity(identity.pid, identity.create_time):
+                return
+            time.sleep(0.02)
+        with suppress(ProcessLookupError):
+            os.killpg(process_group, signal.SIGKILL)
+
     def _assert_healthy(self) -> None:
         request = urllib.request.Request(
             self.endpoint.url.removesuffix("/mcp") + "/health",
             headers={"Authorization": f"Bearer {self.token}"},
         )
-        with urllib.request.urlopen(request, timeout=1.0) as response:
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        with opener.open(request, timeout=1.0) as response:
             payload = json.load(response)
         assert payload["data"]["daemon_id"] == self.daemon_id
 
@@ -274,6 +301,35 @@ async def _wait_for_count(
             return matches
         await asyncio.sleep(0.02)
     raise TimeoutError(f"did not observe {count} {event} events")
+
+
+def test_failed_daemon_start_reclaims_its_detached_process_group(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    daemon = DaemonProcess(tmp_path=tmp_path, root=tmp_path / "workspace", block_crash_operations=False)
+
+    def fail_health() -> None:
+        raise RuntimeError("forced acceptance startup failure")
+
+    monkeypatch.setattr(daemon, "_assert_healthy", fail_health)
+
+    with pytest.raises(RuntimeError, match="forced acceptance startup failure"):
+        daemon.start()
+
+    ready = _wait_for_event(daemon.state_path, "ready")
+    ready_pid = ready["pid"]
+    ready_create_time = ready["create_time"]
+    assert isinstance(ready_pid, int)
+    assert isinstance(ready_create_time, int | float)
+    identity = ProcessIdentity(
+        pid=ready_pid,
+        create_time=float(ready_create_time),
+        process_group=ready_pid,
+    )
+    deadline = time.monotonic() + 5.0
+    while _live_identity(identity.pid, identity.create_time) and time.monotonic() < deadline:
+        time.sleep(0.02)
+    assert not _live_identity(identity.pid, identity.create_time), "failed start left its detached driver running"
 
 
 @pytest.mark.timeout(100)
@@ -365,8 +421,16 @@ def test_detached_daemon_survives_winner_connector_exit_while_second_lease_is_he
 
 
 @pytest.mark.timeout(50)
-def test_sigkill_idle_read_and_edit_cleanup_rebind_and_never_replay_edit(tmp_path: Path) -> None:
+def test_sigkill_idle_read_and_edit_cleanup_rebind_and_never_replay_edit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """5.10 / 9.7: SIGKILL leaves no owned child and connector recovery is safe."""
+
+    # Containment rejects edits before a daemon call. Exercise the retained
+    # recovery core directly so restoring advertisement cannot reintroduce
+    # replay after an unknown edit outcome.
+    monkeypatch.setattr(connector_module, "WITHHELD_TOOLS", frozenset())
 
     async def phase(name: str) -> None:
         root = tmp_path / name / "workspace"
@@ -379,6 +443,11 @@ def test_sigkill_idle_read_and_edit_cleanup_rebind_and_never_replay_edit(tmp_pat
         pending: asyncio.Task[types.CallToolResult] | None = None
         try:
             await connector.start()
+            # Connector startup is intentionally transport-only.  The first
+            # workspace-dependent call binds inherited cwd and starts the
+            # adapter-owned child whose parent-death cleanup is under test.
+            initial_status = await connector.call_tool("get_runtime_status")
+            assert _payload(initial_status)["ok"] is True
             before = old.owned_descendants()
             assert before, "activation must launch an owned parent-death child before SIGKILL"
             assert all(item.process_group == item.pid for item in before)

@@ -195,7 +195,7 @@ def _documents() -> tuple[dict, dict, dict, dict]:
         "owned_code_estimate_lines": 100,
         "expected_production_lines": 200,
         "current_local_production_lines": 150,
-        "maximum_production_lines": 12000,
+        "maximum_production_lines": None,
     }
     return readiness, scope, bootstrap, budget
 
@@ -240,7 +240,7 @@ def test_render_is_deterministic_and_includes_required_evidence() -> None:
         ),
         (lambda docs: docs[2].update({"lock_digest": "invalid"}), "SHA-256"),
         (lambda docs: docs[2].update({"status": "fail"}), "bootstrap status"),
-        (lambda docs: docs[3].update({"current_local_production_lines": 12001}), "exceeds"),
+        (lambda docs: docs[3].update({"maximum_production_lines": 12000}), "must be null"),
     ],
 )
 def test_render_fails_closed_for_each_required_gate(mutate, message: str) -> None:

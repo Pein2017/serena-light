@@ -8,8 +8,8 @@
   "files": [
     {
       "source_path": "src/solidlsp/lsp_protocol_handler/server.py",
-      "copy": ["content_length"],
-      "reshape": ["ProcessLaunchInfo", "LSPError", "create_message"],
+      "copy": ["create_message", "content_length"],
+      "reshape": ["ProcessLaunchInfo", "LSPError"],
       "reference": ["make_request", "make_notification", "make_response", "make_error_response"],
       "delete": ["StopLoopException", "MessageType"]
     },
@@ -19,6 +19,18 @@
       "reshape": ["subprocess_kwargs"],
       "reference": ["subprocess_run"],
       "delete": ["convert_shell_cmd"]
+    },
+    {
+      "source_path": "src/solidlsp/ls_process.py",
+      "copy": [
+        "Request",
+        "LanguageServerInterface._send_request_once",
+        "LanguageServerInterface.send_request",
+        "LanguageServerInterface._response_handler"
+      ],
+      "reshape": [],
+      "reference": [],
+      "delete": []
     },
     {
       "source_path": "src/solidlsp/initialize_params.py",

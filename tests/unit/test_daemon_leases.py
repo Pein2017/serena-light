@@ -92,6 +92,7 @@ def test_release_workspace_preserves_live_lease_and_starts_warm_grace() -> None:
 def test_releasing_unbound_lease_has_no_workspace_effect() -> None:
     lifecycle = LeaseLifecycle[str, object](clock=FakeClock())
     lease = lifecycle.acquire_lease()
+    assert lifecycle.active_lease_count() == 1
 
     result = lifecycle.release_lease(lease.id)
 
@@ -99,6 +100,23 @@ def test_releasing_unbound_lease_has_no_workspace_effect() -> None:
     assert result.decision is not None
     assert result.decision.identity is None
     assert result.decision.binding_to_release is None
+    assert lifecycle.active_lease_count() == 0
+    assert lifecycle.daemon_idle()
+
+
+def test_daemon_idle_waits_for_active_lease_and_workspace_grace() -> None:
+    clock = FakeClock()
+    lifecycle = LeaseLifecycle[str, object](clock=clock, warm_grace_seconds=2)
+    assert lifecycle.daemon_idle()
+
+    lease = lifecycle.acquire_lease(binding("/data/project"))
+    assert not lifecycle.daemon_idle()
+    lifecycle.release_lease(lease.id)
+    assert not lifecycle.daemon_idle()
+
+    clock.advance(2)
+    lifecycle.sweep()
+    assert lifecycle.daemon_idle()
 
 
 def test_distinct_workspace_roots_keep_independent_holder_counts() -> None:

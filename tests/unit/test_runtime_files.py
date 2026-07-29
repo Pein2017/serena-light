@@ -10,13 +10,19 @@ import pytest
 from serena_light.runtime_files import (
     BEARER_NAME,
     DISCOVERY_NAME,
+    SERVICE_GIT_CONFIG_NAME,
+    STARTUP_NONCE_NAME,
     DiscoveryMetadata,
     RuntimeFileError,
+    consume_startup_nonce,
     create_bearer_secret,
+    create_startup_nonce,
     prepare_runtime_directory,
+    prepare_runtime_layout,
     read_bearer_secret,
     read_discovery_metadata,
     write_discovery_metadata,
+    write_service_git_config,
 )
 
 
@@ -28,7 +34,7 @@ def _prepare_parent(root: Path) -> None:
     root.parent.mkdir(parents=True)
 
 
-def _metadata() -> DiscoveryMetadata:
+def _metadata(*, build_identity: str = "0" * 64) -> DiscoveryMetadata:
     return DiscoveryMetadata.create(
         daemon_id=str(uuid4()),
         pid=1234,
@@ -37,7 +43,20 @@ def _metadata() -> DiscoveryMetadata:
         protocol_version="1",
         server_version="0.1.0",
         created_at=50.0,
+        build_identity=build_identity,
     )
+
+
+def test_service_git_config_is_private_and_delegates_scope_to_workspace_policy(tmp_path: Path) -> None:
+    home_root = _root(tmp_path) / "home"
+    _prepare_parent(_root(tmp_path))
+    prepare_runtime_directory(_root(tmp_path))
+
+    config_path = write_service_git_config(home_root)
+
+    assert config_path.name == SERVICE_GIT_CONFIG_NAME
+    assert config_path.read_text() == "[safe]\n\tdirectory = *\n"
+    assert config_path.stat().st_mode & 0o777 == 0o600
 
 
 def test_prepare_runtime_directory_is_exact_mode_and_rejects_symlinks(tmp_path: Path) -> None:
@@ -135,3 +154,87 @@ def test_discovery_round_trip_validates_exact_process_identity(tmp_path: Path) -
 
     assert read_discovery_metadata(root, is_process_identity_live=live) == metadata
     assert seen == [(metadata.pid, metadata.process_start_time)]
+
+
+def test_runtime_layout_is_build_scoped_and_rejects_symlinked_children(tmp_path: Path) -> None:
+    root = _root(tmp_path)
+    _prepare_parent(root)
+    identity = "a" * 64
+
+    layout = prepare_runtime_layout(root, identity)
+
+    assert layout.python_root == root / "python"
+    assert layout.deps_root == root / "deps"
+    assert layout.build_root == root / "builds" / identity
+    assert layout.logs_root == layout.build_root / "logs"
+    assert layout.home_root == root / "home"
+    directories = (
+        root,
+        layout.python_root,
+        layout.deps_root,
+        layout.builds_root,
+        layout.home_root,
+        layout.build_root,
+        layout.logs_root,
+    )
+    assert all(path.stat().st_mode & 0o777 == 0o700 for path in directories)
+
+    broken_root = tmp_path / "broken" / "serena-light"
+    broken_root.parent.mkdir(parents=True)
+    prepare_runtime_directory(broken_root)
+    outside = tmp_path / "outside-builds"
+    outside.mkdir()
+    (broken_root / "builds").symlink_to(outside, target_is_directory=True)
+    with pytest.raises(RuntimeFileError, match="symlinked"):
+        prepare_runtime_layout(broken_root, identity)
+
+
+def test_two_build_slots_keep_discovery_and_bearer_ownership_independent(tmp_path: Path) -> None:
+    root = _root(tmp_path)
+    _prepare_parent(root)
+    first = prepare_runtime_layout(root, "a" * 64)
+    second = prepare_runtime_layout(root, "b" * 64)
+
+    first_secret = create_bearer_secret(first.build_root)
+    second_secret = create_bearer_secret(second.build_root)
+    write_discovery_metadata(first.build_root, _metadata(build_identity="a" * 64))
+    write_discovery_metadata(second.build_root, _metadata(build_identity="b" * 64))
+
+    assert first.build_root != second.build_root
+    assert first_secret.value != second_secret.value
+    assert read_discovery_metadata(
+        first.build_root,
+        is_process_identity_live=lambda _pid, _created: True,
+    ).build_identity == "a" * 64
+    assert read_discovery_metadata(
+        second.build_root,
+        is_process_identity_live=lambda _pid, _created: True,
+    ).build_identity == "b" * 64
+
+
+def test_startup_nonce_is_private_redacted_and_consumed_once(tmp_path: Path) -> None:
+    root = _root(tmp_path)
+    _prepare_parent(root)
+    prepare_runtime_directory(root)
+
+    nonce = create_startup_nonce(root)
+
+    assert (root / STARTUP_NONCE_NAME).stat().st_mode & 0o777 == 0o600
+    assert nonce.value not in repr(nonce)
+    consume_startup_nonce(root, nonce)
+    assert not (root / STARTUP_NONCE_NAME).exists()
+    with pytest.raises(RuntimeFileError, match="unavailable"):
+        consume_startup_nonce(root, nonce)
+
+
+def test_startup_nonce_mismatch_is_not_consumed(tmp_path: Path) -> None:
+    root = _root(tmp_path)
+    _prepare_parent(root)
+    prepare_runtime_directory(root)
+    nonce = create_startup_nonce(root)
+    other = create_startup_nonce(root)
+
+    with pytest.raises(RuntimeFileError, match="does not match"):
+        consume_startup_nonce(root, nonce)
+    assert (root / STARTUP_NONCE_NAME).exists()
+    consume_startup_nonce(root, other)

@@ -335,6 +335,18 @@ class LeaseLifecycle[IdentityT: Hashable, RuntimeT]:
             state = self._workspaces.get(identity)
             return None if state is None else state.grace_deadline
 
+    def daemon_idle(self) -> bool:
+        """Return true only when no lease or warm workspace still owns this daemon."""
+
+        with self._lock:
+            return not self._active and not self._workspaces
+
+    def active_lease_count(self) -> int:
+        """Return the holder count used by authenticated legacy retirement."""
+
+        with self._lock:
+            return len(self._active)
+
     def _require_active_locked(self, lease_id: UUID, now: float) -> DaemonLease[IdentityT, RuntimeT]:
         lease = self._active.get(lease_id)
         if lease is not None:

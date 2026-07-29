@@ -17,6 +17,7 @@ from serena_light.workspace.scope import (
     ScopeGenerationTracker,
     ScopeProjection,
     WatchedFileEvent,
+    bounded_difference_status,
 )
 
 
@@ -78,6 +79,23 @@ def test_supported_program_path_outside_trust_is_scope_incompatible() -> None:
     assert projection.error is not None
     assert projection.error.code is ScopeCode.SCOPE_INCOMPATIBLE
     assert projection.error.paths == ("ignored-generated/hidden.ts",)
+
+
+def test_projection_difference_status_bounds_entries_but_digests_full_set() -> None:
+    differences = tuple(
+        ScopeDifference(f"generated/{index:03d}.py", DifferenceReason.ABSENT_FROM_TRUST_INVENTORY)
+        for index in range(53)
+    )
+
+    status = bounded_difference_status(reversed(differences))
+
+    assert status["total"] == 53
+    assert status["omitted_count"] == 3
+    assert len(status["items"]) == 50
+    assert status["items"][0]["path"] == "generated/000.py"
+    assert status["items"][-1]["path"] == "generated/049.py"
+    assert len(status["digest"]) == 64
+    assert status["digest"] == bounded_difference_status(differences)["digest"]
 
 
 def test_workspace_default_omission_has_engine_reason() -> None:

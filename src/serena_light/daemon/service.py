@@ -11,7 +11,7 @@ import asyncio
 from collections.abc import Callable, Hashable, Mapping
 from inspect import isawaitable
 from pathlib import Path
-from typing import Protocol, cast
+from typing import Any, Protocol, cast
 from uuid import UUID
 
 from serena_light.daemon.leases import (
@@ -24,9 +24,21 @@ from serena_light.daemon.leases import (
     LeaseExpiredError as LifecycleLeaseExpiredError,
 )
 from serena_light.daemon.server import LeaseExpiredError
-from serena_light.tools.envelopes import ErrorCode, JsonValue, error, from_workspace_error, success
+from serena_light.lsp.adapter import AdapterError
+from serena_light.lsp.executor import ExecutorBusyError
+from serena_light.tools.envelopes import (
+    ErrorCode,
+    JsonValue,
+    error,
+    from_adapter_error,
+    from_executor_busy,
+    from_timeout,
+    from_workspace_error,
+    success,
+)
 from serena_light.workspace.identity import WorkspaceError, WorkspaceIdentity, WorkspacePolicy
 from serena_light.workspace.registry import ResolvedWorkspace, WorkspaceBinding, WorkspaceRuntimeRegistry
+from serena_light.workspace.runtime import WorkspaceRuntimeError
 
 
 class WorkspaceResolver[IdentityT](Protocol):
@@ -51,17 +63,27 @@ class WorkspaceDaemonService[IdentityT: Hashable, RuntimeT]:
         registry: WorkspaceRuntimeRegistry[IdentityT, RuntimeT, UUID],
         resolver: WorkspaceResolver[IdentityT] | WorkspacePolicy,
         runtime_stopper: Callable[[RuntimeT], None],
+        debug_reporter: Callable[[str, str], object] | None = None,
     ) -> None:
         self._lifecycle = lifecycle
         self._registry = registry
         self._resolver = resolver
         self._runtime_stopper = runtime_stopper
+        self._debug_reporter = debug_reporter
         self._binding_lock = asyncio.Lock()
 
     async def status(self, *, mcp_session_id: str) -> Mapping[str, object]:
         """Return transport correlation without granting lifetime authority."""
 
         return {"mcp_session_id": mcp_session_id, "lifetime_authority": "daemon_lease"}
+
+    async def migration_status(self) -> Mapping[str, object]:
+        """Expose only authenticated lifetime facts needed for legacy retirement."""
+
+        return {
+            "active_holders": self._lifecycle.active_lease_count(),
+            "daemon_idle": self._lifecycle.daemon_idle(),
+        }
 
     async def acquire_lease(self, *, mcp_session_id: str) -> Mapping[str, object]:
         """Issue an unbound daemon lease independently of the MCP session."""
@@ -90,6 +112,7 @@ class WorkspaceDaemonService[IdentityT: Hashable, RuntimeT]:
             result = self._lifecycle.release_lease(daemon_lease_id, immediate=immediate)
             runtimes_to_stop = self._apply_result_locked(result)
         await self._stop_runtimes(runtimes_to_stop)
+        self._report_decision(result.decision, immediate=immediate)
         return _release_data(daemon_lease_id, result, immediate=immediate)
 
     async def release_workspace(self, *, lease_id: str) -> Mapping[str, object]:
@@ -106,6 +129,10 @@ class WorkspaceDaemonService[IdentityT: Hashable, RuntimeT]:
                 runtimes_to_stop = self._apply_result_locked(result)
                 expiry_error = None
         await self._stop_runtimes(runtimes_to_stop)
+        self._report_decision(
+            expiry_error.decision if expiry_error is not None else result.decision,
+            immediate=False,
+        )
         if expiry_error is not None:
             raise LeaseExpiredError(str(expiry_error)) from expiry_error
         return _release_workspace_data(daemon_lease_id, result)
@@ -122,6 +149,7 @@ class WorkspaceDaemonService[IdentityT: Hashable, RuntimeT]:
         runtimes_to_stop: list[RuntimeT] = []
         expiry_error: LifecycleLeaseExpiredError[IdentityT, RuntimeT] | None = None
         binding: WorkspaceBinding[IdentityT, RuntimeT] | None = None
+        refresh_runtime: RuntimeT | None = None
         async with self._binding_lock:
             try:
                 # Reject a release/expiry that happened while path resolution ran
@@ -131,9 +159,12 @@ class WorkspaceDaemonService[IdentityT: Hashable, RuntimeT]:
                 expiry_error = error
                 runtimes_to_stop.extend(self._apply_decision_locked(error.decision))
             else:
+                existing_runtime = self._registry.runtime_state(resolved.identity)
                 binding = await asyncio.to_thread(self._registry.activate, daemon_lease_id, resolved)
                 try:
                     self._lifecycle.rebind(daemon_lease_id, binding)
+                    if existing_runtime is not None:
+                        refresh_runtime = binding.runtime
                 except LifecycleLeaseExpiredError as error:
                     expiry_error = error
                     # Runtime acquisition completed after authority expired.  It
@@ -148,6 +179,13 @@ class WorkspaceDaemonService[IdentityT: Hashable, RuntimeT]:
         if expiry_error is not None:
             raise LeaseExpiredError(str(expiry_error)) from expiry_error
         assert binding is not None
+        if refresh_runtime is not None:
+            try:
+                callback = cast(Callable[[], object], cast(Any, refresh_runtime).ensure_fresh)
+            except AttributeError:
+                callback = None
+            if callback is not None:
+                await asyncio.to_thread(callback)
         return {
             "lease_id": str(daemon_lease_id),
             "workspace": _binding_data(binding),
@@ -200,7 +238,29 @@ class WorkspaceDaemonService[IdentityT: Hashable, RuntimeT]:
             decisions = self._lifecycle.sweep()
             runtimes_to_stop = self._apply_decisions_locked(decisions)
         await self._stop_runtimes(runtimes_to_stop)
+        for decision in decisions:
+            self._report_decision(decision, immediate=False)
         return decisions
+
+    def daemon_idle(self) -> bool:
+        """Expose only the build-retirement predicate, not mutable lease state."""
+
+        return self._lifecycle.daemon_idle()
+
+    def _report_decision(
+        self,
+        decision: LeaseLifecycleDecision[IdentityT, RuntimeT] | None,
+        *,
+        immediate: bool,
+    ) -> None:
+        if decision is None or self._debug_reporter is None:
+            return
+        event = "workspace_cleanup" if decision.runtime_to_stop is not None else "lease_grace"
+        message = (
+            f"reason={decision.reason.value} holders={decision.active_holders} "
+            f"immediate={str(immediate).lower()}"
+        )
+        self._debug_reporter(event, message)
 
     def _resolve_workspace(self, activation_path: Path) -> ResolvedWorkspace[IdentityT]:
         if isinstance(self._resolver, WorkspacePolicy):
@@ -238,7 +298,11 @@ class WorkspaceDaemonService[IdentityT: Hashable, RuntimeT]:
         self, runtime: RuntimeT, operation: str, kwargs: Mapping[str, object]
     ) -> Mapping[str, object]:
         result = await self._runtime_value(runtime, operation, kwargs)
-        return result if isinstance(result.get("ok"), bool) else success(cast(JsonValue, result)).to_dict()
+        if result.get("ok") is True and "data" in result:
+            return result
+        if result.get("ok") is False and isinstance(result.get("error"), Mapping):
+            return result
+        return error(ErrorCode.UNSUPPORTED, details={"tool": operation, "reason": "malformed_runtime_result"}).to_dict()
 
     async def _runtime_value(
         self, runtime: RuntimeT, operation: str, kwargs: Mapping[str, object]
@@ -250,8 +314,43 @@ class WorkspaceDaemonService[IdentityT: Hashable, RuntimeT]:
             result = await asyncio.to_thread(callback, **kwargs)
         except WorkspaceError as exc:
             return from_workspace_error(exc).to_dict()
+        except WorkspaceRuntimeError as exc:
+            try:
+                code = ErrorCode(exc.code)
+            except ValueError:
+                code = ErrorCode.UNSUPPORTED
+            details: dict[str, JsonValue] = {"paths": exc.paths} if exc.paths else {}
+            return error(code, details=details).to_dict()
+        except ExecutorBusyError as exc:
+            return from_executor_busy(exc).to_dict()
+        except AdapterError as exc:
+            return from_adapter_error(exc).to_dict()
+        # TimeoutError is an OSError, so preserve its stronger operational
+        # meaning before the generic OSError fallback below.
+        except TimeoutError as exc:
+            return from_timeout(exc).to_dict()
+        except OSError:
+            return error(ErrorCode.UNCERTAIN, retry=None).to_dict()
         if isawaitable(result):
-            result = await result
+            try:
+                result = await result
+            except WorkspaceError as exc:
+                return from_workspace_error(exc).to_dict()
+            except WorkspaceRuntimeError as exc:
+                try:
+                    code = ErrorCode(exc.code)
+                except ValueError:
+                    code = ErrorCode.UNSUPPORTED
+                details = {"paths": exc.paths} if exc.paths else {}
+                return error(code, details=details).to_dict()
+            except ExecutorBusyError as exc:
+                return from_executor_busy(exc).to_dict()
+            except AdapterError as exc:
+                return from_adapter_error(exc).to_dict()
+            except TimeoutError as exc:
+                return from_timeout(exc).to_dict()
+            except OSError:
+                return error(ErrorCode.UNCERTAIN).to_dict()
         if callable(to_dict := getattr(result, "to_dict", None)):
             result = to_dict()
         if isinstance(result, Mapping):

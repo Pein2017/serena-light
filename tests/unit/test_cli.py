@@ -1,17 +1,30 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import socket
 import sys
+import threading
 from collections.abc import Mapping
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from typing import Any
 from uuid import uuid4
 
 import pytest
 
 from serena_light import __version__, cli
-from serena_light.runtime_files import BearerSecret, DiscoveryMetadata
+from serena_light.runtime_files import (
+    BEARER_NAME,
+    DISCOVERY_NAME,
+    BearerSecret,
+    DiscoveryMetadata,
+    StartupNonce,
+    create_bearer_secret,
+    prepare_runtime_layout,
+    write_discovery_metadata,
+)
 
 
 def _metadata(*, daemon_id: str | None = None) -> DiscoveryMetadata:
@@ -25,7 +38,7 @@ def _metadata(*, daemon_id: str | None = None) -> DiscoveryMetadata:
     )
 
 
-def test_daemon_command_uses_current_interpreter_module_and_sanitized_environment() -> None:
+def test_daemon_command_uses_current_interpreter_module_and_sanitized_environment(tmp_path: Path) -> None:
     assert cli._daemon_argv() == (
         sys.executable,
         "-I",
@@ -33,22 +46,42 @@ def test_daemon_command_uses_current_interpreter_module_and_sanitized_environmen
         "serena_light.cli",
         "daemon",
     )
+    ambient = {
+        "PATH": "/ambient/bin",
+        "PYTHONHOME": "/root/python",
+        "PYTHONPATH": "/root/site",
+        "HTTP_PROXY": "http://proxy.invalid:8080",
+        "Https_PrOxY": "http://proxy.invalid:8080",
+        "ALL_PROXY": "socks5://proxy.invalid:1080",
+        "NO_PROXY": "127.0.0.1,localhost",
+        "no_proxy": "127.0.0.1,localhost",
+        "LANG": "C.UTF-8",
+        "KEEP": "yes",
+    }
     environment = cli._daemon_environment(
-        {
-            "PATH": "/ambient/bin",
-            "PYTHONHOME": "/root/python",
-            "PYTHONPATH": "/root/site",
-            "KEEP": "yes",
-        }
+        ambient,
+        build_identity="a" * 64,
+        build_root=tmp_path / "builds" / ("a" * 64),
+        startup_nonce=StartupNonce("nonce"),
+        service_home=tmp_path / "home",
     )
     assert environment == {
-        "PATH": "/ambient/bin",
-        "KEEP": "yes",
+        "LANG": "C.UTF-8",
+        "HOME": str(tmp_path / "home"),
+        "GIT_CONFIG_GLOBAL": str(tmp_path / "home" / "gitconfig"),
+        "PATH": os.pathsep.join((str(Path(sys.executable).parent), "/usr/bin", "/bin")),
         "PYTHONNOUSERSITE": "1",
+        cli.BUILD_IDENTITY_ENV: "a" * 64,
+        cli.BUILD_ROOT_ENV: str(tmp_path / "builds" / ("a" * 64)),
+        cli.STARTUP_NONCE_ENV: "nonce",
     }
+    assert ambient["HTTP_PROXY"] == "http://proxy.invalid:8080"
+    assert ambient["NO_PROXY"] == "127.0.0.1,localhost"
 
 
-def test_detached_daemon_spawn_receives_explicit_safe_arguments(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_detached_daemon_spawn_receives_explicit_safe_arguments(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     captured: dict[str, object] = {}
 
     def fake_spawn(
@@ -61,10 +94,21 @@ def test_detached_daemon_spawn_receives_explicit_safe_arguments(monkeypatch: pyt
         return object()
 
     monkeypatch.setattr(cli, "spawn_detached_process", fake_spawn)
-    monkeypatch.setattr(cli, "_daemon_environment", lambda: {"PYTHONNOUSERSITE": "1"})
+    runtime_root = tmp_path / "runtime" / "serena-light"
+    runtime_root.parent.mkdir(parents=True)
+    layout = prepare_runtime_layout(runtime_root, "a" * 64)
+    monkeypatch.setattr(cli, "RUNTIME_ROOT", runtime_root)
+    written_git_configs: list[Path] = []
+    monkeypatch.setattr(cli, "write_service_git_config", written_git_configs.append)
+    monkeypatch.setattr(
+        cli,
+        "_daemon_environment",
+        lambda **_kwargs: {"PYTHONNOUSERSITE": "1"},
+    )
 
-    cli._spawn_daemon()
+    cli._spawn_daemon(layout.build_root)
 
+    assert written_git_configs == [layout.home_root]
     assert captured == {
         "argv": cli._daemon_argv(),
         "cwd": Path("/"),
@@ -119,6 +163,7 @@ def test_health_check_uses_bearer_and_validates_discovery_identity(monkeypatch: 
                     "daemon_id": metadata.daemon_id,
                     "protocol_version": metadata.protocol_version,
                     "server_version": metadata.server_version,
+                    "build_identity": metadata.build_identity,
                 },
             }
 
@@ -131,6 +176,115 @@ def test_health_check_uses_bearer_and_validates_discovery_identity(monkeypatch: 
     assert cli._daemon_is_healthy(candidate)
     assert captured["url"] == "http://127.0.0.1:43123/health"
     assert captured["headers"] == {"Authorization": "Bearer " + "a" * 48}
+    assert captured["trust_env"] is False
+
+
+def test_legacy_status_fetch_is_authenticated_exact_and_proxy_free(monkeypatch: pytest.MonkeyPatch) -> None:
+    metadata = _metadata()
+    captured: dict[str, object] = {}
+
+    class Response:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, object]:
+            return {
+                "ok": True,
+                "data": {
+                    "daemon_id": metadata.daemon_id,
+                    "pid": metadata.pid,
+                    "process_start_time": metadata.process_start_time,
+                    "build_identity": metadata.build_identity,
+                    "active_holders": 0,
+                },
+            }
+
+    def fake_get(url: str, **kwargs: object) -> Response:
+        captured.update(url=url, **kwargs)
+        return Response()
+
+    monkeypatch.setattr(cli, "read_bearer_secret", lambda _root: BearerSecret("a" * 48))
+    monkeypatch.setattr(cli.httpx, "get", fake_get)
+
+    status = cli._fetch_legacy_status(metadata)
+
+    assert status.daemon_id == metadata.daemon_id
+    assert status.active_holders == 0
+    assert captured["url"] == "http://127.0.0.1:43123/migration-status"
+    assert captured["headers"] == {"Authorization": "Bearer " + "a" * 48}
+    assert captured["trust_env"] is False
+
+
+def test_old_daemon_cleanup_never_removes_successor_discovery(tmp_path: Path) -> None:
+    build_root = prepare_runtime_layout(tmp_path / "runtime", "a" * 64).build_root
+    create_bearer_secret(build_root)
+    old = _metadata(daemon_id=str(uuid4()))
+    successor = _metadata(daemon_id=str(uuid4()))
+    write_discovery_metadata(build_root, old)
+    write_discovery_metadata(build_root, successor)
+
+    cli._remove_owned_runtime_artifacts(build_root, old.daemon_id)
+
+    assert (build_root / DISCOVERY_NAME).exists()
+    assert (build_root / BEARER_NAME).exists()
+    assert json.loads((build_root / DISCOVERY_NAME).read_text())["daemon_id"] == successor.daemon_id
+
+    cli._remove_owned_runtime_artifacts(build_root, successor.daemon_id)
+    assert not (build_root / DISCOVERY_NAME).exists()
+    assert not (build_root / BEARER_NAME).exists()
+
+
+def test_health_check_reaches_loopback_with_poisoned_proxy_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    metadata = _metadata()
+
+    class HealthHandler(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            assert self.path == "/health"
+            payload = {
+                "ok": True,
+                "data": {
+                    "daemon_id": metadata.daemon_id,
+                    "protocol_version": metadata.protocol_version,
+                    "server_version": metadata.server_version,
+                    "build_identity": metadata.build_identity,
+                },
+            }
+            encoded = json.dumps(payload).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(encoded)))
+            self.end_headers()
+            self.wfile.write(encoded)
+
+        def log_message(self, format: str, *args: Any) -> None:
+            del format, args
+            return None
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), HealthHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    monkeypatch.setenv("HTTP_PROXY", "http://127.0.0.1:1")
+    monkeypatch.setenv("http_proxy", "http://127.0.0.1:1")
+    monkeypatch.setenv("ALL_PROXY", "http://127.0.0.1:1")
+    monkeypatch.setenv("NO_PROXY", "")
+    monkeypatch.setenv("no_proxy", "")
+    candidate = cli._DiscoveredDaemon(
+        DiscoveryMetadata.create(
+            daemon_id=metadata.daemon_id,
+            pid=metadata.pid,
+            process_start_time=metadata.process_start_time,
+            endpoint=f"http://127.0.0.1:{server.server_port}/mcp",
+            protocol_version=metadata.protocol_version,
+            server_version=metadata.server_version,
+        ),
+        BearerSecret("a" * 48),
+    )
+    try:
+        assert cli._daemon_is_healthy(candidate)
+    finally:
+        server.shutdown()
+        thread.join(timeout=1.0)
+        server.server_close()
 
 
 def test_console_entry_points_run_their_async_composition_roots(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -238,6 +392,50 @@ def test_server_start_callback_precedes_periodic_sweep_and_graceful_stop() -> No
     asyncio.run(exercise())
 
     assert service.calls == 3
+    assert events == ["started", "stopped"]
+
+
+def test_idle_build_daemon_exits_after_all_lifetime_owners_are_gone() -> None:
+    server = _FakeServer()
+    events: list[str] = []
+
+    class Service:
+        calls = 0
+
+        async def sweep(self) -> None:
+            self.calls += 1
+
+        def daemon_idle(self) -> bool:
+            return True
+
+    service = Service()
+
+    async def started() -> None:
+        events.append("started")
+
+    async def stopped() -> None:
+        events.append("stopped")
+
+    async def exercise() -> None:
+        bound = socket.socket()
+        try:
+            await cli._serve_with_lifecycle(
+                server=server,
+                bound_socket=bound,
+                service=service,
+                on_started=started,
+                on_stopping=stopped,
+                sweep_interval_seconds=0.001,
+                startup_poll_seconds=0.001,
+                idle_exit_seconds=0.002,
+            )
+        finally:
+            bound.close()
+
+    asyncio.run(exercise())
+
+    assert service.calls >= 2
+    assert server.should_exit
     assert events == ["started", "stopped"]
 
 

@@ -4,7 +4,7 @@ import threading
 
 import pytest
 
-from serena_light.lsp.executor import BoundedLspExecutor, ExecutorBusyError
+from serena_light.lsp.executor import BoundedLspExecutor, EditCommit, EditCommitState, ExecutorBusyError
 
 
 def test_single_worker_preserves_order() -> None:
@@ -88,3 +88,72 @@ def test_close_cancels_queued_work_but_waits_for_started_work() -> None:
     assert not closer.is_alive()
     assert active.result(timeout=1) is True
     assert queued.cancelled()
+
+
+def test_edit_commit_states_move_forward_only() -> None:
+    commit = EditCommit()
+
+    assert commit.state is EditCommitState.QUEUED
+    assert not commit.installed
+    commit.mark_running()
+    commit.mark_installed()
+    assert commit.installed
+    commit.mark_done()
+    assert commit.state is EditCommitState.DONE
+
+    with pytest.raises(ValueError, match="cannot move from done to running"):
+        commit.mark_running()
+    with pytest.raises(ValueError, match="cannot move from done to done"):
+        commit.mark_done()
+
+
+def test_proven_queued_cancellation_leaves_the_commit_unable_to_write() -> None:
+    executor = BoundedLspExecutor(queue_capacity=2, name="commit")
+    commit = EditCommit()
+    started = threading.Event()
+    release = threading.Event()
+    wrote = threading.Event()
+    active = executor.submit(lambda: started.set() or release.wait(1))
+    assert started.wait(1)
+
+    def edit() -> str:
+        commit.mark_running()
+        wrote.set()
+        return "installed"
+
+    queued = executor.submit(edit)
+
+    # Cancellation succeeds only while the entry is still queued, which is the
+    # proof that a later write is impossible.
+    assert queued.cancel() is True
+    assert commit.state is EditCommitState.QUEUED
+    release.set()
+    assert active.result(timeout=1) is True
+    executor.close()
+
+    assert queued.cancelled()
+    assert not wrote.is_set()
+    assert commit.state is EditCommitState.QUEUED
+
+
+def test_started_edit_cannot_be_cancelled_and_reports_a_running_commit() -> None:
+    executor = BoundedLspExecutor(queue_capacity=1, name="running")
+    commit = EditCommit()
+    started = threading.Event()
+    release = threading.Event()
+
+    def edit() -> str:
+        commit.mark_running()
+        started.set()
+        assert release.wait(1)
+        return "done"
+
+    future = executor.submit(edit)
+    assert started.wait(1)
+
+    assert future.cancel() is False
+    assert commit.state is EditCommitState.RUNNING
+    assert not commit.installed
+    release.set()
+    assert future.result(timeout=1) == "done"
+    executor.close()

@@ -17,6 +17,7 @@ from enum import IntEnum, StrEnum
 from pathlib import PurePosixPath
 from threading import Condition, RLock
 from types import MappingProxyType
+from typing import TypedDict
 
 
 class LanguageFamily(StrEnum):
@@ -195,6 +196,40 @@ class ScopeProjection:
             compatible=not outside,
             error=error,
         )
+
+
+MAX_STATUS_DIFFERENCES = 50
+
+
+class BoundedDifferenceStatus(TypedDict):
+    items: tuple[dict[str, str], ...]
+    total: int
+    digest: str
+    omitted_count: int
+
+
+def bounded_difference_status(
+    differences: Iterable[ScopeDifference],
+    *,
+    limit: int = MAX_STATUS_DIFFERENCES,
+) -> BoundedDifferenceStatus:
+    """Render deterministic bounded evidence while hashing the complete set."""
+
+    if limit < 0:
+        raise ValueError("difference status limit must be non-negative")
+    ordered = tuple(sorted(differences, key=lambda item: (item.path, item.reason.value)))
+    digest = hashlib.sha256()
+    for item in ordered:
+        digest.update(item.path.encode("utf-8", "surrogateescape"))
+        digest.update(b"\0")
+        digest.update(item.reason.value.encode("ascii"))
+        digest.update(b"\0")
+    return {
+        "items": tuple({"path": item.path, "reason": item.reason.value} for item in ordered[:limit]),
+        "total": len(ordered),
+        "digest": digest.hexdigest(),
+        "omitted_count": max(0, len(ordered) - limit),
+    }
 
 
 @dataclass(frozen=True, slots=True)

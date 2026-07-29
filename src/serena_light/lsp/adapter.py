@@ -10,7 +10,7 @@ from __future__ import annotations
 import subprocess
 import threading
 import time
-from collections import deque
+from collections import OrderedDict, deque
 from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import Future
 from contextlib import suppress
@@ -499,6 +499,8 @@ class LanguageAdapter:
     acquire the workspace operation lock or submit recursively from that worker.
     """
 
+    MAX_OPEN_DOCUMENTS = 128
+
     def __init__(
         self,
         *,
@@ -515,6 +517,7 @@ class LanguageAdapter:
         clock: Callable[[], float] = time.monotonic,
         timestamp: Callable[[], float] = time.time,
         notification_handler: Callable[[str, Any], None] | None = None,
+        debug_reporter: Callable[[str, str], object] | None = None,
     ) -> None:
         if readiness_timeout < 0 or readiness_timeout > 30.0:
             raise ValueError("adapter readiness timeout must be between 0 and 30 seconds")
@@ -531,12 +534,14 @@ class LanguageAdapter:
         self._clock = clock
         self._timestamp = timestamp
         self._notification_handler = notification_handler
+        self._debug_reporter = debug_reporter
         self._state_lock = threading.RLock()
         self._phase = AdapterPhase.COLD
         self._runtime: AdapterRuntime | None = None
         self._runtime_token = 0
         self._crashed_runtime_tokens: set[int] = set()
         self._pending_documents: dict[str, DocumentReadinessTarget] = {}
+        self._open_documents: OrderedDict[str, None] = OrderedDict()
         self._raw_providers = RawLspProviders()
         self._derived_tools = DerivedToolAvailability.from_raw(self._raw_providers)
         self._position_encoding = facts.default_position_encoding
@@ -546,7 +551,7 @@ class LanguageAdapter:
         self._last_crash_error: str | None = None
         self._cooldown_until_monotonic: float | None = None
         self._cooldown_until_timestamp: float | None = None
-        self._transitions: list[PhaseTransition] = []
+        self._transitions: deque[PhaseTransition] = deque(maxlen=64)
         self._transition(AdapterPhase.COLD, "registered")
 
     def routes(self, path: str | Path) -> bool:
@@ -667,6 +672,10 @@ class LanguageAdapter:
             self._runtime_token += 1
             token = self._runtime_token
             self._runtime = None
+            # A fresh process has no documents open; stale entries here would
+            # make the next open_document wrongly send didChange instead of
+            # didOpen against a server that never saw the original didOpen.
+            self._open_documents.clear()
 
         if runtime is not None:
             self._runtime_provider.stop(runtime)
@@ -706,7 +715,12 @@ class LanguageAdapter:
             self._transition(AdapterPhase.STOPPING, "explicit stop")
             self._runtime = None
             self._pending_documents.clear()
+            closing_uris = tuple(self._open_documents)
+            self._open_documents.clear()
         if runtime is not None:
+            for uri in closing_uris:
+                with suppress(Exception):
+                    runtime.client.notify("textDocument/didClose", {"textDocument": {"uri": uri}})
             self._runtime_provider.stop(runtime)
         with self._state_lock:
             self._transition(AdapterPhase.COLD, "stopped")
@@ -779,22 +793,57 @@ class LanguageAdapter:
             with self._state_lock:
                 self._pending_documents[uri] = target
             try:
-                client.notify(
-                    "textDocument/didOpen",
-                    {
-                        "textDocument": {
-                            "uri": uri,
-                            "languageId": self.facts.language_id_for(normalized),
-                            "version": version,
-                            "text": text,
-                        }
-                    },
+                self._send_document_open_or_change(
+                    client,
+                    uri=uri,
+                    language_id=self.facts.language_id_for(normalized),
+                    version=version,
+                    text=text,
                 )
             except BaseException:
                 with self._state_lock:
                     self._pending_documents.pop(uri, None)
                 raise
             return target
+
+    def _send_document_open_or_change(
+        self,
+        client: AdapterClient,
+        *,
+        uri: str,
+        language_id: str,
+        version: int,
+        text: str,
+    ) -> None:
+        """Send exactly one didOpen per URI; every later version is a didChange."""
+
+        if uri in self._open_documents:
+            client.notify(
+                "textDocument/didChange",
+                {
+                    "textDocument": {"uri": uri, "version": version},
+                    "contentChanges": [{"text": text}],
+                },
+            )
+            self._open_documents.move_to_end(uri)
+            return
+        client.notify(
+            "textDocument/didOpen",
+            {
+                "textDocument": {
+                    "uri": uri,
+                    "languageId": language_id,
+                    "version": version,
+                    "text": text,
+                }
+            },
+        )
+        self._open_documents[uri] = None
+        while len(self._open_documents) > self.MAX_OPEN_DOCUMENTS:
+            evicted_uri, _ = self._open_documents.popitem(last=False)
+            client.notify("textDocument/didClose", {"textDocument": {"uri": evicted_uri}})
+            with self._state_lock:
+                self._pending_documents.pop(evicted_uri, None)
 
     def _warm_global_worker(
         self,
@@ -901,23 +950,28 @@ class LanguageAdapter:
     def _record_crash(self, token: int, error: BaseException) -> None:
         now = self._clock()
         timestamp = self._timestamp()
+        event = "adapter_crash"
         with self._state_lock:
             if token in self._crashed_runtime_tokens:
                 return
             self._crashed_runtime_tokens.add(token)
             self._crash_total += 1
             self._last_crash_timestamp = timestamp
-            self._last_crash_error = f"{type(error).__name__}: {error}"
+            self._last_crash_error = type(error).__name__
             cutoff = now - self._crash_policy.window_seconds
             while self._crash_times and self._crash_times[0] < cutoff:
                 self._crash_times.popleft()
             self._crash_times.append(now)
             if len(self._crash_times) >= self._crash_policy.threshold:
+                event = "adapter_cooldown"
                 self._cooldown_until_monotonic = now + self._crash_policy.cooldown_seconds
                 self._cooldown_until_timestamp = timestamp + self._crash_policy.cooldown_seconds
                 self._transition(AdapterPhase.COOLDOWN, self._last_crash_error)
             else:
                 self._transition(AdapterPhase.DEGRADED, self._last_crash_error)
+            message = f"adapter={self.facts.name} crashes={self._crash_total} phase={self._phase.value}"
+        if self._debug_reporter is not None:
+            self._debug_reporter(event, message)
 
     def _refresh_cooldown_locked(self) -> None:
         deadline = self._cooldown_until_monotonic
