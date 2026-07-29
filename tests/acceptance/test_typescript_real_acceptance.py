@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import subprocess
 import time
 from collections.abc import Iterator, Mapping, Sequence
@@ -10,6 +11,7 @@ from typing import Any, cast
 import psutil
 import pytest
 
+from serena_light.bootstrap import runtime_paths
 from serena_light.lsp.typescript import TypeScriptAdapterConfig
 from serena_light.tools.envelopes import ToolEnvelope
 from serena_light.workspace.identity import PinnedMsRoots, WorkspacePolicy
@@ -255,6 +257,17 @@ def test_omitted_file_is_path_scoped_and_unicode_ranges_are_exact(
 def test_repository_native_typescript_7_typecheck_is_authoritative(
     acceptance: RealTypeScriptAcceptance,
 ) -> None:
+    paths = runtime_paths(Path(__file__).resolve().parents[2])
+    locked_node = paths["node"]
+    locked_npm = paths["npm"]
+    # ``npm run`` needs a POSIX shell, while ``.bin/tsc`` needs ``env`` to find
+    # Node.  Put the locked engine first and retain only the system shell path;
+    # neither ambient Node nor npm is a command authority here.
+    locked_environment = {"PATH": f"{locked_node.parent}{os.pathsep}{os.defpath}"}
+    assert locked_node.is_file()
+    assert locked_npm.is_file()
+    assert locked_node.resolve().is_relative_to(paths["runtime"].resolve())
+    assert locked_npm.resolve().is_relative_to(paths["runtime"].resolve())
     version = subprocess.run(
         [str(ROOT / "node_modules/.bin/tsc"), "--version"],
         cwd=ROOT,
@@ -262,16 +275,20 @@ def test_repository_native_typescript_7_typecheck_is_authoritative(
         capture_output=True,
         text=True,
         timeout=30,
+        env=locked_environment,
     )
     native = subprocess.run(
-        ["npm", "run", "typecheck"],
+        [str(locked_node), str(locked_npm), "run", "typecheck"],
         cwd=ROOT,
         check=False,
         capture_output=True,
         text=True,
         timeout=120,
+        env=locked_environment,
     )
     assert version.returncode == 0, version.stderr
     assert version.stdout.strip() == "Version 7.0.2"
+    assert version.args == [str(ROOT / "node_modules/.bin/tsc"), "--version"]
+    assert native.args == [str(locked_node), str(locked_npm), "run", "typecheck"]
     assert acceptance.config.typescript_version == "5.9.3"
     assert native.returncode == 0, native.stdout + native.stderr

@@ -10,6 +10,7 @@ from typing import ClassVar, cast
 
 import pytest
 
+from scripts import external_snapshot
 from scripts.external_snapshot import (
     CC_PLUGIN_CODEX_TYPESCRIPT_AUTHORITY_PROFILE,
     _node_platform_architecture,
@@ -148,6 +149,35 @@ def test_non_git_transformers_snapshot_binds_source_content_and_package_metadata
     second = snapshot_identity(root)
     (cache / "module.cpython-312.pyc").write_bytes(os.urandom(8))
     assert snapshot_identity(root) == second
+
+
+def test_cc_plugin_platform_selection_uses_the_locked_service_node(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The authority profile cannot select a user's Node through PATH or ~/.nvm."""
+
+    locked_node = tmp_path / "service-runtime" / "node" / "bin" / "node"
+    locked_node.parent.mkdir(parents=True)
+    locked_node.touch()
+    captured: list[tuple[list[str], dict[str, object]]] = []
+
+    def run(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        captured.append((command, kwargs))
+        return subprocess.CompletedProcess(command, 0, stdout="linux-x64", stderr="")
+
+    monkeypatch.setattr(external_snapshot, "runtime_paths", lambda root: {"node": locked_node})
+    monkeypatch.setattr(external_snapshot.subprocess, "run", run)
+
+    assert _node_platform_architecture(tmp_path) == "linux-x64"
+    assert captured == [
+        (
+            [str(locked_node), "--eval", "process.stdout.write(`${process.platform}-${process.arch}`)"],
+            {"cwd": tmp_path, "check": False, "capture_output": True, "text": True},
+        )
+    ]
+    assert all(command[0] != "node" for command, _ in captured)
+    assert all("/root/.nvm" not in str(command) for command, _ in captured)
 
 
 def test_cc_plugin_typescript_profile_binds_the_ignored_native_tsc_executable(tmp_path: Path) -> None:

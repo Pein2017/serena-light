@@ -584,6 +584,44 @@ def test_incompatible_retirement_retries_rejected_cleanup_admission(tmp_path: Pa
         runtime.stop()
 
 
+def test_incompatible_retirement_retries_failed_cleanup_future_on_next_scan(tmp_path: Path) -> None:
+    _git_repository(tmp_path)
+    source = tmp_path / "main.py"
+    source.write_text("value = 1\n")
+    adapters: dict[LanguageFamily, _Adapter] = {}
+    contexts: dict[LanguageFamily, AdapterBuildContext] = {}
+    runtime = _git_runtime(tmp_path, adapters, contexts)
+    try:
+        original = adapters[LanguageFamily.PYTHON]
+        attempts = 0
+
+        def fail_worker_once() -> None:
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                raise RuntimeError("cleanup worker failed")
+
+        original.before_stop_worker = fail_worker_once
+        source.unlink()
+
+        with pytest.raises(RuntimeError, match="cleanup worker failed"):
+            runtime.ensure_fresh()
+        assert original.stop_calls == 1
+        assert runtime.status()["stopped"] is False
+        assert runtime.adapters == {}
+        unavailable = cast(Mapping[str, object], runtime.status()["unavailable_language_families"])
+        python = cast(Mapping[str, object], unavailable["python"])
+        assert cast(Mapping[str, object], python["error"])["code"] == "SCOPE_INCOMPATIBLE"
+
+        assert runtime.ensure_fresh().dirty is False
+        assert original.stop_calls == 2
+        assert runtime._pending_retirements == {}
+        assert runtime.status()["stopped"] is False
+        assert runtime.adapters == {}
+    finally:
+        runtime.stop()
+
+
 def test_constructor_failure_stops_already_built_adapter(tmp_path: Path) -> None:
     (tmp_path / "main.py").write_text("value = 1\n")
     (tmp_path / "main.ts").write_text("export const value = 1\n")
@@ -1447,6 +1485,45 @@ def test_config_restart_and_runtime_stop_share_atomic_cleanup_ownership(tmp_path
         runtime.stop()
 
 
+def test_config_restart_retries_failed_cleanup_future_on_next_scan(tmp_path: Path) -> None:
+    _git_repository(tmp_path)
+    (tmp_path / "main.py").write_text("value = 1\n")
+    adapters: dict[LanguageFamily, _Adapter] = {}
+    contexts: dict[LanguageFamily, AdapterBuildContext] = {}
+    runtime = _git_runtime(tmp_path, adapters, contexts)
+    try:
+        runtime.load_document_symbols("main.py")
+        original = adapters[LanguageFamily.PYTHON]
+        attempts = 0
+
+        def fail_worker_once() -> None:
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                raise RuntimeError("cleanup worker failed")
+
+        original.before_stop_worker = fail_worker_once
+        (tmp_path / "pyrightconfig.json").write_text('{"include": ["*.py"]}\n')
+
+        with pytest.raises(WorkspaceRuntimeError) as caught:
+            runtime.ensure_fresh()
+        assert caught.value.code is RuntimeErrorCode.UNSUPPORTED
+        assert original.stop_calls == 1
+        assert runtime.status()["stopped"] is False
+        assert LanguageFamily.PYTHON not in runtime.adapters
+        with pytest.raises(WorkspaceRuntimeError) as route_error:
+            runtime.route("main.py")
+        assert route_error.value.code is RuntimeErrorCode.UNSUPPORTED
+
+        assert runtime.ensure_fresh().dirty is False
+        assert original.stop_calls == 2
+        assert adapters[LanguageFamily.PYTHON] is not original
+        assert runtime.route("main.py") is adapters[LanguageFamily.PYTHON]
+        assert runtime.status()["stopped"] is False
+    finally:
+        runtime.stop()
+
+
 def test_runtime_stop_retries_cleanup_admission_before_publishing_stopped(tmp_path: Path) -> None:
     _git_repository(tmp_path)
     (tmp_path / "main.py").write_text("value = 1\n")
@@ -1477,6 +1554,38 @@ def test_runtime_stop_retries_cleanup_admission_before_publishing_stopped(tmp_pa
     assert runtime.status()["stopping"] is True
     assert attempts == 2
     assert adapter.stop_thread is not None
+
+
+def test_runtime_stop_retries_failed_cleanup_future_before_publishing_stopped(tmp_path: Path) -> None:
+    _git_repository(tmp_path)
+    (tmp_path / "main.py").write_text("value = 1\n")
+    adapters: dict[LanguageFamily, _Adapter] = {}
+    contexts: dict[LanguageFamily, AdapterBuildContext] = {}
+    runtime = _git_runtime(tmp_path, adapters, contexts)
+    runtime.load_document_symbols("main.py")
+    adapter = adapters[LanguageFamily.PYTHON]
+    attempts = 0
+
+    def fail_worker_once() -> None:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise RuntimeError("cleanup worker failed")
+
+    adapter.before_stop_worker = fail_worker_once
+    with pytest.raises(RuntimeError, match="cleanup worker failed"):
+        runtime.stop()
+    assert adapter.stop_calls == 1
+    assert runtime.status()["stopped"] is False
+    assert runtime.status()["stopping"] is True
+    with pytest.raises(WorkspaceRuntimeError) as caught:
+        runtime.route("main.py")
+    assert caught.value.code is RuntimeErrorCode.STOPPED
+
+    runtime.stop()
+    assert adapter.stop_calls == 2
+    assert runtime.status()["stopped"] is True
+    assert runtime.status()["stopping"] is True
 
 
 def test_runtime_stop_settles_pending_restart_once_without_publishing_replacement(tmp_path: Path) -> None:

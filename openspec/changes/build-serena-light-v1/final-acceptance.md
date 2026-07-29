@@ -4,30 +4,27 @@ Date: 2026-07-29 UTC
 
 ## Decision
 
-**DUAL AUDIT HOLD — FINAL REAUDIT PENDING.** The follow-up exact-head audits at
-`7ba6773` both returned HOLD after confirming the prior `8f51d9e` blockers were
-fixed. Sol-xhigh found that an admitted adapter stop did not synchronously seal
-ordinary work, exhausted transport/process loss still escaped the typed service
-boundary, and external acceptance did not content-bind ignored native
-TypeScript authority. Opus-max reproduced a two-family freshness failure in
-which the first delivery exception prevented a later family from invalidating,
-and a default stdio test that borrowed the shared production daemon then made
-holder/child equality assertions invalid under legitimate concurrent clients.
+**DUAL AUDIT HOLD — FINAL REAUDIT PENDING.** Exact-head audits at `6fce244`
+confirmed the prior adapter-admission, multi-family freshness, typed transport,
+root-local TypeScript authority, and hermetic-stdio blockers were closed. They
+then found three remaining release gaps: runtime restart/retirement/shutdown
+owners re-awaited one completed failed adapter-stop future forever; the native
+TypeScript authority still selected ambient `/root/.nvm` Node/npm; and required
+exact-build native Claude Code acceptance was absent. Sol-xhigh also found that
+a partial isolated stdio startup entered cleanup ownership too late.
 
-The current candidate fixes all five findings. Adapter stop seals every
-ordinary submit/worker path before cleanup admission and retries failed cleanup
-without reopening it. Freshness advances all affected family generations,
-publishes their pending ownership, and admits every delivery before surfacing
-the first failure. Cold global LSP failures reach the service boundary, which
-now translates response, protocol, transport-closed, and process-lost failures
-without leaking server text or replaying edits. Missing snapshot opt-in skips
-before touching external roots; the `cc-plugin-codex` profile binds the ignored
-launcher chain and ultimate native `tsc`, and teardown reuses the same profile.
-The clean/poisoned stdio test uses an isolated runtime and two test-owned leases
-and proves that closing one holder preserves the other. V1 remains HOLD until
-fresh current-build clients pass and Sol-xhigh plus Opus-max return PASS against
-one exact committed checkpoint. The canonical MCP registration named `serena`
-remains unchanged.
+The current candidate fixes all four. Restart, retirement, and shutdown owners
+retain the sealed adapter and re-invoke its retryable stop after a terminal
+failed/cancelled future, without publishing stopped or a replacement early.
+Snapshot platform selection and repository-native TypeScript checks use the
+service-owned locked Node and npm-cli with controlled PATH. The first isolated
+stdio holder is registered before startup validation and failure cleanup
+reclaims only the unique build-slot UUID/PID/create-time owner. Fresh
+Codex/Terra, native Claude Code/Sonnet 2.1.220, and CC Agent/Sonnet clients all
+pass the exact candidate build across four roots and perform/restore a guarded
+hash edit in separate test-only fixtures. V1 remains HOLD until Sol-xhigh and
+Opus-max return PASS against one exact committed checkpoint. The canonical MCP
+registration named `serena` remains unchanged.
 
 ### Superseded pre-audit decision
 
@@ -51,30 +48,33 @@ SUPERSEDED — HOLD after static/runtime audits found release-blocking gaps.
 Neither historical entry is a current release decision and neither may be
 used to archive this change.
 
-## Current third-audit repair candidate
+## Current fourth-audit repair candidate
 
 The candidate runtime identity is
-`f46812e239fbf614c3885b50057734a31ddf7fb27d6e39e7239c01742d3e1fda`;
+`3756b3b8da6e1e33b91cb2f7c073b2dd04d74e38850f3dfc221a3d31d60f282f`;
 the dependency digest remains
 `eff6ebdf252faff7f77cb3a2f3894d17b9a0dfc89b46bd193fafdaa9e9ab4941`.
 The following evidence is current, but does not yet constitute release PASS:
 
 ```text
 uv run --frozen pytest -q -p no:cacheprovider tests
-528 passed, 22 skipped, 3 warnings in 163.35s
+533 passed, 22 skipped, 1 warning in 163.49s
 (all 22 skips are explicit external_repo/performance gates without snapshot env)
 
-repair-focused adapter/runtime/service/snapshot/stdio selection
-91 passed, 1 warning in 13.23s
+uv run --frozen pytest -q -p no:cacheprovider \
+  tests/unit/test_workspace_runtime.py tests/unit/test_adapter.py \
+  tests/acceptance/test_external_snapshots.py \
+  tests/acceptance/test_stdio_connector_acceptance.py
+70 passed in 12.76s
 
 snapshot-bound Python real-repository plus real Pyright integration
-7 passed, 1 intentional performance skip in 140.54s
+7 passed, 1 intentional performance skip in 148.70s
 
 snapshot-bound TypeScript acceptance, integration, and admission
-15 passed in 22.57s
+15 passed in 22.15s (service-owned Node 22.22.0 and npm 11.13.0)
 
 transformers first-call performance gate, three fresh runtimes
-3/3 passed in 29.42s, 33.74s, and 33.62s
+3/3 passed in 35.60s, 34.15s, and 34.35s
 
 uv run --frozen ruff check --no-cache src tests scripts
 All checks passed!
@@ -86,7 +86,7 @@ uv run --frozen serena-light-bootstrap --check --json
 PASS (service CPython 3.12.12; dependency digest above)
 
 uv run --frozen serena-light-source-budget --json
-PASS: 14,706 production lines (informational; maximum=null, not gated)
+PASS: 14,715 production lines (informational; maximum=null, not gated)
 
 openspec validate build-serena-light-v1 --strict
 Change 'build-serena-light-v1' is valid
@@ -95,17 +95,17 @@ Change 'build-serena-light-v1' is valid
 The default-suite skips are deliberate evidence isolation, not substituted
 passes. Explicit TypeScript acceptance passed against exact authority-profile
 snapshot
-`git:7caa1823bd246deb0d690c83263bc4d4a80480c9:a74fd2b2c5c975139c0d184413bfdb14f0a6b3f55c34ea7e6c8c74b53ca4fc90`;
+`git:a782af11090b8990fc3717dc2a809a28844ab948:4129f2174f2f7ac8476b9edb87b1d4cab798d00410b464d3b53abd3d6420ff17`;
 the before/after gate content-binds repository-native typecheck authority.
-Serena Light did not freeze or modify that foreign checkout. Fresh Codex/Terra
-and CC/Sonnet clients passed the exact candidate build across all four roots.
-Both resolved a declaration from `ms-swift` into transformers as
-`read_only_external`, edited and restored `greet` in separate isolated Git
-fixtures using successive expected hashes, confirmed empty fixture diffs, and
-released with `runtime_stop_pending=false`; the temporary fixtures were then
-removed. Exact-current-head Sol/Opus audits remain pending. The native Claude
-Code receipt remains historical unless a separate current client is required
-by a later gate.
+Serena Light did not freeze or modify that foreign checkout. Fresh Codex/Terra,
+native Claude Code/Sonnet 2.1.220, and CC Agent/Sonnet clients passed the exact
+candidate build across all four roots. All three resolved a declaration from
+`ms-swift` into transformers as `read_only_external`, edited and restored
+`greet` in separate isolated Git fixtures using successive expected hashes,
+confirmed exact restoration, and released with `runtime_stop_pending=false`;
+the temporary fixtures were then removed. The native run used a new
+non-persistent `claude -p` session with built-in file/shell/edit tools disabled.
+Exact-current-head Sol/Opus audits remain pending.
 
 ## Prior repair checkpoint (superseded by current candidate)
 

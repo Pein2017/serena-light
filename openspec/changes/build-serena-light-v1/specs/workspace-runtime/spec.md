@@ -276,6 +276,10 @@ files served through configured, inferred, or transient engine projects.
 - **THEN** shutdown returns a failure without publishing `stopped`, retains the
   exact cleanup owner, and a later shutdown attempt retries admission
 
+#### Scenario: An admitted cleanup future fails transiently
+- **WHEN** a restart, retirement, or runtime-shutdown owner observes a completed failed or cancelled adapter-stop future
+- **THEN** it retains the sealed adapter, never publishes stopped or a replacement prematurely, and the next bounded cleanup attempt invokes the adapter stop retry rather than awaiting the same failed future forever
+
 #### Scenario: Ordinary work races an admitted adapter stop
 - **WHEN** an ordinary adapter operation was queued before stop or is submitted after stop is requested
 - **THEN** stop seals ordinary admission synchronously, the queued worker rechecks the seal, no provider can start or restart after the request, and a failed cleanup admission/future remains retryable without reopening admission

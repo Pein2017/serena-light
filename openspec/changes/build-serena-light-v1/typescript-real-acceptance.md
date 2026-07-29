@@ -2,7 +2,7 @@
 
 ## Current snapshot-bound candidate status
 
-**PASS: 15 passed in 22.57s.** Candidate build `f46812e239fb...` removes this module
+**PASS: 15 passed in 22.15s.** Candidate build `3756b3b8da6e...` removes this module
 from the deterministic default suite unless
 `SERENA_LIGHT_CC_PLUGIN_CODEX_SNAPSHOT` matches the exact observed Git HEAD,
 tracked binary diff, untracked file/symlink content, and the ignored TypeScript
@@ -12,7 +12,7 @@ mismatch or any mid-test mutation fails; it is never `xfail`.
 
 `/data/CoordExp/cc-plugin-codex` initially changed repeatedly, then remained
 stable at authority-profile snapshot
-`git:7caa1823bd246deb0d690c83263bc4d4a80480c9:a74fd2b2c5c975139c0d184413bfdb14f0a6b3f55c34ea7e6c8c74b53ca4fc90`
+`git:a782af11090b8990fc3717dc2a809a28844ab948:4129f2174f2f7ac8476b9edb87b1d4cab798d00410b464d3b53abd3d6420ff17`
 through six semantic/diagnostic cases, the repository-native TypeScript
 authority check, three real TypeScript integration cases, and six admission
 probe cases. The gate verified the same identity after every test. Historical

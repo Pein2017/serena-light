@@ -9,7 +9,7 @@ service-owned, build-identity-scoped path
 `/data/CoordExp/.codex/runtime/serena-light/deps/eff6ebdf252faff7f77cb3a2f3894d17b9a0dfc89b46bd193fafdaa9e9ab4941/python/bin/serena-light`
 with no arguments — **not** the repository `.venv`. The dependency-digest
 segment (`eff6ebdf...`) and the current repair-candidate build identity
-(`f46812e239fbf614c3885b50057734a31ddf7fb27d6e39e7239c01742d3e1fda`) are tied
+(`3756b3b8da6e1e33b91cb2f7c073b2dd04d74e38850f3dfc221a3d31d60f282f`) are tied
 to a versioned daemon slot. A source/schema-only rollover reuses the dependency
 directory but gets a new build slot; a lock change also installs a new digest
 directory. Old build slots coexist until their holders and grace expire, so
@@ -112,15 +112,18 @@ daemon remains after clients have stopped, use normal process inspection and
 stop only the identified `serena-light` daemon; never stop canonical Serena as
 part of this rollback.
 
-Fresh Codex/Terra and CC/Sonnet clients pass the current candidate identity
-`f46812e239fbf614c3885b50057734a31ddf7fb27d6e39e7239c01742d3e1fda`.
-Both explicitly switched across `/data/CoordExp`, `cc-plugin-codex`,
+Fresh Codex/Terra, native Claude Code/Sonnet 2.1.220, and CC Agent/Sonnet clients
+pass the current candidate identity
+`3756b3b8da6e1e33b91cb2f7c073b2dd04d74e38850f3dfc221a3d31d60f282f`.
+All three explicitly switched across `/data/CoordExp`, `cc-plugin-codex`,
 `/data/ms-swift`, and the read-only conda `ms` transformers package; each
 resolved an `ms-swift` declaration into transformers with
 `location_kind=read_only_external`. Each also used `replace_symbol_body` in a
 separate isolated Git fixture, verified the replacement, restored the original
-body using the new current hash, confirmed an empty Git diff, and released with
-`runtime_stop_pending=false`. The leader then removed both test-only fixtures.
+body using the new current hash, confirmed clean content, and released with
+`runtime_stop_pending=false`. The native run was a new non-persistent `claude
+-p` session with built-in file/shell/edit tools disabled, not a CC Agent. All
+three test-only fixtures were removed after exact restoration.
 
 Historical fresh Codex and CC Agent query receipts match the prior repair identity
 `eaa691e2425e7466f2f9c3d18666a050cfd53e8153de0c6db9a6f50c1538c3f5` across
@@ -135,7 +138,7 @@ had zero capture groups, so `INVALID_INPUT` was correct. The current MCP schema
 now describes every tool and states the one-capture-group contract directly.
 These older receipts remain tied to that prior identity.
 
-The earlier native Claude Code and three-client guarded-edit receipts match
+Earlier native Claude Code and three-client guarded-edit receipts match
 historical post-restoration build identity
 `f4ee8a248a8cd2389b7b2d95083fd0d409548421b4933ac29a138ef0badf8721` and
 remain historical. All model-facing clients retained the ambient external-network
@@ -143,7 +146,6 @@ remain historical. All model-facing clients retained the ambient external-networ
 the real service-executable stdio acceptance, which passes the exact environment
 to the connector child and verifies loopback bypass. The prior exact-build
 real-stdio suite also covers the restored guarded edit; it does not relabel the
-older three-client edits as current. Current-build Codex/CC clients are now
-accepted; the native Claude Code receipt remains historical, and the final dual
-audit remains open.
+older three-client edits as current. Current-build Codex, native Claude Code,
+and CC Agent clients are now accepted; the final dual audit remains open.
 Canonical-name switching is unapproved.

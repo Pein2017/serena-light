@@ -46,18 +46,18 @@ complete fault matrix passes. Then obtain
 independent `sol-xhigh` static-correctness and `opus-max` runtime/evidence
 audits, disposition every finding, mark v1 PASS, sync stable specs, and archive.
 
-**Progress as of 2026-07-29:** follow-up exact-head Sol-xhigh and Opus-max
-audits at `7ba6773` both returned HOLD. Their adapter admission, multi-family
-freshness, complete transport-envelope, external authority, and hermetic-stdio
-findings are implemented in candidate build
-`f46812e239fbf614c3885b50057734a31ddf7fb27d6e39e7239c01742d3e1fda`.
-The deterministic default suite passes 528 tests and explicitly skips 22
-snapshot-gated external tests; fixed-snapshot Python plus real Pyright passes 7
-tests with the separate performance case intentionally skipped, fixed-snapshot
-TypeScript acceptance/integration/admission passes 15, and three fresh
-transformers first-call performance runs pass. Fresh Codex/Terra and CC/Sonnet
-clients also pass the four-root matrix plus isolated hash edit/restore at the
-exact build. Only dual audit and release remain pending.
+**Progress as of 2026-07-29:** exact-head Sol-xhigh and Opus-max audits at
+`6fce244` confirmed the previous five blockers closed, then returned HOLD for a
+runtime owner that cached one failed cleanup future, ambient Node/npm authority,
+and missing exact-build native Claude Code evidence; Sol also identified a
+partial-stdio-startup cleanup gap. Candidate build
+`3756b3b8da6e1e33b91cb2f7c073b2dd04d74e38850f3dfc221a3d31d60f282f`
+repairs those items. The deterministic default suite passes 533 tests and
+explicitly skips 22 snapshot-gated external tests; fixed-snapshot TypeScript
+acceptance/integration/admission passes 15 with locked Node/npm. Fresh
+Codex/Terra, native Claude Code/Sonnet, and CC Agent/Sonnet all pass the
+four-root matrix plus isolated hash edit/restore at the exact build. Only final
+dual re-audit and release remain pending.
 
 Gate: every blocker is cleared and task 15 is complete. Sync/archive and the
 authorized GitHub push occur only after both final audits pass; no canonical

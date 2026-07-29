@@ -527,6 +527,10 @@ ordinary request capacity; a third cleanup obligation is rejected instead of
 silently making the bound elastic. Runtime shutdown reuses already-published
 cleanup futures, does not publish `stopped` until every obligation reaches a
 bounded terminal state, and leaves a failed admission retryable on a later stop.
+It also distinguishes a completed failed/cancelled cleanup future from an
+in-flight or successful one: the owning restart, retirement, or runtime-shutdown
+record retains the adapter and invokes its retryable `stop()` again on the next
+preflight instead of re-awaiting the same terminal failure forever.
 If lease retirement has already detached that runtime from the workspace
 registry, the daemon service retains it in a pending-stop owner set, retries it
 on later sweeps, and keeps the build daemon non-idle until cleanup succeeds.
@@ -666,12 +670,20 @@ platform-package metadata, and ultimate native `tsc` executable. The non-Git
 transformers identity binds package version plus bounded source-tree content.
 Setup and teardown use the same recorded profile. A mismatch, missing opted-in
 root, or any before/after change fails rather than becoming `xfail` or clean.
+Platform selection and repository-native TypeScript checks invoke the
+service-owned locked Node and npm-cli; a controlled PATH puts that Node first
+for the `.bin/tsc` shebang and retains only system shell lookup. Ambient
+`node`, `npm`, `/root/.nvm`, and the model-client proxy are not command
+authorities for this gate.
 
 The clean/poisoned real-stdio acceptance uses a temporary runtime root, derived
 test build variant, and two test-owned concurrent connector leases. Closing the
 first lease must preserve the second holder and its daemon; cleanup targets only
 the exact isolated PID/create-time owner. It never borrows or makes equality
 claims about a production daemon that other clients may legitimately share.
+The first holder enters teardown ownership before initialization/status awaits;
+if partial startup fails, cleanup discovers only the unique test build slot and
+reclaims an exact UUID/PID/create-time daemon identity.
 
 The TypeScript 7 repository-native typecheck remains external, authoritative
 acceptance rather than a default Serena Light correctness dependency. The

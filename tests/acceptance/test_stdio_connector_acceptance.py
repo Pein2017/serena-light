@@ -16,6 +16,7 @@ from contextlib import AsyncExitStack, contextmanager, suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import cast
+from uuid import uuid4
 
 import httpx
 import psutil
@@ -81,6 +82,24 @@ def _read_daemon(runtime_root: Path) -> DiscoveryMetadata | None:
         return None
 
 
+def _discover_test_owned_daemon(
+    runtime_root: Path,
+    build_identity: str,
+    *,
+    expected_daemon_id: str | None = None,
+) -> _DaemonProcess | None:
+    """Recover only a live daemon registered in this isolated test build slot."""
+
+    build_root = prepare_runtime_layout(runtime_root, build_identity).build_root
+    metadata = _read_daemon(build_root)
+    if metadata is None or metadata.build_identity != build_identity:
+        return None
+    if expected_daemon_id is not None and metadata.daemon_id != expected_daemon_id:
+        return None
+    owned = _DaemonProcess(metadata.daemon_id, metadata.pid, metadata.process_start_time)
+    return owned if _is_live(owned) else None
+
+
 def _service_connector_executable() -> Path:
     paths = runtime_paths(REPOSITORY_ROOT)
     executable = paths["python"].parent / "serena-light"
@@ -125,6 +144,42 @@ def _terminate_owned_daemon(owned: _DaemonProcess, descendants: tuple[_DaemonPro
         time.sleep(0.05)
     assert not _is_live(owned), "test-owned daemon did not terminate during teardown"
     assert not any(_is_live(child) for child in descendants), "test-owned daemon left a descendant behind"
+
+
+def test_isolated_build_discovery_reclaims_only_the_exact_daemon_identity(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    runtime_root = (tmp_path / "isolated-runtime").resolve()
+    build_identity = "a" * 64
+    daemon_id = str(uuid4())
+    metadata = DiscoveryMetadata.create(
+        daemon_id=daemon_id,
+        pid=4321,
+        process_start_time=123.0,
+        endpoint="http://127.0.0.1:43123/mcp",
+        protocol_version="1",
+        server_version="test",
+        created_at=124.0,
+        build_identity=build_identity,
+    )
+    expected_root = prepare_runtime_layout(runtime_root, build_identity).build_root
+    observed_roots: list[Path] = []
+
+    def read(root: Path) -> DiscoveryMetadata | None:
+        observed_roots.append(root)
+        return metadata
+
+    monkeypatch.setattr(sys.modules[__name__], "_read_daemon", read)
+    monkeypatch.setattr(sys.modules[__name__], "_is_live", lambda identity: identity.pid == metadata.pid)
+
+    assert _discover_test_owned_daemon(
+        runtime_root,
+        build_identity,
+        expected_daemon_id=daemon_id,
+    ) == _DaemonProcess(daemon_id, metadata.pid, metadata.process_start_time)
+    assert observed_roots == [expected_root]
+    assert _discover_test_owned_daemon(runtime_root, build_identity, expected_daemon_id=str(uuid4())) is None
 
 
 @contextmanager
@@ -312,6 +367,8 @@ def test_real_stdio_connector_contains_proxy_environment_and_releases_to_warm_gr
         clients: list[_HeldStdioClient] = []
         owned: _DaemonProcess | None = None
         descendants: tuple[_DaemonProcess, ...] = ()
+        first_daemon_id: str | None = None
+        build_identity: str | None = None
         try:
             with _proxy_environment(monkeypatch, poisoned=False) as clean_environment:
                 clean_environment.update(
@@ -332,8 +389,11 @@ def test_real_stdio_connector_contains_proxy_environment_and_releases_to_warm_gr
                     expected_workspace_root=REPOSITORY_ROOT,
                     expected_build_identity=build_identity,
                 )
+                # Startup includes initialization and status validation.  Register the
+                # holder before awaiting it so a detached daemon remains in teardown
+                # ownership if either validation step fails.
+                clients.append(first)
                 first_daemon_id = await first.start()
-            clients.append(first)
             metadata = _read_daemon(build_root)
             assert metadata is not None and metadata.daemon_id == first_daemon_id
             owned = _DaemonProcess(metadata.daemon_id, metadata.pid, metadata.process_start_time)
@@ -371,8 +431,17 @@ def test_real_stdio_connector_contains_proxy_environment_and_releases_to_warm_gr
             for client in reversed(clients):
                 with suppress(BaseException):
                     await client.aclose()
+            if owned is None and build_identity is not None:
+                # This root is a tmp_path-owned acceptance slot, never the canonical
+                # runtime.  Discovery must still match its build identity and, once
+                # available, the daemon UUID before its PID/create-time is reclaimed.
+                owned = _discover_test_owned_daemon(
+                    runtime_root,
+                    build_identity,
+                    expected_daemon_id=first_daemon_id,
+                )
             if owned is not None:
-                _terminate_owned_daemon(owned, descendants)
+                _terminate_owned_daemon(owned, descendants or _descendants(owned))
 
     asyncio.run(scenario())
 

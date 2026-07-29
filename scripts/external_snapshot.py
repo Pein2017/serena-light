@@ -11,6 +11,8 @@ from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
+from serena_light.bootstrap import repository_root, runtime_paths
+
 DEFAULT_SNAPSHOT_PROFILE = "default"
 CC_PLUGIN_CODEX_TYPESCRIPT_AUTHORITY_PROFILE = "cc-plugin-codex-typescript-authority-v1"
 
@@ -94,8 +96,11 @@ def _profile_authority_paths(root: Path, profile: str) -> tuple[Path, ...]:
 
 
 def _node_platform_architecture(root: Path) -> str:
+    """Read the platform from Serena Light's locked Node, never an ambient engine."""
+
+    locked_node = runtime_paths(repository_root())["node"]
     result = subprocess.run(
-        ["node", "--eval", "process.stdout.write(`${process.platform}-${process.arch}`)"],
+        [str(locked_node), "--eval", "process.stdout.write(`${process.platform}-${process.arch}`)"],
         cwd=root,
         check=False,
         capture_output=True,

@@ -487,6 +487,12 @@ class _PendingAdapterRetirement:
     stop_future: Future[AdapterSnapshot] | None
 
 
+def _stop_future_needs_retry(future: Future[AdapterSnapshot]) -> bool:
+    """Return whether one terminal cleanup attempt failed without consuming ownership."""
+
+    return future.done() and (future.cancelled() or future.exception() is not None)
+
+
 @dataclass(slots=True)
 class _PendingWatchedReconcile:
     """One watcher batch that must settle before unchanged facts can authorize work."""
@@ -1218,13 +1224,16 @@ class WorkspaceRuntime:
         self,
         pending: _PendingAdapterRetirement,
     ) -> tuple[_PendingAdapterRetirement | None, WorkspaceRuntimeError | None]:
-        """Submit one unavailable adapter stop exactly once under lifecycle lock."""
+        """Submit or retry one unavailable adapter stop under lifecycle lock."""
 
         with self._state_lock:
             current = self._pending_retirements.get(pending.family)
             if current is None:
                 return None, None
             if current is not pending:
+                return current, None
+            stop_future = pending.stop_future
+            if stop_future is not None and not _stop_future_needs_retry(stop_future):
                 return current, None
             stop_adapter = pending.stop_adapter
             if stop_adapter is None:
@@ -1236,7 +1245,7 @@ class WorkspaceRuntime:
                     RuntimeErrorCode.UNSUPPORTED,
                     f"{pending.family.value} adapter stop failed ({type(error).__name__})",
                 )
-            replacement = _PendingAdapterRetirement(pending.family, None, stop_future)
+            replacement = _PendingAdapterRetirement(pending.family, stop_adapter, stop_future)
             self._pending_retirements[pending.family] = replacement
             return replacement, None
 
@@ -1268,13 +1277,16 @@ class WorkspaceRuntime:
         self,
         pending: _PendingAdapterRestart,
     ) -> tuple[_PendingAdapterRestart | None, WorkspaceRuntimeError | None]:
-        """Submit one pending old-adapter stop exactly once under lifecycle lock."""
+        """Submit or retry one pending old-adapter stop under lifecycle lock."""
 
         with self._state_lock:
             current = self._pending_restarts.get(pending.family)
             if current is None:
                 return None, None
             if current is not pending:
+                return current, None
+            stop_future = pending.stop_future
+            if stop_future is not None and not _stop_future_needs_retry(stop_future):
                 return current, None
             stop_adapter = pending.stop_adapter
             if stop_adapter is None:
@@ -1293,7 +1305,7 @@ class WorkspaceRuntime:
                 pending.projection,
                 pending.tracker,
                 pending.trusted_paths,
-                None,
+                stop_adapter,
                 stop_future,
             )
             self._pending_restarts[pending.family] = replacement
@@ -2179,7 +2191,7 @@ class WorkspaceRuntime:
                 adapter_key = id(adapter)
                 with self._state_lock:
                     future = self._shutdown_futures.get(adapter_key)
-                if future is None:
+                if future is None or _stop_future_needs_retry(future):
                     try:
                         future = adapter.stop()
                     except BaseException as error:
