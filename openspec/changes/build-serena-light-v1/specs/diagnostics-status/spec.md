@@ -8,6 +8,9 @@ counts and digests, bounded file-level projection evidence, scope differences
 and reasons, incompatible extras, capability matrix, current trust/program/
 document/index generations, selected position encoding, executor queue state,
 last crash, and cooldown without exposing authentication secrets.
+Projection difference lists SHALL return at most 50 entries and include total,
+digest, and omitted count. Adapter transition history SHALL contain at most 64
+entries.
 
 #### Scenario: Python workspace is warming
 - **WHEN** Pyright has document readiness but has not completed its global sentinel
@@ -108,6 +111,9 @@ selected `ms` interpreter path used for import resolution.
 The system SHALL emit concise operational errors to stderr and SHALL keep only
 bounded rotating debug logs under the shared runtime root. It MUST NOT provide
 a dashboard, GUI log window, call audit, telemetry, or memory log.
+Logs SHALL be limited to build/daemon startup and takeover, adapter
+crash/cooldown, lease/grace, and cleanup summaries. Tool arguments, source text,
+bearer values, and secrets SHALL never be logged.
 
 #### Scenario: Adapter crashes repeatedly
 - **WHEN** an adapter enters cooldown

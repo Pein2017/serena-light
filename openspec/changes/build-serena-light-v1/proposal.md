@@ -1,5 +1,11 @@
 ## Why
 
+> Revision status (2026-07-29): the earlier parallel-registration acceptance is
+> superseded by correctness and lifecycle findings recorded after the first v1
+> audit. This change remains the sole repair owner and is **HOLD** until the
+> repair and reacceptance tasks appended to `tasks.md` pass. The historical
+> acceptance evidence is retained, but it is not a current release decision.
+
 The current Serena setup provides valuable semantic navigation, but its global
 active-project model, per-session language-server ownership, broad feature
 surface, and `/root`-owned runtime dependencies create avoidable friction across
@@ -56,6 +62,17 @@ scope-admission gate before Section 2 begins.
 - Run `serena-light` in parallel with the existing `serena` MCP during
   acceptance. Switching the canonical MCP name is a later, separately approved
   integration action.
+- Temporarily withhold `replace_symbol_body` from newly negotiated agent tool
+  lists while preserving a typed `UNSUPPORTED` response for stale clients;
+  restore advertisement only after the guarded-edit fault matrix passes.
+- Make every loopback connector, health, and acceptance call explicitly bypass
+  ambient proxies while allowing dependency bootstrap downloads to use the
+  caller's external-network proxy.
+- Reconcile filesystem freshness synchronously before semantic and edit calls,
+  preserve healthy language families when another family is scope-incompatible,
+  and bound status evidence and adapter transition history.
+- Key shared daemons by a reproducible build identity so source, dependency
+  lock, or public schema changes create a new coexistence-safe runtime slot.
 
 ### Non-goals
 
@@ -102,8 +119,9 @@ None. This is the first change in a new repository.
 - Requires explicit disclosure that TypeScript LSP diagnostics are advisory:
   the probe found three TS 5.9 errors in `runtime/args.mjs` while the owning
   repository's TS 7 typecheck passed. Repository-native CI remains authoritative.
-- Stops the fork before rollout if production code exceeds 12k lines, requires
-  Serena's agent/modes/project-server architecture, cannot prevent orphan
+- Reports production LOC as audit information without a fixed numeric stop
+  threshold. The fork still stops if it requires Serena's
+  agent/modes/project-server architecture, cannot prevent orphan
   language servers, cannot distinguish trust inventory from native semantic
   program scope, or cannot distinguish cold/unsupported states from empty
   results.

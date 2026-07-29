@@ -16,9 +16,10 @@ language registry are not part of the dependency closure.
 The admission probe established the following constraints:
 
 - The unpruned candidate closure is about 19.4k lines. Replacing generated LSP
-  types with a pinned protocol library and deleting unused paths yields an
-  estimated 7–9k production lines. Production code above 12k lines is a stop
-  condition.
+  types with a pinned protocol library and deleting unused paths yielded a
+  compact owned implementation. Production LOC remains reported for review but
+  is not a fixed numeric stop condition; ownership, dependency, provenance, and
+  excluded-subsystem checks remain hard gates.
 - Five clean Pyright starts on the 2,219-file transformers package all found
   `Qwen2VLForConditionalGeneration`. `publishDiagnostics` arrived in roughly
   12.4–13.4 seconds, but the first `workspace/symbol` request required another
@@ -461,6 +462,119 @@ Logging is limited to concise stderr messages and bounded rotating debug files
 under the shared runtime root. V1 has no dashboard, call audit, telemetry, or
 memory log.
 
+### 13. Repair containment and proxy ownership
+
+Until reacceptance, new MCP negotiations omit `replace_symbol_body`. A stale
+client that invokes the old declaration receives `UNSUPPORTED` with reason
+`temporarily_disabled_pending_reacceptance`; the implementation remains covered
+by tests and is not deleted.
+
+Ambient proxy variables are owned only by external-network callers. Bootstrap
+may inherit them for Python/Node/npm downloads. Connector-to-loopback HTTP,
+daemon health probes, and local acceptance/fault HTTP use clients configured not
+to consult environment proxies. Daemon and LSP child environments remove every
+case variant of `*_PROXY`; global proxy and `NO_PROXY` configuration are not
+mutated. Every `DaemonProcess.start` failure path closes the child or driver
+created by that attempt.
+
+### 14. Synchronous freshness and lexical edit authorization
+
+A workspace-owned `FreshnessCoordinator` runs before each semantic or edit
+operation and when the same root is activated again. Concurrent callers share
+one in-flight scan; there is no time cache that can authorize stale success.
+Git workspaces rebuild the lexical trust inventory and compare create, change,
+delete, symlink, and native-config state. Content changes advance document/path
+generations; membership or config changes also reattribute the affected
+language family and advance trust/program/index generations. Running adapters
+receive `didChangeWatchedFiles`; newly created files receive a bounded
+open/close notification when required. The allowlisted read-only transformers
+root continues targeted-stat checks and is never fully walked per call.
+
+Edit membership is checked against the lexical inventory rather than a
+dynamically resolved set. Under the workspace lock, the writer walks every path
+component using directory file descriptors, `lstat`, and `O_NOFOLLOW` before
+opening or replacing the file. Replacing an inventoried path with any symlink,
+including an in-root link to an ignored file, fails closed.
+
+Executor edits expose `queued`, `running`, `installed`, and `done` commit states.
+A queued entry that is successfully cancelled returns `TIMED_OUT` and can never
+write later. Once work starts, or when state cannot be proven, timeout or lost
+response returns `UNCERTAIN` and prohibits replay. Any fsync, notification, or
+transport failure after `os.replace` is `UNCERTAIN` and includes the current hash
+when it can be read safely.
+
+### 15. Semantic contract is enforced at one service boundary
+
+The runtime/service boundary is the sole exception-to-envelope conversion
+owner. It catches `TimeoutError` before `OSError` and preserves `BUSY`,
+`COOLDOWN`, `TIMED_OUT`, `SCOPE_INCOMPATIBLE`, and `UNCERTAIN` without generic
+rewriting.
+
+Each adapter opens a URI at most once, sends `didChange` for subsequent content
+versions, and sends `didClose` on stop or least-recently-used eviction. The open
+document set is capped at 128 per adapter. Global symbol candidates are verified
+against one exact document snapshot and every returned range uses the shared
+`PositionMapper` for source, decoded-text, and byte positions.
+
+`find_symbol` supports an inventory-bounded directory scope. Global
+`include_body` and `include_info` are populated only from verified candidate
+documents. Unsupported parameter combinations return typed failure rather than
+being ignored. Scope attribution and readiness are independent per language
+family: an incompatible family remains visible as `SCOPE_INCOMPATIBLE` while a
+healthy family continues to serve calls, and a workspace may bind even when no
+family is currently ready so status and refresh remain available.
+
+Status projection differences contain at most 50 path entries plus total,
+digest, and omitted count. Adapter transitions use `deque(maxlen=64)`. The
+existing `DebugLogger` records only build/daemon startup and takeover, adapter
+crash/cooldown, lease/grace, and cleanup summaries; it never records tool
+payloads, source text, bearer material, or other secrets.
+
+### 16. Reproducible build identity and versioned daemon slots
+
+The service build identity is:
+
+```text
+sha256(sorted runtime source path+bytes
+       + dependency lock digest
+       + public tool/schema version
+       + build-identity algorithm version)
+```
+
+The shared runtime layout is:
+
+```text
+/data/CoordExp/.codex/runtime/serena-light/
+  python/
+  deps/<lock_digest>/
+  builds/<build_identity>/
+    daemon.json
+    bearer
+    start.lock
+    startup-nonce
+    logs/
+```
+
+The connector attaches only to an exact build slot. Source, lock, schema, or
+algorithm changes start a new daemon without killing older builds that retain
+leases. The daemon recomputes and verifies identity before publishing discovery.
+Under the slot startup lock, the connector creates a one-use nonce; the daemon
+must validate and consume it before discovery becomes visible. There is no
+ordinary public daemon-start surface that bypasses this handshake.
+
+Service Python is installed at
+`/data/CoordExp/.codex/runtime/serena-light/python`; daemon and service-venv
+executables must not resolve through `/root/.local/share/uv`. Daemon and LSP
+children use a service-owned HOME, locked executables, and a minimal environment
+allowlist. Bootstrap itself may retain external proxy variables.
+
+When a build has no leases and every workspace warm grace has ended, its daemon
+exits. If discovery already names a successor daemon for the same build, the
+old process waits for zero holders and never deletes successor metadata. Legacy
+v1 root migration reads holder state and terminates only a zero-holder daemon
+whose PID and create time still match; canonical Serena is never considered a
+cleanup target.
+
 ### 12. Result envelopes are stable and typed
 
 Every tool returns JSON with a stable top-level `ok` boolean. Successful results
@@ -490,7 +604,7 @@ paths outside the allowed operational set.
   report the engine, keep native typecheck authoritative, and include the known
   divergence as an acceptance fixture.
 - **A copied LSP core creates local maintenance ownership** → Keep a provenance
-  manifest, cap production code at 12k lines, copy no unused languages, and
+  manifest, report production LOC, copy no unused languages, and
   treat future Serena features as new design inputs rather than sync work.
 - **Native configuration can omit trusted sources or include ignored generated
   sources** → Report both projections and their reasons, retain path-scoped

@@ -7,7 +7,14 @@ actions, or other editing tools in v1.
 
 #### Scenario: Client enumerates tools
 - **WHEN** an MCP client lists serena-light tools
-- **THEN** `replace_symbol_body` is present and excluded editing operations are absent
+- **THEN** `replace_symbol_body` is absent while repair acceptance is HOLD and is
+  restored only after the guarded-edit reacceptance gate; excluded editing
+  operations remain absent
+
+#### Scenario: Stale client invokes the withheld tool
+- **WHEN** a client negotiated the old declaration before repair containment
+- **THEN** the call returns `UNSUPPORTED` with reason
+  `temporarily_disabled_pending_reacceptance` and writes nothing
 
 ### Requirement: Editing requires an authorized Git workspace
 Before resolving or writing content, `replace_symbol_body` SHALL verify that the
@@ -16,6 +23,10 @@ symlink escape, is present in the current Git trust inventory, and is not a
 read-only external root. Edit authorization SHALL NOT depend on membership in
 the native configured semantic program; if the engine cannot safely resolve a
 trusted target path, the edit SHALL fail before writing.
+Authorization SHALL use lexical inventory membership and SHALL walk the target
+under the workspace lock with directory file descriptors, `lstat`, and
+`O_NOFOLLOW`; it MUST NOT authorize an inventory path through its later symlink
+resolution.
 
 #### Scenario: Target is in the bound source repository
 - **WHEN** the resolved file is inside the active editable Git workspace
@@ -28,6 +39,12 @@ trusted target path, the edit SHALL fail before writing.
 #### Scenario: Target belongs to another bound workspace
 - **WHEN** a session bound to workspace A submits a relative path that resolves only in workspace B
 - **THEN** the edit is rejected as outside the active edit root
+
+#### Scenario: Tracked path is substituted by an in-root symlink
+- **WHEN** an inventoried source path is replaced after activation by a symlink
+  to an ignored file under the same Git root
+- **THEN** editing fails before opening a temporary file and the ignored target
+  remains unchanged
 
 ### Requirement: Editing requires one current symbol and expected hash
 The tool SHALL re-resolve exactly one symbol under the workspace lock, SHALL
@@ -87,6 +104,12 @@ The connector and daemon MUST NOT retry `replace_symbol_body` after a language
 server crash, daemon identity change, HTTP or MCP session loss, timeout, or
 uncertain response. Generic HTTP retry and resumability middleware MUST be
 disabled for editing calls.
+
+Executor state SHALL distinguish `queued`, `running`, `installed`, and `done`.
+A proven cancellation while queued returns `TIMED_OUT`; a timeout after start or
+with unknown state returns `UNCERTAIN`. Every failure after `os.replace`,
+including fsync, notification, or response loss, is `UNCERTAIN` and reports the
+current hash when safely observable.
 
 #### Scenario: Adapter fails after file replacement
 - **WHEN** the file was atomically replaced but adapter notification fails while a response can still be returned

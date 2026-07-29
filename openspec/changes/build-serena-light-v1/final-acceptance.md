@@ -4,10 +4,19 @@ Date: 2026-07-28 UTC
 
 ## Decision
 
-**PASS for the parallel `serena-light` registration.** All implementation,
-real-repository, fault, resource, provenance, and fresh-client gates pass. The
-canonical MCP registration named `serena` remains unchanged; switching that
-name is a separate compatibility decision requiring explicit user approval.
+**SUPERSEDED — HOLD (2026-07-29).** The PASS below is retained as historical v1
+evidence, but subsequent static and runtime audits found release-blocking gaps
+in freshness wiring, lexical edit authorization, edit timeout/commit-state
+semantics, loopback proxy isolation, document lifecycle, typed error mapping,
+per-family scope isolation, provenance enforcement, and daemon build ownership.
+`replace_symbol_body` remains withheld from new tool negotiations until the
+repair and reacceptance tasks pass. The canonical MCP registration named
+`serena` remains unchanged.
+
+### Historical decision (2026-07-28)
+
+The original decision was PASS for parallel `serena-light` registration. It is
+not a current release decision and MUST NOT be used to archive this change.
 
 ## Reproducible gates
 
@@ -80,8 +89,9 @@ modified by fixture cleanup.
   `SCOPE_INCOMPATIBLE` and preserves the previous binding. A fixture-owned
   `pyrightconfig.json` proves the supported explicit boundary; no automatic
   overlay is generated.
-- The 12,000-line stop gate has 343 nonblank production lines of headroom, so
-  future features need deletion or an explicit budget decision.
+- Production LOC is now informational; ownership, forbidden imports, direct
+  dependencies, census/manifest consistency, copied hashes, and the pinned
+  Serena commit remain hard gates.
 - TypeScript LSP diagnostics remain advisory when the repository uses a newer
   TypeScript than the pinned semantic engine; native typecheck remains the
   declared authority.

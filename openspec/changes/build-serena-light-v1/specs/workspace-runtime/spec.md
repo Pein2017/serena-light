@@ -8,6 +8,10 @@ MUST be owned below `/data/CoordExp/.codex/runtime/serena-light` and MUST NOT
 depend on `/root` configuration. The runtime directory SHALL be mode `0700`,
 secret-bearing files SHALL be atomically created at mode `0600`, and startup
 SHALL reject symlinked runtime paths.
+Connector and health-check loopback clients SHALL ignore ambient proxy
+configuration, and daemon/LSP subprocess environments SHALL remove all
+case-variants of proxy variables. Dependency bootstrap MAY inherit the ambient
+proxy for external downloads and SHALL NOT mutate global proxy configuration.
 
 #### Scenario: Two clients connect to the existing daemon
 - **WHEN** a second client starts while a healthy daemon is already running
@@ -20,6 +24,11 @@ SHALL reject symlinked runtime paths.
 #### Scenario: Unauthenticated local process connects
 - **WHEN** a local process calls the HTTP endpoint without the runtime bearer secret
 - **THEN** the daemon rejects the request before workspace or language-server work begins
+
+#### Scenario: Loopback proxy environment is poisoned
+- **WHEN** ambient HTTP proxy variables point at an unusable proxy
+- **THEN** connector, daemon health, and local acceptance traffic still reach
+  loopback directly while external bootstrap remains independently configurable
 
 ### Requirement: Workspace binding is session-scoped
 The system SHALL keep the active workspace binding on the daemon-issued
@@ -104,6 +113,14 @@ other roots SHALL remain responsive. Queue saturation SHALL return `BUSY`.
 #### Scenario: Queued request is cancelled
 - **WHEN** a client cancels work before its bounded executor entry starts
 - **THEN** the entry is removed without mutating adapter state or retaining the workspace lock
+
+#### Scenario: Queued edit reaches its timeout
+- **WHEN** an edit is proven not to have started and is cancelled in the queue
+- **THEN** it returns `TIMED_OUT` and can never execute later
+
+#### Scenario: Running edit reaches its timeout
+- **WHEN** an edit has started or its commit state cannot be proven
+- **THEN** it returns `UNCERTAIN`, is not replayed, and requires a fresh hash read
 
 ### Requirement: Query and edit roots obey a fixed trust policy
 The system SHALL accept path operands only from the active workspace inventory.
@@ -203,6 +220,52 @@ files served through configured, inferred, or transient engine projects.
 #### Scenario: Omitted trusted file changes
 - **WHEN** a trusted file outside the configured program changes without changing native program membership
 - **THEN** its path-scoped document generation is invalidated without falsely invalidating or expanding configured-program global readiness
+
+#### Scenario: Concurrent calls observe external change
+- **WHEN** multiple semantic calls arrive after one external filesystem change
+- **THEN** they share one synchronous in-flight freshness scan and none may
+  return success using a stale time-cache entry
+
+#### Scenario: Same root is activated again
+- **WHEN** a bound session activates another path in the same Git root
+- **THEN** the runtime performs an immediate refresh before returning reuse
+
+### Requirement: Build identity isolates daemon generations
+The connector and daemon SHALL compute the same build identity from sorted
+runtime source path and bytes, dependency lock digest, public tool/schema
+version, and build-identity algorithm version. Discovery, bearer, startup lock,
+nonce, and logs SHALL live under `builds/<build_identity>`. A connector SHALL
+attach only to an exact identity match.
+
+#### Scenario: Runtime source changes while an old client holds a lease
+- **WHEN** a new connector computes a different build identity
+- **THEN** it starts or joins the new build daemon and does not kill or reuse the
+  leased old-build daemon
+
+#### Scenario: Source changes during startup
+- **WHEN** daemon recomputation differs from the identity selected by its connector
+- **THEN** startup fails before publishing discovery
+
+#### Scenario: Daemon is started without connector authorization
+- **WHEN** no valid one-time startup nonce exists in the locked build slot
+- **THEN** the daemon refuses to publish discovery
+
+#### Scenario: Last build lease and warm grace end
+- **WHEN** no holder or warm workspace remains for a build
+- **THEN** that build daemon exits without deleting discovery owned by a successor
+
+### Requirement: Runtime executables are service-owned
+The service SHALL install its pinned CPython below
+`/data/CoordExp/.codex/runtime/serena-light/python`, materialize dependencies by
+lock digest, and launch daemon and LSP children with locked executable paths, a
+service-owned HOME, and a minimal environment allowlist. Daemon and service
+venv executables MUST NOT resolve below `/root/.local/share/uv`.
+
+#### Scenario: Service runtime is inspected after bootstrap
+- **WHEN** the connector reports its Python, daemon, and language-server launch environment
+- **THEN** Python is owned below the shared Serena Light runtime, HOME is
+  service-owned, executable paths are locked, and no child proxy variable or
+  `/root/.local/share/uv` executable is present
 
 ### Requirement: Leases bound runtime lifetime
 Each connector SHALL renew a daemon-issued lease every 15 seconds. A lease SHALL

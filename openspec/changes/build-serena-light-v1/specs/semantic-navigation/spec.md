@@ -5,6 +5,9 @@ The system SHALL expose `get_symbols_overview`, `find_symbol`,
 `find_referencing_symbols`, `find_declaration`, and `find_implementations` with
 stable JSON success and error envelopes. Results SHALL include workspace,
 adapter, and generation metadata.
+Every global and document result range SHALL be derived from the exact verified
+document snapshot through the shared `PositionMapper`, with consistent LSP,
+decoded-text, and byte semantics.
 
 #### Scenario: Navigation succeeds
 - **WHEN** a supported semantic query completes
@@ -33,6 +36,10 @@ SHALL reject an ambiguous single-symbol operation. A trusted file omitted by
 native project configuration MAY be served path-scoped only when the adapter's
 engine owns an inferred or transient project for that file; this MUST NOT imply
 configured-program global readiness.
+Directory scope SHALL be bounded by the current lexical inventory. Global
+`include_body` and `include_info` SHALL be populated only from candidate
+documents revalidated in the same snapshot; unsupported parameter combinations
+SHALL return a typed failure and MUST NOT be silently ignored.
 
 #### Scenario: Function body is requested
 - **WHEN** `find_symbol` selects one exact function with `include_body=true`
@@ -140,6 +147,9 @@ When a global workspace query covers both supported language families, the
 system SHALL fan out to the required ready adapters, merge bounded results, and
 retain adapter/language identity. It MUST NOT infer references, declarations,
 or implementations across adapter boundaries.
+Scope compatibility SHALL be tracked per language family. An incompatible
+family SHALL return `SCOPE_INCOMPATIBLE` for its operations without preventing a
+healthy family in the same workspace from serving its operations.
 
 #### Scenario: Python and TypeScript define the same name
 - **WHEN** both adapters return an exact global symbol with the same name
