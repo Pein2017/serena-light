@@ -14,7 +14,7 @@ mismatch or any mid-test mutation fails; it is never `xfail`.
 `/data/CoordExp/cc-plugin-codex` initially changed repeatedly, then remained
 stable at authority-profile snapshot
 `git:a782af11090b8990fc3717dc2a809a28844ab948:4129f2174f2f7ac8476b9edb87b1d4cab798d00410b464d3b53abd3d6420ff17`
-through six semantic/diagnostic cases, the repository-native TypeScript
+through five semantic/diagnostic cases, the repository-native TypeScript
 authority check, three real TypeScript integration cases, six TypeScript
 admission probe cases, and eight additional admission cases. The strict
 TypeScript subset is 15; the gate verified the same identity after every test. Historical

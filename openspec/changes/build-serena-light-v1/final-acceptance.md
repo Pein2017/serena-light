@@ -42,8 +42,8 @@ collapsed distinct evidence layers: some checks were unit/in-process, some used
 a real connector with deterministic LSP, some used a real daemon fault driver,
 and real-repository LSP tests did not use the daemon/connector. Agent-public
 `replace_symbol_body` had been restored after the reported fault matrix and a
-poisoned-proxy stdio hash edit/release. This is
-**not** v1 PASS and is superseded by the HOLD above.
+poisoned-proxy stdio hash edit/release. This historical report is
+**not** the current v1 PASS and is superseded by the current decision above.
 
 ### Historical decisions
 
@@ -397,5 +397,5 @@ deliberately dropped UI, memory, mode, JetBrains, broad file-edit, and project
 server surfaces do not block parallel use; they block only an unreviewed claim
 of full Serena compatibility or a canonical-name switch.
 `replace_symbol_body` is marked `agent_public` there after the post-restoration
-full suite and fresh-client hash-edit receipts. The final audit HOLD blocks v1
-PASS/archive, not current use of the reaccepted guarded-edit contract.
+full suite and fresh-client hash-edit receipts. The final dual-audit PASS
+authorizes v1 sync/archive and retains the reaccepted guarded-edit contract.

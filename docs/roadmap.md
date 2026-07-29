@@ -31,8 +31,8 @@ currently combines the production connector executable with the shared daemon.
 No canonical-name change is permitted. The current candidate also reconciles
 changed open documents before generation success, retains and reports failed
 runtime-stop ownership, translates LSP failures at the service boundary, and
-snapshot-isolates mutable external acceptance. Only final current-build client
-acceptance, independent reaudit, and release are still open. See
+snapshot-isolates mutable external acceptance. Current-build client acceptance
+and independent reaudit are complete; only sync/archive and release are open. See
 [the final acceptance record](../openspec/changes/build-serena-light-v1/final-acceptance.md).
 
 ## Phase B: reaccept and release v1
@@ -66,9 +66,9 @@ Agent/Sonnet pass this exact build across all four roots plus isolated guarded
 edit/restore. Sol-xhigh and Opus-max both returned PASS on exact clean commit
 `c2dffca`; only the mechanical sync/archive and authorized push remain pending.
 
-Gate: every blocker is cleared and task 15 is complete. Sync/archive and the
-authorized GitHub push occur only after both final audits pass; no canonical
-Serena switch is part of this roadmap.
+Gate: every blocker is cleared and tasks 15.1–15.8 are complete. Task 15.9 owns
+the remaining sync/archive step; the authorized GitHub push follows it. No
+canonical Serena switch is part of this roadmap.
 
 ## Phase C: agent-facing position queries
 
