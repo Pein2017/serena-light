@@ -43,7 +43,7 @@ Canonical `serena` remains unchanged pending a separate user decision.
 **Current state: `DUAL AUDIT HOLD — FINAL REAUDIT PENDING`.** Exact-head audits
 of `8f51d9e` found stale already-open document reconciliation, failed runtime
 stop ownership, untyped LSP failures, and mutable external acceptance evidence.
-The current candidate repairs those findings, adds truthful pending-stop status
+Local repair commit `625187c` repairs those findings, adds truthful pending-stop status
 and agent-facing tool/schema descriptions, and snapshot-gates external roots.
 Exact-current-head Sol-xhigh and Opus-max PASS verdicts are still required.
 Agent-public

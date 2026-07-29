@@ -15,7 +15,7 @@ transformers state. Both reviews identified inaccurate declaration-client
 evidence: five CC calls, not four, all correctly rejected because their regexes
 had zero capture groups.
 
-The current repair candidate fixes those findings and their adjacent
+Repair commit `625187c` fixes those findings and their adjacent
 agent-usability gaps. Open changed documents receive full-text `didChange` (or
 `didClose`) and watcher futures are retained, settled, and retried before stale
 facts can authorize success. Failed runtime stops remain owned, periodic sweeps
@@ -52,7 +52,7 @@ SUPERSEDED — HOLD after static/runtime audits found release-blocking gaps.
 Neither historical entry is a current release decision and neither may be
 used to archive this change.
 
-## Current second-audit repair candidate
+## Current second-audit repair checkpoint (`625187c`)
 
 The candidate runtime identity is
 `c85f2b4fac40069593d42b0631a0626b8a5330b732414065f0cfeb801506d34a`;

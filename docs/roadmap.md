@@ -49,7 +49,7 @@ audits, disposition every finding, mark v1 PASS, sync stable specs, and archive.
 **Progress as of 2026-07-29:** exact-head Sol-xhigh and Opus-max audits at
 `8f51d9e` both returned HOLD. Their open-document freshness, runtime-stop,
 typed-LSP-boundary, declaration-evidence, and mutable-acceptance findings are
-implemented in candidate build
+implemented at local repair commit `625187c` in build
 `c85f2b4fac40069593d42b0631a0626b8a5330b732414065f0cfeb801506d34a`.
 The deterministic default suite passes 515 tests and explicitly skips 22
 snapshot-gated external tests; fixed-snapshot Python real-repository acceptance
