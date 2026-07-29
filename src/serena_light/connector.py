@@ -55,7 +55,7 @@ CONTROL_PLANE_TOOLS = frozenset(
 ACTIVATE_WORKSPACE_TOOL = "activate_workspace"
 RELEASE_WORKSPACE_TOOL = "release_workspace"
 EDIT_TOOLS = frozenset({"replace_symbol_body"})
-WITHHELD_TOOLS = frozenset()
+WITHHELD_TOOLS = frozenset({"replace_symbol_body"})
 READ_ONLY_TOOLS = frozenset(
     {
         "get_runtime_status",

@@ -104,8 +104,6 @@ part of this rollback.
 
 Fresh-session tool, cwd, navigation, diagnostics, warm-daemon reuse across
 versioned build slots, and cleanup acceptance pass for Codex, Claude Code, and
-CC Agent as of 2026-07-29. `replace_symbol_body` is agent-public again after
-the full fault matrix and a poisoned-proxy real stdio hash edit/release passed.
-Clients that negotiated tools while containment was active must be restarted
-before the restored tool appears. Canonical-name switching remains separately
-unapproved.
+CC Agent as of 2026-07-29, but the final dual audit subsequently returned HOLD.
+`replace_symbol_body` is withheld again for new clients pending repair and full
+reacceptance. Canonical-name switching remains separately unapproved.

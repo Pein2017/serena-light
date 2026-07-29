@@ -190,7 +190,7 @@ async def _run_fresh_stdio_client(
         listed = await client.list_tools()
         tool_names = {tool.name for tool in listed.tools}
         assert "get_runtime_status" in tool_names
-        assert "replace_symbol_body" in tool_names
+        assert "replace_symbol_body" not in tool_names
 
         status = _data(await client.call_tool("get_runtime_status"))
         assert status["build_identity"] == compute_build_identity(REPOSITORY_ROOT)
@@ -248,7 +248,7 @@ def test_real_stdio_connector_contains_proxy_environment_edits_and_releases_to_w
                     _run_fresh_stdio_client(
                         edit_workspace if poisoned else REPOSITORY_ROOT,
                         release_workspace=poisoned,
-                        edit_source=edit_source if poisoned else None,
+                        edit_source=None,
                     )
                 )
             daemon_ids.append(daemon_id)

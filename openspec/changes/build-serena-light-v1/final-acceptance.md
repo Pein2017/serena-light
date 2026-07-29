@@ -4,8 +4,19 @@ Date: 2026-07-29 UTC
 
 ## Decision
 
-**REPAIR AND EDIT REACCEPTANCE PASSED — DUAL AUDITS PENDING.** Tasks 11-14 and
-15.1-15.7 are green: containment, freshness,
+**DUAL AUDIT HOLD — REPAIR IN PROGRESS.** Sol-xhigh and Opus-max completed the
+required independent review at commit `6a3acb6` and both returned HOLD. Their
+accepted P1 findings cover guarded-edit parent-rename TOCTOU, runtime-source
+build-identity closure, legacy retirement atomicity, native-config freshness,
+typed activation failures, immediate release plumbing, poisoned-proxy process
+evidence, reproducible production-path stdio acceptance, and fresh-client
+receipt scope. Agent-public `replace_symbol_body` is withheld again for new
+clients. The earlier green evidence remains useful but no longer closes tasks
+12-15. The canonical MCP registration named `serena` remains unchanged.
+
+### Superseded pre-audit decision
+
+Before the dual audit, tasks 11-14 and 15.1-15.7 appeared green: containment, freshness,
 lexical trust, symlink safety, edit commit-state semantics, typed envelopes,
 document lifecycle, positions, symbol lookup, per-language isolation, bounded
 status, logging, dependency ownership, provenance, service-owned CPython,
@@ -13,9 +24,7 @@ reproducible build identities, versioned daemon slots, nonce-authorized
 startup, and coexistence/retirement all pass through real daemon and
 connector tests. Agent-public `replace_symbol_body` is restored after the full
 fault matrix and a poisoned-proxy real stdio hash edit/release passed. This is
-**not** v1 PASS because the independent Sol-xhigh static-correctness and
-Opus-max runtime/evidence audits (task 15.8) have not run. The canonical MCP
-registration named `serena` remains unchanged.
+**not** v1 PASS and is superseded by the HOLD above.
 
 ### Historical decisions
 

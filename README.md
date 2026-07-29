@@ -37,14 +37,11 @@ process lifecycle are implemented and accepted. Parallel Codex, Claude Code,
 and CC Agent fresh-session acceptance passed; canonical `serena` remains
 unchanged pending a separate user decision.
 
-**Current state: `REPAIR AND EDIT REACCEPTANCE PASSED — DUAL AUDITS
-PENDING`.** Tasks 11-14 and 15.1-15.7 of `build-serena-light-v1` pass through
-real daemon and connector tests, including
-service-owned CPython, reproducible build identities, and versioned daemon
-slots. Agent-public `replace_symbol_body` is restored after its fault matrix
-and a poisoned-proxy real stdio hash edit/release passed. Independent Sol-xhigh
-static-correctness and Opus-max runtime/evidence audits (task 15.8) have not yet
-run, so this is **not** v1 PASS. Source ownership/provenance
+**Current state: `DUAL AUDIT HOLD — REPAIR IN PROGRESS`.** The Sol-xhigh and
+Opus-max audits found release-blocking correctness and evidence gaps after the
+first reacceptance. Agent-public `replace_symbol_body` is withheld again for
+new clients while those findings are repaired and reaccepted. This is **not**
+v1 PASS. Source ownership/provenance
 passes with 9 copied hashes against official Serena commit
 `9a9d07e83d8c1cba3458992707f440c624446c6d`; production LOC (13,529) is
 informational only and not gated. See

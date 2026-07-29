@@ -203,7 +203,7 @@ def test_control_plane_tools_are_not_agent_visible() -> None:
         )
         try:
             result = await connector.list_tools()
-            assert [item.name for item in result.tools] == ["find_symbol", "replace_symbol_body"]
+            assert [item.name for item in result.tools] == ["find_symbol"]
             assert session.activations == []
             assert connector.last_validated_binding is None
         finally:
