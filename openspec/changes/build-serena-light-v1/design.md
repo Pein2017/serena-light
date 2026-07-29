@@ -504,6 +504,18 @@ restarts before an unchanged scan may succeed. Runtime shutdown settles both
 published adapters and pending restart futures before closing the executor and
 cannot publish a replacement after the runtime enters stopped state.
 
+Every other adapter removal, including a family that becomes scope-incompatible
+during reattribution, likewise publishes an exact pending-retirement owner in
+the same lifecycle critical section as removal. The workspace executor retains
+exactly two cleanup queue slots, one per fixed language family, outside the
+ordinary request capacity; a third cleanup obligation is rejected instead of
+silently making the bound elastic. Runtime shutdown reuses already-published
+cleanup futures, does not publish `stopped` until every obligation reaches a
+bounded terminal state, and leaves a failed admission retryable on a later stop.
+If lease retirement has already detached that runtime from the workspace
+registry, the daemon service retains it in a pending-stop owner set, retries it
+on later sweeps, and keeps the build daemon non-idle until cleanup succeeds.
+
 Edit membership is checked against the lexical inventory rather than a
 dynamically resolved set. Under the workspace lock, the writer walks every path
 component using directory file descriptors, `lstat`, and `O_NOFOLLOW` before

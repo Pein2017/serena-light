@@ -468,6 +468,15 @@ class _PendingAdapterRestart:
     stop_future: Future[AdapterSnapshot] | None
 
 
+@dataclass(frozen=True, slots=True)
+class _PendingAdapterRetirement:
+    """An unavailable family retains exact cleanup ownership until stop settles."""
+
+    family: LanguageFamily
+    stop_adapter: RuntimeAdapter | None
+    stop_future: Future[AdapterSnapshot] | None
+
+
 class _SharedScan:
     """One in-flight scan whose single result every joined caller receives."""
 
@@ -617,12 +626,24 @@ class FreshnessCoordinator:
         # adapter cannot be allowed to report readiness for a newly attributed
         # program until it has restarted against that native configuration.
         restart_families = _affected_families((), config_changed)
-        runtime.install_freshness(
-            rebuilt,
-            projections,
-            restart_families=restart_families,
-            config_paths=config_changed,
-        )
+        install_failure: BaseException | None = None
+        try:
+            runtime.install_freshness(
+                rebuilt,
+                projections,
+                restart_families=restart_families,
+                config_paths=config_changed,
+            )
+        except WorkspaceRuntimeError as caught:
+            if caught.code is RuntimeErrorCode.STOPPED:
+                raise
+            install_failure = caught
+        except Exception as caught:
+            # Installation has already published typed recovery ownership for
+            # any failed family.  Healthy-family source facts from this same
+            # scan must still advance and enqueue exactly once before that
+            # family-local failure is surfaced.
+            install_failure = caught
         reattributed = tuple(sorted(projections))
 
         events = (
@@ -633,7 +654,7 @@ class FreshnessCoordinator:
         notified, opened, unopened = self._apply_events(
             events, created=created, force_notify=restart_families
         )
-        return FreshnessScan(
+        scan = FreshnessScan(
             created=created,
             changed=changed,
             deleted=deleted,
@@ -644,6 +665,9 @@ class FreshnessCoordinator:
             opened=opened,
             unopened=unopened,
         )
+        if install_failure is not None:
+            raise install_failure
+        return scan
 
     def _apply_events(
         self,
@@ -743,8 +767,12 @@ class WorkspaceRuntime:
         self._adapters: dict[LanguageFamily, RuntimeAdapter] = {}
         self._trackers: dict[LanguageFamily, ScopeGenerationTracker] = {}
         self._pending_restarts: dict[LanguageFamily, _PendingAdapterRestart] = {}
+        self._pending_retirements: dict[LanguageFamily, _PendingAdapterRetirement] = {}
+        self._shutdown_futures: dict[int, Future[AdapterSnapshot]] = {}
         self._versions: dict[str, int] = {}
         self._state_lock = threading.RLock()
+        self._stop_lock = threading.Lock()
+        self._stopping = False
         self._stopped = False
         try:
             for family, projection in self._projections.items():
@@ -838,8 +866,8 @@ class WorkspaceRuntime:
         """Swap inventory and projections, restarting adapters for native-config changes."""
 
         paths_by_family = _family_paths(inventory)
-        to_stop: list[RuntimeAdapter] = []
-        restart_adapters: list[tuple[_PendingAdapterRestart, RuntimeAdapter]] = []
+        retirements: list[_PendingAdapterRetirement] = []
+        restart_adapters: list[_PendingAdapterRestart] = []
         restart_without_adapter: list[_PendingAdapterRestart] = []
         restart = frozenset(restart_families)
         config_events = {
@@ -851,6 +879,8 @@ class WorkspaceRuntime:
             for family in restart
         }
         with self._state_lock:
+            if self._stopping or self._stopped:
+                raise WorkspaceRuntimeError(RuntimeErrorCode.STOPPED, "workspace runtime is stopped")
             self.inventory = inventory
             for family, attribution in attributions.items():
                 projection = attribution.projection
@@ -861,7 +891,9 @@ class WorkspaceRuntime:
                     adapter = self._adapters.pop(family, None)
                     self._trackers.pop(family, None)
                     if adapter is not None:
-                        to_stop.append(adapter)
+                        retirement = _PendingAdapterRetirement(family, adapter, None)
+                        self._pending_retirements[family] = retirement
+                        retirements.append(retirement)
                     continue
                 assert projection is not None
                 self._family_errors.pop(family, None)
@@ -878,9 +910,14 @@ class WorkspaceRuntime:
                         projection,
                         tracker,
                         paths_by_family[family],
-                        None,
+                        adapter,
                         None,
                     )
+                    # Removal and cleanup ownership are one publication.  A
+                    # concurrent runtime stop can therefore observe the old
+                    # adapter either as active or as this exact pending stop,
+                    # never in an ownerless gap.
+                    self._pending_restarts[family] = pending
                     self._family_errors[family] = WorkspaceRuntimeError(
                         RuntimeErrorCode.NOT_READY,
                         f"{family.value} adapter restart is in progress",
@@ -888,7 +925,7 @@ class WorkspaceRuntime:
                     if adapter is None:
                         restart_without_adapter.append(pending)
                     else:
-                        restart_adapters.append((pending, adapter))
+                        restart_adapters.append(pending)
                     continue
                 tracker = self._trackers.get(family)
                 if tracker is not None:
@@ -904,26 +941,16 @@ class WorkspaceRuntime:
                     continue
                 self._trackers[family] = tracker
                 self._adapters[family] = adapter
-        for adapter in to_stop:
-            adapter.stop().result(timeout=self._future_timeout)
         failures: list[BaseException] = []
+        for retirement in retirements:
+            failure = self._settle_pending_retirement(retirement)
+            if failure is not None:
+                failures.append(failure)
         for pending in restart_without_adapter:
-            with self._state_lock:
-                self._pending_restarts[pending.family] = pending
             failure = self._complete_pending_restart(pending)
             if failure is not None:
                 failures.append(failure)
-        for pending, adapter in restart_adapters:
-            pending = _PendingAdapterRestart(
-                pending.family,
-                pending.projection,
-                pending.tracker,
-                pending.trusted_paths,
-                adapter,
-                None,
-            )
-            with self._state_lock:
-                self._pending_restarts[pending.family] = pending
+        for pending in restart_adapters:
             pending, failure = self._start_pending_stop(pending)
             if failure is not None:
                 failures.append(failure)
@@ -957,11 +984,16 @@ class WorkspaceRuntime:
             raise failures[0]
 
     def retry_pending_restarts(self) -> None:
-        """Resolve uncertain config restarts before unchanged facts can pass."""
+        """Resolve uncertain cleanup before unchanged facts can pass."""
 
         with self._state_lock:
+            pending_retirements = tuple(self._pending_retirements.values())
             pending_restarts = tuple(self._pending_restarts.values())
         failures: list[BaseException] = []
+        for retirement in pending_retirements:
+            failure = self._settle_pending_retirement(retirement)
+            if failure is not None:
+                failures.append(failure)
         for pending in pending_restarts:
             pending, failure = self._start_pending_stop(pending)
             if failure is not None:
@@ -995,6 +1027,56 @@ class WorkspaceRuntime:
                 failures.append(failure)
         if failures:
             raise failures[0]
+
+    def _start_pending_retirement(
+        self,
+        pending: _PendingAdapterRetirement,
+    ) -> tuple[_PendingAdapterRetirement | None, WorkspaceRuntimeError | None]:
+        """Submit one unavailable adapter stop exactly once under lifecycle lock."""
+
+        with self._state_lock:
+            current = self._pending_retirements.get(pending.family)
+            if current is None:
+                return None, None
+            if current is not pending:
+                return current, None
+            stop_adapter = pending.stop_adapter
+            if stop_adapter is None:
+                return pending, None
+            try:
+                stop_future = stop_adapter.stop()
+            except Exception as error:
+                return pending, WorkspaceRuntimeError(
+                    RuntimeErrorCode.UNSUPPORTED,
+                    f"{pending.family.value} adapter stop failed ({type(error).__name__})",
+                )
+            replacement = _PendingAdapterRetirement(pending.family, None, stop_future)
+            self._pending_retirements[pending.family] = replacement
+            return replacement, None
+
+    def _settle_pending_retirement(
+        self,
+        pending: _PendingAdapterRetirement,
+    ) -> BaseException | None:
+        """Retain an unavailable adapter until its exact stop is proven complete."""
+
+        current, failure = self._start_pending_retirement(pending)
+        if failure is not None or current is None:
+            return failure
+        stop_future = current.stop_future
+        if stop_future is None:
+            return WorkspaceRuntimeError(
+                RuntimeErrorCode.UNSUPPORTED,
+                f"{current.family.value} adapter cleanup has no terminal future",
+            )
+        try:
+            stop_future.result(timeout=self._future_timeout)
+        except BaseException as error:
+            return error
+        with self._state_lock:
+            if self._pending_retirements.get(current.family) is current:
+                self._pending_retirements.pop(current.family, None)
+        return None
 
     def _start_pending_stop(
         self,
@@ -1040,8 +1122,7 @@ class WorkspaceRuntime:
         with self._state_lock:
             if self._pending_restarts.get(pending.family) is not pending:
                 return None
-            if self._stopped:
-                self._pending_restarts.pop(pending.family, None)
+            if self._stopping or self._stopped:
                 return None
             try:
                 adapter, tracker = self._build_adapter(
@@ -1879,63 +1960,75 @@ class WorkspaceRuntime:
         }
 
     def stop(self) -> None:
-        """Settle current and pending adapter stops before closing the executor."""
+        """Settle every owned cleanup before publishing the stopped state."""
 
-        with self._state_lock:
-            if self._stopped:
-                return
-            self._stopped = True
-            adapters = tuple(self._adapters.values())
-            pending_restarts = tuple(self._pending_restarts.values())
-        failures: list[BaseException] = []
-        responsibilities: dict[int, Future[AdapterSnapshot]] = {}
-        for adapter in adapters:
-            try:
-                future = adapter.stop()
-            except BaseException as error:
-                failures.append(error)
-            else:
+        with self._stop_lock:
+            with self._state_lock:
+                if self._stopped:
+                    return
+                self._stopping = True
+                adapters = tuple(self._adapters.values())
+                pending_retirements = tuple(self._pending_retirements.values())
+                pending_restarts = tuple(self._pending_restarts.values())
+
+            failures: list[BaseException] = []
+            responsibilities: dict[int, Future[AdapterSnapshot]] = {}
+            for adapter in adapters:
+                adapter_key = id(adapter)
+                with self._state_lock:
+                    future = self._shutdown_futures.get(adapter_key)
+                if future is None:
+                    try:
+                        future = adapter.stop()
+                    except BaseException as error:
+                        failures.append(error)
+                        continue
+                    with self._state_lock:
+                        self._shutdown_futures[adapter_key] = future
                 responsibilities[id(future)] = future
-        for pending in pending_restarts:
-            pending, failure = self._start_pending_stop(pending)
-            if failure is not None:
-                failures.append(failure)
-                continue
-            if pending is not None and pending.stop_future is not None:
-                responsibilities[id(pending.stop_future)] = pending.stop_future
-        timed_out: list[tuple[Future[AdapterSnapshot], TimeoutError]] = []
-        futures = tuple(responsibilities.values())
-        for future in futures:
+            for retirement in pending_retirements:
+                retirement, failure = self._start_pending_retirement(retirement)
+                if failure is not None:
+                    failures.append(failure)
+                    continue
+                if retirement is not None and retirement.stop_future is not None:
+                    responsibilities[id(retirement.stop_future)] = retirement.stop_future
+            for pending in pending_restarts:
+                pending, failure = self._start_pending_stop(pending)
+                if failure is not None:
+                    failures.append(failure)
+                    continue
+                if pending is not None and pending.stop_future is not None:
+                    responsibilities[id(pending.stop_future)] = pending.stop_future
+
+            # Admission failures leave the exact adapters/pending restarts in
+            # their ownership maps.  A later stop retries instead of silently
+            # succeeding because a stopped bit was published too early.
+            if failures:
+                raise RuntimeError(f"workspace runtime stop failed: {failures[0]}") from failures[0]
+
+            for future in tuple(responsibilities.values()):
+                try:
+                    future.result(timeout=self._future_timeout)
+                except BaseException as error:
+                    failures.append(error)
+            if failures:
+                raise RuntimeError(f"workspace runtime stop failed: {failures[0]}") from failures[0]
+
             try:
-                future.result(timeout=self._future_timeout)
-            except TimeoutError as error:
-                timed_out.append((future, error))
+                self._executor.close(cancel_queued=True, timeout=min(self._future_timeout, 5.0))
             except BaseException as error:
-                failures.append(error)
-        try:
-            # If a cleanup future exceeded its ordinary request timeout, retain
-            # it in FIFO order rather than canceling away process ownership.
-            self._executor.close(
-                cancel_queued=not timed_out,
-                timeout=min(self._future_timeout, 5.0),
-            )
-        except BaseException as error:
-            failures.append(error)
-        for future, timeout_error in timed_out:
-            try:
-                future.result(timeout=0)
-            except TimeoutError:
-                failures.append(timeout_error)
-            except BaseException as error:
-                failures.append(error)
-        with self._state_lock:
-            self._pending_restarts.clear()
-        if failures:
-            raise RuntimeError(f"workspace runtime stop failed: {failures[0]}") from failures[0]
+                raise RuntimeError(f"workspace runtime stop failed: {error}") from error
+            with self._state_lock:
+                self._pending_retirements.clear()
+                self._pending_restarts.clear()
+                self._shutdown_futures.clear()
+                self._adapters.clear()
+                self._stopped = True
 
     def _require_running(self) -> None:
         with self._state_lock:
-            if self._stopped:
+            if self._stopping or self._stopped:
                 raise WorkspaceRuntimeError(RuntimeErrorCode.STOPPED, "workspace runtime is stopped")
 
 

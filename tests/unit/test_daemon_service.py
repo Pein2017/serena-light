@@ -384,6 +384,40 @@ def test_immediate_release_stops_only_when_last_same_root_holder_leaves() -> Non
     assert [runtime.identity for runtime in stopped] == ["/data/project"]
 
 
+def test_detached_runtime_stop_failure_remains_owned_until_later_sweep() -> None:
+    clock = FakeClock()
+    registry = WorkspaceRuntimeRegistry[str, Runtime, UUID](lambda identity: Runtime(identity))
+    attempts: list[Runtime] = []
+
+    def reject_once(runtime: Runtime) -> None:
+        attempts.append(runtime)
+        if len(attempts) == 1:
+            raise RuntimeError("cleanup admission rejected")
+
+    service = WorkspaceDaemonService[str, Runtime](
+        lifecycle=LeaseLifecycle[str, Runtime](clock=clock),
+        registry=registry,
+        resolver=resolution,
+        runtime_stopper=reject_once,
+    )
+
+    async def scenario() -> None:
+        lease_id = await acquire(service, "owner")
+        await service.activate_workspace(lease_id=lease_id, absolute_path="/data/project")
+
+        with pytest.raises(RuntimeError, match="cleanup admission rejected"):
+            await service.release_lease(lease_id=lease_id, immediate=True)
+
+        assert registry.runtime_state("/data/project") is None
+        assert service.daemon_idle() is False
+
+        await service.sweep()
+        assert service.daemon_idle() is True
+
+    run(scenario())
+    assert [runtime.identity for runtime in attempts] == ["/data/project", "/data/project"]
+
+
 def test_sweep_releases_expired_binding_then_stops_after_grace() -> None:
     service, registry, clock, stopped, _threads = make_service()
 

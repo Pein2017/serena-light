@@ -76,6 +76,8 @@ class WorkspaceDaemonService[IdentityT: Hashable, RuntimeT]:
         self._runtime_stopper = runtime_stopper
         self._debug_reporter = debug_reporter
         self._binding_lock = asyncio.Lock()
+        self._runtime_stop_lock = asyncio.Lock()
+        self._pending_runtime_stops: dict[int, RuntimeT] = {}
 
     async def status(self, *, mcp_session_id: str) -> Mapping[str, object]:
         """Return transport correlation without granting lifetime authority."""
@@ -275,7 +277,7 @@ class WorkspaceDaemonService[IdentityT: Hashable, RuntimeT]:
     def daemon_idle(self) -> bool:
         """Expose only the build-retirement predicate, not mutable lease state."""
 
-        return self._lifecycle.daemon_idle()
+        return self._lifecycle.daemon_idle() and not self._pending_runtime_stops
 
     def _report_decision(
         self,
@@ -463,15 +465,25 @@ class WorkspaceDaemonService[IdentityT: Hashable, RuntimeT]:
         return [] if detached is None else [detached]
 
     async def _stop_runtimes(self, runtimes: list[RuntimeT]) -> None:
-        unique: list[RuntimeT] = []
-        seen: set[int] = set()
-        for runtime in runtimes:
-            marker = id(runtime)
-            if marker not in seen:
-                seen.add(marker)
-                unique.append(runtime)
-        if unique:
-            await asyncio.gather(*(asyncio.to_thread(self._runtime_stopper, runtime) for runtime in unique))
+        async with self._runtime_stop_lock:
+            for runtime in runtimes:
+                self._pending_runtime_stops.setdefault(id(runtime), runtime)
+            pending = tuple(self._pending_runtime_stops.items())
+            if not pending:
+                return
+            results = await asyncio.gather(
+                *(asyncio.to_thread(self._runtime_stopper, runtime) for _, runtime in pending),
+                return_exceptions=True,
+            )
+            failures: list[BaseException] = []
+            for (marker, runtime), result in zip(pending, results, strict=True):
+                if isinstance(result, BaseException):
+                    self._pending_runtime_stops[marker] = runtime
+                    failures.append(result)
+                else:
+                    self._pending_runtime_stops.pop(marker, None)
+            if failures:
+                raise failures[0]
 
 
 def _lease_uuid(value: str) -> UUID:

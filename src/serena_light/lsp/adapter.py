@@ -585,7 +585,7 @@ class LanguageAdapter:
         return self._executor.submit(self._start_and_snapshot_worker)
 
     def stop(self) -> Future[AdapterSnapshot]:
-        return self._executor.submit(self._stop_and_snapshot_worker)
+        return self._executor._submit_cleanup(self._stop_and_snapshot_worker)
 
     def submit_read(self, operation: Callable[[AdapterClient], T]) -> Future[T]:
         return self._executor.submit(lambda: self._execute_worker(operation, read_only=True))

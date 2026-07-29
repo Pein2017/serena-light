@@ -30,7 +30,7 @@ from serena_light.lsp.adapter import (
     read_only_client_request_handlers,
 )
 from serena_light.lsp.client import LspResponseError, LspTransportClosed
-from serena_light.lsp.executor import BoundedLspExecutor
+from serena_light.lsp.executor import BoundedLspExecutor, ExecutorBusyError
 from serena_light.lsp.positions import PositionEncoding
 from serena_light.lsp.state import LspState
 from serena_light.workspace.scope import (
@@ -172,9 +172,10 @@ class AdapterHarness:
         clock: Callable[[], float] = time.monotonic,
         timestamp: Callable[[], float] = time.time,
         debug_reporter: Callable[[str, str], object] | None = None,
+        queue_capacity: int = 8,
     ) -> None:
         self.provider = provider
-        self.executor = BoundedLspExecutor(queue_capacity=8, name="adapter-test")
+        self.executor = BoundedLspExecutor(queue_capacity=queue_capacity, name="adapter-test")
         self.lock = threading.RLock()
         self.scope = ScopeGenerationTracker(_projection(paths), max_wait_seconds=0.2)
         self.state = LspState()
@@ -209,6 +210,39 @@ def _ready_document(harness: AdapterHarness, *, path: str = "src/example.py", ve
     ).result(timeout=1)
     harness.provider.publish(uri=uri, version=version)
     assert harness.adapter.wait_for_document(target, timeout=0.1).ready
+
+
+def test_stop_uses_owned_cleanup_capacity_when_ordinary_queue_is_saturated() -> None:
+    provider = FakeRuntimeProvider([lambda: FakeClient(_initialize_result())])
+    harness = AdapterHarness(provider, queue_capacity=1)
+    entered = threading.Event()
+    release = threading.Event()
+    try:
+        harness.adapter.start().result(timeout=1)
+
+        def block_worker() -> None:
+            entered.set()
+            assert release.wait(5)
+
+        blocked = harness.executor.submit(block_worker)
+        assert entered.wait(5)
+        queued = harness.adapter.submit_read(lambda _client: "ordinary")
+        with pytest.raises(ExecutorBusyError):
+            harness.adapter.submit_read(lambda _client: "overflow")
+
+        stopped = harness.adapter.stop()
+        assert not stopped.done()
+        assert harness.executor.snapshot().queue_size == 1
+        release.set()
+
+        blocked.result(timeout=5)
+        assert queued.result(timeout=5) == "ordinary"
+        assert stopped.result(timeout=5).phase is AdapterPhase.COLD
+        assert provider.stop_count == 1
+        assert provider.clients[0].shutdown_count == 1
+    finally:
+        release.set()
+        harness.executor.close()
 
 
 def test_lazy_start_extension_routing_and_capability_derivation() -> None:

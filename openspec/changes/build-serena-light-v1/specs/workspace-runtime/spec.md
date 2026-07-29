@@ -130,6 +130,12 @@ other roots SHALL remain responsive. Queue saturation SHALL return `BUSY`.
 - **WHEN** an edit has started or its commit state cannot be proven
 - **THEN** it returns `UNCERTAIN`, is not replayed, and requires a fresh hash read
 
+#### Scenario: Ordinary request queue is saturated during shutdown
+- **WHEN** all ordinary queued-work slots are occupied and both fixed language
+  adapters require cleanup
+- **THEN** their two cleanup obligations remain admissible without increasing
+  ordinary request capacity, while a third cleanup submission fails explicitly
+
 ### Requirement: Query and edit roots obey a fixed trust policy
 The system SHALL accept path operands only from the active workspace inventory.
 It SHALL permit returned semantic locations below `/data` or below the
@@ -245,6 +251,24 @@ files served through configured, inferred, or transient engine projects.
 #### Scenario: Runtime retires with a pending adapter restart
 - **WHEN** the last holder releases a runtime after a config restart timed out
 - **THEN** runtime shutdown retains and settles the pending adapter cleanup responsibility, never republishes the old adapter, and never installs a replacement after the runtime is stopped
+
+#### Scenario: Reattribution makes a running family incompatible
+- **WHEN** freshness removes a running adapter because its new native-program
+  attribution is incompatible while runtime shutdown begins concurrently
+- **THEN** removal and pending-retirement publication are atomic, both paths
+  share the exact cleanup future, and `stopped` is not published before cleanup
+  settles
+
+#### Scenario: Cleanup admission fails during runtime shutdown
+- **WHEN** an owned adapter stop cannot enter even the reserved cleanup queue
+- **THEN** shutdown returns a failure without publishing `stopped`, retains the
+  exact cleanup owner, and a later shutdown attempt retries admission
+
+#### Scenario: Registry retirement detaches a runtime before cleanup fails
+- **WHEN** lease policy atomically removes an idle runtime and its first stop
+  attempt fails
+- **THEN** the daemon service retains that detached runtime as pending cleanup,
+  reports the build non-idle, and retries it on a later sweep
 
 ### Requirement: Build identity isolates daemon generations
 The connector and daemon SHALL compute the same build identity from sorted

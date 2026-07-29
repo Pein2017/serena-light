@@ -89,6 +89,7 @@ class ExecutorSnapshot:
 class _WorkItem:
     future: Future[Any]
     call: Callable[[], Any]
+    cleanup: bool = False
 
 
 _STOP = object()
@@ -97,12 +98,21 @@ _STOP = object()
 class BoundedLspExecutor:
     """Order LSP work without blocking the daemon event loop."""
 
+    # A workspace owns at most one adapter per supported language family.  Keep
+    # their cleanup admission separate from the ordinary work bound so a full
+    # request queue cannot disown the processes whose termination it requires.
+    _CLEANUP_RESERVE = 2
+
     def __init__(self, *, queue_capacity: int = 32, name: str = "workspace") -> None:
         if queue_capacity < 1:
             raise ValueError("queue_capacity must be positive")
-        self._queue: queue.Queue[_WorkItem | object] = queue.Queue(maxsize=queue_capacity)
+        self._queue: queue.Queue[_WorkItem | object] = queue.Queue(
+            maxsize=queue_capacity + self._CLEANUP_RESERVE
+        )
         self._capacity = queue_capacity
         self._state_lock = threading.Lock()
+        self._ordinary_queued = 0
+        self._cleanup_queued = 0
         self._active = False
         self._stopping = False
         self._thread = threading.Thread(target=self._run, name=f"serena-light-lsp:{name}", daemon=False)
@@ -113,16 +123,35 @@ class BoundedLspExecutor:
         with self._state_lock:
             if self._stopping:
                 raise RuntimeError("LSP executor is stopping")
+            if self._ordinary_queued >= self._capacity:
+                raise ExecutorBusyError(f"LSP executor queue is full ({self._capacity})")
             try:
                 self._queue.put_nowait(_WorkItem(future=future, call=call))
             except queue.Full as exc:
                 raise ExecutorBusyError(f"LSP executor queue is full ({self._capacity})") from exc
+            self._ordinary_queued += 1
+        return future
+
+    def _submit_cleanup(self, call: Callable[[], T]) -> Future[T]:
+        """Use the bounded cleanup reserve without consuming ordinary capacity."""
+
+        future: Future[T] = Future()
+        with self._state_lock:
+            if self._stopping:
+                raise RuntimeError("LSP executor is stopping")
+            if self._cleanup_queued >= self._CLEANUP_RESERVE:
+                raise ExecutorBusyError("LSP executor cleanup reserve is full")
+            try:
+                self._queue.put_nowait(_WorkItem(future=future, call=call, cleanup=True))
+            except queue.Full as exc:
+                raise ExecutorBusyError("LSP executor cleanup reserve is full") from exc
+            self._cleanup_queued += 1
         return future
 
     def snapshot(self) -> ExecutorSnapshot:
         with self._state_lock:
             return ExecutorSnapshot(
-                queue_size=self._queue.qsize(),
+                queue_size=self._ordinary_queued,
                 queue_capacity=self._capacity,
                 active=self._active,
                 stopping=self._stopping,
@@ -153,6 +182,11 @@ class BoundedLspExecutor:
                 return
             try:
                 if isinstance(item, _WorkItem):
+                    with self._state_lock:
+                        if item.cleanup:
+                            self._cleanup_queued -= 1
+                        else:
+                            self._ordinary_queued -= 1
                     item.future.cancel()
             finally:
                 self._queue.task_done()
@@ -164,6 +198,11 @@ class BoundedLspExecutor:
                 if item is _STOP:
                     return
                 assert isinstance(item, _WorkItem)
+                with self._state_lock:
+                    if item.cleanup:
+                        self._cleanup_queued -= 1
+                    else:
+                        self._ordinary_queued -= 1
                 if not item.future.set_running_or_notify_cancel():
                     continue
                 with self._state_lock:

@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import subprocess
 import threading
+import time
 from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import Future
 from pathlib import Path, PurePosixPath
@@ -89,6 +90,8 @@ class _Adapter:
         self.probe_thread: str | None = None
         self.stop_thread: str | None = None
         self.stop_calls = 0
+        self.before_stop_submit: Callable[[], None] | None = None
+        self.before_stop_worker: Callable[[], None] | None = None
         self._phase = AdapterPhase.COLD
         self._document_generation = 0
         self._running = False
@@ -179,14 +182,18 @@ class _Adapter:
 
     def stop(self) -> Future[AdapterSnapshot]:
         self.stop_calls += 1
+        if self.before_stop_submit is not None:
+            self.before_stop_submit()
 
         def stop_on_executor() -> AdapterSnapshot:
             self.stop_thread = threading.current_thread().name
+            if self.before_stop_worker is not None:
+                self.before_stop_worker()
             self._phase = AdapterPhase.STOPPING
             self._running = False
             return self.snapshot()
 
-        return self.context.executor.submit(stop_on_executor)
+        return self.context.executor._submit_cleanup(stop_on_executor)
 
 
 def _inventory(root: Path, *paths: str) -> TrustInventory:
@@ -375,6 +382,122 @@ def test_family_can_recover_and_degrade_independently_after_reattribution(tmp_pa
         with pytest.raises(WorkspaceRuntimeError) as caught:
             runtime.route("main.py")
         assert caught.value.code is RuntimeErrorCode.SCOPE_INCOMPATIBLE
+    finally:
+        runtime.stop()
+
+
+def test_incompatible_reattribution_and_runtime_stop_share_cleanup_owner(tmp_path: Path) -> None:
+    (tmp_path / "main.py").write_text("value = 1\n")
+    compatible = [True]
+    adapters: dict[LanguageFamily, _Adapter] = {}
+    contexts: dict[LanguageFamily, AdapterBuildContext] = {}
+
+    def attribute(_root: Path, paths: tuple[str, ...]) -> ScopeProjection:
+        program = paths if compatible[0] else (*paths, "ignored/generated.py")
+        return _projection(LanguageFamily.PYTHON, paths, program)
+
+    runtime = WorkspaceRuntime(
+        (WorkspaceKind.GIT, tmp_path),
+        path_policy=_PathPolicy(),
+        inventory=_inventory(tmp_path, "main.py"),
+        attributors={LanguageFamily.PYTHON: attribute},
+        adapter_factories=_factories(adapters, contexts),
+    )
+    submit_entered = threading.Event()
+    allow_submit = threading.Event()
+    refresh_errors: list[BaseException] = []
+    stop_errors: list[BaseException] = []
+    try:
+        original = adapters[LanguageFamily.PYTHON]
+
+        def block_submit() -> None:
+            submit_entered.set()
+            assert allow_submit.wait(5)
+
+        original.before_stop_submit = block_submit
+        compatible[0] = False
+        degraded = runtime.build_projections(runtime.inventory, {LanguageFamily.PYTHON})
+
+        def refresh() -> None:
+            try:
+                runtime.install_freshness(runtime.inventory, degraded)
+            except BaseException as error:
+                refresh_errors.append(error)
+
+        refreshing = threading.Thread(target=refresh)
+        refreshing.start()
+        assert submit_entered.wait(5)
+
+        def stop_runtime() -> None:
+            try:
+                runtime.stop()
+            except BaseException as error:
+                stop_errors.append(error)
+
+        stopping = threading.Thread(target=stop_runtime)
+        stopping.start()
+        stopping.join(timeout=0.1)
+        assert stopping.is_alive()
+
+        allow_submit.set()
+        refreshing.join(timeout=5)
+        stopping.join(timeout=5)
+
+        assert not refreshing.is_alive()
+        assert not stopping.is_alive()
+        assert refresh_errors == []
+        assert stop_errors == []
+        assert original.stop_calls == 1
+        assert runtime._pending_retirements == {}
+        assert runtime.adapters == {}
+        assert runtime.status()["stopped"] is True
+    finally:
+        allow_submit.set()
+        runtime.stop()
+
+
+def test_incompatible_retirement_retries_rejected_cleanup_admission(tmp_path: Path) -> None:
+    (tmp_path / "main.py").write_text("value = 1\n")
+    compatible = [True]
+    adapters: dict[LanguageFamily, _Adapter] = {}
+    contexts: dict[LanguageFamily, AdapterBuildContext] = {}
+
+    def attribute(_root: Path, paths: tuple[str, ...]) -> ScopeProjection:
+        program = paths if compatible[0] else (*paths, "ignored/generated.py")
+        return _projection(LanguageFamily.PYTHON, paths, program)
+
+    runtime = WorkspaceRuntime(
+        (WorkspaceKind.GIT, tmp_path),
+        path_policy=_PathPolicy(),
+        inventory=_inventory(tmp_path, "main.py"),
+        attributors={LanguageFamily.PYTHON: attribute},
+        adapter_factories=_factories(adapters, contexts),
+    )
+    attempts = 0
+    try:
+        original = adapters[LanguageFamily.PYTHON]
+
+        def reject_once() -> None:
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                raise RuntimeError("cleanup admission rejected")
+
+        original.before_stop_submit = reject_once
+        compatible[0] = False
+        degraded = runtime.build_projections(runtime.inventory, {LanguageFamily.PYTHON})
+
+        with pytest.raises(WorkspaceRuntimeError) as caught:
+            runtime.install_freshness(runtime.inventory, degraded)
+        assert caught.value.code is RuntimeErrorCode.UNSUPPORTED
+        assert runtime.status()["stopped"] is False
+        assert runtime._pending_retirements[LanguageFamily.PYTHON].stop_adapter is original
+
+        runtime.stop()
+        assert attempts == 2
+        assert original.stop_calls == 2
+        assert runtime._pending_retirements == {}
+        assert runtime.status()["stopped"] is True
     finally:
         runtime.stop()
 
@@ -837,6 +960,178 @@ def test_config_restart_timeout_is_explicit_and_retries_same_stop_before_recover
     finally:
         release.set()
         runtime.stop()
+
+
+def test_config_timeout_does_not_lose_same_scan_healthy_family_events(tmp_path: Path) -> None:
+    _git_repository(tmp_path)
+    (tmp_path / "main.py").write_text("value = 1\n")
+    (tmp_path / "main.ts").write_text("export const value = 1;\n")
+    (tmp_path / "gone.ts").write_text("export const gone = 1;\n")
+    adapters: dict[LanguageFamily, _Adapter] = {}
+    contexts: dict[LanguageFamily, AdapterBuildContext] = {}
+    runtime = _git_runtime(tmp_path, adapters, contexts, future_timeout=0.05)
+    release = threading.Event()
+    entered = threading.Event()
+    try:
+        runtime.load_document_symbols("main.py")
+        runtime.load_document_symbols("main.ts")
+        original_python = adapters[LanguageFamily.PYTHON]
+        typescript = adapters[LanguageFamily.TYPESCRIPT]
+        typescript.client.notifications.clear()
+        before = typescript.context.scope_tracker.generations
+
+        def block_executor() -> None:
+            entered.set()
+            assert release.wait(5)
+
+        blocked = runtime.executor.submit(block_executor)
+        assert entered.wait(5)
+        (tmp_path / "pyrightconfig.json").write_text('{"include": ["*.py"]}\n')
+        (tmp_path / "main.ts").write_text("export const value = 22222;\n")
+        (tmp_path / "created.ts").write_text("export const fresh = 1;\n")
+        (tmp_path / "gone.ts").unlink()
+
+        with pytest.raises(TimeoutError):
+            runtime.ensure_fresh()
+
+        after_failure = typescript.context.scope_tracker.generations
+        assert after_failure.trust_inventory > before.trust_inventory
+        assert after_failure.configured_program > before.configured_program
+        assert after_failure.path_scoped["main.ts"] == before.path_scoped.get("main.ts", 0) + 1
+        assert after_failure.path_scoped["created.ts"] == 1
+        assert runtime.executor.snapshot().queue_size == 1
+        unavailable = cast(Mapping[str, object], runtime.status()["unavailable_language_families"])
+        python_error = cast(Mapping[str, object], cast(Mapping[str, object], unavailable["python"])["error"])
+        assert python_error["code"] == "TIMED_OUT"
+        assert runtime.get_symbols_overview("main.py").to_dict()["error"]["code"] == "TIMED_OUT"
+
+        release.set()
+        blocked.result(timeout=5)
+        assert runtime.ensure_fresh().config_changed == ()
+        runtime.executor.submit(lambda: None).result(timeout=5)
+
+        assert adapters[LanguageFamily.PYTHON] is not original_python
+        assert original_python.stop_calls == 1
+        assert typescript.context.scope_tracker.generations == after_failure
+        methods = [method for method, _ in typescript.client.notifications]
+        assert methods == ["workspace/didChangeWatchedFiles", "textDocument/didOpen", "textDocument/didClose"]
+        changes = cast(Mapping[str, Any], typescript.client.notifications[0][1])["changes"]
+        assert {(item["uri"].rsplit("/", 1)[-1], item["type"]) for item in changes} == {
+            ("created.ts", 1),
+            ("main.ts", 2),
+            ("gone.ts", 3),
+        }
+        opened = cast(Mapping[str, Any], typescript.client.notifications[1][1])["textDocument"]
+        assert opened["uri"] == (tmp_path / "created.ts").resolve().as_uri()
+    finally:
+        release.set()
+        runtime.stop()
+
+
+def test_config_restart_and_runtime_stop_share_atomic_cleanup_ownership(tmp_path: Path) -> None:
+    _git_repository(tmp_path)
+    (tmp_path / "main.py").write_text("value = 1\n")
+    adapters: dict[LanguageFamily, _Adapter] = {}
+    contexts: dict[LanguageFamily, AdapterBuildContext] = {}
+    runtime = _git_runtime(tmp_path, adapters, contexts, future_timeout=1.0)
+    submit_entered = threading.Event()
+    allow_submit = threading.Event()
+    worker_entered = threading.Event()
+    allow_worker = threading.Event()
+    freshness_failures: list[BaseException] = []
+    stop_failures: list[BaseException] = []
+    try:
+        runtime.load_document_symbols("main.py")
+        original = adapters[LanguageFamily.PYTHON]
+
+        def block_submit() -> None:
+            submit_entered.set()
+            assert allow_submit.wait(5)
+
+        def block_worker() -> None:
+            worker_entered.set()
+            assert allow_worker.wait(5)
+
+        original.before_stop_submit = block_submit
+        original.before_stop_worker = block_worker
+        (tmp_path / "pyrightconfig.json").write_text('{"include": ["*.py"]}\n')
+
+        def refresh() -> None:
+            try:
+                runtime.ensure_fresh()
+            except BaseException as error:
+                freshness_failures.append(error)
+
+        refreshing = threading.Thread(target=refresh)
+        refreshing.start()
+        assert submit_entered.wait(5)
+
+        def stop_runtime() -> None:
+            try:
+                runtime.stop()
+            except BaseException as error:
+                stop_failures.append(error)
+
+        stopping = threading.Thread(target=stop_runtime)
+        stopping.start()
+        assert stopping.is_alive()
+        allow_submit.set()
+        assert worker_entered.wait(5)
+        deadline = time.monotonic() + 5
+        stop_claimed = False
+        while time.monotonic() < deadline:
+            with runtime._state_lock:
+                if runtime._stopping:
+                    stop_claimed = True
+                    break
+            time.sleep(0.001)
+        assert stop_claimed, "runtime stop did not claim lifecycle ownership"
+        allow_worker.set()
+        refreshing.join(timeout=5)
+        stopping.join(timeout=5)
+
+        assert freshness_failures == []
+        assert stop_failures == []
+        assert original.stop_calls == 1
+        assert original.stop_thread is not None
+        assert adapters[LanguageFamily.PYTHON] is original
+        assert runtime.adapters == {}
+        assert runtime._pending_restarts == {}
+        assert runtime.status()["stopped"] is True
+    finally:
+        allow_submit.set()
+        allow_worker.set()
+        runtime.stop()
+
+
+def test_runtime_stop_retries_cleanup_admission_before_publishing_stopped(tmp_path: Path) -> None:
+    _git_repository(tmp_path)
+    (tmp_path / "main.py").write_text("value = 1\n")
+    adapters: dict[LanguageFamily, _Adapter] = {}
+    contexts: dict[LanguageFamily, AdapterBuildContext] = {}
+    runtime = _git_runtime(tmp_path, adapters, contexts)
+    runtime.load_document_symbols("main.py")
+    adapter = adapters[LanguageFamily.PYTHON]
+    attempts = 0
+
+    def reject_once() -> None:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise RuntimeError("cleanup admission rejected")
+
+    adapter.before_stop_submit = reject_once
+    with pytest.raises(RuntimeError, match="cleanup admission rejected"):
+        runtime.stop()
+    assert runtime.status()["stopped"] is False
+    with pytest.raises(WorkspaceRuntimeError) as caught:
+        runtime.route("main.py")
+    assert caught.value.code is RuntimeErrorCode.STOPPED
+
+    runtime.stop()
+    assert runtime.status()["stopped"] is True
+    assert attempts == 2
+    assert adapter.stop_thread is not None
 
 
 def test_runtime_stop_settles_pending_restart_once_without_publishing_replacement(tmp_path: Path) -> None:
