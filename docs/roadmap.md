@@ -61,8 +61,9 @@ suite passes 564 tests with only the opt-in performance case skipped.
 Fixed-snapshot TypeScript acceptance/integration/admission passes 23, Python
 production acceptance passes 5 with one intentional performance skip, real
 Pyright integration passes 2, and three isolated transformers performance runs
-remain below 40 seconds. Fresh-client acceptance and final dual re-audit for
-this exact build remain pending.
+remain below 40 seconds. Fresh Codex/Terra, native Claude Code/Sonnet, and CC
+Agent/Sonnet pass this exact build across all four roots plus isolated guarded
+edit/restore. Only the final dual re-audit and release remain pending.
 
 Gate: every blocker is cleared and task 15 is complete. Sync/archive and the
 authorized GitHub push occur only after both final audits pass; no canonical

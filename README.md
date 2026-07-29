@@ -52,8 +52,8 @@ could still miss a concurrent same-stat rewrite to an already-read region. The
 current candidate therefore requires two matching guarded byte-identity passes
 for Git sources and native configs while keeping external transformers checks
 caller-targeted. Fresh Codex/Terra, native Claude Code/Sonnet, and CC
-Agent/Sonnet acceptance is being repeated for this exact build across four
-roots plus isolated hash-guarded edit/restore.
+Agent/Sonnet all pass this exact build across four roots plus isolated
+hash-guarded edit/restore.
 Exact-current-head Sol-xhigh and Opus-max PASS verdicts are still required.
 Agent-public
 `replace_symbol_body` remains restored after its fault

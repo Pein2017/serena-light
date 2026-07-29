@@ -113,8 +113,8 @@ stop only the identified `serena-light` daemon; never stop canonical Serena as
 part of this rollback.
 
 Fresh Codex/Terra, native Claude Code/Sonnet 2.1.220, and CC Agent/Sonnet clients
-passed the prior single-byte-pass candidate identity
-`500f841f5826bd15a5332f6e30a968d846c600d0ce9cb6e3b6715f0243514c0d`.
+pass the current double-pass candidate identity
+`d46175203f8b78749d2ae0341ef8157965aea31c454620e8f2840de5a2b8dff7`.
 All three explicitly switched across `/data/CoordExp`, `cc-plugin-codex`,
 `/data/ms-swift`, and the read-only conda `ms` transformers package; each
 resolved an `ms-swift` declaration into transformers with
@@ -123,14 +123,11 @@ separate isolated Git fixture, verified the replacement, restored the original
 body using the new current hash, confirmed clean content, and released with
 `runtime_stop_pending=false`. The native run was a new non-persistent `claude
 -p` session with built-in file/shell/edit tools disabled, not a CC Agent. All
-three test-only fixtures were removed after exact restoration. Those receipts
-remain historical until they are repeated for the current double-pass build
-`d46175203f8b78749d2ae0341ef8157965aea31c454620e8f2840de5a2b8dff7`. The Terra
-fixture moved `79cd2a41...` to `4e465daf...` and back; the native and CC Agent
-fixtures moved `098c7ba9...` to `b60bef43...` and back. One interrupted CC
-setup turn created the latter clean baseline before the newly spawned CC Agent
-independently verified its commit/hash/clean state and used it; no production
-repository was edited.
+three test-only fixtures were removed after exact restoration. The Terra
+fixture moved `7d180e1a...` to `68fe02ea...` and back; the native fixture moved
+`afd3fd8a...` to `d043f961...` and back; the CC Agent fixture moved
+`7d180e1a...` to `7ab0150e...` and back. No production repository or external
+library was edited, and every release reported `runtime_stop_pending=false`.
 
 Historical fresh Codex and CC Agent query receipts match the prior repair identity
 `eaa691e2425e7466f2f9c3d18666a050cfd53e8153de0c6db9a6f50c1538c3f5` across

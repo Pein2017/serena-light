@@ -108,18 +108,17 @@ snapshot
 `git:a782af11090b8990fc3717dc2a809a28844ab948:4129f2174f2f7ac8476b9edb87b1d4cab798d00410b464d3b53abd3d6420ff17`;
 the before/after gate content-binds repository-native typecheck authority.
 Serena Light did not freeze or modify that foreign checkout. Fresh Codex/Terra,
-native Claude Code/Sonnet 2.1.220, and CC Agent/Sonnet clients passed the prior
-single-pass build `500f841f...` across all four roots. All three resolved a declaration from
+native Claude Code/Sonnet 2.1.220, and CC Agent/Sonnet clients passed build
+`d46175203f...` across all four roots. All three resolved a declaration from
 `ms-swift` into transformers as `read_only_external`, edited and restored
 `greet` in separate isolated Git fixtures using successive expected hashes,
 confirmed exact restoration, and released with `runtime_stop_pending=false`;
 the temporary fixtures were then removed. The native run used a new
 non-persistent `claude -p` session with built-in file/shell/edit tools disabled.
-One interrupted CC setup turn created a clean baseline fixture before the newly
-spawned CC Agent independently verified its commit, hash, and clean state and
-performed the accepted edit/restore. Those receipts are historical for the
-current double-pass build; exact-build fresh clients and Sol/Opus audits remain
-pending.
+The Terra fixture moved `7d180e1a...` to `68fe02ea...` and back; the native
+fixture moved `afd3fd8a...` to `d043f961...` and back; the CC Agent fixture
+moved `7d180e1a...` to `7ab0150e...` and back. Exact-current-head Sol/Opus
+audits remain pending.
 
 ## Prior repair checkpoint (superseded by current candidate)
 
