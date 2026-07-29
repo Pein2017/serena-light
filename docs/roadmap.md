@@ -8,8 +8,8 @@ active OpenSpec change, OpenSpec wins.
 
 `build-serena-light-v1` is the sole repair owner. Its 2026-07-28 PASS was
 superseded by HOLD. The 2026-07-29 Sol-xhigh and Opus-max audits found new
-release-blocking correctness and evidence gaps, so the current state is
-`DUAL AUDIT HOLD — FINAL REAUDIT PENDING`, not v1 PASS. Serena Light remains
+release-blocking correctness and evidence gaps. Those gaps are now repaired and
+the current state is `PASS — V1 REACCEPTED; ARCHIVE PENDING`. Serena Light remains
 registered in parallel under `serena-light`; canonical `serena` is unchanged.
 Guarded editing (`replace_symbol_body`) is restored after reacceptance.
 
@@ -63,7 +63,8 @@ production acceptance passes 5 with one intentional performance skip, real
 Pyright integration passes 2, and three isolated transformers performance runs
 remain below 40 seconds. Fresh Codex/Terra, native Claude Code/Sonnet, and CC
 Agent/Sonnet pass this exact build across all four roots plus isolated guarded
-edit/restore. Only the final dual re-audit and release remain pending.
+edit/restore. Sol-xhigh and Opus-max both returned PASS on exact clean commit
+`c2dffca`; only the mechanical sync/archive and authorized push remain pending.
 
 Gate: every blocker is cleared and task 15 is complete. Sync/archive and the
 authorized GitHub push occur only after both final audits pass; no canonical

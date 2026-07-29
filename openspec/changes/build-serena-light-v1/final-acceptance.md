@@ -4,7 +4,7 @@ Date: 2026-07-29 UTC
 
 ## Decision
 
-**DUAL AUDIT HOLD — DOUBLE-PASS REACCEPTANCE PENDING.** Exact-head audits at
+**PASS — V1 REACCEPTED.** Exact-head audits at
 `483e7a4` confirmed that the prior adapter cleanup, Node/npm authority,
 partial-stdio cleanup, and exact-build three-client blockers were closed.
 Opus-max returned PASS for the repaired runtime/evidence surface and identified
@@ -24,10 +24,11 @@ changes. The allowlisted non-Git transformers root still hashes only the
 caller-named path and now has the same deterministic race coverage. The
 operation boundary explicitly does not claim an atomic multi-file filesystem
 snapshot: a non-cooperating write after the final verified byte is observed on
-the next mandatory preflight. V1 remains
-HOLD until fresh Codex, native Claude Code, and CC Agent clients pass this exact
-build and Sol-xhigh plus Opus-max both PASS one committed checkpoint. The
-canonical MCP registration named `serena` remains unchanged.
+the next mandatory preflight. Fresh Codex, native Claude Code, and CC Agent
+clients passed the exact build. Sol-xhigh and Opus-max then both returned PASS
+on clean commit `c2dffca45ab564b5b7bad99db18fb7fd5ff78d7b`, with no P0/P1/P2
+release blocker. The canonical MCP registration named `serena` remains
+unchanged.
 
 ### Superseded pre-audit decision
 
@@ -57,7 +58,7 @@ The candidate runtime identity is
 `d46175203f8b78749d2ae0341ef8157965aea31c454620e8f2840de5a2b8dff7`;
 the dependency digest remains
 `eff6ebdf252faff7f77cb3a2f3894d17b9a0dfc89b46bd193fafdaa9e9ab4941`.
-The following evidence is current, but does not yet constitute release PASS:
+The following evidence is the current release PASS record:
 
 ```text
 pytest -q
@@ -80,8 +81,8 @@ snapshot-bound Python real-repository plus real Pyright integration
 5 passed, 1 intentional performance skip in 130.95s;
 2 real Pyright integration cases passed in 16.71s
 
-snapshot-bound TypeScript acceptance, integration, and admission
-23 passed in 23.02s (service-owned Node 22.22.0 and npm 11.13.0)
+snapshot-bound TypeScript acceptance plus integration and the full admission directory
+23 passed in 23.02s (the strict TypeScript subset is 15; service-owned Node 22.22.0 and npm 11.13.0)
 
 transformers first-call performance gate, three fresh runtimes
 3/3 passed in isolated runs of 31.47s, 32.08s, and 30.09s
@@ -117,8 +118,9 @@ the temporary fixtures were then removed. The native run used a new
 non-persistent `claude -p` session with built-in file/shell/edit tools disabled.
 The Terra fixture moved `7d180e1a...` to `68fe02ea...` and back; the native
 fixture moved `afd3fd8a...` to `d043f961...` and back; the CC Agent fixture
-moved `7d180e1a...` to `7ab0150e...` and back. Exact-current-head Sol/Opus
-audits remain pending.
+moved `7d180e1a...` to `7ab0150e...` and back. Exact-current-head Sol-xhigh and
+Opus-max both returned PASS on `c2dffca` after independently reproducing the
+double-pass discriminator and the declared operation boundary.
 
 ## Prior repair checkpoint (superseded by current candidate)
 
@@ -375,7 +377,7 @@ configuration is untouched.
   `SCOPE_INCOMPATIBLE` and preserves the previous binding. A fixture-owned
   `pyrightconfig.json` proves the supported explicit boundary; no automatic
   overlay is generated.
-- Production LOC (14,822) is informational only; ownership, forbidden
+- Production LOC (14,837) is informational only; ownership, forbidden
   imports, direct dependencies, census/manifest consistency, copied hashes,
   and the pinned Serena commit remain hard gates.
 - TypeScript LSP diagnostics remain advisory when the repository uses a newer

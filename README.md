@@ -6,8 +6,8 @@ derivative of selected MIT-licensed Serena and SolidLSP mechanisms.
 
 The repository is reaccepting its first OpenSpec change. The admission probes,
 provenance census, owned LSP core, workspace/adapter/daemon layers, containment,
-repair-state test/static gates, fresh clients, and guarded-edit restoration
-pass; only the final dual audit remains open.
+repair-state test/static gates, fresh clients, guarded-edit restoration, and
+the final dual audit pass; OpenSpec sync/archive remains.
 
 ## Scope
 
@@ -40,7 +40,7 @@ The current real-stdio connector independently passes its guarded-edit and
 cross-library declaration contracts.
 Canonical `serena` remains unchanged pending a separate user decision.
 
-**Current state: `DUAL AUDIT HOLD — FINAL REAUDIT PENDING`.** Exact-head audits
+**Current state: `PASS — V1 REACCEPTED; ARCHIVE PENDING`.** Exact-head audits
 of `6fce244` confirmed the prior freshness, transport, adapter-admission, native
 source, and hermetic-stdio blockers were closed, then found that a runtime owner
 could still pin one failed cleanup future forever and that the native TypeScript
@@ -54,11 +54,12 @@ for Git sources and native configs while keeping external transformers checks
 caller-targeted. Fresh Codex/Terra, native Claude Code/Sonnet, and CC
 Agent/Sonnet all pass this exact build across four roots plus isolated
 hash-guarded edit/restore.
-Exact-current-head Sol-xhigh and Opus-max PASS verdicts are still required.
+Exact-current-head Sol-xhigh and Opus-max both returned PASS on clean commit
+`c2dffca` with no P0/P1/P2 release blocker.
 Agent-public
 `replace_symbol_body` remains restored after its fault
 matrix, full regression, and three fresh-client hash-edit receipts passed. This
-is **not** v1 PASS. Source ownership/provenance
+is v1 PASS pending only the mechanical OpenSpec sync/archive. Source ownership/provenance
 passes with 9 copied hashes against official Serena commit
 `9a9d07e83d8c1cba3458992707f440c624446c6d`; production LOC (14,837) is
 informational only and not gated. The current repair candidate has build

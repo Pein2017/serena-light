@@ -151,5 +151,6 @@ the real service-executable stdio acceptance, which passes the exact environment
 to the connector child and verifies loopback bypass. The prior exact-build
 real-stdio suite also covers the restored guarded edit; it does not relabel the
 older three-client edits as current. Current-build Codex, native Claude Code,
-and CC Agent clients are accepted; the final dual audit remains open.
+and CC Agent clients are accepted, and the final Sol-xhigh plus Opus-max audits
+both passed exact clean commit `c2dffca`.
 Canonical-name switching is unapproved.

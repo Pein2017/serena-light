@@ -45,5 +45,5 @@
     {"family": "broad or non-v1 editing", "tools": ["insert_after_symbol", "insert_before_symbol", "rename_symbol", "safe_delete_symbol", "restart_language_server"], "classification": "dropped"},
     {"family": "JetBrains", "tools": ["jet_brains_debug", "jet_brains_find_declaration", "jet_brains_find_implementations", "jet_brains_find_referencing_symbols", "jet_brains_find_symbol", "jet_brains_get_symbols_overview", "jet_brains_inline_symbol", "jet_brains_list_inspections", "jet_brains_move", "jet_brains_rename", "jet_brains_run_inspections", "jet_brains_safe_delete", "jet_brains_type_hierarchy"], "classification": "dropped"}
   ],
-  "acceptance": {"historical_fresh_session_accepted": true, "current_candidate_fresh_session_accepted": true, "canonical_switch_approved": false, "edit_reacceptance_pending": false, "dual_audit_hold": true}
+  "acceptance": {"historical_fresh_session_accepted": true, "current_candidate_fresh_session_accepted": true, "canonical_switch_approved": false, "edit_reacceptance_pending": false, "dual_audit_hold": false}
 }

@@ -2,9 +2,9 @@
 
 ## Current snapshot-bound candidate status
 
-**PASS: 23 passed in 23.02s.** Candidate build `d46175203f8b...` removes these real
-TypeScript acceptance, integration, and admission cases from the deterministic
-default suite unless
+**PASS: 23 passed in 23.02s.** Candidate build `d46175203f8b...` removes the real
+TypeScript acceptance and integration cases plus the full admission directory
+from the deterministic default suite unless
 `SERENA_LIGHT_CC_PLUGIN_CODEX_SNAPSHOT` matches the exact observed Git HEAD,
 tracked binary diff, untracked file/symlink content, and the ignored TypeScript
 launcher/native-executable authority before and after every test. The same gate
@@ -15,8 +15,9 @@ mismatch or any mid-test mutation fails; it is never `xfail`.
 stable at authority-profile snapshot
 `git:a782af11090b8990fc3717dc2a809a28844ab948:4129f2174f2f7ac8476b9edb87b1d4cab798d00410b464d3b53abd3d6420ff17`
 through six semantic/diagnostic cases, the repository-native TypeScript
-authority check, three real TypeScript integration cases, and six admission
-probe cases. The gate verified the same identity after every test. Historical
+authority check, three real TypeScript integration cases, six TypeScript
+admission probe cases, and eight additional admission cases. The strict
+TypeScript subset is 15; the gate verified the same identity after every test. Historical
 passes below remain evidence for older builds only.
 
 ## Post-audit current-build rerun
