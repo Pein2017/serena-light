@@ -76,6 +76,14 @@ class ReadinessWitnessError(AdapterError):
 
 
 @dataclass(frozen=True, slots=True)
+class _UndrainedUnversionedClose:
+    """A close publication which must be causally drained before reopening."""
+
+    runtime_token: int
+    close_delivered: bool
+
+
+@dataclass(frozen=True, slots=True)
 class EngineMetadata:
     name: str
     version: str
@@ -136,10 +144,13 @@ class AdapterLanguageFacts:
     initialize_params: Mapping[str, object]
     default_position_encoding: PositionEncoding = PositionEncoding.UTF16
     language_ids: Mapping[str, str] | None = None
+    diagnostic_publications_include_version: bool = True
 
     def __post_init__(self) -> None:
         if not self.name or not self.language_id:
             raise ValueError("adapter name and language_id must be non-empty")
+        if type(self.diagnostic_publications_include_version) is not bool:
+            raise ValueError("diagnostic publication version evidence must be declared as a boolean")
         normalized = frozenset(_normalize_extension(extension) for extension in self.extensions)
         if not normalized:
             raise ValueError("an adapter must route at least one extension")
@@ -204,6 +215,7 @@ class AdapterSnapshot:
     crash: CrashSnapshot
     transitions: tuple[PhaseTransition, ...]
     running: bool
+    runtime_token: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -543,7 +555,14 @@ class LanguageAdapter:
         self._runtime_token = 0
         self._crashed_runtime_tokens: set[int] = set()
         self._pending_documents: dict[str, DocumentReadinessTarget] = {}
+        # A diagnostics load may establish document readiness through a
+        # document-symbol response before its asynchronous publication arrives.
+        # Keep that publication owner separately from ordinary readiness.
+        self._pending_diagnostics: dict[str, DocumentReadinessTarget] = {}
         self._open_documents: OrderedDict[str, None] = OrderedDict()
+        # This must not be inferred from open ownership: a didClose can be
+        # delivered while its same-connection causal barrier still fails.
+        self._undrained_unversioned_closes: dict[str, _UndrainedUnversionedClose] = {}
         self._raw_providers = RawLspProviders()
         self._derived_tools = DerivedToolAvailability.from_raw(self._raw_providers)
         self._position_encoding = facts.default_position_encoding
@@ -583,6 +602,7 @@ class LanguageAdapter:
                 crash=self._crash_snapshot_locked(),
                 transitions=tuple(self._transitions),
                 running=process_running,
+                runtime_token=self._runtime_token,
             )
 
     def start(self) -> Future[AdapterSnapshot]:
@@ -734,6 +754,9 @@ class LanguageAdapter:
             # make the next open_document wrongly send didChange instead of
             # didOpen against a server that never saw the original didOpen.
             self._open_documents.clear()
+            self._forget_all_document_tracking()
+            self._clear_unversioned_close_markers()
+            self._lsp_state.reset_documents()
 
         if runtime is not None:
             self._runtime_provider.stop(runtime)
@@ -771,9 +794,10 @@ class LanguageAdapter:
             if runtime is None and self._phase is AdapterPhase.COLD:
                 return
             self._transition(AdapterPhase.STOPPING, "explicit stop")
-            self._pending_documents.clear()
+            self._forget_all_document_tracking()
             closing_uris = tuple(self._open_documents)
             self._open_documents.clear()
+            self._clear_unversioned_close_markers()
         if runtime is not None:
             for uri in closing_uris:
                 with suppress(Exception):
@@ -827,43 +851,178 @@ class LanguageAdapter:
         version: int,
         text: str,
     ) -> DocumentReadinessTarget:
+        client = self._ensure_started_worker()
+        with self._operation_lock:
+            return self._open_document_with_client(
+                client,
+                relative_path=relative_path,
+                uri=uri,
+                version=version,
+                text=text,
+            )
+
+    def _open_document_with_client(
+        self,
+        client: AdapterClient,
+        *,
+        relative_path: str,
+        uri: str,
+        version: int,
+        text: str,
+        retain_diagnostics_target: bool = False,
+    ) -> DocumentReadinessTarget:
+        """Open/change a document on the exact client owned by the caller."""
+
         normalized = _normalize_relative_path(relative_path)
         if normalized not in self._scope.projection.trust_inventory.paths:
             raise ValueError(f"path is outside the current trust inventory: {normalized}")
-        client = self._ensure_started_worker()
-        with self._operation_lock:
-            document = self._lsp_state.update_document(
+        # A stale caller must not close a current server buffer when the local
+        # version ordering already proves its update cannot be admitted.
+        current = self._lsp_state.document(uri)
+        if current is not None and current.version is not None and (version is None or version <= current.version):
+            raise ValueError(f"document version {version} is not newer for {uri}")
+        self._drain_unversioned_diagnostics_before_change(client, uri)
+        document = self._lsp_state.update_document(
+            uri=uri,
+            path=self.workspace_root / normalized,
+            version=version,
+        )
+        if document is None:
+            raise ValueError(f"document version {version} is not newer for {uri}")
+        self._lsp_state.advance_source_generation()
+        path_generation = self._scope.generations.path_scoped.get(normalized, 0)
+        target = DocumentReadinessTarget(
+            uri=uri,
+            relative_path=normalized,
+            absolute_path=document.path,
+            version=version,
+            document_generation=document.generation,
+            path_generation=path_generation,
+        )
+        with self._state_lock:
+            self._pending_diagnostics.pop(uri, None)
+            self._pending_documents[uri] = target
+            if retain_diagnostics_target:
+                self._pending_diagnostics[uri] = target
+        try:
+            self._send_document_open_or_change(
+                client,
                 uri=uri,
-                path=self.workspace_root / normalized,
+                language_id=self.facts.language_id_for(normalized),
                 version=version,
+                text=text,
             )
-            if document is None:
-                raise ValueError(f"document version {version} is not newer for {uri}")
-            self._lsp_state.advance_source_generation()
-            path_generation = self._scope.generations.path_scoped.get(normalized, 0)
-            target = DocumentReadinessTarget(
-                uri=uri,
-                relative_path=normalized,
-                absolute_path=document.path,
-                version=version,
-                document_generation=document.generation,
-                path_generation=path_generation,
-            )
+        except BaseException:
             with self._state_lock:
-                self._pending_documents[uri] = target
-            try:
-                self._send_document_open_or_change(
-                    client,
-                    uri=uri,
-                    language_id=self.facts.language_id_for(normalized),
-                    version=version,
-                    text=text,
-                )
-            except BaseException:
-                with self._state_lock:
+                if self._pending_documents.get(uri) == target:
                     self._pending_documents.pop(uri, None)
-                raise
-            return target
+                if self._pending_diagnostics.get(uri) == target:
+                    self._pending_diagnostics.pop(uri, None)
+            raise
+        return target
+
+    def _drain_unversioned_diagnostics_before_change(self, client: AdapterClient, uri: str) -> None:
+        """Close an open unversioned-diagnostics buffer before replacing it.
+
+        The fixed TypeScript server does not put document versions on
+        ``publishDiagnostics``.  Its debounced pre-change publication therefore
+        cannot be distinguished after a normal ``didChange``.  Disowning the
+        old target before ``didClose`` makes the close-generated empty
+        publication ineligible.  The locked TypeScript server advertises
+        ``workspace/willRenameFiles`` and its empty-files handler returns an
+        empty changes map without touching a project.  It serially writes the
+        close publication before answering that harmless no-op request.
+        Waiting for the response on this same client therefore drains the
+        publication before a subsequent full-text ``didOpen`` can install the
+        new owner.  Engines whose publications carry versions retain the
+        ordinary ``didChange`` path.
+        """
+
+        if self.facts.diagnostic_publications_include_version:
+            return
+        if uri in self._open_documents:
+            self._open_documents.pop(uri, None)
+            self._forget_document_tracking(uri)
+            self._record_unversioned_close_before_delivery(uri)
+        self._drain_recorded_unversioned_closes(client)
+
+    def _drain_recorded_unversioned_closes(self, client: AdapterClient) -> None:
+        """Drain every close recorded on the current unversioned connection.
+
+        A single same-connection response orders all preceding close
+        notifications and their diagnostic publications.  Draining the whole
+        set, rather than only the URI about to reopen, also keeps LRU and
+        watched-file close state bounded when many distinct files are visited.
+        """
+
+        if self.facts.diagnostic_publications_include_version:
+            return
+        with self._state_lock:
+            recorded = tuple(self._undrained_unversioned_closes.items())
+            runtime_token = self._runtime_token
+        current = tuple((uri, marker) for uri, marker in recorded if marker.runtime_token == runtime_token)
+        if not current:
+            return
+        for recorded_uri, _marker in current:
+            if recorded_uri in self._open_documents:
+                # A close marker and local open ownership must never coexist.
+                # The watcher guards against creating that state, but a prior
+                # failed reconciliation may have left one behind.  Disown it
+                # before the causal barrier lets its close-empty publication
+                # reach the client, so no stale target can accept CLEAN.
+                self._open_documents.pop(recorded_uri, None)
+                self._forget_document_tracking(recorded_uri)
+        for recorded_uri, marker in current:
+            if not marker.close_delivered:
+                self._deliver_recorded_unversioned_close(client, recorded_uri, marker.runtime_token)
+        client.request(
+            "workspace/willRenameFiles",
+            {"files": []},
+            timeout=self._readiness_timeout,
+        )
+        with self._state_lock:
+            for recorded_uri, _marker in current:
+                latest = self._undrained_unversioned_closes.get(recorded_uri)
+                if latest is not None and latest.runtime_token == runtime_token:
+                    self._undrained_unversioned_closes.pop(recorded_uri, None)
+
+    def _record_unversioned_close_before_delivery(self, uri: str) -> None:
+        """Make an unversioned close retryable before its delivery is attempted."""
+
+        if self.facts.diagnostic_publications_include_version:
+            return
+        with self._state_lock:
+            self._undrained_unversioned_closes[uri] = _UndrainedUnversionedClose(
+                runtime_token=self._runtime_token,
+                close_delivered=False,
+            )
+
+    def _deliver_recorded_unversioned_close(
+        self,
+        client: AdapterClient,
+        uri: str,
+        runtime_token: int,
+    ) -> None:
+        """Deliver a marked close, retaining the marker if delivery is unknown."""
+
+        client.notify("textDocument/didClose", {"textDocument": {"uri": uri}})
+        with self._state_lock:
+            marker = self._undrained_unversioned_closes.get(uri)
+            if marker is not None and marker.runtime_token == runtime_token == self._runtime_token:
+                self._undrained_unversioned_closes[uri] = _UndrainedUnversionedClose(
+                    runtime_token=runtime_token,
+                    close_delivered=True,
+                )
+
+    def _send_unversioned_didclose(self, client: AdapterClient, uri: str) -> None:
+        """Mark then deliver a close that a future open must drain first."""
+
+        self._record_unversioned_close_before_delivery(uri)
+        marker = self._undrained_unversioned_closes.get(uri)
+        if marker is None:
+            client.notify("textDocument/didClose", {"textDocument": {"uri": uri}})
+            return
+        self._deliver_recorded_unversioned_close(client, uri, marker.runtime_token)
 
     def _send_document_open_or_change(
         self,
@@ -874,7 +1033,7 @@ class LanguageAdapter:
         version: int,
         text: str,
     ) -> None:
-        """Send exactly one didOpen per URI; every later version is a didChange."""
+        """Send didChange for a retained URI, otherwise exact full-text didOpen."""
 
         if uri in self._open_documents:
             client.notify(
@@ -884,6 +1043,7 @@ class LanguageAdapter:
                     "contentChanges": [{"text": text}],
                 },
             )
+            self._on_document_text(uri, text)
             self._open_documents.move_to_end(uri)
             return
         client.notify(
@@ -897,12 +1057,12 @@ class LanguageAdapter:
                 }
             },
         )
+        self._on_document_text(uri, text)
         self._open_documents[uri] = None
         while len(self._open_documents) > self.MAX_OPEN_DOCUMENTS:
             evicted_uri, _ = self._open_documents.popitem(last=False)
-            client.notify("textDocument/didClose", {"textDocument": {"uri": evicted_uri}})
-            with self._state_lock:
-                self._pending_documents.pop(evicted_uri, None)
+            self._forget_document_tracking(evicted_uri)
+            self._send_unversioned_didclose(client, evicted_uri)
 
     def _reconcile_watched_files_worker(
         self,
@@ -918,6 +1078,7 @@ class LanguageAdapter:
         workspace_uri = self.workspace_root.as_uri()
         changes = [dict(event.as_lsp_change(workspace_uri)) for event in events]
         with self._operation_lock:
+            self._drain_recorded_unversioned_closes(client)
             client.notify("workspace/didChangeWatchedFiles", {"changes": changes})
             for uri in tuple(self._open_documents):
                 document = self._lsp_state.document(uri)
@@ -937,45 +1098,37 @@ class LanguageAdapter:
                 try:
                     text = FileSnapshot.from_bytes(document.path.read_bytes()).text
                     version = versions[relative_path]
-                    updated = self._lsp_state.update_document(
-                        uri=uri,
-                        path=document.path,
-                        version=version,
-                    )
-                    if updated is None:
-                        raise ValueError("fresh watcher document version is not newer")
                 except (KeyError, OSError, PositionError, UnicodeError, ValueError):
                     # A source that disappears or cannot be represented exactly
                     # is never left open with stale server content.
                     self._close_document_worker(client, uri)
                     continue
-                self._lsp_state.advance_source_generation()
-                target = DocumentReadinessTarget(
-                    uri=uri,
-                    relative_path=relative_path,
-                    absolute_path=document.path,
-                    version=version,
-                    document_generation=updated.generation,
-                    path_generation=self._scope.generations.path_scoped.get(relative_path, 0),
-                )
-                with self._state_lock:
-                    self._pending_documents[uri] = target
-                client.notify(
-                    "textDocument/didChange",
-                    {
-                        "textDocument": {"uri": uri, "version": version},
-                        "contentChanges": [{"text": text}],
-                    },
-                )
-                self._open_documents.move_to_end(uri)
+                try:
+                    self._open_document_with_client(
+                        client,
+                        relative_path=relative_path,
+                        uri=uri,
+                        version=version,
+                        text=text,
+                    )
+                except ValueError:
+                    # Invalid/stale version ownership is treated like an
+                    # unreadable source: no stale server buffer survives.
+                    self._close_document_worker(client, uri)
             for relative_path in created:
-                language_id = self.facts.language_id_for(relative_path)
                 path = self.workspace_root / relative_path
+                uri = path.as_uri()
+                # This process already owns the server buffer.  A raw
+                # temporary didOpen/didClose would close that buffer while
+                # leaving local ownership intact and can later stamp its
+                # close-empty diagnostics onto a cached target.
+                if uri in self._open_documents:
+                    continue
+                language_id = self.facts.language_id_for(relative_path)
                 try:
                     text = FileSnapshot.from_bytes(path.read_bytes()).text
                 except (OSError, PositionError, UnicodeError):
                     continue
-                uri = path.as_uri()
                 client.notify(
                     "textDocument/didOpen",
                     {
@@ -987,15 +1140,65 @@ class LanguageAdapter:
                         }
                     },
                 )
-                client.notify("textDocument/didClose", {"textDocument": {"uri": uri}})
+                self._send_unversioned_didclose(client, uri)
+                if len(self._undrained_unversioned_closes) >= self.MAX_OPEN_DOCUMENTS:
+                    self._drain_recorded_unversioned_closes(client)
 
     def _close_document_worker(self, client: AdapterClient, uri: str) -> None:
         """Close one adapter-owned URI and forget any pending readiness witness."""
 
+        was_open = uri in self._open_documents
         self._open_documents.pop(uri, None)
+        self._forget_document_tracking(uri)
+        if was_open:
+            self._send_unversioned_didclose(client, uri)
+
+    def _retain_diagnostics_target(self, target: DocumentReadinessTarget) -> None:
+        """Keep one current target eligible for its push diagnostics publication."""
+
+        with self._state_lock:
+            self._pending_documents[target.uri] = target
+            self._pending_diagnostics[target.uri] = target
+
+    def cancel_diagnostics_target(self, target: DocumentReadinessTarget) -> None:
+        """Release one waiter while retaining its current publication owner.
+
+        The synchronous runtime wait has already stopped when this is called.
+        Push diagnostics may legitimately arrive later, so the matching
+        ``_pending_documents`` entry remains eligible to accept and cache that
+        publication.  A newer open replaces both maps before this method can
+        act on the old target.
+        """
+
+        with self._state_lock:
+            if self._pending_diagnostics.get(target.uri) != target:
+                return
+            self._pending_diagnostics.pop(target.uri, None)
+
+    def _forget_document_tracking(self, uri: str) -> None:
         with self._state_lock:
             self._pending_documents.pop(uri, None)
-        client.notify("textDocument/didClose", {"textDocument": {"uri": uri}})
+            self._pending_diagnostics.pop(uri, None)
+        self._on_document_forgotten(uri)
+
+    def _forget_all_document_tracking(self) -> None:
+        with self._state_lock:
+            self._pending_documents.clear()
+            self._pending_diagnostics.clear()
+        self._on_all_documents_forgotten()
+
+    def _clear_unversioned_close_markers(self) -> None:
+        with self._state_lock:
+            self._undrained_unversioned_closes.clear()
+
+    def _on_document_forgotten(self, uri: str) -> None:
+        """Subclass hook for document-owned side state."""
+
+    def _on_all_documents_forgotten(self) -> None:
+        """Subclass hook for process restart and explicit stop."""
+
+    def _on_document_text(self, uri: str, text: str) -> None:
+        """Subclass hook for the exact full text last sent for one URI."""
 
     def _warm_global_worker(
         self,
@@ -1021,10 +1224,7 @@ class LanguageAdapter:
         if not isinstance(result, Sequence) or isinstance(result, str | bytes):
             raise ReadinessWitnessError(AdapterErrorCode.NOT_READY, "workspace-symbol sentinel returned no result list")
         exact_name = tuple(
-            item
-            for item in result
-            if isinstance(item, Mapping)
-            and item.get("name") == witness.exact_symbol
+            item for item in result if isinstance(item, Mapping) and item.get("name") == witness.exact_symbol
         )
         if not any(_workspace_symbol_uri(item) == witness.uri for item in exact_name):
             with self._state_lock:
@@ -1056,7 +1256,17 @@ class LanguageAdapter:
     ) -> DocumentReadinessTarget:
         client = self._ensure_started_worker()
         with self._operation_lock:
-            observed = probe.observe(client, target, timeout=self._readiness_timeout)
+            return self._probe_document_with_client(client, target, probe)
+
+    def _probe_document_with_client(
+        self,
+        client: AdapterClient,
+        target: DocumentReadinessTarget,
+        probe: DocumentReadinessProbe,
+    ) -> DocumentReadinessTarget:
+        """Probe one target on the exact process that owns its didOpen state."""
+
+        observed = probe.observe(client, target, timeout=self._readiness_timeout)
         if not observed or not self._mark_document_ready(target):
             raise ReadinessWitnessError(
                 AdapterErrorCode.NOT_READY,
@@ -1070,11 +1280,33 @@ class LanguageAdapter:
             self._notification_handler(method, params)
         with self._state_lock:
             target = self._pending_documents.get(params.get("uri") if isinstance(params, Mapping) else "")
-        if target is None:
-            return
-        if not self._document_witness.observe(method, params, target, self._lsp_state):
-            return
+            if (
+                target is None
+                or not self._publication_has_declared_version_evidence(method, params)
+                or not self._document_witness.observe(method, params, target, self._lsp_state)
+            ):
+                return
+            # Once the matching publication is accepted, neither the waiter nor
+            # the publication owner is needed.  Cancellation may already have
+            # released only the waiter; retaining the document owner until this
+            # point makes a late same-target publication recoverable.
+            if self._pending_diagnostics.get(target.uri) == target:
+                self._pending_diagnostics.pop(target.uri, None)
+            if self._pending_documents.get(target.uri) == target:
+                self._pending_documents.pop(target.uri, None)
         self._mark_document_ready(target)
+
+    def _publication_has_declared_version_evidence(self, method: str, params: object) -> bool:
+        """Fail closed when a versioned engine violates its publication fact."""
+
+        if method != "textDocument/publishDiagnostics":
+            return True
+        if not self.facts.diagnostic_publications_include_version:
+            return True
+        if not isinstance(params, Mapping):
+            return False
+        publication = cast(Mapping[str, object], params)
+        return type(publication.get("version")) is int
 
     def _mark_document_ready(self, target: DocumentReadinessTarget) -> bool:
         current = self._lsp_state.document(target.uri)
@@ -1107,6 +1339,15 @@ class LanguageAdapter:
             if token in self._crashed_runtime_tokens:
                 return
             self._crashed_runtime_tokens.add(token)
+            if token == self._runtime_token:
+                # Document versions, open ownership, and push diagnostics are
+                # process-owned.  Clear them as soon as the current transport
+                # dies so a diagnostics fast path cannot reuse them before the
+                # replacement process has received a fresh didOpen.
+                self._open_documents.clear()
+                self._forget_all_document_tracking()
+                self._clear_unversioned_close_markers()
+                self._lsp_state.reset_documents()
             self._crash_total += 1
             self._last_crash_timestamp = timestamp
             self._last_crash_error = type(error).__name__

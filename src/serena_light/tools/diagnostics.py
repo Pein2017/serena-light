@@ -17,7 +17,7 @@ from enum import StrEnum
 from typing import Any, Protocol, cast
 
 from serena_light.lsp.normalize import Location, NormalizedSymbol, Position, Range, containing_symbol
-from serena_light.lsp.positions import LspPosition, PositionError
+from serena_light.lsp.positions import LspPosition, PositionError, PublicPositionRenderer
 from serena_light.lsp.state import DiagnosticsSnapshot, DiagnosticsState
 from serena_light.tools.envelopes import (
     ErrorCode,
@@ -556,18 +556,11 @@ def _segment_matches(actual: str, expected: str) -> bool:
 
 
 def _source_range(document: DocumentNavigation, value: Range) -> dict[str, dict[str, int]]:
-    return {"start": _source_position(document, value.start), "end": _source_position(document, value.end)}
-
-
-def _source_position(document: DocumentNavigation, value: Position) -> dict[str, int]:
-    offset = document.mapper.lsp_to_text_offset(LspPosition(value.line, value.character))
-    line_start = max(document.snapshot.text.rfind("\n", 0, offset), document.snapshot.text.rfind("\r", 0, offset)) + 1
-    return {
-        "line": value.line + 1,
-        "column": offset - line_start + 1,
-        "text_offset": offset,
-        "byte_offset": document.mapper.text_offset_to_byte_offset(offset),
-    }
+    renderer = PublicPositionRenderer(document.mapper)
+    return renderer.range(
+        LspPosition(value.start.line, value.start.character),
+        LspPosition(value.end.line, value.end.character),
+    )
 
 
 def _generations(document: DocumentNavigation, requested_generation: int):

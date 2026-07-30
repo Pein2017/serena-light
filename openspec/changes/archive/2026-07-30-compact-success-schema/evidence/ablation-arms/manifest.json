@@ -1,0 +1,150 @@
+{
+  "manifest_version": 1,
+  "evidence_kind": "locked_four_arm_semantic_mcp_ablation_manifest",
+  "date_utc": "2026-07-30",
+  "status": "complete_evidence_not_release_acceptance",
+  "prompt": "../ablation-prompt.md",
+  "enforcement": {
+    "physical_unassigned_mcp_schema_isolation": false,
+    "physical_unassigned_mcp_schema_isolation_note": "The harness could not physically hide the unassigned MCP schema from a participant.",
+    "authorized_control": "Each arm was authorized to call exactly its assigned semantic MCP; the retained complete tool ledger is the enforcement evidence.",
+    "cross_use_rule": "Any call to the other semantic MCP invalidates that arm.",
+    "cross_use_observed": false,
+    "claim_boundary": "This is authorization plus post-hoc complete-ledger enforcement, not proof of physical schema-exposure isolation."
+  },
+  "reported_snapshots": {
+    "serena_light": {
+      "commit": "9e4987e9f2190a4ff03cb7a35359483a5387f327",
+      "working_tree_state": "dirty",
+      "working_tree_subjects": [
+        {
+          "path": "src/serena_light/workspace/runtime.py",
+          "sha256": "8165bc40212d7c7b99657f727c9ce7acc971d246e7b14b56df7af4131cc8e91c",
+          "reported_state": "modified"
+        },
+        {
+          "path": "src/serena_light/workspace/inventory.py",
+          "sha256": "5c3b3fd5019812107d5cff73b5a689f538b6bc6711d93cafb794935fdeadc89a",
+          "reported_state": "clean"
+        },
+        {
+          "path": "tests/unit/test_workspace_runtime.py",
+          "sha256": "af5cf360163dd036a5ab688dc55ddcb7912617e5aef8d75394a6631f44cbb915",
+          "reported_state": "clean"
+        },
+        {
+          "path": "tests/unit/test_workspace_inventory.py",
+          "sha256": "36e19c9f53cc6cc950ca1636288345b8bd2be5b6a71c471290dee6f2213e79f1",
+          "reported_state": "clean"
+        }
+      ]
+    },
+    "research_probes": {
+      "commit": "ccdadc4e2d8c00a091dde8d684a14982f05715f2",
+      "working_tree_state": "dirty_overall; cited_Q2_subjects_reported_clean",
+      "working_tree_subjects": [
+        {
+          "path": "src/inference/hf_backend.py",
+          "sha256": "e21beb1e6b5c475ca8f0102b3500636620e880709589388bb8c56e7d8a99db95",
+          "reported_state": "clean"
+        },
+        {
+          "path": "scripts/research/run_continuation_locality_boundary_scoring.py",
+          "sha256": "747a4efd007dcbfbf0d59bb6bf2d60b6e4179390dabb033f74f4281dde7b110d",
+          "reported_state": "clean"
+        },
+        {
+          "path": "tests/inference/test_hf_exact_history_evidence.py",
+          "sha256": "5b90b6b79326ea3b92ccc702ab64680676f5187dd2ee71f90c4361114cc6aa4c",
+          "reported_state": "clean"
+        },
+        {
+          "path": "tests/research/test_continuation_locality_owner_compositionality.py",
+          "sha256": "f4dd39fbecee67aa70932234f57db1e66cf932e04e16d012c24918a35f0b8cc1",
+          "reported_state": "clean"
+        }
+      ]
+    },
+    "comparison_boundary": "Q1 used the explicitly listed dirty working-tree subjects above and differed from the precompact round; these commits plus subject hashes, not a claim of a clean repository snapshot, identify this ablation."
+  },
+  "arms": [
+    {
+      "id": "opus_canonical_serena",
+      "primary_receipt": "opus-canonical-serena.md",
+      "model": "Opus 5",
+      "effort": "high",
+      "surface": "cc-for-pein durable Claude Code agent",
+      "assigned_mcp": "canonical Serena",
+      "started_at_utc": "2026-07-30T20:02:42.581Z",
+      "completed_at_utc": "2026-07-30T20:10:08.165Z",
+      "retained_response_mtime_utc": "2026-07-30T20:40:10Z",
+      "accuracy_score": 99.0,
+      "semantic_mcp_calls": 68,
+      "source_shell_fallbacks": 3,
+      "response_word_count": 3531,
+      "response_word_count_note": "Parent-scored participant response count; it exceeded the 2500-word limit.",
+      "observed_wall_time": "7m 26s",
+      "response_sha256": "6f51f42c76fd2353b749e64cc76490540ab888635185ec070a6dc2910c9db12e",
+      "cross_use_observed": false
+    },
+    {
+      "id": "opus_serena_light",
+      "primary_receipt": "opus-serena-light.md",
+      "model": "Opus 5",
+      "effort": "high",
+      "surface": "cc-for-pein durable Claude Code agent",
+      "assigned_mcp": "Serena Light",
+      "started_at_utc": "2026-07-30T19:53:26.984Z",
+      "completed_at_utc": "2026-07-30T20:01:45.000Z",
+      "retained_response_mtime_utc": "2026-07-30T20:40:10Z",
+      "accuracy_score": 98.5,
+      "semantic_mcp_calls": 53,
+      "source_shell_fallbacks": 0,
+      "response_word_count": 2784,
+      "response_word_count_note": "Parent-scored participant response count; it exceeded the 2500-word limit.",
+      "observed_wall_time": "8m 18s",
+      "response_sha256": "1ac37621761e9f8efbc88d1f0e121506a26a66a24b81cce37fda8c705c9bd6d8",
+      "cross_use_observed": false
+    },
+    {
+      "id": "sol_canonical_serena",
+      "primary_receipt": "sol-canonical-serena.md",
+      "model": "Sol",
+      "effort": "high",
+      "surface": "built-in Codex subagent",
+      "assigned_mcp": "canonical Serena",
+      "started_at_utc": "2026-07-30T19:53:26.984Z",
+      "completed_at_utc": null,
+      "retained_response_mtime_utc": "2026-07-30T20:41:31Z",
+      "accuracy_score": 97.5,
+      "semantic_mcp_calls": 68,
+      "source_shell_fallbacks": 2,
+      "response_word_count": null,
+      "response_word_count_note": "The participant reported compliance with the 2500-word limit; no independently retained count is available.",
+      "observed_wall_time": null,
+      "observed_wall_time_note": "Not reliably captured after interruption.",
+      "response_sha256": "dd5ee2059cf60ec76b1234c80f19dd32da1aa512e1db663a5500b8171ea6f30e",
+      "cross_use_observed": false
+    },
+    {
+      "id": "sol_serena_light",
+      "primary_receipt": "sol-serena-light.md",
+      "model": "Sol",
+      "effort": "high",
+      "surface": "built-in Codex subagent",
+      "assigned_mcp": "Serena Light",
+      "started_at_utc": "2026-07-30T20:02:42.581Z",
+      "completed_at_utc": null,
+      "completion_observed_at_utc": "2026-07-30T20:09:06.282Z",
+      "retained_response_mtime_utc": "2026-07-30T20:41:32Z",
+      "accuracy_score": 98.0,
+      "semantic_mcp_calls": 60,
+      "source_shell_fallbacks": 0,
+      "response_word_count": null,
+      "response_word_count_note": "The participant reported compliance with the 2500-word limit; no independently retained count is available.",
+      "observed_wall_time": "at most 6m 24s",
+      "response_sha256": "8e2997fbae54aab27bf6214d4675939de87538b6e2012a50bea44a92c77c92f3",
+      "cross_use_observed": false
+    }
+  ]
+}

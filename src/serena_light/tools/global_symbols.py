@@ -20,13 +20,20 @@ from typing import Any, Protocol, cast
 from urllib.parse import unquote, urlparse
 
 from serena_light.lsp.normalize import (
+    BodyCompleteness,
     ContainmentRecovery,
     NormalizedSymbol,
     Position,
     Range,
     normalize_document_symbols,
 )
-from serena_light.lsp.positions import FileSnapshot, PositionEncoding, PositionError, PositionMapper
+from serena_light.lsp.positions import (
+    FileSnapshot,
+    LspPosition,
+    PositionEncoding,
+    PositionError,
+    PublicPositionRenderer,
+)
 from serena_light.tools.envelopes import (
     AdapterMetadata,
     ErrorCode,
@@ -39,7 +46,6 @@ from serena_light.tools.envelopes import (
     error,
     success,
 )
-from serena_light.tools.navigation import source_body, source_range
 
 type RawSymbol = Mapping[str, Any]
 
@@ -139,6 +145,7 @@ class DocumentSymbolBatch:
     position_encoding: PositionEncoding = PositionEncoding.UTF16
     normalize_name: Callable[[str], str] | None = None
     recover_containment: ContainmentRecovery | None = None
+    body_completeness: BodyCompleteness | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "relative_path", _relative_path(self.relative_path))
@@ -194,9 +201,7 @@ class GlobalSymbolService:
         names = [state.adapter.name for _, state in states]
         if len(names) != len(set(names)):
             raise ValueError("global adapter names must be unique")
-        self._providers = tuple(
-            provider for provider, _ in sorted(states, key=lambda item: _adapter_key(item[1]))
-        )
+        self._providers = tuple(provider for provider, _ in sorted(states, key=lambda item: _adapter_key(item[1])))
 
     def find_symbol(
         self,
@@ -286,12 +291,27 @@ class GlobalSymbolService:
                     document_uri=document.uri,
                     normalize_name=document.normalize_name,
                     recover_containment=document.recover_containment,
+                    body_completeness=document.body_completeness,
                 )
                 for symbol in (symbol for root in roots for symbol in root.iter_depth_first()):
                     if not _matches_name_path(symbol, pattern, substring_matching):
                         continue
                     if not any(_candidate_verifies_symbol(candidate, symbol) for candidate in file_candidates):
                         continue
+                    if include_body and symbol.body_incomplete_reason is not None:
+                        return error(
+                            ErrorCode.UNSUPPORTED,
+                            details={
+                                "operation": "find_symbol",
+                                "reason": "incomplete_assignment_range",
+                                "recovery_reason": symbol.body_incomplete_reason,
+                                "relative_path": relative_path,
+                                "name_path": "/".join(symbol.name_path),
+                            },
+                            workspace=workspace,
+                            adapter=state.adapter,
+                            generations=state.generations,
+                        )
                     try:
                         rendered.append(
                             _symbol_data(
@@ -445,23 +465,36 @@ def _symbol_data(
     include_body: bool,
     include_info: bool,
 ) -> dict[str, Any]:
-    mapper = PositionMapper(document.snapshot, document.position_encoding)
+    renderer = PublicPositionRenderer.from_snapshot(document.snapshot, document.position_encoding)
     data: dict[str, Any] = {
         "name": symbol.name,
         "name_path": "/".join(symbol.name_path),
         "kind": symbol.kind,
         "relative_path": document.relative_path,
-        "location": {"uri": symbol.location.uri, "range": source_range(mapper, symbol.location.range)},
+        "location": {
+            "uri": symbol.location.uri,
+            "range": renderer.range(
+                LspPosition(symbol.location.range.start.line, symbol.location.range.start.character),
+                LspPosition(symbol.location.range.end.line, symbol.location.range.end.character),
+            ),
+        },
         "adapter": state.adapter.to_dict(),
         "generations": state.generations.to_dict(),
     }
     if include_info:
         data["info"] = {
             "detail": symbol.detail,
-            "selection_range": source_range(mapper, symbol.selection_range),
+            "selection_range": renderer.range(
+                LspPosition(symbol.selection_range.start.line, symbol.selection_range.start.character),
+                LspPosition(symbol.selection_range.end.line, symbol.selection_range.end.character),
+            ),
         }
     if include_body:
-        data["body"] = source_body(mapper, symbol.location.range)
+        data["body"] = renderer.text(
+            LspPosition(symbol.location.range.start.line, symbol.location.range.start.character),
+            LspPosition(symbol.location.range.end.line, symbol.location.range.end.character),
+        )
+        data["sha256"] = hashlib.sha256(document.snapshot.raw_bytes).hexdigest()
     return data
 
 

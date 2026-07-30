@@ -1,0 +1,1539 @@
+{
+  "evidence_kind": "compact_schema3_real_mcp_fixed_fixtures",
+  "supersession": {
+    "status": "historical_fixed_fixture_capture",
+    "reference_entries_status": "The retained reference payloads predate python_uncovered.py and are preserved verbatim as historical evidence.",
+    "current_reference_replay_owner": "reference-uncovered-schema2-vs-schema3.json",
+    "final_schema3_current_build_recap_owner": "final-schema3-current-build-recap.json",
+    "not_current_reference_replay_owner": true
+  },
+  "captured_at_utc": "2026-07-30T18:52:28Z",
+  "source_commit_parent": "9e4987e9f2190a4ff03cb7a35359483a5387f327",
+  "working_tree_has_uncommitted_compact_change": true,
+  "build_identity": "4ff261a7ebda7bbddf182e836742103c47a11c18becce01dad266b6829df4290",
+  "public_tool_schema_version": "3",
+  "workspace": "/data/CoordExp/serena-light",
+  "runtime_status": {
+    "ok": true,
+    "data": {
+      "lease": {
+        "lease_id": "a6efd5d0-69ca-4e78-94c8-fb453661f058",
+        "bound": true,
+        "issued_at": 31575444.68832423,
+        "last_heartbeat_at": 31575444.68832423,
+        "heartbeat_interval_seconds": 15,
+        "expiry_seconds": 60,
+        "workspace": {
+          "identity": "/data/CoordExp/serena-light",
+          "working_subdirectory": "/data/CoordExp/serena-light"
+        }
+      },
+      "binding": {
+        "identity": "/data/CoordExp/serena-light",
+        "working_subdirectory": "/data/CoordExp/serena-light"
+      },
+      "runtime": {
+        "identity": {
+          "root": "/data/CoordExp/serena-light",
+          "kind": "git"
+        },
+        "trust_inventory": {
+          "kind": "git",
+          "count": 146,
+          "sha256": "e941014934ecc7c1b7bd06f733bf9295d67e45dd8cbfc10c5406b6c23732e80f",
+          "rejected": []
+        },
+        "freshness": {
+          "created": [],
+          "changed": [],
+          "deleted": [],
+          "symlinked": [],
+          "config_changed": [],
+          "reattributed": [],
+          "notified": [],
+          "opened": [],
+          "unopened": []
+        },
+        "adapters": {
+          "python": {
+            "phase": "cold",
+            "running": false,
+            "raw_providers": {
+              "definition": false,
+              "declaration": false,
+              "implementation": false,
+              "references": false,
+              "document_symbols": false,
+              "workspace_symbols": false
+            },
+            "derived_tools": {
+              "find_declaration": false,
+              "find_implementations": false,
+              "find_referencing_symbols": false,
+              "get_symbols_overview": false,
+              "global_find_symbol": false
+            },
+            "engine": {
+              "name": "pyright",
+              "version": "1.1.403",
+              "executable": "/data/CoordExp/.codex/runtime/serena-light/deps/eff6ebdf252faff7f77cb3a2f3894d17b9a0dfc89b46bd193fafdaa9e9ab4941/node-packages/node_modules/pyright/langserver.index.js",
+              "interpreter": "/root/miniconda3/envs/ms/bin/python"
+            },
+            "position_encoding": "utf-16",
+            "selected_native_config": null,
+            "project_kind": "workspace_default",
+            "trust_inventory": {
+              "count": 133,
+              "sha256": "ed0e067243402f32a6eea3d1d49637edb86d33abc09c7cad7e56ac8fb31406c1"
+            },
+            "configured_program": {
+              "count": 133,
+              "sha256": "ed0e067243402f32a6eea3d1d49637edb86d33abc09c7cad7e56ac8fb31406c1"
+            },
+            "trusted_not_in_configured_program": {
+              "items": [],
+              "total": 0,
+              "digest": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+              "omitted_count": 0
+            },
+            "configured_program_outside_trust": {
+              "items": [],
+              "total": 0,
+              "digest": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+              "omitted_count": 0
+            },
+            "scope_compatible": true,
+            "overlay_generated": false,
+            "generations": {
+              "trust": 0,
+              "program": 1,
+              "document": 0,
+              "index": 0
+            },
+            "crash": {
+              "total": 0,
+              "window_count": 0,
+              "last_timestamp": null,
+              "last_error": null
+            },
+            "cooldown": {
+              "until": null,
+              "remaining_seconds": 0
+            },
+            "transitions": [
+              {
+                "phase": "cold",
+                "timestamp": 1785437532.1674864,
+                "reason": "registered"
+              }
+            ]
+          },
+          "typescript": {
+            "phase": "cold",
+            "running": false,
+            "raw_providers": {
+              "definition": false,
+              "declaration": false,
+              "implementation": false,
+              "references": false,
+              "document_symbols": false,
+              "workspace_symbols": false
+            },
+            "derived_tools": {
+              "find_declaration": false,
+              "find_implementations": false,
+              "find_referencing_symbols": false,
+              "get_symbols_overview": false,
+              "global_find_symbol": false
+            },
+            "engine": {
+              "name": "typescript-language-server",
+              "version": "5.1.3",
+              "executable": "/data/CoordExp/.codex/runtime/serena-light/deps/eff6ebdf252faff7f77cb3a2f3894d17b9a0dfc89b46bd193fafdaa9e9ab4941/node-packages/node_modules/typescript-language-server/lib/cli.mjs",
+              "interpreter": null
+            },
+            "position_encoding": "utf-16",
+            "selected_native_config": null,
+            "project_kind": "workspace_default",
+            "trust_inventory": {
+              "count": 13,
+              "sha256": "137e5c878d224cf2066267d7a6a9145fb61d135b139dd3e9f04162b67f5f69de"
+            },
+            "configured_program": {
+              "count": 1,
+              "sha256": "7aaeb59ea4e6ccedb9c5fb050d8c648e5f19dc48273eb576dafcfb941e2c9ade"
+            },
+            "trusted_not_in_configured_program": {
+              "items": [
+                {
+                  "path": "tests/admission/fixtures/ts-scope/src/helper.ts",
+                  "reason": "omitted_by_engine_workspace_program"
+                },
+                {
+                  "path": "tests/admission/fixtures/ts-scope/src/main.ts",
+                  "reason": "omitted_by_engine_workspace_program"
+                },
+                {
+                  "path": "tests/admission/pyright_owned_files_probe.mjs",
+                  "reason": "omitted_by_engine_workspace_program"
+                },
+                {
+                  "path": "tests/admission/pyright_owned_files_probe.test.mjs",
+                  "reason": "omitted_by_engine_workspace_program"
+                },
+                {
+                  "path": "tests/integration/fixtures/assignment_probe/typescript/src/top_level.js",
+                  "reason": "omitted_by_engine_workspace_program"
+                },
+                {
+                  "path": "tests/integration/fixtures/assignment_probe/typescript/src/top_level.mjs",
+                  "reason": "omitted_by_engine_workspace_program"
+                },
+                {
+                  "path": "tests/integration/fixtures/assignment_probe/typescript/src/top_level.ts",
+                  "reason": "omitted_by_engine_workspace_program"
+                },
+                {
+                  "path": "tests/integration/fixtures/assignment_probe/typescript/src/top_level.tsx",
+                  "reason": "omitted_by_engine_workspace_program"
+                },
+                {
+                  "path": "tests/integration/fixtures/compact_navigation/typescript_symbols.ts",
+                  "reason": "omitted_by_engine_workspace_program"
+                },
+                {
+                  "path": "tests/integration/fixtures/compact_navigation/typescript_usage.ts",
+                  "reason": "omitted_by_engine_workspace_program"
+                },
+                {
+                  "path": "tests/integration/fixtures/readiness/typescript/src/empty.ts",
+                  "reason": "omitted_by_engine_workspace_program"
+                },
+                {
+                  "path": "tests/integration/fixtures/readiness/typescript/src/sentinel.ts",
+                  "reason": "omitted_by_engine_workspace_program"
+                }
+              ],
+              "total": 12,
+              "digest": "5442e3d02edbb705026a6570639b7f6b2692199bd85e7217fc3e77718c6263fb",
+              "omitted_count": 0
+            },
+            "configured_program_outside_trust": {
+              "items": [],
+              "total": 0,
+              "digest": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+              "omitted_count": 0
+            },
+            "scope_compatible": true,
+            "overlay_generated": false,
+            "generations": {
+              "trust": 0,
+              "program": 1,
+              "document": 0,
+              "index": 0
+            },
+            "crash": {
+              "total": 0,
+              "window_count": 0,
+              "last_timestamp": null,
+              "last_error": null
+            },
+            "cooldown": {
+              "until": null,
+              "remaining_seconds": 0
+            },
+            "transitions": [
+              {
+                "phase": "cold",
+                "timestamp": 1785437533.2974186,
+                "reason": "registered"
+              }
+            ]
+          }
+        },
+        "unavailable_language_families": {},
+        "skipped_language_families": [],
+        "executor": {
+          "queue_size": 0,
+          "queue_capacity": 32,
+          "active": false,
+          "stopping": false
+        },
+        "stopping": false,
+        "stopped": false
+      },
+      "daemon_id": "5e4fe4ab-979f-4414-8e8b-142e49333399",
+      "build_identity": "4ff261a7ebda7bbddf182e836742103c47a11c18becce01dad266b6829df4290",
+      "server_version": "0.1.0",
+      "protocol_version": "2025-11-25"
+    }
+  },
+  "fresh_tool_listing": [
+    {
+      "name": "activate_workspace",
+      "title": null,
+      "description": "Bind this lease to the physical workspace containing an absolute path.",
+      "inputSchema": {
+        "properties": {
+          "absolute_path": {
+            "description": "Absolute path inside the Git workspace or allowlisted read-only source root.",
+            "title": "Absolute Path",
+            "type": "string"
+          }
+        },
+        "required": [
+          "absolute_path"
+        ],
+        "title": "activate_workspaceArguments",
+        "type": "object"
+      },
+      "outputSchema": {
+        "additionalProperties": true,
+        "title": "activate_workspaceDictOutput",
+        "type": "object"
+      },
+      "icons": null,
+      "annotations": null,
+      "meta": null,
+      "execution": null
+    },
+    {
+      "name": "release_workspace",
+      "title": null,
+      "description": "Unbind this lease from its workspace while retaining the live lease.",
+      "inputSchema": {
+        "properties": {
+          "immediate": {
+            "default": false,
+            "title": "Immediate",
+            "type": "boolean"
+          }
+        },
+        "title": "release_workspaceArguments",
+        "type": "object"
+      },
+      "outputSchema": {
+        "additionalProperties": true,
+        "title": "release_workspaceDictOutput",
+        "type": "object"
+      },
+      "icons": null,
+      "annotations": null,
+      "meta": null,
+      "execution": null
+    },
+    {
+      "name": "get_runtime_status",
+      "title": null,
+      "description": "Report bounded workspace, generation, adapter, and cleanup status for this lease.",
+      "inputSchema": {
+        "properties": {},
+        "title": "get_runtime_statusArguments",
+        "type": "object"
+      },
+      "outputSchema": {
+        "additionalProperties": true,
+        "title": "get_runtime_statusDictOutput",
+        "type": "object"
+      },
+      "icons": null,
+      "annotations": null,
+      "meta": null,
+      "execution": null
+    },
+    {
+      "name": "get_symbols_overview",
+      "title": null,
+      "description": "Return a compact symbol tree; optional filters use lowercase LSP kind names.",
+      "inputSchema": {
+        "properties": {
+          "relative_path": {
+            "title": "Relative Path",
+            "type": "string"
+          },
+          "max_depth": {
+            "default": 1,
+            "title": "Max Depth",
+            "type": "integer"
+          },
+          "max_answer_chars": {
+            "default": 12000,
+            "description": "Final compact MCP text limit: 512 through 50000 characters; default 12000.",
+            "title": "Max Answer Chars",
+            "type": "integer"
+          },
+          "include_kinds": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Optional stable lowercase LSP kind names to retain; omitted means all kinds.",
+            "title": "Include Kinds"
+          },
+          "exclude_kinds": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Optional stable lowercase LSP kind names to remove after include filtering.",
+            "title": "Exclude Kinds"
+          }
+        },
+        "required": [
+          "relative_path"
+        ],
+        "title": "get_symbols_overviewArguments",
+        "type": "object"
+      },
+      "outputSchema": {
+        "additionalProperties": true,
+        "title": "get_symbols_overviewDictOutput",
+        "type": "object"
+      },
+      "icons": null,
+      "annotations": null,
+      "meta": null,
+      "execution": null
+    },
+    {
+      "name": "find_symbol",
+      "title": null,
+      "description": "Find at most 1-100 compact symbols; body requests are complete or fail typed.",
+      "inputSchema": {
+        "properties": {
+          "name_path": {
+            "title": "Name Path",
+            "type": "string"
+          },
+          "relative_path": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Relative Path"
+          },
+          "substring_matching": {
+            "default": false,
+            "title": "Substring Matching",
+            "type": "boolean"
+          },
+          "include_body": {
+            "default": false,
+            "title": "Include Body",
+            "type": "boolean"
+          },
+          "include_info": {
+            "default": false,
+            "title": "Include Info",
+            "type": "boolean"
+          },
+          "max_answer_chars": {
+            "default": 12000,
+            "description": "Final compact MCP text limit: 512 through 50000 characters; default 12000.",
+            "title": "Max Answer Chars",
+            "type": "integer"
+          },
+          "max_matches": {
+            "default": 20,
+            "description": "Maximum semantic matches after filtering and deduplication: 1 through 100; default 20.",
+            "title": "Max Matches",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "name_path"
+        ],
+        "title": "find_symbolArguments",
+        "type": "object"
+      },
+      "outputSchema": {
+        "additionalProperties": true,
+        "title": "find_symbolDictOutput",
+        "type": "object"
+      },
+      "icons": null,
+      "annotations": null,
+      "meta": null,
+      "execution": null
+    },
+    {
+      "name": "find_declaration",
+      "title": null,
+      "description": "Resolve one declaration and return compact snapshot-owned locations.",
+      "inputSchema": {
+        "properties": {
+          "relative_path": {
+            "title": "Relative Path",
+            "type": "string"
+          },
+          "regex": {
+            "description": "Python MULTILINE/DOTALL regex over the source file with exactly one capture group; that group must select the symbol whose declaration is requested.",
+            "title": "Regex",
+            "type": "string"
+          },
+          "containing_symbol_name_path": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Containing Symbol Name Path"
+          },
+          "include_body": {
+            "default": false,
+            "title": "Include Body",
+            "type": "boolean"
+          },
+          "include_info": {
+            "default": false,
+            "title": "Include Info",
+            "type": "boolean"
+          },
+          "max_answer_chars": {
+            "default": 12000,
+            "description": "Final compact MCP text limit: 512 through 50000 characters; default 12000.",
+            "title": "Max Answer Chars",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "relative_path",
+          "regex"
+        ],
+        "title": "find_declarationArguments",
+        "type": "object"
+      },
+      "outputSchema": {
+        "additionalProperties": true,
+        "title": "find_declarationDictOutput",
+        "type": "object"
+      },
+      "icons": null,
+      "annotations": null,
+      "meta": null,
+      "execution": null
+    },
+    {
+      "name": "find_implementations",
+      "title": null,
+      "description": "Find implementations and return normalized 0-based decoded-text locations.",
+      "inputSchema": {
+        "properties": {
+          "name_path": {
+            "title": "Name Path",
+            "type": "string"
+          },
+          "relative_path": {
+            "title": "Relative Path",
+            "type": "string"
+          },
+          "include_info": {
+            "default": false,
+            "title": "Include Info",
+            "type": "boolean"
+          },
+          "include_kinds": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "integer"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Include Kinds"
+          },
+          "exclude_kinds": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "integer"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Exclude Kinds"
+          },
+          "max_answer_chars": {
+            "default": 12000,
+            "description": "Final compact MCP text limit: 512 through 50000 characters; default 12000.",
+            "title": "Max Answer Chars",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "name_path",
+          "relative_path"
+        ],
+        "title": "find_implementationsArguments",
+        "type": "object"
+      },
+      "outputSchema": {
+        "additionalProperties": true,
+        "title": "find_implementationsDictOutput",
+        "type": "object"
+      },
+      "icons": null,
+      "annotations": null,
+      "meta": null,
+      "execution": null
+    },
+    {
+      "name": "find_referencing_symbols",
+      "title": null,
+      "description": "Find compact semantic references; set max_snippet_chars above zero to include snippets.",
+      "inputSchema": {
+        "properties": {
+          "name_path": {
+            "title": "Name Path",
+            "type": "string"
+          },
+          "relative_path": {
+            "title": "Relative Path",
+            "type": "string"
+          },
+          "max_snippet_chars": {
+            "default": 0,
+            "description": "Optional per-reference snippet limit; default 0 omits snippets.",
+            "title": "Max Snippet Chars",
+            "type": "integer"
+          },
+          "max_answer_chars": {
+            "default": 12000,
+            "description": "Final compact MCP text limit: 512 through 50000 characters; default 12000.",
+            "title": "Max Answer Chars",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "name_path",
+          "relative_path"
+        ],
+        "title": "find_referencing_symbolsArguments",
+        "type": "object"
+      },
+      "outputSchema": {
+        "additionalProperties": true,
+        "title": "find_referencing_symbolsDictOutput",
+        "type": "object"
+      },
+      "icons": null,
+      "annotations": null,
+      "meta": null,
+      "execution": null
+    },
+    {
+      "name": "get_diagnostics_for_file",
+      "title": null,
+      "description": "Return current-generation diagnostics with 0-based decoded-text ranges.",
+      "inputSchema": {
+        "properties": {
+          "relative_path": {
+            "title": "Relative Path",
+            "type": "string"
+          },
+          "timeout_seconds": {
+            "default": 1,
+            "title": "Timeout Seconds",
+            "type": "number"
+          },
+          "maximum_severity": {
+            "default": 2,
+            "title": "Maximum Severity",
+            "type": "integer"
+          },
+          "max_answer_chars": {
+            "default": 12000,
+            "title": "Max Answer Chars",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "relative_path"
+        ],
+        "title": "get_diagnostics_for_fileArguments",
+        "type": "object"
+      },
+      "outputSchema": {
+        "additionalProperties": true,
+        "title": "get_diagnostics_for_fileDictOutput",
+        "type": "object"
+      },
+      "icons": null,
+      "annotations": null,
+      "meta": null,
+      "execution": null
+    },
+    {
+      "name": "get_diagnostics_for_symbol",
+      "title": null,
+      "description": "Return current-generation symbol diagnostics with 0-based decoded-text ranges.",
+      "inputSchema": {
+        "properties": {
+          "relative_path": {
+            "title": "Relative Path",
+            "type": "string"
+          },
+          "name_path": {
+            "title": "Name Path",
+            "type": "string"
+          },
+          "timeout_seconds": {
+            "default": 1,
+            "title": "Timeout Seconds",
+            "type": "number"
+          },
+          "maximum_severity": {
+            "default": 2,
+            "title": "Maximum Severity",
+            "type": "integer"
+          },
+          "max_answer_chars": {
+            "default": 12000,
+            "title": "Max Answer Chars",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "relative_path",
+          "name_path"
+        ],
+        "title": "get_diagnostics_for_symbolArguments",
+        "type": "object"
+      },
+      "outputSchema": {
+        "additionalProperties": true,
+        "title": "get_diagnostics_for_symbolDictOutput",
+        "type": "object"
+      },
+      "icons": null,
+      "annotations": null,
+      "meta": null,
+      "execution": null
+    },
+    {
+      "name": "replace_symbol_body",
+      "title": null,
+      "description": "Hash-guard and atomically replace one complete semantic symbol body in an editable Git root.",
+      "inputSchema": {
+        "properties": {
+          "name_path": {
+            "title": "Name Path",
+            "type": "string"
+          },
+          "relative_path": {
+            "title": "Relative Path",
+            "type": "string"
+          },
+          "body": {
+            "title": "Body",
+            "type": "string"
+          },
+          "expected_hash": {
+            "title": "Expected Hash",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name_path",
+          "relative_path",
+          "body",
+          "expected_hash"
+        ],
+        "title": "replace_symbol_bodyArguments",
+        "type": "object"
+      },
+      "outputSchema": {
+        "additionalProperties": true,
+        "title": "replace_symbol_bodyDictOutput",
+        "type": "object"
+      },
+      "icons": null,
+      "annotations": null,
+      "meta": null,
+      "execution": null
+    }
+  ],
+  "connector": {
+    "executable": "/data/CoordExp/.codex/runtime/serena-light/deps/eff6ebdf252faff7f77cb3a2f3894d17b9a0dfc89b46bd193fafdaa9e9ab4941/python/bin/serena-light",
+    "initialized_server": {
+      "name": "serena-light",
+      "title": null,
+      "version": "0.1.0",
+      "websiteUrl": null,
+      "icons": null
+    },
+    "python": "3.12.11",
+    "mcp": "1.27.1",
+    "httpx": "0.28.1",
+    "tiktoken": "0.12.0",
+    "tokenizer": "o200k_base",
+    "note": "Token counts are deterministic client-visible text estimates under o200k_base; character gates remain authoritative."
+  },
+  "environment": {
+    "surface": "current_ambient",
+    "ambient_proxy_variable_names": [
+      "ALL_PROXY",
+      "HTTPS_PROXY",
+      "HTTP_PROXY",
+      "NO_PROXY",
+      "all_proxy",
+      "http_proxy",
+      "https_proxy",
+      "no_proxy"
+    ],
+    "proxy_values_redacted": true,
+    "connector_loopback_trust_env": false
+  },
+  "results": [
+    {
+      "case": "exact_symbol_no_body",
+      "tool": "find_symbol",
+      "arguments": {
+        "relative_path": "tests/integration/fixtures/compact_navigation/python_symbols.py",
+        "name_path": "ANSWER",
+        "include_body": false,
+        "max_answer_chars": 12000
+      },
+      "content_text": "{\"ok\":true,\"data\":{\"workspace\":\"/data/CoordExp/serena-light\",\"files\":[{\"path\":\"tests/integration/fixtures/compact_navigation/python_symbols.py\",\"symbols\":[{\"name_path\":\"ANSWER\",\"kind\":\"constant\",\"range\":[[2,0],[2,16]]}]}],\"omitted\":0}}",
+      "structured_content": {
+        "ok": true,
+        "data": {
+          "workspace": "/data/CoordExp/serena-light",
+          "files": [
+            {
+              "path": "tests/integration/fixtures/compact_navigation/python_symbols.py",
+              "symbols": [
+                {
+                  "name_path": "ANSWER",
+                  "kind": "constant",
+                  "range": [
+                    [
+                      2,
+                      0
+                    ],
+                    [
+                      2,
+                      16
+                    ]
+                  ]
+                }
+              ]
+            }
+          ],
+          "omitted": 0
+        }
+      },
+      "semantic_evidence": {
+        "paths": [
+          "tests/integration/fixtures/compact_navigation/python_symbols.py"
+        ],
+        "name_paths": [
+          "ANSWER"
+        ],
+        "ranges": [
+          [
+            [
+              2,
+              0
+            ],
+            [
+              2,
+              16
+            ]
+          ]
+        ]
+      },
+      "is_error": false,
+      "character_count": 235,
+      "utf8_byte_count": 235,
+      "o200k_base_tokens": 67,
+      "tool_calls": 1,
+      "wall_time_seconds": 9.323763504624367,
+      "content_sha256": "4d415ffbcaed50e2fb1c889ce64451e4dcf7bba0541613c5c5ecde219d62cabd",
+      "canonical_text_equals_structured": true
+    },
+    {
+      "case": "exact_symbol_with_body",
+      "tool": "find_symbol",
+      "arguments": {
+        "relative_path": "tests/integration/fixtures/compact_navigation/python_symbols.py",
+        "name_path": "ANSWER",
+        "include_body": true,
+        "max_answer_chars": 12000
+      },
+      "content_text": "{\"ok\":true,\"data\":{\"workspace\":\"/data/CoordExp/serena-light\",\"files\":[{\"path\":\"tests/integration/fixtures/compact_navigation/python_symbols.py\",\"sha256\":\"8419f2197b919cc3f69898a5240690c8cbef847b80b6584cb6a324f7c7b8fcaf\",\"symbols\":[{\"name_path\":\"ANSWER\",\"kind\":\"constant\",\"range\":[[2,0],[2,16]],\"body\":\"ANSWER: int = 42\"}]}],\"omitted\":0}}",
+      "structured_content": {
+        "ok": true,
+        "data": {
+          "workspace": "/data/CoordExp/serena-light",
+          "files": [
+            {
+              "path": "tests/integration/fixtures/compact_navigation/python_symbols.py",
+              "sha256": "8419f2197b919cc3f69898a5240690c8cbef847b80b6584cb6a324f7c7b8fcaf",
+              "symbols": [
+                {
+                  "name_path": "ANSWER",
+                  "kind": "constant",
+                  "range": [
+                    [
+                      2,
+                      0
+                    ],
+                    [
+                      2,
+                      16
+                    ]
+                  ],
+                  "body": "ANSWER: int = 42"
+                }
+              ]
+            }
+          ],
+          "omitted": 0
+        }
+      },
+      "semantic_evidence": {
+        "paths": [
+          "tests/integration/fixtures/compact_navigation/python_symbols.py"
+        ],
+        "name_paths": [
+          "ANSWER"
+        ],
+        "ranges": [
+          [
+            [
+              2,
+              0
+            ],
+            [
+              2,
+              16
+            ]
+          ]
+        ],
+        "sha256s": [
+          "8419f2197b919cc3f69898a5240690c8cbef847b80b6584cb6a324f7c7b8fcaf"
+        ],
+        "body_sha256": [
+          "f3c87cc8cbf74b00bbc3b8e607c4d77afef73aa74560e050f58ec562e73f1f41"
+        ],
+        "bodies": [
+          "ANSWER: int = 42"
+        ]
+      },
+      "is_error": false,
+      "character_count": 337,
+      "utf8_byte_count": 337,
+      "o200k_base_tokens": 118,
+      "tool_calls": 1,
+      "wall_time_seconds": 0.20613545924425125,
+      "content_sha256": "b0e6454cb10c8a3419c62546947de5d66eac3460729a01e31d2feeb51fb4f0e5",
+      "canonical_text_equals_structured": true
+    },
+    {
+      "case": "global_symbol",
+      "tool": "find_symbol",
+      "arguments": {
+        "name_path": "Calculator",
+        "include_body": false,
+        "max_answer_chars": 12000,
+        "max_matches": 20
+      },
+      "content_text": "{\"ok\":true,\"data\":{\"workspace\":\"/data/CoordExp/serena-light\",\"files\":[{\"path\":\"tests/integration/fixtures/compact_navigation/python_symbols.py\",\"symbols\":[{\"name_path\":\"Calculator\",\"kind\":\"class\",\"range\":[[5,0],[7,27]]}]}],\"omitted\":0}}",
+      "structured_content": {
+        "ok": true,
+        "data": {
+          "workspace": "/data/CoordExp/serena-light",
+          "files": [
+            {
+              "path": "tests/integration/fixtures/compact_navigation/python_symbols.py",
+              "symbols": [
+                {
+                  "name_path": "Calculator",
+                  "kind": "class",
+                  "range": [
+                    [
+                      5,
+                      0
+                    ],
+                    [
+                      7,
+                      27
+                    ]
+                  ]
+                }
+              ]
+            }
+          ],
+          "omitted": 0
+        }
+      },
+      "semantic_evidence": {
+        "paths": [
+          "tests/integration/fixtures/compact_navigation/python_symbols.py"
+        ],
+        "name_paths": [
+          "Calculator"
+        ],
+        "ranges": [
+          [
+            [
+              5,
+              0
+            ],
+            [
+              7,
+              27
+            ]
+          ]
+        ]
+      },
+      "is_error": false,
+      "character_count": 236,
+      "utf8_byte_count": 236,
+      "o200k_base_tokens": 67,
+      "tool_calls": 1,
+      "wall_time_seconds": 3.7201164551079273,
+      "content_sha256": "69e12cb2b5cef9c5a590dacdeddf1d25d736112c758275435a2895c264ef401e",
+      "canonical_text_equals_structured": true
+    },
+    {
+      "case": "large_nested_overview",
+      "tool": "get_symbols_overview",
+      "arguments": {
+        "relative_path": "tests/integration/fixtures/compact_navigation/large_nested.py",
+        "max_depth": 1,
+        "max_answer_chars": 12000
+      },
+      "content_text": "{\"ok\":true,\"data\":{\"workspace\":\"/data/CoordExp/serena-light\",\"files\":[{\"path\":\"tests/integration/fixtures/compact_navigation/large_nested.py\",\"symbols\":[{\"name\":\"LargeFixture\",\"kind\":\"class\",\"children\":[{\"name\":\"method_00\",\"kind\":\"method\"},{\"name\":\"method_01\",\"kind\":\"method\"},{\"name\":\"method_02\",\"kind\":\"method\"},{\"name\":\"method_03\",\"kind\":\"method\"},{\"name\":\"method_04\",\"kind\":\"method\"},{\"name\":\"method_05\",\"kind\":\"method\"},{\"name\":\"method_06\",\"kind\":\"method\"},{\"name\":\"method_07\",\"kind\":\"method\"},{\"name\":\"method_08\",\"kind\":\"method\"},{\"name\":\"method_09\",\"kind\":\"method\"},{\"name\":\"method_10\",\"kind\":\"method\"},{\"name\":\"method_11\",\"kind\":\"method\"},{\"name\":\"method_12\",\"kind\":\"method\"},{\"name\":\"method_13\",\"kind\":\"method\"},{\"name\":\"method_14\",\"kind\":\"method\"},{\"name\":\"method_15\",\"kind\":\"method\"},{\"name\":\"method_16\",\"kind\":\"method\"},{\"name\":\"method_17\",\"kind\":\"method\"},{\"name\":\"method_18\",\"kind\":\"method\"},{\"name\":\"method_19\",\"kind\":\"method\"}]}]}],\"omitted\":0}}",
+      "structured_content": {
+        "ok": true,
+        "data": {
+          "workspace": "/data/CoordExp/serena-light",
+          "files": [
+            {
+              "path": "tests/integration/fixtures/compact_navigation/large_nested.py",
+              "symbols": [
+                {
+                  "name": "LargeFixture",
+                  "kind": "class",
+                  "children": [
+                    {
+                      "name": "method_00",
+                      "kind": "method"
+                    },
+                    {
+                      "name": "method_01",
+                      "kind": "method"
+                    },
+                    {
+                      "name": "method_02",
+                      "kind": "method"
+                    },
+                    {
+                      "name": "method_03",
+                      "kind": "method"
+                    },
+                    {
+                      "name": "method_04",
+                      "kind": "method"
+                    },
+                    {
+                      "name": "method_05",
+                      "kind": "method"
+                    },
+                    {
+                      "name": "method_06",
+                      "kind": "method"
+                    },
+                    {
+                      "name": "method_07",
+                      "kind": "method"
+                    },
+                    {
+                      "name": "method_08",
+                      "kind": "method"
+                    },
+                    {
+                      "name": "method_09",
+                      "kind": "method"
+                    },
+                    {
+                      "name": "method_10",
+                      "kind": "method"
+                    },
+                    {
+                      "name": "method_11",
+                      "kind": "method"
+                    },
+                    {
+                      "name": "method_12",
+                      "kind": "method"
+                    },
+                    {
+                      "name": "method_13",
+                      "kind": "method"
+                    },
+                    {
+                      "name": "method_14",
+                      "kind": "method"
+                    },
+                    {
+                      "name": "method_15",
+                      "kind": "method"
+                    },
+                    {
+                      "name": "method_16",
+                      "kind": "method"
+                    },
+                    {
+                      "name": "method_17",
+                      "kind": "method"
+                    },
+                    {
+                      "name": "method_18",
+                      "kind": "method"
+                    },
+                    {
+                      "name": "method_19",
+                      "kind": "method"
+                    }
+                  ]
+                }
+              ]
+            }
+          ],
+          "omitted": 0
+        }
+      },
+      "semantic_evidence": {
+        "paths": [
+          "tests/integration/fixtures/compact_navigation/large_nested.py"
+        ]
+      },
+      "is_error": false,
+      "character_count": 961,
+      "utf8_byte_count": 961,
+      "o200k_base_tokens": 260,
+      "tool_calls": 1,
+      "wall_time_seconds": 0.17791015282273293,
+      "content_sha256": "40aece4f66ccac8aa75d79f3dbdea48a6574fe71eb5171cd60649a7096b58611",
+      "canonical_text_equals_structured": true
+    },
+    {
+      "case": "multi_file_references",
+      "tool": "find_referencing_symbols",
+      "arguments": {
+        "relative_path": "tests/integration/fixtures/compact_navigation/python_symbols.py",
+        "name_path": "ANSWER",
+        "max_answer_chars": 12000,
+        "max_snippet_chars": 240
+      },
+      "content_text": "{\"ok\":true,\"data\":{\"workspace\":\"/data/CoordExp/serena-light\",\"files\":[{\"path\":\"tests/integration/fixtures/compact_navigation/python_symbols.py\",\"references\":[{\"range\":[[2,0],[2,6]],\"symbol\":\"ANSWER\",\"snippet\":\"ANSWER: int = 42\"}]},{\"path\":\"tests/integration/fixtures/compact_navigation/python_usage.py\",\"references\":[{\"range\":[[0,27],[0,33]],\"symbol\":\"<file>\",\"snippet\":\"from python_symbols import ANSWER, Calculator\"},{\"range\":[[4,28],[4,34]],\"symbol\":\"calculate\",\"snippet\":\"    return Calculator().add(ANSWER, 1)\"}]}],\"coverage\":{\"adapter\":\"pyright\",\"language\":\"python\",\"scope_kind\":\"workspace_default\",\"configured_program_files\":133,\"configured_program_digest\":\"ed0e067243402f32a6eea3d1d49637edb86d33abc09c7cad7e56ac8fb31406c1\",\"trusted_language_files\":133,\"trusted_language_digest\":\"ed0e067243402f32a6eea3d1d49637edb86d33abc09c7cad7e56ac8fb31406c1\",\"uncovered_files\":0,\"uncovered_sample\":{\"total\":0,\"items\":[],\"digest\":\"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\",\"omitted\":0}},\"omitted\":0}}",
+      "structured_content": {
+        "ok": true,
+        "data": {
+          "workspace": "/data/CoordExp/serena-light",
+          "files": [
+            {
+              "path": "tests/integration/fixtures/compact_navigation/python_symbols.py",
+              "references": [
+                {
+                  "range": [
+                    [
+                      2,
+                      0
+                    ],
+                    [
+                      2,
+                      6
+                    ]
+                  ],
+                  "symbol": "ANSWER",
+                  "snippet": "ANSWER: int = 42"
+                }
+              ]
+            },
+            {
+              "path": "tests/integration/fixtures/compact_navigation/python_usage.py",
+              "references": [
+                {
+                  "range": [
+                    [
+                      0,
+                      27
+                    ],
+                    [
+                      0,
+                      33
+                    ]
+                  ],
+                  "symbol": "<file>",
+                  "snippet": "from python_symbols import ANSWER, Calculator"
+                },
+                {
+                  "range": [
+                    [
+                      4,
+                      28
+                    ],
+                    [
+                      4,
+                      34
+                    ]
+                  ],
+                  "symbol": "calculate",
+                  "snippet": "    return Calculator().add(ANSWER, 1)"
+                }
+              ]
+            }
+          ],
+          "coverage": {
+            "adapter": "pyright",
+            "language": "python",
+            "scope_kind": "workspace_default",
+            "configured_program_files": 133,
+            "configured_program_digest": "ed0e067243402f32a6eea3d1d49637edb86d33abc09c7cad7e56ac8fb31406c1",
+            "trusted_language_files": 133,
+            "trusted_language_digest": "ed0e067243402f32a6eea3d1d49637edb86d33abc09c7cad7e56ac8fb31406c1",
+            "uncovered_files": 0,
+            "uncovered_sample": {
+              "total": 0,
+              "items": [],
+              "digest": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+              "omitted": 0
+            }
+          },
+          "omitted": 0
+        }
+      },
+      "semantic_evidence": {
+        "paths": [
+          "tests/integration/fixtures/compact_navigation/python_symbols.py",
+          "tests/integration/fixtures/compact_navigation/python_usage.py"
+        ],
+        "ranges": [
+          [
+            [
+              2,
+              0
+            ],
+            [
+              2,
+              6
+            ]
+          ],
+          [
+            [
+              0,
+              27
+            ],
+            [
+              0,
+              33
+            ]
+          ],
+          [
+            [
+              4,
+              28
+            ],
+            [
+              4,
+              34
+            ]
+          ]
+        ],
+        "coverages": [
+          {
+            "adapter": "pyright",
+            "language": "python",
+            "scope_kind": "workspace_default",
+            "configured_program_files": 133,
+            "configured_program_digest": "ed0e067243402f32a6eea3d1d49637edb86d33abc09c7cad7e56ac8fb31406c1",
+            "trusted_language_files": 133,
+            "trusted_language_digest": "ed0e067243402f32a6eea3d1d49637edb86d33abc09c7cad7e56ac8fb31406c1",
+            "uncovered_files": 0,
+            "uncovered_sample": {
+              "total": 0,
+              "items": [],
+              "digest": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+              "omitted": 0
+            }
+          }
+        ]
+      },
+      "is_error": false,
+      "character_count": 1017,
+      "utf8_byte_count": 1017,
+      "o200k_base_tokens": 325,
+      "tool_calls": 1,
+      "wall_time_seconds": 0.2891058884561062,
+      "content_sha256": "68950c1416c1435941e2f1d94217dc51ce7a8f585742f4d4431e81f2bf0266d8",
+      "canonical_text_equals_structured": true
+    },
+    {
+      "case": "declaration",
+      "tool": "find_declaration",
+      "arguments": {
+        "relative_path": "tests/integration/fixtures/compact_navigation/python_usage.py",
+        "regex": "import (ANSWER), Calculator",
+        "max_answer_chars": 12000
+      },
+      "content_text": "{\"ok\":true,\"data\":{\"workspace\":\"/data/CoordExp/serena-light\",\"files\":[{\"path\":\"tests/integration/fixtures/compact_navigation/python_symbols.py\",\"targets\":[{\"range\":[[2,0],[2,6]]}]}],\"omitted\":0}}",
+      "structured_content": {
+        "ok": true,
+        "data": {
+          "workspace": "/data/CoordExp/serena-light",
+          "files": [
+            {
+              "path": "tests/integration/fixtures/compact_navigation/python_symbols.py",
+              "targets": [
+                {
+                  "range": [
+                    [
+                      2,
+                      0
+                    ],
+                    [
+                      2,
+                      6
+                    ]
+                  ]
+                }
+              ]
+            }
+          ],
+          "omitted": 0
+        }
+      },
+      "semantic_evidence": {
+        "paths": [
+          "tests/integration/fixtures/compact_navigation/python_symbols.py"
+        ],
+        "ranges": [
+          [
+            [
+              2,
+              0
+            ],
+            [
+              2,
+              6
+            ]
+          ]
+        ]
+      },
+      "is_error": false,
+      "character_count": 195,
+      "utf8_byte_count": 195,
+      "o200k_base_tokens": 58,
+      "tool_calls": 1,
+      "wall_time_seconds": 0.18470730632543564,
+      "content_sha256": "40f3db2a9fae2d7b0b7b531c593eb74183c2e99177c5c9fc2f42596e09905058",
+      "canonical_text_equals_structured": true
+    },
+    {
+      "case": "typescript_implementation",
+      "tool": "find_implementations",
+      "arguments": {
+        "relative_path": "tests/integration/fixtures/compact_navigation/typescript_symbols.ts",
+        "name_path": "Runner",
+        "max_answer_chars": 12000
+      },
+      "content_text": "{\"ok\":true,\"data\":{\"workspace\":\"/data/CoordExp/serena-light\",\"files\":[{\"path\":\"tests/integration/fixtures/compact_navigation/typescript_symbols.ts\",\"targets\":[{\"range\":[[4,13],[4,27]]}]}],\"omitted\":0}}",
+      "structured_content": {
+        "ok": true,
+        "data": {
+          "workspace": "/data/CoordExp/serena-light",
+          "files": [
+            {
+              "path": "tests/integration/fixtures/compact_navigation/typescript_symbols.ts",
+              "targets": [
+                {
+                  "range": [
+                    [
+                      4,
+                      13
+                    ],
+                    [
+                      4,
+                      27
+                    ]
+                  ]
+                }
+              ]
+            }
+          ],
+          "omitted": 0
+        }
+      },
+      "semantic_evidence": {
+        "paths": [
+          "tests/integration/fixtures/compact_navigation/typescript_symbols.ts"
+        ],
+        "ranges": [
+          [
+            [
+              4,
+              13
+            ],
+            [
+              4,
+              27
+            ]
+          ]
+        ]
+      },
+      "is_error": false,
+      "character_count": 201,
+      "utf8_byte_count": 201,
+      "o200k_base_tokens": 59,
+      "tool_calls": 1,
+      "wall_time_seconds": 0.19186421111226082,
+      "content_sha256": "6e604124303e40868c94ed8815a70685819e46b9ca1776d779aa45b9f3b3748b",
+      "canonical_text_equals_structured": true
+    },
+    {
+      "case": "external_read_only_declaration",
+      "tool": "find_declaration",
+      "arguments": {
+        "relative_path": "tests/integration/fixtures/compact_navigation/python_symbols.py",
+        "regex": "return (GenerationConfig)\\(",
+        "max_answer_chars": 12000
+      },
+      "content_text": "{\"ok\":true,\"data\":{\"workspace\":\"/data/CoordExp/serena-light\",\"files\":[{\"path\":\"/root/miniconda3/envs/ms/lib/python3.12/site-packages/transformers/generation/configuration_utils.py\",\"read_only\":true,\"targets\":[{\"raw_range\":[[81,6],[81,22]],\"position_basis\":\"lsp_zero_based_line_utf16_code_unit_character\"}]}],\"omitted\":0}}",
+      "structured_content": {
+        "ok": true,
+        "data": {
+          "workspace": "/data/CoordExp/serena-light",
+          "files": [
+            {
+              "path": "/root/miniconda3/envs/ms/lib/python3.12/site-packages/transformers/generation/configuration_utils.py",
+              "read_only": true,
+              "targets": [
+                {
+                  "raw_range": [
+                    [
+                      81,
+                      6
+                    ],
+                    [
+                      81,
+                      22
+                    ]
+                  ],
+                  "position_basis": "lsp_zero_based_line_utf16_code_unit_character"
+                }
+              ]
+            }
+          ],
+          "omitted": 0
+        }
+      },
+      "semantic_evidence": {
+        "paths": [
+          "/root/miniconda3/envs/ms/lib/python3.12/site-packages/transformers/generation/configuration_utils.py"
+        ],
+        "raw_ranges": [
+          [
+            [
+              81,
+              6
+            ],
+            [
+              81,
+              22
+            ]
+          ]
+        ],
+        "position_basiss": [
+          "lsp_zero_based_line_utf16_code_unit_character"
+        ]
+      },
+      "is_error": false,
+      "character_count": 321,
+      "utf8_byte_count": 321,
+      "o200k_base_tokens": 93,
+      "tool_calls": 1,
+      "wall_time_seconds": 0.5756884664297104,
+      "content_sha256": "155c26aa4e08bc82122410887611e1bdf23201fecfe0d6321cb3f55764c39867",
+      "canonical_text_equals_structured": true
+    },
+    {
+      "case": "true_empty_overview",
+      "tool": "get_symbols_overview",
+      "arguments": {
+        "relative_path": "tests/integration/fixtures/compact_navigation/empty.py",
+        "max_depth": 1,
+        "max_answer_chars": 12000
+      },
+      "content_text": "{\"ok\":true,\"data\":{\"workspace\":\"/data/CoordExp/serena-light\",\"files\":[],\"omitted\":0}}",
+      "structured_content": {
+        "ok": true,
+        "data": {
+          "workspace": "/data/CoordExp/serena-light",
+          "files": [],
+          "omitted": 0
+        }
+      },
+      "semantic_evidence": {},
+      "is_error": false,
+      "character_count": 85,
+      "utf8_byte_count": 85,
+      "o200k_base_tokens": 27,
+      "tool_calls": 1,
+      "wall_time_seconds": 0.1543283313512802,
+      "content_sha256": "85b47e523f10114352d5def9991bef811eab1fc5d785d68ea974455237cc6d60",
+      "canonical_text_equals_structured": true
+    }
+  ],
+  "release_result": {
+    "ok": true,
+    "data": {
+      "lease_id": "a6efd5d0-69ca-4e78-94c8-fb453661f058",
+      "released": true,
+      "bound": false,
+      "immediate": true,
+      "reason": "released",
+      "active_holders": 0,
+      "grace_deadline": null,
+      "runtime_stopped": true,
+      "runtime_stop_pending": false
+    }
+  }
+}

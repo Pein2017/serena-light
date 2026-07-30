@@ -156,6 +156,18 @@ class LspState:
         with self._lock:
             return self._documents.get(uri)
 
+    def reset_documents(self) -> None:
+        """Drop process-owned document and diagnostic state after a restart.
+
+        Source/index/diagnostic counters stay monotonic across a replacement
+        language-server process, but no document version or push publication
+        belongs to that new process until it receives a fresh ``didOpen``.
+        """
+
+        with self._lock:
+            self._documents.clear()
+            self._publications.clear()
+
     def publish_diagnostics(
         self,
         *,

@@ -121,7 +121,16 @@ def test_production_runtime_selects_the_configured_program_and_pinned_engine(
 def test_diagnostics_are_current_and_disclose_advisory_authority(
     acceptance: RealTypeScriptAcceptance,
 ) -> None:
+    overview = _envelope(acceptance.runtime.get_symbols_overview("runtime/args.mjs"))
+    assert overview["ok"] is True, overview
     rendered = _envelope(
+        acceptance.runtime.get_diagnostics_for_file(
+            "runtime/args.mjs",
+            timeout_seconds=20.0,
+            maximum_severity=2,
+        )
+    )
+    repeated = _envelope(
         acceptance.runtime.get_diagnostics_for_file(
             "runtime/args.mjs",
             timeout_seconds=20.0,
@@ -140,6 +149,13 @@ def test_diagnostics_are_current_and_disclose_advisory_authority(
     failures: list[str] = []
     if rendered.get("ok") is not True:
         failures.append(f"current-generation diagnostics did not complete: {rendered}")
+    if repeated.get("ok") is not True:
+        failures.append(f"unchanged repeated diagnostics did not complete: {repeated}")
+    elif (
+        rendered.get("ok") is True
+        and _mapping(repeated["data"])["diagnostics_generation"] != _mapping(rendered["data"])["diagnostics_generation"]
+    ):
+        failures.append("unchanged repeated diagnostics manufactured a new generation")
     if diagnostic_state not in {"findings", "clean"}:
         failures.append(f"diagnostic state is {diagnostic_state!r}, expected findings or clean")
     if engine.get("authority") != "advisory":
@@ -199,8 +215,7 @@ def test_definition_references_and_implementation_use_public_semantics(
     reference_paths = {_mapping(item)["path"] for item in _sequence(references["references"])}
     assert {"runtime/args.mjs", "runtime/cli.mjs"} <= reference_paths
     assert any(
-        _mapping(_mapping(item)["container"])["name_path"] == "parse"
-        for item in _sequence(references["references"])
+        _mapping(_mapping(item)["container"])["name_path"] == "parse" for item in _sequence(references["references"])
     )
 
     implementation = _success(
@@ -245,7 +260,29 @@ def test_omitted_file_is_path_scoped_and_unicode_ranges_are_exact(
     byte_offset = int(start["byte_offset"])
     assert len(source[:text_offset].encode("utf-8")) == byte_offset
     assert byte_offset > text_offset
-    assert int(start["line"]) == source[:text_offset].count("\n") + 1
+    assert int(start["line"]) == source[:text_offset].count("\n")
+
+    first_diagnostics = _envelope(
+        acceptance.runtime.get_diagnostics_for_file(
+            OMITTED_UNICODE_FILE,
+            timeout_seconds=20.0,
+            maximum_severity=2,
+        )
+    )
+    repeated_diagnostics = _envelope(
+        acceptance.runtime.get_diagnostics_for_file(
+            OMITTED_UNICODE_FILE,
+            timeout_seconds=20.0,
+            maximum_severity=2,
+        )
+    )
+    assert first_diagnostics["ok"] is True, first_diagnostics
+    assert repeated_diagnostics["ok"] is True, repeated_diagnostics
+    assert _mapping(first_diagnostics["data"])["state"] in {"clean", "findings"}
+    assert (
+        _mapping(repeated_diagnostics["data"])["diagnostics_generation"]
+        == _mapping(first_diagnostics["data"])["diagnostics_generation"]
+    )
 
     after = acceptance.runtime.status()
     adapter_after = _mapping(_mapping(after["adapters"])["typescript"])

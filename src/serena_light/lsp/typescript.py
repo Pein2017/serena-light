@@ -15,7 +15,7 @@ import os
 import queue
 import stat
 import threading
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from types import MappingProxyType
@@ -28,6 +28,11 @@ from serena_light.lsp.adapter import (
     EngineMetadata,
     SubprocessAdapterRuntimeProvider,
     read_only_client_request_handlers,
+)
+from serena_light.lsp.positions import FileSnapshot, PositionEncoding
+from serena_light.lsp.typescript_assignment_recovery import (
+    AssignmentRecoveryResult,
+    recover_typescript_top_level_variable_symbols,
 )
 from serena_light.processes import LanguageServerSubprocessLauncher, terminate_process_tree_with_kill_fallback
 from serena_light.workspace.scope import (
@@ -236,6 +241,7 @@ class TypeScriptAdapterConfig:
                 executable=self.language_server_path,
             ),
             initialize_params=self.initialize_params(workspace_root),
+            diagnostic_publications_include_version=False,
         )
 
     @staticmethod
@@ -274,6 +280,33 @@ class TypeScriptAdapterConfig:
 
     def capability_facts(self, initialize_result: Mapping[str, Any]) -> TypeScriptCapabilityFacts:
         return TypeScriptCapabilityFacts.from_initialize_result(initialize_result)
+
+    def recover_assignment_document_symbols(
+        self,
+        raw_symbols: Sequence[Mapping[str, Any]] | None,
+        *,
+        selection_ranges: Sequence[Mapping[str, Any]] | None,
+        snapshot: FileSnapshot,
+        position_encoding: PositionEncoding,
+    ) -> AssignmentRecoveryResult:
+        """Recover incomplete top-level variable-statement ranges.
+
+        The pinned ``typescript-language-server`` starts plain declaration
+        ranges at the identifier and reports destructured bindings as
+        identifier-only.  This adapter-owned seam expands either form to the
+        unique enclosing top-level variable statement using the exact verified
+        snapshot, preserving the identifier as the selection range.
+        A symbol that cannot be recovered unambiguously keeps its original
+        incomplete range and is reported through the result's ``unresolved``
+        entries instead of being silently expanded.
+        """
+
+        return recover_typescript_top_level_variable_symbols(
+            raw_symbols,
+            selection_ranges=selection_ranges,
+            snapshot=snapshot,
+            position_encoding=position_encoding,
+        )
 
 
 @dataclass(frozen=True, slots=True)

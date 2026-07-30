@@ -1,0 +1,108 @@
+{
+  "evidence_kind": "compact_schema3_final_current_build_recap",
+  "date": "2026-07-30",
+  "build_identity": "a9d7e7ae8796903eefb52ed2e4b4c4193113438df84fe1f870b336e8f43970b0",
+  "daemon_id": "bb461127-9ea8-42b7-902c-514c4a2f7309",
+  "prior_full_capture_build_identity": "4ff261a7ebda7bbddf182e836742103c47a11c18becce01dad266b6829df4290",
+  "tokenizer": "o200k_base",
+  "nonreference_payloads": {
+    "all_eight_identical_to_prior_full_capture": true,
+    "token_counts_reused_only_after_exact_payload_equality": true,
+    "results": [
+      {
+        "case": "exact_symbol_no_body",
+        "characters": 235,
+        "tokens": 67,
+        "wall_seconds": 0.151620,
+        "content_sha256": "4d415ffbcaed50e2fb1c889ce64451e4dcf7bba0541613c5c5ecde219d62cabd"
+      },
+      {
+        "case": "exact_symbol_with_body",
+        "characters": 337,
+        "tokens": 118,
+        "wall_seconds": 0.187855,
+        "content_sha256": "b0e6454cb10c8a3419c62546947de5d66eac3460729a01e31d2feeb51fb4f0e5"
+      },
+      {
+        "case": "global_symbol",
+        "characters": 236,
+        "tokens": 67,
+        "wall_seconds": 0.525620,
+        "content_sha256": "69e12cb2b5cef9c5a590dacdeddf1d25d736112c758275435a2895c264ef401e"
+      },
+      {
+        "case": "large_nested_overview",
+        "characters": 961,
+        "tokens": 260,
+        "wall_seconds": 0.172111,
+        "content_sha256": "40aece4f66ccac8aa75d79f3dbdea48a6574fe71eb5171cd60649a7096b58611"
+      },
+      {
+        "case": "declaration",
+        "characters": 195,
+        "tokens": 58,
+        "wall_seconds": 0.187612,
+        "content_sha256": "40f3db2a9fae2d7b0b7b531c593eb74183c2e99177c5c9fc2f42596e09905058"
+      },
+      {
+        "case": "typescript_implementation",
+        "characters": 201,
+        "tokens": 59,
+        "wall_seconds": 0.240664,
+        "content_sha256": "6e604124303e40868c94ed8815a70685819e46b9ca1776d779aa45b9f3b3748b"
+      },
+      {
+        "case": "external_read_only_declaration",
+        "characters": 321,
+        "tokens": 93,
+        "wall_seconds": 0.195861,
+        "content_sha256": "155c26aa4e08bc82122410887611e1bdf23201fecfe0d6321cb3f55764c39867"
+      },
+      {
+        "case": "true_empty_overview",
+        "characters": 85,
+        "tokens": 27,
+        "wall_seconds": 0.211418,
+        "content_sha256": "85b47e523f10114352d5def9991bef811eab1fc5d785d68ea974455237cc6d60"
+      }
+    ]
+  },
+  "configured_reference_paired_capture": {
+    "temporary_workspace_removed": true,
+    "semantic_evidence_equal": true,
+    "reference_count": 3,
+    "returned_paths": [
+      "python_symbols.py",
+      "python_usage.py"
+    ],
+    "coverage": {
+      "scope_kind": "configured",
+      "configured_program_files": 4,
+      "configured_program_digest": "66eb260f30e705cd38ead8aefbd984b78f0ab7b2661a58f5ad077e94fc6d6729",
+      "trusted_language_files": 5,
+      "trusted_language_digest": "090f73ca39c99aadff60fcc35cbae10355903ba50eb5f5d549e60991769f2648",
+      "uncovered_files": 1,
+      "uncovered_item": "python_uncovered.py"
+    },
+    "schema2": {
+      "build_identity": "481c45e485310dbd7a827cb0b22b292c2867728d845ada883a7e39c047bbb639",
+      "daemon_id": "cc470af2-bea2-4bf1-9e2f-ec39b3c7cb11",
+      "characters": 3026,
+      "tokens": 865,
+      "content_sha256": "6ebdeaa535c201b09889d6cc724de50c596d69648501cd0aa9c6343bc60e265a"
+    },
+    "schema3": {
+      "characters": 947,
+      "tokens": 318,
+      "wall_seconds": 9.124372,
+      "content_sha256": "92adfd4300f4eb8e3fadebbfc95c7619e128c5b1394b3c2228111bddf9e301c8"
+    },
+    "character_ratio": 0.312954
+  },
+  "common_assertions": {
+    "tool_calls_per_case": 1,
+    "canonical_text_equals_structured_content": true,
+    "final_success_bound_respected": true,
+    "body_hash_range_and_coverage_integrity_preserved": true
+  }
+}

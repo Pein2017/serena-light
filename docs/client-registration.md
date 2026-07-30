@@ -9,7 +9,7 @@ service-owned, build-identity-scoped path
 `/data/CoordExp/.codex/runtime/serena-light/deps/eff6ebdf252faff7f77cb3a2f3894d17b9a0dfc89b46bd193fafdaa9e9ab4941/python/bin/serena-light`
 with no arguments — **not** the repository `.venv`. The dependency-digest
 segment (`eff6ebdf...`) and the current repair-candidate build identity
-(`d46175203f8b78749d2ae0341ef8157965aea31c454620e8f2840de5a2b8dff7`) are tied
+(`4b0a5e2e4460afbfde1456045d3fc381833c7c1dc41959d36742dbb094371f77`) are tied
 to a versioned daemon slot. A source/schema-only rollover reuses the dependency
 directory but gets a new build slot; a lock change also installs a new digest
 directory. Old build slots coexist until their holders and grace expire, so
@@ -72,6 +72,18 @@ Verify both MCP server names are reported, then call `get_runtime_status` on
 `serena-light`. Do not alter the existing canonical
 Serena registration or SessionStart behavior.
 
+For a one-MCP native acceptance, use a temporary `--strict-mcp-config` that
+contains only `serena-light`, pass `--setting-sources ''`, use
+`--permission-mode dontAsk`, and allow only the read-only
+`mcp__serena-light__...` tools required by the prompt. In the current Claude
+Code 2.1.220 acceptance, `--tools ''` also prevented the explicitly allowlisted
+MCP tools from being called, so omit that flag; the MCP allowlist plus
+`dontAsk` keeps non-allowlisted built-ins unusable. An additional `--settings`
+file with empty hook arrays does not reliably override the shared canonical
+Serena SessionStart hook. Strict MCP configuration alone is also insufficient;
+an accepted isolated run must prove that it created no `.serena/` artifact in
+the fixture.
+
 ## CC Agent
 
 CC Agents launch native Claude Code with `CLAUDE_CONFIG_DIR=/data/CoordExp/.claude`.
@@ -95,6 +107,51 @@ cwd. Its child Claude process inherits that cwd, so the connector auto-binds
 it. Verify `get_runtime_status` is available from `serena-light` to the new
 agent. This is not fresh-session acceptance; task 10.2 owns that test.
 
+## Compact navigation schema rollover (client migration)
+
+Archived OpenSpec change `2026-07-30-compact-success-schema` owns the accepted
+schema-3 migration contract. Fresh-client, rollover, full-suite, and ablation
+evidence are complete, and post-repair Codex, native Claude Code, and CC Agent
+receipts select build `92b2618eb6030d50260b9885a63feb358f94f05823e545e0d5f72f9f3b380242`.
+The first audit blockers are repaired and the final Sol-xhigh and Opus-max
+audits both pass with no P0/P1 findings. The accepted schema carries no
+compatibility shim: there is no `compact=true` flag and no dual schema. Incrementing
+`PUBLIC_TOOL_SCHEMA_VERSION` changes build identity and starts a new versioned
+daemon slot exactly like the correctness rollover above — re-check the
+registration path in this file rather than assuming the digest or build slot
+is unchanged, restart the affected client from its intended workspace cwd, and
+re-verify its tool listing and `get_runtime_status` the same way prior
+rollovers were verified. Old build slots and their holders keep serving the
+prior verbose schema until they drain normally; no daemon is stopped by name to
+force the migration.
+
+Every consumer of `get_symbols_overview`, `find_symbol`,
+`find_referencing_symbols`, `find_declaration`, and `find_implementations`
+success must migrate off the current `{"ok":true,"data":{...},"workspace":
+{...},"adapter":{...},"generations":{...}}` shape and onto
+`{"ok":true,"data":{"workspace":"<absolute root>","files":[...],"omitted":
+<int>}}`, with `data.coverage` added once for references only. Per-record
+`path`/`sha256`/`language` repetition, per-record text/byte offsets, adapter
+phase, runtime generations, and configured-program detail disappear from
+navigation success; a client that inspected those fields directly must instead
+read them once per file group or from `get_runtime_status`/typed errors.
+Tool schemas gain `find_symbol.max_matches` (1-100, default 20),
+`find_declaration.max_answer_chars`, lowercase `include_kinds`/`exclude_kinds`
+on `get_symbols_overview`, the existing integer kind filters on
+`find_implementations`, and
+`find_referencing_symbols.max_snippet_chars` (default `0`, so snippets are
+omitted unless a client requests them); there is no public adapter-candidate
+fan-out control. Overview kind filtering is post-order: a non-matching ancestor
+is retained only when needed to keep a matching descendant reachable, while
+every node actually removed by depth, kind filtering, or final budgeting is
+included in `data.omitted`. See
+[the compatibility inventory](compatibility.json)'s `migration_examples` for
+exact old-to-new field mappings and representative payloads for all five
+tools, including the `raw_range`/`position_basis` fallback a client must
+handle for a read-only external target lacking an exact response-owned
+snapshot. This accepted rollover leaves canonical Serena unchanged; known
+nonblocking error-budget limitations are recorded in that inventory.
+
 ## Stop, rollback, and limits
 
 For a normal stop, exit the client session; its connector releases its lease.
@@ -113,7 +170,7 @@ stop only the identified `serena-light` daemon; never stop canonical Serena as
 part of this rollback.
 
 Fresh Codex/Terra, native Claude Code/Sonnet 2.1.220, and CC Agent/Sonnet clients
-pass the current double-pass candidate identity
+passed the archived v1 double-pass candidate identity
 `d46175203f8b78749d2ae0341ef8157965aea31c454620e8f2840de5a2b8dff7`.
 All three explicitly switched across `/data/CoordExp`, `cc-plugin-codex`,
 `/data/ms-swift`, and the read-only conda `ms` transformers package; each
@@ -154,3 +211,51 @@ older three-client edits as current. Current-build Codex, native Claude Code,
 and CC Agent clients are accepted, and the final Sol-xhigh plus Opus-max audits
 both passed exact clean commit `c2dffca`.
 Canonical-name switching is unapproved.
+
+The repaired 2026-07-30 correctness revision was inspected by fresh Codex/Sol,
+native Claude Code/Sonnet, and CC Agent/Sonnet clients at exact build
+`b3b9952e7abcbca7554c8572499c5541888f6ecf3661fe8787dbde629a258f33`.
+All three returned coherent 0-based Unicode positions, complete Python and
+TypeScript assignment statements, bounded reference coverage, declarations,
+and stable repeated TypeScript diagnostics. Codex additionally verified that a
+read-only external transformers declaration returns only its explicit raw LSP
+range when an exact response-owned snapshot is unavailable. CC Agent acceptance
+also used a dedicated nested Git fixture to replace a complete TypeScript
+assignment including its terminal semicolon, verify exact bytes and hash, and
+restore the original bytes and hash without duplicating declaration syntax. The native client was isolated
+with `--strict-mcp-config`, `--tools ''`, and an explicit read-only
+`mcp__serena-light__...` allowlist. The last release reported zero holders,
+`runtime_stopped=true`, and `runtime_stop_pending=false`. This acceptance does
+not change canonical Serena and remained on final independent dual-audit hold
+at that predecessor build.
+
+The latest independently dual-audited correctness candidate is
+`4b0a5e2e4460afbfde1456045d3fc381833c7c1dc41959d36742dbb094371f77`.
+Its predecessor `ecc4689b781c2de8c4bf03788a4dc17388c28e402220b99519294f31010dc358`
+had a Sol-xhigh PASS but an Opus-max runtime HOLD.
+The `481c45e...` audits proved that owner-before-`didChange` is sufficient only
+when the engine publishes an integer document version. The locked TypeScript
+server does not. For that engine `22c80421...` disowned the old target before
+`didClose`, then installed the new generation before exact-full-text `didOpen`;
+Pyright retained the versioned `didChange` path and rejected missing version
+evidence. Exact review showed that `didClose` delivery alone did not causally
+drain the server's unversioned close publication. Build `e26ccf65...` added the
+response barrier and exact selected-identifier binding, but its final audits
+showed that a first barrier timeout lost the obligation on exact retry. The
+`ecc4689b...` repair kept process-tokened undrained-close state until a successful
+same-connection barrier and drained LRU/watched close state before reopen, but
+its watcher-created temporary lifecycle could record a close marker while the
+URI remained locally open, and cached diagnostics reuse did not drain markers.
+The current candidate skips that temporary lifecycle for an owned URI and
+drains before retaining any cached diagnostics owner. The
+`b3b9952e...`, `481c45e...`, `22c80421...`, and `e26ccf65...` fresh-client
+receipts remain predecessor evidence and are not relabelled as the current
+build. Exact-current Codex, hooks-isolated native Claude Code 2.1.220, and CC
+Agent acceptance now pass the hash edit/restore and four-root semantic matrix
+as predecessor evidence. Exact build `4b0a5e2e...` also passes the 747-test
+fixed-snapshot suite and fresh Codex, native Claude Code, and CC Agent
+diagnostics acceptance. The final Sol-xhigh static-correctness and Opus-max runtime/evidence audits now
+both PASS exact fingerprint `ce73c06e...`; stable specs are synchronized and
+the owning change is archived. Opus recorded one non-blocking pre-existing P2:
+transport/protocol loss may surface as a loud generic MCP error rather than a
+typed retry envelope, but cannot become false semantic success.

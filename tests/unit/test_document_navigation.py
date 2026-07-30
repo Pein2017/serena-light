@@ -73,7 +73,7 @@ def test_python_overview_uses_one_normalized_tree_depth_and_utf16_crlf_positions
     assert value["data"]["depth_truncated"] is True
     symbol = value["data"]["symbols"][0]
     assert symbol["name_path"] == "Café"
-    assert symbol["range"]["start"] == {"line": 2, "column": 1, "text_offset": 5, "byte_offset": 8}
+    assert symbol["range"]["start"] == {"line": 1, "column": 0, "text_offset": 5, "byte_offset": 8}
     assert symbol["children"] == []
     assert symbol["children_truncated"] is True
     assert value["generations"] == {"trust": 1, "program": 2, "document": 3, "index": 4}
@@ -91,8 +91,8 @@ def test_mjs_find_symbol_uses_utf16_astral_offsets_body_info_and_file_hash() -> 
     assert result["symbol"]["info"]["detail"] == "method detail"
     # The LSP body end uses UTF-16 character 29 while source columns remain
     # decoded Unicode code-point columns; CRLF still has two raw bytes.
-    assert result["symbol"]["range"]["end"] == {"line": 3, "column": 29, "text_offset": 55, "byte_offset": 62}
-    assert result["symbol"]["info"]["selection_range"]["end"]["column"] == 10
+    assert result["symbol"]["range"]["end"] == {"line": 2, "column": 28, "text_offset": 55, "byte_offset": 62}
+    assert result["symbol"]["info"]["selection_range"]["end"]["column"] == 9
 
 
 def test_serena_name_path_suffix_absolute_and_last_segment_substring_matching() -> None:
@@ -222,3 +222,48 @@ def test_overview_and_ambiguity_are_deterministically_bounded() -> None:
     assert overview["ok"] is True
     assert overview["data"]["symbols"] == []
     assert overview["truncation"] == {"truncated": True, "omitted_count": 1}
+
+
+def test_ambiguity_candidates_use_private_error_budget_not_success_budget() -> None:
+    names = [f"ambiguous_candidate_{index:03d}_{'x' * 48}" for index in range(80)]
+    snapshot = FileSnapshot.from_bytes("".join(f"{name}\n" for name in names).encode())
+    document = DocumentNavigation.from_input(
+        DocumentSymbolInput(
+            "src/ambiguous.py",
+            "file:///repo/src/ambiguous.py",
+            snapshot,
+            [
+                {
+                    "name": name,
+                    "kind": 12,
+                    "range": _range(index, 0, index, len(name)),
+                    "selectionRange": _range(index, 0, index, len(name)),
+                }
+                for index, name in enumerate(names)
+            ],
+            PositionEncoding.UTF16,
+            WorkspaceMetadata("/repo", "git", "/repo"),
+        )
+    )
+
+    narrow = find_symbol(
+        document,
+        "ambiguous",
+        substring_matching=True,
+        max_answer_chars=2_147_483_647,
+        _error_max_answer_chars=512,
+    ).to_dict()
+    wide = find_symbol(
+        document,
+        "ambiguous",
+        substring_matching=True,
+        max_answer_chars=2_147_483_647,
+        _error_max_answer_chars=12_000,
+    ).to_dict()
+
+    narrow_details = narrow["error"]["details"]
+    wide_details = wide["error"]["details"]
+    assert narrow_details["truncated"] is True
+    assert narrow_details["omitted_count"] > 0
+    assert len(narrow_details["candidates"]) < len(wide_details["candidates"])
+    assert len(narrow_details["candidates"]) < len(names)

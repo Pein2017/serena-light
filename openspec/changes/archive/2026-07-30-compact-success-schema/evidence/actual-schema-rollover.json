@@ -1,0 +1,49 @@
+{
+  "date": "2026-07-30",
+  "reproducible_rollover_test": {
+    "command": ".venv/bin/python -m pytest -q tests/acceptance/test_real_versioned_rollover_acceptance.py -rA",
+    "result": "1 passed in 12.29s",
+    "temporary_old_build_prefix": "ee0de82d6bc4",
+    "temporary_new_build_prefix": "0613bc9051c6",
+    "assertions": [
+      "old and new build daemons coexist while independently held",
+      "old holders remain usable after successor publication",
+      "zero-holder and warm-grace retirement removes only owned discovery",
+      "an older daemon cannot delete successor discovery state"
+    ]
+  },
+  "live_schema_coexistence": {
+    "precompact_client": {
+      "build_identity": "481c45e485310dbd7a827cb0b22b292c2867728d845ada883a7e39c047bbb639",
+      "daemon_id": "cc470af2-bea2-4bf1-9e2f-ec39b3c7cb11",
+      "lease_id": "8d52f3c6-202e-4e49-85c7-f3ff31fa6fc7",
+      "workspace": "/data/CoordExp",
+      "remained_healthy_after_new_clients_closed": true
+    },
+    "compact_build": {
+      "build_identity": "a9d7e7ae8796903eefb52ed2e4b4c4193113438df84fe1f870b336e8f43970b0",
+      "daemon_id": "bb461127-9ea8-42b7-902c-514c4a2f7309",
+      "clients": [
+        {
+          "lease_id": "9e0c64f4-71ec-46cb-995b-4fcc1e7eae03",
+          "workspace": "/data/CoordExp/serena-light"
+        },
+        {
+          "lease_id": "4bce8ae8-1cdb-4955-8327-2936359f9a43",
+          "workspace": "/data/CoordExp/cc-plugin-codex"
+        }
+      ],
+      "same_daemon": true,
+      "distinct_leases": true,
+      "distinct_workspaces": true,
+      "fresh_schema_checks": {
+        "find_symbol.max_matches": true,
+        "get_symbols_overview.include_kinds": true,
+        "get_symbols_overview.exclude_kinds": true,
+        "find_declaration.max_answer_chars": true,
+        "compact_flag_absent": true,
+        "max_candidates_per_adapter_absent": true
+      }
+    }
+  }
+}

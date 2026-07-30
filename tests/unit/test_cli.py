@@ -74,6 +74,34 @@ def test_acceptance_overrides_are_complete_isolated_and_source_derived(
         cli._acceptance_overrides({**environment, cli.ACCEPTANCE_RUNTIME_ROOT_ENV: str(cli.RUNTIME_ROOT)})
 
 
+def test_daemon_start_recomputes_identity_before_consuming_startup_nonce(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    expected_identity = "a" * 64
+    consumed = False
+
+    def observe_nonce_consumption(*_args: object, **_kwargs: object) -> None:
+        nonlocal consumed
+        consumed = True
+
+    monkeypatch.setenv(cli.BUILD_IDENTITY_ENV, expected_identity)
+    monkeypatch.setenv(
+        cli.BUILD_ROOT_ENV,
+        str(tmp_path / "builds" / expected_identity),
+    )
+    monkeypatch.setenv(cli.STARTUP_NONCE_ENV, "one-time-nonce")
+    monkeypatch.setattr(cli, "compute_build_identity", lambda: "b" * 64)
+    monkeypatch.setattr(cli, "consume_startup_nonce", observe_nonce_consumption)
+
+    with pytest.raises(
+        RuntimeFileError,
+        match="daemon source changed after connector selected the build identity",
+    ):
+        asyncio.run(cli._run_daemon())
+
+    assert consumed is False
+
+
 def test_daemon_command_uses_current_interpreter_module_and_sanitized_environment(tmp_path: Path) -> None:
     assert cli._daemon_argv() == (
         sys.executable,

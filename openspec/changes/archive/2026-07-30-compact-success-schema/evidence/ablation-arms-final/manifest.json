@@ -1,0 +1,107 @@
+{
+  "date": "2026-07-30",
+  "freeze_started_utc": "2026-07-30T22:18:48Z",
+  "prompt": {
+    "path": "openspec/changes/compact-success-schema/evidence/ablation-prompt.md",
+    "sha256": "e4036ff48c07d4904e77b7dcd63c52a4daa4f5850deacc30b23b0060880bc8a3"
+  },
+  "serena_light_build_identity": "92b2618eb6030d50260b9885a63feb358f94f05823e545e0d5f72f9f3b380242",
+  "porcelain_capture": {
+    "command": "git status --porcelain=v1 -uall | sha256sum",
+    "timing": "immediately before the four benchmark arms and before ablation-arms-final receipts were materialized",
+    "note": "The recorded freeze digests are provenance for that instant and are not expected to equal a later recomputation after evidence files are added."
+  },
+  "snapshots": {
+    "serena_light": {
+      "root": "/data/CoordExp/serena-light",
+      "head": "9e4987e9f2190a4ff03cb7a35359483a5387f327",
+      "porcelain_sha256_at_freeze": "f5e33220b6fb389cc4142460066959739b6e90ed77addbdf6afcba903750805a",
+      "subject_sha256": {
+        "src/serena_light/workspace/runtime.py": "2a34c8bedfa6376838dc41c0f89120db796afcfd7ae08de56a1c7cd1feefeb6f",
+        "src/serena_light/tools/navigation.py": "4a54384d660a7ec7d67ae3348e5ada1f5aaa055816c732f234a8a596cd3b6ff6",
+        "src/serena_light/tools/global_symbols.py": "ea814a7f105d01048dab3040aff438508327953a68e3133c2e6d83f57b18ced8",
+        "tests/unit/test_workspace_runtime.py": "af5cf360163dd036a5ab688dc55ddcb7912617e5aef8d75394a6631f44cbb915",
+        "tests/unit/test_workspace_runtime_semantics.py": "609e208ca3a8fa80b4cbb87da95d28f504690df785ec8876494f1cb0255dc6e4"
+      }
+    },
+    "research_probes": {
+      "root": "/data/CoordExp/.worktrees/research-probes",
+      "head": "ccdadc4e2d8c00a091dde8d684a14982f05715f2",
+      "porcelain_sha256_at_freeze": "64634a349520dda21fd2c3fe4d5c24d04d108ccc927f028bda086da6f9745e46",
+      "subject_sha256": {
+        "src/inference/hf_backend.py": "e21beb1e6b5c475ca8f0102b3500636620e880709589388bb8c56e7d8a99db95",
+        "scripts/research/run_continuation_locality_boundary_scoring.py": "747a4efd007dcbfbf0d59bb6bf2d60b6e4179390dabb033f74f4281dde7b110d",
+        "tests/inference/test_hf_exact_history_evidence.py": "5b90b6b79326ea3b92ccc702ab64680676f5187dd2ee71f90c4361114cc6aa4c",
+        "tests/research/test_continuation_locality_owner_compositionality.py": "f4dd39fbecee67aa70932234f57db1e66cf932e04e16d012c24918a35f0b8cc1"
+      }
+    }
+  },
+  "arms": [
+    {
+      "model": "gpt-5.6-sol",
+      "reasoning_effort": "high",
+      "assigned_mcp": "canonical serena",
+      "accuracy_score": 98.0,
+      "assigned_mcp_calls": 54,
+      "source_shell_fallback_calls": 2,
+      "all_shell_calls": 5,
+      "response_words": 1584,
+      "response_chars": 13202,
+      "response_limit_words": 2500,
+      "response_limit_passed": true,
+      "unassigned_mcp_calls": 0,
+      "receipt": "sol-canonical-serena.md",
+      "receipt_sha256": "3c3b85820c354bb6556d44e915a1f6512f3cd22beffcce927df8d475c5b84aed"
+    },
+    {
+      "model": "gpt-5.6-sol",
+      "reasoning_effort": "high",
+      "assigned_mcp": "serena-light",
+      "accuracy_score": 97.5,
+      "assigned_mcp_calls": 64,
+      "source_shell_fallback_calls": 3,
+      "all_shell_calls": 7,
+      "response_words": 1557,
+      "response_chars": 12982,
+      "response_limit_words": 2500,
+      "response_limit_passed": true,
+      "unassigned_mcp_calls": 0,
+      "receipt": "sol-serena-light.md",
+      "receipt_sha256": "3329bcfcb90f00e87d5f5790647cb08111a3f4be1a5667bc53b8fc38857122aa"
+    },
+    {
+      "model": "claude-opus-5",
+      "reasoning_effort": "high",
+      "assigned_mcp": "canonical serena",
+      "accuracy_score": 99.0,
+      "assigned_mcp_calls": 63,
+      "source_shell_fallback_calls": 3,
+      "all_shell_calls": 4,
+      "response_words": 2717,
+      "response_chars": 23369,
+      "response_limit_words": 2500,
+      "response_limit_passed": false,
+      "unassigned_mcp_calls": 0,
+      "receipt": "opus-canonical-serena.md",
+      "receipt_sha256": "cf17cf56a5ba9e4e69be8816bd337a8d5ef1097e7f049b62c44296fb3b9d3609"
+    },
+    {
+      "model": "claude-opus-5",
+      "reasoning_effort": "high",
+      "assigned_mcp": "serena-light",
+      "accuracy_score": 98.5,
+      "assigned_mcp_calls": 57,
+      "source_shell_fallback_calls": 0,
+      "all_shell_calls": 1,
+      "response_words": 3531,
+      "response_chars": 31455,
+      "response_limit_words": 2500,
+      "response_limit_passed": false,
+      "unassigned_mcp_calls": 0,
+      "receipt": "opus-serena-light.md",
+      "receipt_sha256": "0de7ada1ffe7157204ad6daff89628a3bcefa48e7cbe07fe548e353fe11cf809"
+    }
+  ],
+  "wall_time_note": "All arms ran concurrently on different agent transports; reliable per-arm wall time was not captured and is excluded from ranking.",
+  "scoring_order": "accuracy before efficiency"
+}

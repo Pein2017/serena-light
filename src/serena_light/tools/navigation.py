@@ -16,8 +16,15 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Protocol, cast
 
-from serena_light.lsp.normalize import NormalizedSymbol, Position, Range, normalize_document_symbols
-from serena_light.lsp.positions import FileSnapshot, LspPosition, PositionEncoding, PositionError, PositionMapper
+from serena_light.lsp.normalize import BodyCompleteness, NormalizedSymbol, Position, Range, normalize_document_symbols
+from serena_light.lsp.positions import (
+    FileSnapshot,
+    LspPosition,
+    PositionEncoding,
+    PositionError,
+    PositionMapper,
+    PublicPositionRenderer,
+)
 from serena_light.tools.envelopes import (
     AdapterMetadata,
     ErrorCode,
@@ -48,6 +55,7 @@ class DocumentSymbolInput:
     workspace: WorkspaceMetadata | None = None
     adapter: AdapterMetadata | None = None
     generations: GenerationMetadata | None = None
+    body_completeness: BodyCompleteness | None = None
 
     def __post_init__(self) -> None:
         if not self.relative_path or self.relative_path.startswith("/"):
@@ -89,7 +97,11 @@ class DocumentNavigation:
             uri=value.uri,
             snapshot=value.snapshot,
             mapper=PositionMapper(value.snapshot, value.position_encoding),
-            symbols=normalize_document_symbols(value.raw_symbols, document_uri=value.uri),
+            symbols=normalize_document_symbols(
+                value.raw_symbols,
+                document_uri=value.uri,
+                body_completeness=value.body_completeness,
+            ),
             workspace=value.workspace,
             adapter=value.adapter,
             generations=value.generations,
@@ -129,6 +141,7 @@ class DocumentNavigationService:
         include_body: bool = False,
         include_info: bool = False,
         max_answer_chars: int = 12_000,
+        _error_max_answer_chars: int | None = None,
     ) -> ToolEnvelope:
         """Resolve one Serena-style name path in one selected document."""
 
@@ -142,6 +155,7 @@ class DocumentNavigationService:
             include_body=include_body,
             include_info=include_info,
             max_answer_chars=max_answer_chars,
+            _error_max_answer_chars=_error_max_answer_chars,
         )
 
     def find_symbol_in_documents(
@@ -158,7 +172,11 @@ class DocumentNavigationService:
         """Search an explicit inventory-selected document set without walking."""
 
         pattern = _parse_name_path(name_path)
-        if pattern is None or max_answer_chars <= 0 or not _valid_relative_scope(relative_scope):
+        if (
+            pattern is None
+            or max_answer_chars <= 0
+            or not _valid_relative_scope(relative_scope)
+        ):
             return error(ErrorCode.INVALID_INPUT, details={"field": "relative_path, name_path, or max_answer_chars"})
         documents: list[DocumentNavigation] = []
         matches: list[tuple[DocumentNavigation, NormalizedSymbol]] = []
@@ -169,9 +187,7 @@ class DocumentNavigationService:
             documents.append(document)
             symbols = (symbol for root in document.symbols for symbol in root.iter_depth_first())
             matches.extend(
-                (document, symbol)
-                for symbol in symbols
-                if _matches_name_path(symbol, pattern, substring_matching)
+                (document, symbol) for symbol in symbols if _matches_name_path(symbol, pattern, substring_matching)
             )
         matches.sort(key=lambda item: (item[0].relative_path, *_symbol_order_key(item[1])))
         workspace = documents[0].workspace if documents else None
@@ -185,6 +201,14 @@ class DocumentNavigationService:
                 },
                 workspace=workspace,
             )
+        if include_body:
+            incomplete = next(
+                ((document, symbol) for document, symbol in matches if symbol.body_incomplete_reason is not None),
+                None,
+            )
+            if incomplete is not None:
+                document, symbol = incomplete
+                return _incomplete_body_error(document, symbol)
         base: dict[str, Any] = {
             "relative_path": relative_scope,
             "scope": "directory",
@@ -272,6 +296,7 @@ def find_symbol(
     include_body: bool = False,
     include_info: bool = False,
     max_answer_chars: int = 12_000,
+    _error_max_answer_chars: int | None = None,
 ) -> ToolEnvelope:
     """Resolve one exact or substring Serena-style name path in one document.
 
@@ -284,7 +309,11 @@ def find_symbol(
     """
 
     pattern = _parse_name_path(name_path)
-    if pattern is None or max_answer_chars <= 0:
+    if (
+        pattern is None
+        or max_answer_chars <= 0
+        or (_error_max_answer_chars is not None and _error_max_answer_chars <= 0)
+    ):
         return _invalid_bounds(document)
     query_text = pattern.expression
     symbols = [symbol for root in document.symbols for symbol in root.iter_depth_first()]
@@ -299,7 +328,10 @@ def find_symbol(
             generations=document.generations,
         )
     if len(matches) > 1:
-        candidates, omitted = _bounded_candidates(document, matches, max_answer_chars)
+        candidates, omitted = _bounded_candidates(
+            [_symbol_data(document, symbol, include_body=False, include_info=False) for symbol in matches],
+            _error_max_answer_chars if _error_max_answer_chars is not None else max_answer_chars,
+        )
         return error(
             ErrorCode.AMBIGUOUS_SYMBOL,
             details={
@@ -313,6 +345,8 @@ def find_symbol(
             adapter=document.adapter,
             generations=document.generations,
         )
+    if include_body and matches[0].body_incomplete_reason is not None:
+        return _incomplete_body_error(document, matches[0])
     selected = _symbol_data(document, matches[0], include_body=include_body, include_info=include_info)
     if len(_canonical_json(selected)) > max_answer_chars:
         return error(
@@ -361,17 +395,17 @@ def _bound_overview(data: dict[str, Any], max_answer_chars: int) -> tuple[dict[s
 
 
 def _bounded_candidates(
-    document: DocumentNavigation,
-    matches: Sequence[NormalizedSymbol],
+    candidates: Sequence[dict[str, Any]],
     max_answer_chars: int,
 ) -> tuple[list[dict[str, Any]], int]:
+    """Keep ambiguity evidence within its caller-owned error budget."""
+
     kept: list[dict[str, Any]] = []
-    for symbol in matches:
-        candidate = _symbol_data(document, symbol, include_body=False, include_info=False)
+    for candidate in candidates:
         if len(_canonical_json({"candidates": [*kept, candidate]})) > max_answer_chars:
             break
         kept.append(candidate)
-    return kept, len(matches) - len(kept)
+    return kept, len(candidates) - len(kept)
 
 
 def _symbol_data(
@@ -381,52 +415,56 @@ def _symbol_data(
     include_body: bool,
     include_info: bool,
 ) -> dict[str, Any]:
-    start = document.mapper.lsp_to_text_offset(_lsp_position(symbol.location.range.start))
-    end = document.mapper.lsp_to_text_offset(_lsp_position(symbol.location.range.end))
+    renderer = PublicPositionRenderer(document.mapper)
     data: dict[str, Any] = {
         "name": symbol.name,
         "name_path": _name_path_text(symbol),
         "kind": symbol.kind,
-        "range": _source_range(document.mapper, symbol.location.range),
+        "range": _source_range(renderer, symbol.location.range),
     }
     if include_info:
         data["info"] = {
             "detail": symbol.detail,
-            "selection_range": _source_range(document.mapper, symbol.selection_range),
+            "selection_range": _source_range(renderer, symbol.selection_range),
         }
     if include_body:
-        data["body"] = document.snapshot.text[start:end]
+        data["body"] = renderer.text(
+            _lsp_position(symbol.location.range.start),
+            _lsp_position(symbol.location.range.end),
+        )
     return data
 
 
-def _source_range(mapper: PositionMapper, value: Range) -> dict[str, dict[str, int]]:
-    return {"start": _source_position(mapper, value.start), "end": _source_position(mapper, value.end)}
+def _incomplete_body_error(document: DocumentNavigation, symbol: NormalizedSymbol) -> ErrorEnvelope:
+    return error(
+        ErrorCode.UNSUPPORTED,
+        details={
+            "operation": "find_symbol",
+            "reason": "incomplete_assignment_range",
+            "recovery_reason": symbol.body_incomplete_reason,
+            "relative_path": document.relative_path,
+            "name_path": _name_path_text(symbol),
+        },
+        workspace=document.workspace,
+        adapter=document.adapter,
+        generations=document.generations,
+    )
+
+
+def _source_range(renderer: PublicPositionRenderer, value: Range) -> dict[str, dict[str, int]]:
+    return renderer.range(_lsp_position(value.start), _lsp_position(value.end))
 
 
 def source_range(mapper: PositionMapper, value: Range) -> dict[str, dict[str, int]]:
     """Render an LSP range with the snapshot-owned source coordinates."""
 
-    return _source_range(mapper, value)
+    return _source_range(PublicPositionRenderer(mapper), value)
 
 
 def source_body(mapper: PositionMapper, value: Range) -> str:
     """Return the exact decoded source slice for an LSP range."""
 
-    start = mapper.lsp_to_text_offset(_lsp_position(value.start))
-    end = mapper.lsp_to_text_offset(_lsp_position(value.end))
-    return mapper.snapshot.text[start:end]
-
-
-def _source_position(mapper: PositionMapper, value: Position) -> dict[str, int]:
-    lsp = _lsp_position(value)
-    text_offset = mapper.lsp_to_text_offset(lsp)
-    line_start = _line_start_offset(mapper.snapshot.text, text_offset)
-    return {
-        "line": value.line + 1,
-        "column": text_offset - line_start + 1,
-        "text_offset": text_offset,
-        "byte_offset": mapper.text_offset_to_byte_offset(text_offset),
-    }
+    return PublicPositionRenderer(mapper).text(_lsp_position(value.start), _lsp_position(value.end))
 
 
 @dataclass(frozen=True, slots=True)
@@ -472,12 +510,6 @@ def _matches_name_path(
         expected in actual if substring_matching and index == last_index else expected == actual
         for index, (expected, actual) in enumerate(zip(pattern.components, suffix, strict=True))
     )
-
-
-def _line_start_offset(text: str, offset: int) -> int:
-    """Find a decoded line start without reaching into mapper internals."""
-
-    return max(text.rfind("\n", 0, offset), text.rfind("\r", 0, offset)) + 1
 
 
 def _valid_relative_path(value: str) -> bool:

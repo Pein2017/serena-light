@@ -1,0 +1,2055 @@
+{
+  "evidence_kind": "repaired_precompact_schema2_real_mcp_fixed_fixtures",
+  "supersession": {
+    "status": "historical_fixed_fixture_capture",
+    "reference_entries_status": "The retained reference payloads predate python_uncovered.py and are preserved verbatim as historical evidence.",
+    "current_reference_replay_owner": "reference-uncovered-schema2-vs-schema3.json",
+    "final_schema3_current_build_recap_owner": "final-schema3-current-build-recap.json",
+    "not_current_reference_replay_owner": true
+  },
+  "captured_at_utc": "2026-07-30T18:40:43Z",
+  "source_commit": "9e4987e9f2190a4ff03cb7a35359483a5387f327",
+  "build_identity": "4b0a5e2e4460afbfde1456045d3fc381833c7c1dc41959d36742dbb094371f77",
+  "daemon_id": "c5a2b4fd-fdac-44bc-96ca-17d2787c9021",
+  "daemon_pid": 3039272,
+  "daemon_process_start_time": 1785430235.31,
+  "server_version": "0.1.0",
+  "protocol_version": "2025-11-25",
+  "public_tool_schema_version": "2",
+  "workspace": "/data/CoordExp/serena-light",
+  "connector": {
+    "python": "3.12.11",
+    "mcp": "1.27.1",
+    "httpx": "0.28.1",
+    "tiktoken": "0.12.0",
+    "tokenizer": "o200k_base",
+    "note": "Token counts are deterministic client-visible text estimates under o200k_base; character gates remain authoritative."
+  },
+  "environment": {
+    "surface": "current_ambient",
+    "ambient_proxy_variable_names": [
+      "ALL_PROXY",
+      "HTTPS_PROXY",
+      "HTTP_PROXY",
+      "NO_PROXY",
+      "all_proxy",
+      "http_proxy",
+      "https_proxy",
+      "no_proxy"
+    ],
+    "proxy_values_redacted": true,
+    "connector_loopback_trust_env": false
+  },
+  "activation_is_error": false,
+  "results": [
+    {
+      "case": "exact_symbol_no_body",
+      "tool": "find_symbol",
+      "arguments": {
+        "relative_path": "tests/integration/fixtures/compact_navigation/python_symbols.py",
+        "name_path": "ANSWER",
+        "include_body": false,
+        "max_answer_chars": 12000
+      },
+      "content_text": "{\n  \"ok\": true,\n  \"data\": {\n    \"relative_path\": \"tests/integration/fixtures/compact_navigation/python_symbols.py\",\n    \"sha256\": \"8419f2197b919cc3f69898a5240690c8cbef847b80b6584cb6a324f7c7b8fcaf\",\n    \"symbol\": {\n      \"name\": \"ANSWER\",\n      \"name_path\": \"ANSWER\",\n      \"kind\": 14,\n      \"range\": {\n        \"start\": {\n          \"line\": 2,\n          \"column\": 0,\n          \"text_offset\": 76,\n          \"byte_offset\": 76\n        },\n        \"end\": {\n          \"line\": 2,\n          \"column\": 16,\n          \"text_offset\": 92,\n          \"byte_offset\": 92\n        }\n      }\n    }\n  },\n  \"workspace\": {\n    \"root\": \"/data/CoordExp/serena-light\",\n    \"kind\": \"git\",\n    \"working_subdirectory\": \"/data/CoordExp/serena-light\"\n  },\n  \"adapter\": {\n    \"name\": \"pyright\",\n    \"language\": \"python\"\n  },\n  \"generations\": {\n    \"trust\": 0,\n    \"program\": 1,\n    \"document\": 2,\n    \"index\": 0,\n    \"scope\": \"path\"\n  }\n}",
+      "structured_content": {
+        "ok": true,
+        "data": {
+          "relative_path": "tests/integration/fixtures/compact_navigation/python_symbols.py",
+          "sha256": "8419f2197b919cc3f69898a5240690c8cbef847b80b6584cb6a324f7c7b8fcaf",
+          "symbol": {
+            "name": "ANSWER",
+            "name_path": "ANSWER",
+            "kind": 14,
+            "range": {
+              "start": {
+                "line": 2,
+                "column": 0,
+                "text_offset": 76,
+                "byte_offset": 76
+              },
+              "end": {
+                "line": 2,
+                "column": 16,
+                "text_offset": 92,
+                "byte_offset": 92
+              }
+            }
+          }
+        },
+        "workspace": {
+          "root": "/data/CoordExp/serena-light",
+          "kind": "git",
+          "working_subdirectory": "/data/CoordExp/serena-light"
+        },
+        "adapter": {
+          "name": "pyright",
+          "language": "python"
+        },
+        "generations": {
+          "trust": 0,
+          "program": 1,
+          "document": 2,
+          "index": 0,
+          "scope": "path"
+        }
+      },
+      "semantic_evidence": {
+        "relative_paths": [
+          "tests/integration/fixtures/compact_navigation/python_symbols.py"
+        ],
+        "name_paths": [
+          "ANSWER"
+        ],
+        "ranges": [
+          {
+            "start": {
+              "line": 2,
+              "column": 0,
+              "text_offset": 76,
+              "byte_offset": 76
+            },
+            "end": {
+              "line": 2,
+              "column": 16,
+              "text_offset": 92,
+              "byte_offset": 92
+            }
+          }
+        ],
+        "sha256s": [
+          "8419f2197b919cc3f69898a5240690c8cbef847b80b6584cb6a324f7c7b8fcaf"
+        ]
+      },
+      "is_error": false,
+      "character_count": 904,
+      "utf8_byte_count": 904,
+      "o200k_base_tokens": 297,
+      "tool_calls": 1,
+      "wall_time_seconds": 0.14736028760671616,
+      "content_sha256": "b91df8e1e60942ea6627a016699d41738408a17da4b5975cb9437838b89f8b12"
+    },
+    {
+      "case": "exact_symbol_with_body",
+      "tool": "find_symbol",
+      "arguments": {
+        "relative_path": "tests/integration/fixtures/compact_navigation/python_symbols.py",
+        "name_path": "ANSWER",
+        "include_body": true,
+        "max_answer_chars": 12000
+      },
+      "content_text": "{\n  \"ok\": true,\n  \"data\": {\n    \"relative_path\": \"tests/integration/fixtures/compact_navigation/python_symbols.py\",\n    \"sha256\": \"8419f2197b919cc3f69898a5240690c8cbef847b80b6584cb6a324f7c7b8fcaf\",\n    \"symbol\": {\n      \"name\": \"ANSWER\",\n      \"name_path\": \"ANSWER\",\n      \"kind\": 14,\n      \"range\": {\n        \"start\": {\n          \"line\": 2,\n          \"column\": 0,\n          \"text_offset\": 76,\n          \"byte_offset\": 76\n        },\n        \"end\": {\n          \"line\": 2,\n          \"column\": 16,\n          \"text_offset\": 92,\n          \"byte_offset\": 92\n        }\n      },\n      \"body\": \"ANSWER: int = 42\"\n    }\n  },\n  \"workspace\": {\n    \"root\": \"/data/CoordExp/serena-light\",\n    \"kind\": \"git\",\n    \"working_subdirectory\": \"/data/CoordExp/serena-light\"\n  },\n  \"adapter\": {\n    \"name\": \"pyright\",\n    \"language\": \"python\"\n  },\n  \"generations\": {\n    \"trust\": 0,\n    \"program\": 1,\n    \"document\": 3,\n    \"index\": 0,\n    \"scope\": \"path\"\n  }\n}",
+      "structured_content": {
+        "ok": true,
+        "data": {
+          "relative_path": "tests/integration/fixtures/compact_navigation/python_symbols.py",
+          "sha256": "8419f2197b919cc3f69898a5240690c8cbef847b80b6584cb6a324f7c7b8fcaf",
+          "symbol": {
+            "name": "ANSWER",
+            "name_path": "ANSWER",
+            "kind": 14,
+            "range": {
+              "start": {
+                "line": 2,
+                "column": 0,
+                "text_offset": 76,
+                "byte_offset": 76
+              },
+              "end": {
+                "line": 2,
+                "column": 16,
+                "text_offset": 92,
+                "byte_offset": 92
+              }
+            },
+            "body": "ANSWER: int = 42"
+          }
+        },
+        "workspace": {
+          "root": "/data/CoordExp/serena-light",
+          "kind": "git",
+          "working_subdirectory": "/data/CoordExp/serena-light"
+        },
+        "adapter": {
+          "name": "pyright",
+          "language": "python"
+        },
+        "generations": {
+          "trust": 0,
+          "program": 1,
+          "document": 3,
+          "index": 0,
+          "scope": "path"
+        }
+      },
+      "semantic_evidence": {
+        "relative_paths": [
+          "tests/integration/fixtures/compact_navigation/python_symbols.py"
+        ],
+        "name_paths": [
+          "ANSWER"
+        ],
+        "ranges": [
+          {
+            "start": {
+              "line": 2,
+              "column": 0,
+              "text_offset": 76,
+              "byte_offset": 76
+            },
+            "end": {
+              "line": 2,
+              "column": 16,
+              "text_offset": 92,
+              "byte_offset": 92
+            }
+          }
+        ],
+        "sha256s": [
+          "8419f2197b919cc3f69898a5240690c8cbef847b80b6584cb6a324f7c7b8fcaf"
+        ],
+        "body_sha256": [
+          "f3c87cc8cbf74b00bbc3b8e607c4d77afef73aa74560e050f58ec562e73f1f41"
+        ],
+        "bodies": [
+          "ANSWER: int = 42"
+        ]
+      },
+      "is_error": false,
+      "character_count": 938,
+      "utf8_byte_count": 938,
+      "o200k_base_tokens": 309,
+      "tool_calls": 1,
+      "wall_time_seconds": 0.13509951159358025,
+      "content_sha256": "215854bb5b9156a561f8917acdaa25e040e251bb59a5a6ffb57cae7dc816e0a4"
+    },
+    {
+      "case": "global_symbol",
+      "tool": "find_symbol",
+      "arguments": {
+        "name_path": "Calculator",
+        "include_body": false,
+        "max_answer_chars": 12000
+      },
+      "content_text": "{\n  \"ok\": true,\n  \"data\": {\n    \"name_path\": \"Calculator\",\n    \"substring_matching\": false,\n    \"include_body\": false,\n    \"include_info\": false,\n    \"scope\": \"configured_program\",\n    \"adapters\": [\n      {\n        \"adapter\": {\n          \"name\": \"pyright\",\n          \"language\": \"python\"\n        },\n        \"phase\": \"ready\",\n        \"workspace_symbols_supported\": true,\n        \"global_ready\": true,\n        \"generations\": {\n          \"trust\": 0,\n          \"program\": 1,\n          \"document\": 4,\n          \"index\": 1,\n          \"scope\": \"configured_program\"\n        },\n        \"configured_program\": {\n          \"scope\": \"configured_program\",\n          \"project_kind\": \"workspace_default\",\n          \"selected_config_path\": null,\n          \"file_count\": 133,\n          \"sha256\": \"ed0e067243402f32a6eea3d1d49637edb86d33abc09c7cad7e56ac8fb31406c1\"\n        }\n      },\n      {\n        \"adapter\": {\n          \"name\": \"typescript\",\n          \"language\": \"typescript\"\n        },\n        \"phase\": \"ready\",\n        \"workspace_symbols_supported\": true,\n        \"global_ready\": true,\n        \"generations\": {\n          \"trust\": 0,\n          \"program\": 1,\n          \"document\": 1,\n          \"index\": 1,\n          \"scope\": \"configured_program\"\n        },\n        \"configured_program\": {\n          \"scope\": \"configured_program\",\n          \"project_kind\": \"workspace_default\",\n          \"selected_config_path\": null,\n          \"file_count\": 1,\n          \"sha256\": \"7aaeb59ea4e6ccedb9c5fb050d8c648e5f19dc48273eb576dafcfb941e2c9ade\"\n        }\n      }\n    ],\n    \"symbols\": [\n      {\n        \"name\": \"Calculator\",\n        \"name_path\": \"Calculator\",\n        \"kind\": 5,\n        \"relative_path\": \"tests/integration/fixtures/compact_navigation/python_symbols.py\",\n        \"location\": {\n          \"uri\": \"file:///data/CoordExp/serena-light/tests/integration/fixtures/compact_navigation/python_symbols.py\",\n          \"range\": {\n            \"start\": {\n              \"line\": 5,\n              \"column\": 0,\n              \"text_offset\": 95,\n              \"byte_offset\": 95\n            },\n            \"end\": {\n              \"line\": 7,\n              \"column\": 27,\n              \"text_offset\": 189,\n              \"byte_offset\": 189\n            }\n          }\n        },\n        \"adapter\": {\n          \"name\": \"pyright\",\n          \"language\": \"python\"\n        },\n        \"generations\": {\n          \"trust\": 0,\n          \"program\": 1,\n          \"document\": 4,\n          \"index\": 1,\n          \"scope\": \"configured_program\"\n        }\n      }\n    ]\n  },\n  \"workspace\": {\n    \"root\": \"/data/CoordExp/serena-light\",\n    \"kind\": \"git\",\n    \"working_subdirectory\": \"/data/CoordExp/serena-light\"\n  },\n  \"truncation\": {\n    \"truncated\": false,\n    \"omitted_count\": 0\n  }\n}",
+      "structured_content": {
+        "ok": true,
+        "data": {
+          "name_path": "Calculator",
+          "substring_matching": false,
+          "include_body": false,
+          "include_info": false,
+          "scope": "configured_program",
+          "adapters": [
+            {
+              "adapter": {
+                "name": "pyright",
+                "language": "python"
+              },
+              "phase": "ready",
+              "workspace_symbols_supported": true,
+              "global_ready": true,
+              "generations": {
+                "trust": 0,
+                "program": 1,
+                "document": 4,
+                "index": 1,
+                "scope": "configured_program"
+              },
+              "configured_program": {
+                "scope": "configured_program",
+                "project_kind": "workspace_default",
+                "selected_config_path": null,
+                "file_count": 133,
+                "sha256": "ed0e067243402f32a6eea3d1d49637edb86d33abc09c7cad7e56ac8fb31406c1"
+              }
+            },
+            {
+              "adapter": {
+                "name": "typescript",
+                "language": "typescript"
+              },
+              "phase": "ready",
+              "workspace_symbols_supported": true,
+              "global_ready": true,
+              "generations": {
+                "trust": 0,
+                "program": 1,
+                "document": 1,
+                "index": 1,
+                "scope": "configured_program"
+              },
+              "configured_program": {
+                "scope": "configured_program",
+                "project_kind": "workspace_default",
+                "selected_config_path": null,
+                "file_count": 1,
+                "sha256": "7aaeb59ea4e6ccedb9c5fb050d8c648e5f19dc48273eb576dafcfb941e2c9ade"
+              }
+            }
+          ],
+          "symbols": [
+            {
+              "name": "Calculator",
+              "name_path": "Calculator",
+              "kind": 5,
+              "relative_path": "tests/integration/fixtures/compact_navigation/python_symbols.py",
+              "location": {
+                "uri": "file:///data/CoordExp/serena-light/tests/integration/fixtures/compact_navigation/python_symbols.py",
+                "range": {
+                  "start": {
+                    "line": 5,
+                    "column": 0,
+                    "text_offset": 95,
+                    "byte_offset": 95
+                  },
+                  "end": {
+                    "line": 7,
+                    "column": 27,
+                    "text_offset": 189,
+                    "byte_offset": 189
+                  }
+                }
+              },
+              "adapter": {
+                "name": "pyright",
+                "language": "python"
+              },
+              "generations": {
+                "trust": 0,
+                "program": 1,
+                "document": 4,
+                "index": 1,
+                "scope": "configured_program"
+              }
+            }
+          ]
+        },
+        "workspace": {
+          "root": "/data/CoordExp/serena-light",
+          "kind": "git",
+          "working_subdirectory": "/data/CoordExp/serena-light"
+        },
+        "truncation": {
+          "truncated": false,
+          "omitted_count": 0
+        }
+      },
+      "semantic_evidence": {
+        "relative_paths": [
+          "tests/integration/fixtures/compact_navigation/python_symbols.py"
+        ],
+        "name_paths": [
+          "Calculator",
+          "Calculator"
+        ],
+        "ranges": [
+          {
+            "start": {
+              "line": 5,
+              "column": 0,
+              "text_offset": 95,
+              "byte_offset": 95
+            },
+            "end": {
+              "line": 7,
+              "column": 27,
+              "text_offset": 189,
+              "byte_offset": 189
+            }
+          }
+        ],
+        "sha256s": [
+          "ed0e067243402f32a6eea3d1d49637edb86d33abc09c7cad7e56ac8fb31406c1",
+          "7aaeb59ea4e6ccedb9c5fb050d8c648e5f19dc48273eb576dafcfb941e2c9ade"
+        ]
+      },
+      "is_error": false,
+      "character_count": 2727,
+      "utf8_byte_count": 2727,
+      "o200k_base_tokens": 716,
+      "tool_calls": 1,
+      "wall_time_seconds": 1.6715631484985352,
+      "content_sha256": "faf7557baa8ae629210474147ad004a8765193084be1c914c221ca7bab28c72a"
+    },
+    {
+      "case": "large_nested_overview",
+      "tool": "get_symbols_overview",
+      "arguments": {
+        "relative_path": "tests/integration/fixtures/compact_navigation/large_nested.py",
+        "max_depth": 1,
+        "max_answer_chars": 12000
+      },
+      "content_text": "{\n  \"ok\": true,\n  \"data\": {\n    \"relative_path\": \"tests/integration/fixtures/compact_navigation/large_nested.py\",\n    \"sha256\": \"13a78c590a99313de8a9b000c75a5b04ed03060cadb7cb3f37f90f072c5eae32\",\n    \"max_depth\": 1,\n    \"depth_truncated\": false,\n    \"depth_omitted_count\": 0,\n    \"symbols\": [\n      {\n        \"name\": \"LargeFixture\",\n        \"name_path\": \"LargeFixture\",\n        \"kind\": 5,\n        \"range\": {\n          \"start\": {\n            \"line\": 0,\n            \"column\": 0,\n            \"text_offset\": 0,\n            \"byte_offset\": 0\n          },\n          \"end\": {\n            \"line\": 59,\n            \"column\": 17,\n            \"text_offset\": 1028,\n            \"byte_offset\": 1028\n          }\n        },\n        \"info\": {\n          \"detail\": null,\n          \"selection_range\": {\n            \"start\": {\n              \"line\": 0,\n              \"column\": 6,\n              \"text_offset\": 6,\n              \"byte_offset\": 6\n            },\n            \"end\": {\n              \"line\": 0,\n              \"column\": 18,\n              \"text_offset\": 18,\n              \"byte_offset\": 18\n            }\n          }\n        },\n        \"children\": [\n          {\n            \"name\": \"method_00\",\n            \"name_path\": \"LargeFixture/method_00\",\n            \"kind\": 6,\n            \"range\": {\n              \"start\": {\n                \"line\": 1,\n                \"column\": 4,\n                \"text_offset\": 24,\n                \"byte_offset\": 24\n              },\n              \"end\": {\n                \"line\": 2,\n                \"column\": 16,\n                \"text_offset\": 68,\n                \"byte_offset\": 68\n              }\n            },\n            \"info\": {\n              \"detail\": null,\n              \"selection_range\": {\n                \"start\": {\n                  \"line\": 1,\n                  \"column\": 8,\n                  \"text_offset\": 28,\n                  \"byte_offset\": 28\n                },\n                \"end\": {\n                  \"line\": 1,\n                  \"column\": 17,\n                  \"text_offset\": 37,\n                  \"byte_offset\": 37\n                }\n              }\n            },\n            \"children\": [],\n            \"children_truncated\": false\n          },\n          {\n            \"name\": \"method_01\",\n            \"name_path\": \"LargeFixture/method_01\",\n            \"kind\": 6,\n            \"range\": {\n              \"start\": {\n                \"line\": 4,\n                \"column\": 4,\n                \"text_offset\": 74,\n                \"byte_offset\": 74\n              },\n              \"end\": {\n                \"line\": 5,\n                \"column\": 16,\n                \"text_offset\": 118,\n                \"byte_offset\": 118\n              }\n            },\n            \"info\": {\n              \"detail\": null,\n              \"selection_range\": {\n                \"start\": {\n                  \"line\": 4,\n                  \"column\": 8,\n                  \"text_offset\": 78,\n                  \"byte_offset\": 78\n                },\n                \"end\": {\n                  \"line\": 4,\n                  \"column\": 17,\n                  \"text_offset\": 87,\n                  \"byte_offset\": 87\n                }\n              }\n            },\n            \"children\": [],\n            \"children_truncated\": false\n          },\n          {\n            \"name\": \"method_02\",\n            \"name_path\": \"LargeFixture/method_02\",\n            \"kind\": 6,\n            \"range\": {\n              \"start\": {\n                \"line\": 7,\n                \"column\": 4,\n                \"text_offset\": 124,\n                \"byte_offset\": 124\n              },\n              \"end\": {\n                \"line\": 8,\n                \"column\": 16,\n                \"text_offset\": 168,\n                \"byte_offset\": 168\n              }\n            },\n            \"info\": {\n              \"detail\": null,\n              \"selection_range\": {\n                \"start\": {\n                  \"line\": 7,\n                  \"column\": 8,\n                  \"text_offset\": 128,\n                  \"byte_offset\": 128\n                },\n                \"end\": {\n                  \"line\": 7,\n                  \"column\": 17,\n                  \"text_offset\": 137,\n                  \"byte_offset\": 137\n                }\n              }\n            },\n            \"children\": [],\n            \"children_truncated\": false\n          },\n          {\n            \"name\": \"method_03\",\n            \"name_path\": \"LargeFixture/method_03\",\n            \"kind\": 6,\n            \"range\": {\n              \"start\": {\n                \"line\": 10,\n                \"column\": 4,\n                \"text_offset\": 174,\n                \"byte_offset\": 174\n              },\n              \"end\": {\n                \"line\": 11,\n                \"column\": 16,\n                \"text_offset\": 218,\n                \"byte_offset\": 218\n              }\n            },\n            \"info\": {\n              \"detail\": null,\n              \"selection_range\": {\n                \"start\": {\n                  \"line\": 10,\n                  \"column\": 8,\n                  \"text_offset\": 178,\n                  \"byte_offset\": 178\n                },\n                \"end\": {\n                  \"line\": 10,\n                  \"column\": 17,\n                  \"text_offset\": 187,\n                  \"byte_offset\": 187\n                }\n              }\n            },\n            \"children\": [],\n            \"children_truncated\": false\n          },\n          {\n            \"name\": \"method_04\",\n            \"name_path\": \"LargeFixture/method_04\",\n            \"kind\": 6,\n            \"range\": {\n              \"start\": {\n                \"line\": 13,\n                \"column\": 4,\n                \"text_offset\": 224,\n                \"byte_offset\": 224\n              },\n              \"end\": {\n                \"line\": 14,\n                \"column\": 16,\n                \"text_offset\": 268,\n                \"byte_offset\": 268\n              }\n            },\n            \"info\": {\n              \"detail\": null,\n              \"selection_range\": {\n                \"start\": {\n                  \"line\": 13,\n                  \"column\": 8,\n                  \"text_offset\": 228,\n                  \"byte_offset\": 228\n                },\n                \"end\": {\n                  \"line\": 13,\n                  \"column\": 17,\n                  \"text_offset\": 237,\n                  \"byte_offset\": 237\n                }\n              }\n            },\n            \"children\": [],\n            \"children_truncated\": false\n          },\n          {\n            \"name\": \"method_05\",\n            \"name_path\": \"LargeFixture/method_05\",\n            \"kind\": 6,\n            \"range\": {\n              \"start\": {\n                \"line\": 16,\n                \"column\": 4,\n                \"text_offset\": 274,\n                \"byte_offset\": 274\n              },\n              \"end\": {\n                \"line\": 17,\n                \"column\": 16,\n                \"text_offset\": 318,\n                \"byte_offset\": 318\n              }\n            },\n            \"info\": {\n              \"detail\": null,\n              \"selection_range\": {\n                \"start\": {\n                  \"line\": 16,\n                  \"column\": 8,\n                  \"text_offset\": 278,\n                  \"byte_offset\": 278\n                },\n                \"end\": {\n                  \"line\": 16,\n                  \"column\": 17,\n                  \"text_offset\": 287,\n                  \"byte_offset\": 287\n                }\n              }\n            },\n            \"children\": [],\n            \"children_truncated\": false\n          },\n          {\n            \"name\": \"method_06\",\n            \"name_path\": \"LargeFixture/method_06\",\n            \"kind\": 6,\n            \"range\": {\n              \"start\": {\n                \"line\": 19,\n                \"column\": 4,\n                \"text_offset\": 324,\n                \"byte_offset\": 324\n              },\n              \"end\": {\n                \"line\": 20,\n                \"column\": 16,\n                \"text_offset\": 368,\n                \"byte_offset\": 368\n              }\n            },\n            \"info\": {\n              \"detail\": null,\n              \"selection_range\": {\n                \"start\": {\n                  \"line\": 19,\n                  \"column\": 8,\n                  \"text_offset\": 328,\n                  \"byte_offset\": 328\n                },\n                \"end\": {\n                  \"line\": 19,\n                  \"column\": 17,\n                  \"text_offset\": 337,\n                  \"byte_offset\": 337\n                }\n              }\n            },\n            \"children\": [],\n            \"children_truncated\": false\n          },\n          {\n            \"name\": \"method_07\",\n            \"name_path\": \"LargeFixture/method_07\",\n            \"kind\": 6,\n            \"range\": {\n              \"start\": {\n                \"line\": 22,\n                \"column\": 4,\n                \"text_offset\": 374,\n                \"byte_offset\": 374\n              },\n              \"end\": {\n                \"line\": 23,\n                \"column\": 16,\n                \"text_offset\": 418,\n                \"byte_offset\": 418\n              }\n            },\n            \"info\": {\n              \"detail\": null,\n              \"selection_range\": {\n                \"start\": {\n                  \"line\": 22,\n                  \"column\": 8,\n                  \"text_offset\": 378,\n                  \"byte_offset\": 378\n                },\n                \"end\": {\n                  \"line\": 22,\n                  \"column\": 17,\n                  \"text_offset\": 387,\n                  \"byte_offset\": 387\n                }\n              }\n            },\n            \"children\": [],\n            \"children_truncated\": false\n          },\n          {\n            \"name\": \"method_08\",\n            \"name_path\": \"LargeFixture/method_08\",\n            \"kind\": 6,\n            \"range\": {\n              \"start\": {\n                \"line\": 25,\n                \"column\": 4,\n                \"text_offset\": 424,\n                \"byte_offset\": 424\n              },\n              \"end\": {\n                \"line\": 26,\n                \"column\": 16,\n                \"text_offset\": 468,\n                \"byte_offset\": 468\n              }\n            },\n            \"info\": {\n              \"detail\": null,\n              \"selection_range\": {\n                \"start\": {\n                  \"line\": 25,\n                  \"column\": 8,\n                  \"text_offset\": 428,\n                  \"byte_offset\": 428\n                },\n                \"end\": {\n                  \"line\": 25,\n                  \"column\": 17,\n                  \"text_offset\": 437,\n                  \"byte_offset\": 437\n                }\n              }\n            },\n            \"children\": [],\n            \"children_truncated\": false\n          },\n          {\n            \"name\": \"method_09\",\n            \"name_path\": \"LargeFixture/method_09\",\n            \"kind\": 6,\n            \"range\": {\n              \"start\": {\n                \"line\": 28,\n                \"column\": 4,\n                \"text_offset\": 474,\n                \"byte_offset\": 474\n              },\n              \"end\": {\n                \"line\": 29,\n                \"column\": 16,\n                \"text_offset\": 518,\n                \"byte_offset\": 518\n              }\n            },\n            \"info\": {\n              \"detail\": null,\n              \"selection_range\": {\n                \"start\": {\n                  \"line\": 28,\n                  \"column\": 8,\n                  \"text_offset\": 478,\n                  \"byte_offset\": 478\n                },\n                \"end\": {\n                  \"line\": 28,\n                  \"column\": 17,\n                  \"text_offset\": 487,\n                  \"byte_offset\": 487\n                }\n              }\n            },\n            \"children\": [],\n            \"children_truncated\": false\n          },\n          {\n            \"name\": \"method_10\",\n            \"name_path\": \"LargeFixture/method_10\",\n            \"kind\": 6,\n            \"range\": {\n              \"start\": {\n                \"line\": 31,\n                \"column\": 4,\n                \"text_offset\": 524,\n                \"byte_offset\": 524\n              },\n              \"end\": {\n                \"line\": 32,\n                \"column\": 17,\n                \"text_offset\": 569,\n                \"byte_offset\": 569\n              }\n            },\n            \"info\": {\n              \"detail\": null,\n              \"selection_range\": {\n                \"start\": {\n                  \"line\": 31,\n                  \"column\": 8,\n                  \"text_offset\": 528,\n                  \"byte_offset\": 528\n                },\n                \"end\": {\n                  \"line\": 31,\n                  \"column\": 17,\n                  \"text_offset\": 537,\n                  \"byte_offset\": 537\n                }\n              }\n            },\n            \"children\": [],\n            \"children_truncated\": false\n          },\n          {\n            \"name\": \"method_11\",\n            \"name_path\": \"LargeFixture/method_11\",\n            \"kind\": 6,\n            \"range\": {\n              \"start\": {\n                \"line\": 34,\n                \"column\": 4,\n                \"text_offset\": 575,\n                \"byte_offset\": 575\n              },\n              \"end\": {\n                \"line\": 35,\n                \"column\": 17,\n                \"text_offset\": 620,\n                \"byte_offset\": 620\n              }\n            },\n            \"info\": {\n              \"detail\": null,\n              \"selection_range\": {\n                \"start\": {\n                  \"line\": 34,\n                  \"column\": 8,\n                  \"text_offset\": 579,\n                  \"byte_offset\": 579\n                },\n                \"end\": {\n                  \"line\": 34,\n                  \"column\": 17,\n                  \"text_offset\": 588,\n                  \"byte_offset\": 588\n                }\n              }\n            },\n            \"children\": [],\n            \"children_truncated\": false\n          },\n          {\n            \"name\": \"method_12\",\n            \"name_path\": \"LargeFixture/method_12\",\n            \"kind\": 6,\n            \"range\": {\n              \"start\": {\n                \"line\": 37,\n                \"column\": 4,\n                \"text_offset\": 626,\n                \"byte_offset\": 626\n              },\n              \"end\": {\n                \"line\": 38,\n                \"column\": 17,\n                \"text_offset\": 671,\n                \"byte_offset\": 671\n              }\n            },\n            \"info\": {\n              \"detail\": null,\n              \"selection_range\": {\n                \"start\": {\n                  \"line\": 37,\n                  \"column\": 8,\n                  \"text_offset\": 630,\n                  \"byte_offset\": 630\n                },\n                \"end\": {\n                  \"line\": 37,\n                  \"column\": 17,\n                  \"text_offset\": 639,\n                  \"byte_offset\": 639\n                }\n              }\n            },\n            \"children\": [],\n            \"children_truncated\": false\n          },\n          {\n            \"name\": \"method_13\",\n            \"name_path\": \"LargeFixture/method_13\",\n            \"kind\": 6,\n            \"range\": {\n              \"start\": {\n                \"line\": 40,\n                \"column\": 4,\n                \"text_offset\": 677,\n                \"byte_offset\": 677\n              },\n              \"end\": {\n                \"line\": 41,\n                \"column\": 17,\n                \"text_offset\": 722,\n                \"byte_offset\": 722\n              }\n            },\n            \"info\": {\n              \"detail\": null,\n              \"selection_range\": {\n                \"start\": {\n                  \"line\": 40,\n                  \"column\": 8,\n                  \"text_offset\": 681,\n                  \"byte_offset\": 681\n                },\n                \"end\": {\n                  \"line\": 40,\n                  \"column\": 17,\n                  \"text_offset\": 690,\n                  \"byte_offset\": 690\n                }\n              }\n            },\n            \"children\": [],\n            \"children_truncated\": false\n          },\n          {\n            \"name\": \"method_14\",\n            \"name_path\": \"LargeFixture/method_14\",\n            \"kind\": 6,\n            \"range\": {\n              \"start\": {\n                \"line\": 43,\n                \"column\": 4,\n                \"text_offset\": 728,\n                \"byte_offset\": 728\n              },\n              \"end\": {\n                \"line\": 44,\n                \"column\": 17,\n                \"text_offset\": 773,\n                \"byte_offset\": 773\n              }\n            },\n            \"info\": {\n              \"detail\": null,\n              \"selection_range\": {\n                \"start\": {\n                  \"line\": 43,\n                  \"column\": 8,\n                  \"text_offset\": 732,\n                  \"byte_offset\": 732\n                },\n                \"end\": {\n                  \"line\": 43,\n                  \"column\": 17,\n                  \"text_offset\": 741,\n                  \"byte_offset\": 741\n                }\n              }\n            },\n            \"children\": [],\n            \"children_truncated\": false\n          },\n          {\n            \"name\": \"method_15\",\n            \"name_path\": \"LargeFixture/method_15\",\n            \"kind\": 6,\n            \"range\": {\n              \"start\": {\n                \"line\": 46,\n                \"column\": 4,\n                \"text_offset\": 779,\n                \"byte_offset\": 779\n              },\n              \"end\": {\n                \"line\": 47,\n                \"column\": 17,\n                \"text_offset\": 824,\n                \"byte_offset\": 824\n              }\n            },\n            \"info\": {\n              \"detail\": null,\n              \"selection_range\": {\n                \"start\": {\n                  \"line\": 46,\n                  \"column\": 8,\n                  \"text_offset\": 783,\n                  \"byte_offset\": 783\n                },\n                \"end\": {\n                  \"line\": 46,\n                  \"column\": 17,\n                  \"text_offset\": 792,\n                  \"byte_offset\": 792\n                }\n              }\n            },\n            \"children\": [],\n            \"children_truncated\": false\n          },\n          {\n            \"name\": \"method_16\",\n            \"name_path\": \"LargeFixture/method_16\",\n            \"kind\": 6,\n            \"range\": {\n              \"start\": {\n                \"line\": 49,\n                \"column\": 4,\n                \"text_offset\": 830,\n                \"byte_offset\": 830\n              },\n              \"end\": {\n                \"line\": 50,\n                \"column\": 17,\n                \"text_offset\": 875,\n                \"byte_offset\": 875\n              }\n            },\n            \"info\": {\n              \"detail\": null,\n              \"selection_range\": {\n                \"start\": {\n                  \"line\": 49,\n                  \"column\": 8,\n                  \"text_offset\": 834,\n                  \"byte_offset\": 834\n                },\n                \"end\": {\n                  \"line\": 49,\n                  \"column\": 17,\n                  \"text_offset\": 843,\n                  \"byte_offset\": 843\n                }\n              }\n            },\n            \"children\": [],\n            \"children_truncated\": false\n          },\n          {\n            \"name\": \"method_17\",\n            \"name_path\": \"LargeFixture/method_17\",\n            \"kind\": 6,\n            \"range\": {\n              \"start\": {\n                \"line\": 52,\n                \"column\": 4,\n                \"text_offset\": 881,\n                \"byte_offset\": 881\n              },\n              \"end\": {\n                \"line\": 53,\n                \"column\": 17,\n                \"text_offset\": 926,\n                \"byte_offset\": 926\n              }\n            },\n            \"info\": {\n              \"detail\": null,\n              \"selection_range\": {\n                \"start\": {\n                  \"line\": 52,\n                  \"column\": 8,\n                  \"text_offset\": 885,\n                  \"byte_offset\": 885\n                },\n                \"end\": {\n                  \"line\": 52,\n                  \"column\": 17,\n                  \"text_offset\": 894,\n                  \"byte_offset\": 894\n                }\n              }\n            },\n            \"children\": [],\n            \"children_truncated\": false\n          },\n          {\n            \"name\": \"method_18\",\n            \"name_path\": \"LargeFixture/method_18\",\n            \"kind\": 6,\n            \"range\": {\n              \"start\": {\n                \"line\": 55,\n                \"column\": 4,\n                \"text_offset\": 932,\n                \"byte_offset\": 932\n              },\n              \"end\": {\n                \"line\": 56,\n                \"column\": 17,\n                \"text_offset\": 977,\n                \"byte_offset\": 977\n              }\n            },\n            \"info\": {\n              \"detail\": null,\n              \"selection_range\": {\n                \"start\": {\n                  \"line\": 55,\n                  \"column\": 8,\n                  \"text_offset\": 936,\n                  \"byte_offset\": 936\n                },\n                \"end\": {\n                  \"line\": 55,\n                  \"column\": 17,\n                  \"text_offset\": 945,\n                  \"byte_offset\": 945\n                }\n              }\n            },\n            \"children\": [],\n            \"children_truncated\": false\n          },\n          {\n            \"name\": \"method_19\",\n            \"name_path\": \"LargeFixture/method_19\",\n            \"kind\": 6,\n            \"range\": {\n              \"start\": {\n                \"line\": 58,\n                \"column\": 4,\n                \"text_offset\": 983,\n                \"byte_offset\": 983\n              },\n              \"end\": {\n                \"line\": 59,\n                \"column\": 17,\n                \"text_offset\": 1028,\n                \"byte_offset\": 1028\n              }\n            },\n            \"info\": {\n              \"detail\": null,\n              \"selection_range\": {\n                \"start\": {\n                  \"line\": 58,\n                  \"column\": 8,\n                  \"text_offset\": 987,\n                  \"byte_offset\": 987\n                },\n                \"end\": {\n                  \"line\": 58,\n                  \"column\": 17,\n                  \"text_offset\": 996,\n                  \"byte_offset\": 996\n                }\n              }\n            },\n            \"children\": [],\n            \"children_truncated\": false\n          }\n        ],\n        \"children_truncated\": false\n      }\n    ]\n  },\n  \"workspace\": {\n    \"root\": \"/data/CoordExp/serena-light\",\n    \"kind\": \"git\",\n    \"working_subdirectory\": \"/data/CoordExp/serena-light\"\n  },\n  \"adapter\": {\n    \"name\": \"pyright\",\n    \"language\": \"python\"\n  },\n  \"generations\": {\n    \"trust\": 0,\n    \"program\": 1,\n    \"document\": 6,\n    \"index\": 1,\n    \"scope\": \"path\"\n  },\n  \"truncation\": {\n    \"truncated\": false,\n    \"omitted_count\": 0\n  }\n}",
+      "structured_content": {
+        "ok": true,
+        "data": {
+          "relative_path": "tests/integration/fixtures/compact_navigation/large_nested.py",
+          "sha256": "13a78c590a99313de8a9b000c75a5b04ed03060cadb7cb3f37f90f072c5eae32",
+          "max_depth": 1,
+          "depth_truncated": false,
+          "depth_omitted_count": 0,
+          "symbols": [
+            {
+              "name": "LargeFixture",
+              "name_path": "LargeFixture",
+              "kind": 5,
+              "range": {
+                "start": {
+                  "line": 0,
+                  "column": 0,
+                  "text_offset": 0,
+                  "byte_offset": 0
+                },
+                "end": {
+                  "line": 59,
+                  "column": 17,
+                  "text_offset": 1028,
+                  "byte_offset": 1028
+                }
+              },
+              "info": {
+                "detail": null,
+                "selection_range": {
+                  "start": {
+                    "line": 0,
+                    "column": 6,
+                    "text_offset": 6,
+                    "byte_offset": 6
+                  },
+                  "end": {
+                    "line": 0,
+                    "column": 18,
+                    "text_offset": 18,
+                    "byte_offset": 18
+                  }
+                }
+              },
+              "children": [
+                {
+                  "name": "method_00",
+                  "name_path": "LargeFixture/method_00",
+                  "kind": 6,
+                  "range": {
+                    "start": {
+                      "line": 1,
+                      "column": 4,
+                      "text_offset": 24,
+                      "byte_offset": 24
+                    },
+                    "end": {
+                      "line": 2,
+                      "column": 16,
+                      "text_offset": 68,
+                      "byte_offset": 68
+                    }
+                  },
+                  "info": {
+                    "detail": null,
+                    "selection_range": {
+                      "start": {
+                        "line": 1,
+                        "column": 8,
+                        "text_offset": 28,
+                        "byte_offset": 28
+                      },
+                      "end": {
+                        "line": 1,
+                        "column": 17,
+                        "text_offset": 37,
+                        "byte_offset": 37
+                      }
+                    }
+                  },
+                  "children": [],
+                  "children_truncated": false
+                },
+                {
+                  "name": "method_01",
+                  "name_path": "LargeFixture/method_01",
+                  "kind": 6,
+                  "range": {
+                    "start": {
+                      "line": 4,
+                      "column": 4,
+                      "text_offset": 74,
+                      "byte_offset": 74
+                    },
+                    "end": {
+                      "line": 5,
+                      "column": 16,
+                      "text_offset": 118,
+                      "byte_offset": 118
+                    }
+                  },
+                  "info": {
+                    "detail": null,
+                    "selection_range": {
+                      "start": {
+                        "line": 4,
+                        "column": 8,
+                        "text_offset": 78,
+                        "byte_offset": 78
+                      },
+                      "end": {
+                        "line": 4,
+                        "column": 17,
+                        "text_offset": 87,
+                        "byte_offset": 87
+                      }
+                    }
+                  },
+                  "children": [],
+                  "children_truncated": false
+                },
+                {
+                  "name": "method_02",
+                  "name_path": "LargeFixture/method_02",
+                  "kind": 6,
+                  "range": {
+                    "start": {
+                      "line": 7,
+                      "column": 4,
+                      "text_offset": 124,
+                      "byte_offset": 124
+                    },
+                    "end": {
+                      "line": 8,
+                      "column": 16,
+                      "text_offset": 168,
+                      "byte_offset": 168
+                    }
+                  },
+                  "info": {
+                    "detail": null,
+                    "selection_range": {
+                      "start": {
+                        "line": 7,
+                        "column": 8,
+                        "text_offset": 128,
+                        "byte_offset": 128
+                      },
+                      "end": {
+                        "line": 7,
+                        "column": 17,
+                        "text_offset": 137,
+                        "byte_offset": 137
+                      }
+                    }
+                  },
+                  "children": [],
+                  "children_truncated": false
+                },
+                {
+                  "name": "method_03",
+                  "name_path": "LargeFixture/method_03",
+                  "kind": 6,
+                  "range": {
+                    "start": {
+                      "line": 10,
+                      "column": 4,
+                      "text_offset": 174,
+                      "byte_offset": 174
+                    },
+                    "end": {
+                      "line": 11,
+                      "column": 16,
+                      "text_offset": 218,
+                      "byte_offset": 218
+                    }
+                  },
+                  "info": {
+                    "detail": null,
+                    "selection_range": {
+                      "start": {
+                        "line": 10,
+                        "column": 8,
+                        "text_offset": 178,
+                        "byte_offset": 178
+                      },
+                      "end": {
+                        "line": 10,
+                        "column": 17,
+                        "text_offset": 187,
+                        "byte_offset": 187
+                      }
+                    }
+                  },
+                  "children": [],
+                  "children_truncated": false
+                },
+                {
+                  "name": "method_04",
+                  "name_path": "LargeFixture/method_04",
+                  "kind": 6,
+                  "range": {
+                    "start": {
+                      "line": 13,
+                      "column": 4,
+                      "text_offset": 224,
+                      "byte_offset": 224
+                    },
+                    "end": {
+                      "line": 14,
+                      "column": 16,
+                      "text_offset": 268,
+                      "byte_offset": 268
+                    }
+                  },
+                  "info": {
+                    "detail": null,
+                    "selection_range": {
+                      "start": {
+                        "line": 13,
+                        "column": 8,
+                        "text_offset": 228,
+                        "byte_offset": 228
+                      },
+                      "end": {
+                        "line": 13,
+                        "column": 17,
+                        "text_offset": 237,
+                        "byte_offset": 237
+                      }
+                    }
+                  },
+                  "children": [],
+                  "children_truncated": false
+                },
+                {
+                  "name": "method_05",
+                  "name_path": "LargeFixture/method_05",
+                  "kind": 6,
+                  "range": {
+                    "start": {
+                      "line": 16,
+                      "column": 4,
+                      "text_offset": 274,
+                      "byte_offset": 274
+                    },
+                    "end": {
+                      "line": 17,
+                      "column": 16,
+                      "text_offset": 318,
+                      "byte_offset": 318
+                    }
+                  },
+                  "info": {
+                    "detail": null,
+                    "selection_range": {
+                      "start": {
+                        "line": 16,
+                        "column": 8,
+                        "text_offset": 278,
+                        "byte_offset": 278
+                      },
+                      "end": {
+                        "line": 16,
+                        "column": 17,
+                        "text_offset": 287,
+                        "byte_offset": 287
+                      }
+                    }
+                  },
+                  "children": [],
+                  "children_truncated": false
+                },
+                {
+                  "name": "method_06",
+                  "name_path": "LargeFixture/method_06",
+                  "kind": 6,
+                  "range": {
+                    "start": {
+                      "line": 19,
+                      "column": 4,
+                      "text_offset": 324,
+                      "byte_offset": 324
+                    },
+                    "end": {
+                      "line": 20,
+                      "column": 16,
+                      "text_offset": 368,
+                      "byte_offset": 368
+                    }
+                  },
+                  "info": {
+                    "detail": null,
+                    "selection_range": {
+                      "start": {
+                        "line": 19,
+                        "column": 8,
+                        "text_offset": 328,
+                        "byte_offset": 328
+                      },
+                      "end": {
+                        "line": 19,
+                        "column": 17,
+                        "text_offset": 337,
+                        "byte_offset": 337
+                      }
+                    }
+                  },
+                  "children": [],
+                  "children_truncated": false
+                },
+                {
+                  "name": "method_07",
+                  "name_path": "LargeFixture/method_07",
+                  "kind": 6,
+                  "range": {
+                    "start": {
+                      "line": 22,
+                      "column": 4,
+                      "text_offset": 374,
+                      "byte_offset": 374
+                    },
+                    "end": {
+                      "line": 23,
+                      "column": 16,
+                      "text_offset": 418,
+                      "byte_offset": 418
+                    }
+                  },
+                  "info": {
+                    "detail": null,
+                    "selection_range": {
+                      "start": {
+                        "line": 22,
+                        "column": 8,
+                        "text_offset": 378,
+                        "byte_offset": 378
+                      },
+                      "end": {
+                        "line": 22,
+                        "column": 17,
+                        "text_offset": 387,
+                        "byte_offset": 387
+                      }
+                    }
+                  },
+                  "children": [],
+                  "children_truncated": false
+                },
+                {
+                  "name": "method_08",
+                  "name_path": "LargeFixture/method_08",
+                  "kind": 6,
+                  "range": {
+                    "start": {
+                      "line": 25,
+                      "column": 4,
+                      "text_offset": 424,
+                      "byte_offset": 424
+                    },
+                    "end": {
+                      "line": 26,
+                      "column": 16,
+                      "text_offset": 468,
+                      "byte_offset": 468
+                    }
+                  },
+                  "info": {
+                    "detail": null,
+                    "selection_range": {
+                      "start": {
+                        "line": 25,
+                        "column": 8,
+                        "text_offset": 428,
+                        "byte_offset": 428
+                      },
+                      "end": {
+                        "line": 25,
+                        "column": 17,
+                        "text_offset": 437,
+                        "byte_offset": 437
+                      }
+                    }
+                  },
+                  "children": [],
+                  "children_truncated": false
+                },
+                {
+                  "name": "method_09",
+                  "name_path": "LargeFixture/method_09",
+                  "kind": 6,
+                  "range": {
+                    "start": {
+                      "line": 28,
+                      "column": 4,
+                      "text_offset": 474,
+                      "byte_offset": 474
+                    },
+                    "end": {
+                      "line": 29,
+                      "column": 16,
+                      "text_offset": 518,
+                      "byte_offset": 518
+                    }
+                  },
+                  "info": {
+                    "detail": null,
+                    "selection_range": {
+                      "start": {
+                        "line": 28,
+                        "column": 8,
+                        "text_offset": 478,
+                        "byte_offset": 478
+                      },
+                      "end": {
+                        "line": 28,
+                        "column": 17,
+                        "text_offset": 487,
+                        "byte_offset": 487
+                      }
+                    }
+                  },
+                  "children": [],
+                  "children_truncated": false
+                },
+                {
+                  "name": "method_10",
+                  "name_path": "LargeFixture/method_10",
+                  "kind": 6,
+                  "range": {
+                    "start": {
+                      "line": 31,
+                      "column": 4,
+                      "text_offset": 524,
+                      "byte_offset": 524
+                    },
+                    "end": {
+                      "line": 32,
+                      "column": 17,
+                      "text_offset": 569,
+                      "byte_offset": 569
+                    }
+                  },
+                  "info": {
+                    "detail": null,
+                    "selection_range": {
+                      "start": {
+                        "line": 31,
+                        "column": 8,
+                        "text_offset": 528,
+                        "byte_offset": 528
+                      },
+                      "end": {
+                        "line": 31,
+                        "column": 17,
+                        "text_offset": 537,
+                        "byte_offset": 537
+                      }
+                    }
+                  },
+                  "children": [],
+                  "children_truncated": false
+                },
+                {
+                  "name": "method_11",
+                  "name_path": "LargeFixture/method_11",
+                  "kind": 6,
+                  "range": {
+                    "start": {
+                      "line": 34,
+                      "column": 4,
+                      "text_offset": 575,
+                      "byte_offset": 575
+                    },
+                    "end": {
+                      "line": 35,
+                      "column": 17,
+                      "text_offset": 620,
+                      "byte_offset": 620
+                    }
+                  },
+                  "info": {
+                    "detail": null,
+                    "selection_range": {
+                      "start": {
+                        "line": 34,
+                        "column": 8,
+                        "text_offset": 579,
+                        "byte_offset": 579
+                      },
+                      "end": {
+                        "line": 34,
+                        "column": 17,
+                        "text_offset": 588,
+                        "byte_offset": 588
+                      }
+                    }
+                  },
+                  "children": [],
+                  "children_truncated": false
+                },
+                {
+                  "name": "method_12",
+                  "name_path": "LargeFixture/method_12",
+                  "kind": 6,
+                  "range": {
+                    "start": {
+                      "line": 37,
+                      "column": 4,
+                      "text_offset": 626,
+                      "byte_offset": 626
+                    },
+                    "end": {
+                      "line": 38,
+                      "column": 17,
+                      "text_offset": 671,
+                      "byte_offset": 671
+                    }
+                  },
+                  "info": {
+                    "detail": null,
+                    "selection_range": {
+                      "start": {
+                        "line": 37,
+                        "column": 8,
+                        "text_offset": 630,
+                        "byte_offset": 630
+                      },
+                      "end": {
+                        "line": 37,
+                        "column": 17,
+                        "text_offset": 639,
+                        "byte_offset": 639
+                      }
+                    }
+                  },
+                  "children": [],
+                  "children_truncated": false
+                },
+                {
+                  "name": "method_13",
+                  "name_path": "LargeFixture/method_13",
+                  "kind": 6,
+                  "range": {
+                    "start": {
+                      "line": 40,
+                      "column": 4,
+                      "text_offset": 677,
+                      "byte_offset": 677
+                    },
+                    "end": {
+                      "line": 41,
+                      "column": 17,
+                      "text_offset": 722,
+                      "byte_offset": 722
+                    }
+                  },
+                  "info": {
+                    "detail": null,
+                    "selection_range": {
+                      "start": {
+                        "line": 40,
+                        "column": 8,
+                        "text_offset": 681,
+                        "byte_offset": 681
+                      },
+                      "end": {
+                        "line": 40,
+                        "column": 17,
+                        "text_offset": 690,
+                        "byte_offset": 690
+                      }
+                    }
+                  },
+                  "children": [],
+                  "children_truncated": false
+                },
+                {
+                  "name": "method_14",
+                  "name_path": "LargeFixture/method_14",
+                  "kind": 6,
+                  "range": {
+                    "start": {
+                      "line": 43,
+                      "column": 4,
+                      "text_offset": 728,
+                      "byte_offset": 728
+                    },
+                    "end": {
+                      "line": 44,
+                      "column": 17,
+                      "text_offset": 773,
+                      "byte_offset": 773
+                    }
+                  },
+                  "info": {
+                    "detail": null,
+                    "selection_range": {
+                      "start": {
+                        "line": 43,
+                        "column": 8,
+                        "text_offset": 732,
+                        "byte_offset": 732
+                      },
+                      "end": {
+                        "line": 43,
+                        "column": 17,
+                        "text_offset": 741,
+                        "byte_offset": 741
+                      }
+                    }
+                  },
+                  "children": [],
+                  "children_truncated": false
+                },
+                {
+                  "name": "method_15",
+                  "name_path": "LargeFixture/method_15",
+                  "kind": 6,
+                  "range": {
+                    "start": {
+                      "line": 46,
+                      "column": 4,
+                      "text_offset": 779,
+                      "byte_offset": 779
+                    },
+                    "end": {
+                      "line": 47,
+                      "column": 17,
+                      "text_offset": 824,
+                      "byte_offset": 824
+                    }
+                  },
+                  "info": {
+                    "detail": null,
+                    "selection_range": {
+                      "start": {
+                        "line": 46,
+                        "column": 8,
+                        "text_offset": 783,
+                        "byte_offset": 783
+                      },
+                      "end": {
+                        "line": 46,
+                        "column": 17,
+                        "text_offset": 792,
+                        "byte_offset": 792
+                      }
+                    }
+                  },
+                  "children": [],
+                  "children_truncated": false
+                },
+                {
+                  "name": "method_16",
+                  "name_path": "LargeFixture/method_16",
+                  "kind": 6,
+                  "range": {
+                    "start": {
+                      "line": 49,
+                      "column": 4,
+                      "text_offset": 830,
+                      "byte_offset": 830
+                    },
+                    "end": {
+                      "line": 50,
+                      "column": 17,
+                      "text_offset": 875,
+                      "byte_offset": 875
+                    }
+                  },
+                  "info": {
+                    "detail": null,
+                    "selection_range": {
+                      "start": {
+                        "line": 49,
+                        "column": 8,
+                        "text_offset": 834,
+                        "byte_offset": 834
+                      },
+                      "end": {
+                        "line": 49,
+                        "column": 17,
+                        "text_offset": 843,
+                        "byte_offset": 843
+                      }
+                    }
+                  },
+                  "children": [],
+                  "children_truncated": false
+                },
+                {
+                  "name": "method_17",
+                  "name_path": "LargeFixture/method_17",
+                  "kind": 6,
+                  "range": {
+                    "start": {
+                      "line": 52,
+                      "column": 4,
+                      "text_offset": 881,
+                      "byte_offset": 881
+                    },
+                    "end": {
+                      "line": 53,
+                      "column": 17,
+                      "text_offset": 926,
+                      "byte_offset": 926
+                    }
+                  },
+                  "info": {
+                    "detail": null,
+                    "selection_range": {
+                      "start": {
+                        "line": 52,
+                        "column": 8,
+                        "text_offset": 885,
+                        "byte_offset": 885
+                      },
+                      "end": {
+                        "line": 52,
+                        "column": 17,
+                        "text_offset": 894,
+                        "byte_offset": 894
+                      }
+                    }
+                  },
+                  "children": [],
+                  "children_truncated": false
+                },
+                {
+                  "name": "method_18",
+                  "name_path": "LargeFixture/method_18",
+                  "kind": 6,
+                  "range": {
+                    "start": {
+                      "line": 55,
+                      "column": 4,
+                      "text_offset": 932,
+                      "byte_offset": 932
+                    },
+                    "end": {
+                      "line": 56,
+                      "column": 17,
+                      "text_offset": 977,
+                      "byte_offset": 977
+                    }
+                  },
+                  "info": {
+                    "detail": null,
+                    "selection_range": {
+                      "start": {
+                        "line": 55,
+                        "column": 8,
+                        "text_offset": 936,
+                        "byte_offset": 936
+                      },
+                      "end": {
+                        "line": 55,
+                        "column": 17,
+                        "text_offset": 945,
+                        "byte_offset": 945
+                      }
+                    }
+                  },
+                  "children": [],
+                  "children_truncated": false
+                },
+                {
+                  "name": "method_19",
+                  "name_path": "LargeFixture/method_19",
+                  "kind": 6,
+                  "range": {
+                    "start": {
+                      "line": 58,
+                      "column": 4,
+                      "text_offset": 983,
+                      "byte_offset": 983
+                    },
+                    "end": {
+                      "line": 59,
+                      "column": 17,
+                      "text_offset": 1028,
+                      "byte_offset": 1028
+                    }
+                  },
+                  "info": {
+                    "detail": null,
+                    "selection_range": {
+                      "start": {
+                        "line": 58,
+                        "column": 8,
+                        "text_offset": 987,
+                        "byte_offset": 987
+                      },
+                      "end": {
+                        "line": 58,
+                        "column": 17,
+                        "text_offset": 996,
+                        "byte_offset": 996
+                      }
+                    }
+                  },
+                  "children": [],
+                  "children_truncated": false
+                }
+              ],
+              "children_truncated": false
+            }
+          ]
+        },
+        "workspace": {
+          "root": "/data/CoordExp/serena-light",
+          "kind": "git",
+          "working_subdirectory": "/data/CoordExp/serena-light"
+        },
+        "adapter": {
+          "name": "pyright",
+          "language": "python"
+        },
+        "generations": {
+          "trust": 0,
+          "program": 1,
+          "document": 6,
+          "index": 1,
+          "scope": "path"
+        },
+        "truncation": {
+          "truncated": false,
+          "omitted_count": 0
+        }
+      },
+      "semantic_evidence": {
+        "relative_paths": [
+          "tests/integration/fixtures/compact_navigation/large_nested.py"
+        ],
+        "name_paths": [
+          "LargeFixture",
+          "LargeFixture/method_00",
+          "LargeFixture/method_01",
+          "LargeFixture/method_02",
+          "LargeFixture/method_03",
+          "LargeFixture/method_04",
+          "LargeFixture/method_05",
+          "LargeFixture/method_06",
+          "LargeFixture/method_07",
+          "LargeFixture/method_08",
+          "LargeFixture/method_09",
+          "LargeFixture/method_10",
+          "LargeFixture/method_11",
+          "LargeFixture/method_12",
+          "LargeFixture/method_13",
+          "LargeFixture/method_14",
+          "LargeFixture/method_15",
+          "LargeFixture/method_16",
+          "LargeFixture/method_17",
+          "LargeFixture/method_18",
+          "LargeFixture/method_19"
+        ],
+        "ranges": [
+          {
+            "start": {
+              "line": 0,
+              "column": 0,
+              "text_offset": 0,
+              "byte_offset": 0
+            },
+            "end": {
+              "line": 59,
+              "column": 17,
+              "text_offset": 1028,
+              "byte_offset": 1028
+            }
+          },
+          {
+            "start": {
+              "line": 1,
+              "column": 4,
+              "text_offset": 24,
+              "byte_offset": 24
+            },
+            "end": {
+              "line": 2,
+              "column": 16,
+              "text_offset": 68,
+              "byte_offset": 68
+            }
+          },
+          {
+            "start": {
+              "line": 4,
+              "column": 4,
+              "text_offset": 74,
+              "byte_offset": 74
+            },
+            "end": {
+              "line": 5,
+              "column": 16,
+              "text_offset": 118,
+              "byte_offset": 118
+            }
+          },
+          {
+            "start": {
+              "line": 7,
+              "column": 4,
+              "text_offset": 124,
+              "byte_offset": 124
+            },
+            "end": {
+              "line": 8,
+              "column": 16,
+              "text_offset": 168,
+              "byte_offset": 168
+            }
+          },
+          {
+            "start": {
+              "line": 10,
+              "column": 4,
+              "text_offset": 174,
+              "byte_offset": 174
+            },
+            "end": {
+              "line": 11,
+              "column": 16,
+              "text_offset": 218,
+              "byte_offset": 218
+            }
+          },
+          {
+            "start": {
+              "line": 13,
+              "column": 4,
+              "text_offset": 224,
+              "byte_offset": 224
+            },
+            "end": {
+              "line": 14,
+              "column": 16,
+              "text_offset": 268,
+              "byte_offset": 268
+            }
+          },
+          {
+            "start": {
+              "line": 16,
+              "column": 4,
+              "text_offset": 274,
+              "byte_offset": 274
+            },
+            "end": {
+              "line": 17,
+              "column": 16,
+              "text_offset": 318,
+              "byte_offset": 318
+            }
+          },
+          {
+            "start": {
+              "line": 19,
+              "column": 4,
+              "text_offset": 324,
+              "byte_offset": 324
+            },
+            "end": {
+              "line": 20,
+              "column": 16,
+              "text_offset": 368,
+              "byte_offset": 368
+            }
+          },
+          {
+            "start": {
+              "line": 22,
+              "column": 4,
+              "text_offset": 374,
+              "byte_offset": 374
+            },
+            "end": {
+              "line": 23,
+              "column": 16,
+              "text_offset": 418,
+              "byte_offset": 418
+            }
+          },
+          {
+            "start": {
+              "line": 25,
+              "column": 4,
+              "text_offset": 424,
+              "byte_offset": 424
+            },
+            "end": {
+              "line": 26,
+              "column": 16,
+              "text_offset": 468,
+              "byte_offset": 468
+            }
+          },
+          {
+            "start": {
+              "line": 28,
+              "column": 4,
+              "text_offset": 474,
+              "byte_offset": 474
+            },
+            "end": {
+              "line": 29,
+              "column": 16,
+              "text_offset": 518,
+              "byte_offset": 518
+            }
+          },
+          {
+            "start": {
+              "line": 31,
+              "column": 4,
+              "text_offset": 524,
+              "byte_offset": 524
+            },
+            "end": {
+              "line": 32,
+              "column": 17,
+              "text_offset": 569,
+              "byte_offset": 569
+            }
+          },
+          {
+            "start": {
+              "line": 34,
+              "column": 4,
+              "text_offset": 575,
+              "byte_offset": 575
+            },
+            "end": {
+              "line": 35,
+              "column": 17,
+              "text_offset": 620,
+              "byte_offset": 620
+            }
+          },
+          {
+            "start": {
+              "line": 37,
+              "column": 4,
+              "text_offset": 626,
+              "byte_offset": 626
+            },
+            "end": {
+              "line": 38,
+              "column": 17,
+              "text_offset": 671,
+              "byte_offset": 671
+            }
+          },
+          {
+            "start": {
+              "line": 40,
+              "column": 4,
+              "text_offset": 677,
+              "byte_offset": 677
+            },
+            "end": {
+              "line": 41,
+              "column": 17,
+              "text_offset": 722,
+              "byte_offset": 722
+            }
+          },
+          {
+            "start": {
+              "line": 43,
+              "column": 4,
+              "text_offset": 728,
+              "byte_offset": 728
+            },
+            "end": {
+              "line": 44,
+              "column": 17,
+              "text_offset": 773,
+              "byte_offset": 773
+            }
+          },
+          {
+            "start": {
+              "line": 46,
+              "column": 4,
+              "text_offset": 779,
+              "byte_offset": 779
+            },
+            "end": {
+              "line": 47,
+              "column": 17,
+              "text_offset": 824,
+              "byte_offset": 824
+            }
+          },
+          {
+            "start": {
+              "line": 49,
+              "column": 4,
+              "text_offset": 830,
+              "byte_offset": 830
+            },
+            "end": {
+              "line": 50,
+              "column": 17,
+              "text_offset": 875,
+              "byte_offset": 875
+            }
+          },
+          {
+            "start": {
+              "line": 52,
+              "column": 4,
+              "text_offset": 881,
+              "byte_offset": 881
+            },
+            "end": {
+              "line": 53,
+              "column": 17,
+              "text_offset": 926,
+              "byte_offset": 926
+            }
+          },
+          {
+            "start": {
+              "line": 55,
+              "column": 4,
+              "text_offset": 932,
+              "byte_offset": 932
+            },
+            "end": {
+              "line": 56,
+              "column": 17,
+              "text_offset": 977,
+              "byte_offset": 977
+            }
+          },
+          {
+            "start": {
+              "line": 58,
+              "column": 4,
+              "text_offset": 983,
+              "byte_offset": 983
+            },
+            "end": {
+              "line": 59,
+              "column": 17,
+              "text_offset": 1028,
+              "byte_offset": 1028
+            }
+          }
+        ],
+        "sha256s": [
+          "13a78c590a99313de8a9b000c75a5b04ed03060cadb7cb3f37f90f072c5eae32"
+        ]
+      },
+      "is_error": false,
+      "character_count": 22686,
+      "utf8_byte_count": 22686,
+      "o200k_base_tokens": 4911,
+      "tool_calls": 1,
+      "wall_time_seconds": 0.13258757069706917,
+      "content_sha256": "49766c2234104572e370ea213c79fdccb93ed432253c4fa8fe29903ef5675983"
+    },
+    {
+      "case": "multi_file_references",
+      "tool": "find_referencing_symbols",
+      "arguments": {
+        "relative_path": "tests/integration/fixtures/compact_navigation/python_symbols.py",
+        "name_path": "ANSWER",
+        "max_answer_chars": 12000,
+        "max_snippet_chars": 240
+      },
+      "content_text": "{\n  \"ok\": true,\n  \"data\": {\n    \"relative_path\": \"tests/integration/fixtures/compact_navigation/python_symbols.py\",\n    \"reference_count\": 3,\n    \"references\": [\n      {\n        \"path\": \"tests/integration/fixtures/compact_navigation/python_symbols.py\",\n        \"read_only_external\": false,\n        \"location\": {\n          \"start\": {\n            \"line\": 2,\n            \"column\": 0,\n            \"text_offset\": 76,\n            \"byte_offset\": 76\n          },\n          \"end\": {\n            \"line\": 2,\n            \"column\": 6,\n            \"text_offset\": 82,\n            \"byte_offset\": 82\n          }\n        },\n        \"container\": {\n          \"kind\": \"symbol\",\n          \"name_path\": \"ANSWER\",\n          \"symbol_kind\": 14\n        },\n        \"snippet\": \"ANSWER: int = 42\",\n        \"snippet_truncated\": false\n      },\n      {\n        \"path\": \"tests/integration/fixtures/compact_navigation/python_usage.py\",\n        \"read_only_external\": false,\n        \"location\": {\n          \"start\": {\n            \"line\": 0,\n            \"column\": 27,\n            \"text_offset\": 27,\n            \"byte_offset\": 27\n          },\n          \"end\": {\n            \"line\": 0,\n            \"column\": 33,\n            \"text_offset\": 33,\n            \"byte_offset\": 33\n          }\n        },\n        \"container\": {\n          \"kind\": \"file\",\n          \"name_path\": \"<file>\"\n        },\n        \"snippet\": \"from python_symbols import ANSWER, Calculator\",\n        \"snippet_truncated\": false\n      },\n      {\n        \"path\": \"tests/integration/fixtures/compact_navigation/python_usage.py\",\n        \"read_only_external\": false,\n        \"location\": {\n          \"start\": {\n            \"line\": 4,\n            \"column\": 28,\n            \"text_offset\": 100,\n            \"byte_offset\": 100\n          },\n          \"end\": {\n            \"line\": 4,\n            \"column\": 34,\n            \"text_offset\": 106,\n            \"byte_offset\": 106\n          }\n        },\n        \"container\": {\n          \"kind\": \"symbol\",\n          \"name_path\": \"calculate\",\n          \"symbol_kind\": 12\n        },\n        \"snippet\": \"    return Calculator().add(ANSWER, 1)\",\n        \"snippet_truncated\": false\n      }\n    ],\n    \"coverage\": {\n      \"adapter\": \"pyright\",\n      \"language\": \"python\",\n      \"scope_kind\": \"workspace_default\",\n      \"configured_program_files\": 133,\n      \"configured_program_digest\": \"ed0e067243402f32a6eea3d1d49637edb86d33abc09c7cad7e56ac8fb31406c1\",\n      \"trusted_language_files\": 133,\n      \"trusted_language_digest\": \"ed0e067243402f32a6eea3d1d49637edb86d33abc09c7cad7e56ac8fb31406c1\",\n      \"uncovered_files\": 0,\n      \"uncovered_sample\": {\n        \"total\": 0,\n        \"items\": [],\n        \"digest\": \"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\",\n        \"omitted\": 0\n      }\n    }\n  },\n  \"workspace\": {\n    \"root\": \"/data/CoordExp/serena-light\",\n    \"kind\": \"git\",\n    \"working_subdirectory\": \"/data/CoordExp/serena-light\"\n  },\n  \"adapter\": {\n    \"name\": \"pyright\",\n    \"language\": \"python\"\n  },\n  \"generations\": {\n    \"trust\": 0,\n    \"program\": 1,\n    \"document\": 7,\n    \"index\": 1,\n    \"scope\": \"path\"\n  },\n  \"truncation\": {\n    \"truncated\": false,\n    \"omitted_count\": 0\n  }\n}",
+      "structured_content": {
+        "ok": true,
+        "data": {
+          "relative_path": "tests/integration/fixtures/compact_navigation/python_symbols.py",
+          "reference_count": 3,
+          "references": [
+            {
+              "path": "tests/integration/fixtures/compact_navigation/python_symbols.py",
+              "read_only_external": false,
+              "location": {
+                "start": {
+                  "line": 2,
+                  "column": 0,
+                  "text_offset": 76,
+                  "byte_offset": 76
+                },
+                "end": {
+                  "line": 2,
+                  "column": 6,
+                  "text_offset": 82,
+                  "byte_offset": 82
+                }
+              },
+              "container": {
+                "kind": "symbol",
+                "name_path": "ANSWER",
+                "symbol_kind": 14
+              },
+              "snippet": "ANSWER: int = 42",
+              "snippet_truncated": false
+            },
+            {
+              "path": "tests/integration/fixtures/compact_navigation/python_usage.py",
+              "read_only_external": false,
+              "location": {
+                "start": {
+                  "line": 0,
+                  "column": 27,
+                  "text_offset": 27,
+                  "byte_offset": 27
+                },
+                "end": {
+                  "line": 0,
+                  "column": 33,
+                  "text_offset": 33,
+                  "byte_offset": 33
+                }
+              },
+              "container": {
+                "kind": "file",
+                "name_path": "<file>"
+              },
+              "snippet": "from python_symbols import ANSWER, Calculator",
+              "snippet_truncated": false
+            },
+            {
+              "path": "tests/integration/fixtures/compact_navigation/python_usage.py",
+              "read_only_external": false,
+              "location": {
+                "start": {
+                  "line": 4,
+                  "column": 28,
+                  "text_offset": 100,
+                  "byte_offset": 100
+                },
+                "end": {
+                  "line": 4,
+                  "column": 34,
+                  "text_offset": 106,
+                  "byte_offset": 106
+                }
+              },
+              "container": {
+                "kind": "symbol",
+                "name_path": "calculate",
+                "symbol_kind": 12
+              },
+              "snippet": "    return Calculator().add(ANSWER, 1)",
+              "snippet_truncated": false
+            }
+          ],
+          "coverage": {
+            "adapter": "pyright",
+            "language": "python",
+            "scope_kind": "workspace_default",
+            "configured_program_files": 133,
+            "configured_program_digest": "ed0e067243402f32a6eea3d1d49637edb86d33abc09c7cad7e56ac8fb31406c1",
+            "trusted_language_files": 133,
+            "trusted_language_digest": "ed0e067243402f32a6eea3d1d49637edb86d33abc09c7cad7e56ac8fb31406c1",
+            "uncovered_files": 0,
+            "uncovered_sample": {
+              "total": 0,
+              "items": [],
+              "digest": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+              "omitted": 0
+            }
+          }
+        },
+        "workspace": {
+          "root": "/data/CoordExp/serena-light",
+          "kind": "git",
+          "working_subdirectory": "/data/CoordExp/serena-light"
+        },
+        "adapter": {
+          "name": "pyright",
+          "language": "python"
+        },
+        "generations": {
+          "trust": 0,
+          "program": 1,
+          "document": 7,
+          "index": 1,
+          "scope": "path"
+        },
+        "truncation": {
+          "truncated": false,
+          "omitted_count": 0
+        }
+      },
+      "semantic_evidence": {
+        "relative_paths": [
+          "tests/integration/fixtures/compact_navigation/python_symbols.py"
+        ],
+        "name_paths": [
+          "ANSWER",
+          "<file>",
+          "calculate"
+        ],
+        "coverages": [
+          {
+            "adapter": "pyright",
+            "language": "python",
+            "scope_kind": "workspace_default",
+            "configured_program_files": 133,
+            "configured_program_digest": "ed0e067243402f32a6eea3d1d49637edb86d33abc09c7cad7e56ac8fb31406c1",
+            "trusted_language_files": 133,
+            "trusted_language_digest": "ed0e067243402f32a6eea3d1d49637edb86d33abc09c7cad7e56ac8fb31406c1",
+            "uncovered_files": 0,
+            "uncovered_sample": {
+              "total": 0,
+              "items": [],
+              "digest": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+              "omitted": 0
+            }
+          }
+        ]
+      },
+      "is_error": false,
+      "character_count": 3156,
+      "utf8_byte_count": 3156,
+      "o200k_base_tokens": 880,
+      "tool_calls": 1,
+      "wall_time_seconds": 0.31132232397794724,
+      "content_sha256": "8abb5f0ea8cb6a5c876d66701e0d3c8b5884a422ae96298b4027ea886262a0eb"
+    },
+    {
+      "case": "declaration",
+      "tool": "find_declaration",
+      "arguments": {
+        "relative_path": "tests/integration/fixtures/compact_navigation/python_usage.py",
+        "regex": "import (ANSWER), Calculator"
+      },
+      "content_text": "{\n  \"ok\": true,\n  \"data\": {\n    \"relative_path\": \"tests/integration/fixtures/compact_navigation/python_usage.py\",\n    \"capabilities\": {\n      \"raw\": {\n        \"definitionProvider\": true,\n        \"declarationProvider\": true,\n        \"implementationProvider\": false,\n        \"referencesProvider\": true,\n        \"documentSymbolProvider\": true,\n        \"workspaceSymbolProvider\": true\n      },\n      \"derived\": {\n        \"find_declaration\": true,\n        \"find_implementations\": false,\n        \"find_referencing_symbols\": true,\n        \"get_symbols_overview\": true,\n        \"global_find_symbol\": true\n      }\n    },\n    \"locations\": [\n      {\n        \"absolute_path\": \"/data/CoordExp/serena-light/tests/integration/fixtures/compact_navigation/python_symbols.py\",\n        \"location_kind\": \"workspace\",\n        \"relative_path\": \"tests/integration/fixtures/compact_navigation/python_symbols.py\",\n        \"range\": {\n          \"start\": {\n            \"line\": 2,\n            \"column\": 0,\n            \"text_offset\": 76,\n            \"byte_offset\": 76\n          },\n          \"end\": {\n            \"line\": 2,\n            \"column\": 6,\n            \"text_offset\": 82,\n            \"byte_offset\": 82\n          }\n        }\n      }\n    ]\n  },\n  \"workspace\": {\n    \"root\": \"/data/CoordExp/serena-light\",\n    \"kind\": \"git\",\n    \"working_subdirectory\": \"/data/CoordExp/serena-light\"\n  },\n  \"adapter\": {\n    \"name\": \"pyright\",\n    \"language\": \"python\"\n  },\n  \"generations\": {\n    \"trust\": 0,\n    \"program\": 1,\n    \"document\": 9,\n    \"index\": 1,\n    \"scope\": \"path\"\n  }\n}",
+      "structured_content": {
+        "ok": true,
+        "data": {
+          "relative_path": "tests/integration/fixtures/compact_navigation/python_usage.py",
+          "capabilities": {
+            "raw": {
+              "definitionProvider": true,
+              "declarationProvider": true,
+              "implementationProvider": false,
+              "referencesProvider": true,
+              "documentSymbolProvider": true,
+              "workspaceSymbolProvider": true
+            },
+            "derived": {
+              "find_declaration": true,
+              "find_implementations": false,
+              "find_referencing_symbols": true,
+              "get_symbols_overview": true,
+              "global_find_symbol": true
+            }
+          },
+          "locations": [
+            {
+              "absolute_path": "/data/CoordExp/serena-light/tests/integration/fixtures/compact_navigation/python_symbols.py",
+              "location_kind": "workspace",
+              "relative_path": "tests/integration/fixtures/compact_navigation/python_symbols.py",
+              "range": {
+                "start": {
+                  "line": 2,
+                  "column": 0,
+                  "text_offset": 76,
+                  "byte_offset": 76
+                },
+                "end": {
+                  "line": 2,
+                  "column": 6,
+                  "text_offset": 82,
+                  "byte_offset": 82
+                }
+              }
+            }
+          ]
+        },
+        "workspace": {
+          "root": "/data/CoordExp/serena-light",
+          "kind": "git",
+          "working_subdirectory": "/data/CoordExp/serena-light"
+        },
+        "adapter": {
+          "name": "pyright",
+          "language": "python"
+        },
+        "generations": {
+          "trust": 0,
+          "program": 1,
+          "document": 9,
+          "index": 1,
+          "scope": "path"
+        }
+      },
+      "semantic_evidence": {
+        "relative_paths": [
+          "tests/integration/fixtures/compact_navigation/python_usage.py",
+          "tests/integration/fixtures/compact_navigation/python_symbols.py"
+        ],
+        "ranges": [
+          {
+            "start": {
+              "line": 2,
+              "column": 0,
+              "text_offset": 76,
+              "byte_offset": 76
+            },
+            "end": {
+              "line": 2,
+              "column": 6,
+              "text_offset": 82,
+              "byte_offset": 82
+            }
+          }
+        ]
+      },
+      "is_error": false,
+      "character_count": 1543,
+      "utf8_byte_count": 1543,
+      "o200k_base_tokens": 396,
+      "tool_calls": 1,
+      "wall_time_seconds": 0.1767168939113617,
+      "content_sha256": "340ebbd197e9e3e680a03baeb5a12e19ff62ce19128393220ff83a22d10daf5e"
+    },
+    {
+      "case": "typescript_implementation",
+      "tool": "find_implementations",
+      "arguments": {
+        "relative_path": "tests/integration/fixtures/compact_navigation/typescript_symbols.ts",
+        "name_path": "Runner",
+        "max_answer_chars": 12000
+      },
+      "content_text": "{\n  \"ok\": true,\n  \"data\": {\n    \"relative_path\": \"tests/integration/fixtures/compact_navigation/typescript_symbols.ts\",\n    \"name_path\": \"Runner\",\n    \"capabilities\": {\n      \"raw\": {\n        \"definitionProvider\": true,\n        \"declarationProvider\": false,\n        \"implementationProvider\": true,\n        \"referencesProvider\": true,\n        \"documentSymbolProvider\": true,\n        \"workspaceSymbolProvider\": true\n      },\n      \"derived\": {\n        \"find_declaration\": true,\n        \"find_implementations\": true,\n        \"find_referencing_symbols\": true,\n        \"get_symbols_overview\": true,\n        \"global_find_symbol\": true\n      }\n    },\n    \"locations\": [\n      {\n        \"absolute_path\": \"/data/CoordExp/serena-light/tests/integration/fixtures/compact_navigation/typescript_symbols.ts\",\n        \"location_kind\": \"workspace\",\n        \"relative_path\": \"tests/integration/fixtures/compact_navigation/typescript_symbols.ts\",\n        \"range\": {\n          \"start\": {\n            \"line\": 4,\n            \"column\": 13,\n            \"text_offset\": 59,\n            \"byte_offset\": 59\n          },\n          \"end\": {\n            \"line\": 4,\n            \"column\": 27,\n            \"text_offset\": 73,\n            \"byte_offset\": 73\n          }\n        }\n      }\n    ]\n  },\n  \"workspace\": {\n    \"root\": \"/data/CoordExp/serena-light\",\n    \"kind\": \"git\",\n    \"working_subdirectory\": \"/data/CoordExp/serena-light\"\n  },\n  \"adapter\": {\n    \"name\": \"typescript\",\n    \"language\": \"typescript\"\n  },\n  \"generations\": {\n    \"trust\": 0,\n    \"program\": 1,\n    \"document\": 2,\n    \"index\": 1,\n    \"scope\": \"path\"\n  },\n  \"truncation\": {\n    \"truncated\": false,\n    \"omitted_count\": 0\n  }\n}",
+      "structured_content": {
+        "ok": true,
+        "data": {
+          "relative_path": "tests/integration/fixtures/compact_navigation/typescript_symbols.ts",
+          "name_path": "Runner",
+          "capabilities": {
+            "raw": {
+              "definitionProvider": true,
+              "declarationProvider": false,
+              "implementationProvider": true,
+              "referencesProvider": true,
+              "documentSymbolProvider": true,
+              "workspaceSymbolProvider": true
+            },
+            "derived": {
+              "find_declaration": true,
+              "find_implementations": true,
+              "find_referencing_symbols": true,
+              "get_symbols_overview": true,
+              "global_find_symbol": true
+            }
+          },
+          "locations": [
+            {
+              "absolute_path": "/data/CoordExp/serena-light/tests/integration/fixtures/compact_navigation/typescript_symbols.ts",
+              "location_kind": "workspace",
+              "relative_path": "tests/integration/fixtures/compact_navigation/typescript_symbols.ts",
+              "range": {
+                "start": {
+                  "line": 4,
+                  "column": 13,
+                  "text_offset": 59,
+                  "byte_offset": 59
+                },
+                "end": {
+                  "line": 4,
+                  "column": 27,
+                  "text_offset": 73,
+                  "byte_offset": 73
+                }
+              }
+            }
+          ]
+        },
+        "workspace": {
+          "root": "/data/CoordExp/serena-light",
+          "kind": "git",
+          "working_subdirectory": "/data/CoordExp/serena-light"
+        },
+        "adapter": {
+          "name": "typescript",
+          "language": "typescript"
+        },
+        "generations": {
+          "trust": 0,
+          "program": 1,
+          "document": 2,
+          "index": 1,
+          "scope": "path"
+        },
+        "truncation": {
+          "truncated": false,
+          "omitted_count": 0
+        }
+      },
+      "semantic_evidence": {
+        "relative_paths": [
+          "tests/integration/fixtures/compact_navigation/typescript_symbols.ts",
+          "tests/integration/fixtures/compact_navigation/typescript_symbols.ts"
+        ],
+        "name_paths": [
+          "Runner"
+        ],
+        "ranges": [
+          {
+            "start": {
+              "line": 4,
+              "column": 13,
+              "text_offset": 59,
+              "byte_offset": 59
+            },
+            "end": {
+              "line": 4,
+              "column": 27,
+              "text_offset": 73,
+              "byte_offset": 73
+            }
+          }
+        ]
+      },
+      "is_error": false,
+      "character_count": 1662,
+      "utf8_byte_count": 1662,
+      "o200k_base_tokens": 431,
+      "tool_calls": 1,
+      "wall_time_seconds": 0.6228336989879608,
+      "content_sha256": "27c0929d464248a5224f4fafcd0e9f98306e768e80ff1c7a3b7d25ffab2892d1"
+    },
+    {
+      "case": "external_read_only_declaration",
+      "tool": "find_declaration",
+      "arguments": {
+        "relative_path": "tests/integration/fixtures/compact_navigation/python_symbols.py",
+        "regex": "return (GenerationConfig)\\("
+      },
+      "content_text": "{\n  \"ok\": true,\n  \"data\": {\n    \"relative_path\": \"tests/integration/fixtures/compact_navigation/python_symbols.py\",\n    \"capabilities\": {\n      \"raw\": {\n        \"definitionProvider\": true,\n        \"declarationProvider\": true,\n        \"implementationProvider\": false,\n        \"referencesProvider\": true,\n        \"documentSymbolProvider\": true,\n        \"workspaceSymbolProvider\": true\n      },\n      \"derived\": {\n        \"find_declaration\": true,\n        \"find_implementations\": false,\n        \"find_referencing_symbols\": true,\n        \"get_symbols_overview\": true,\n        \"global_find_symbol\": true\n      }\n    },\n    \"locations\": [\n      {\n        \"absolute_path\": \"/root/miniconda3/envs/ms/lib/python3.12/site-packages/transformers/generation/configuration_utils.py\",\n        \"location_kind\": \"read_only_external\",\n        \"read_only_external\": true,\n        \"raw_lsp_range\": {\n          \"basis\": \"lsp_zero_based_line_utf16_code_unit_character\",\n          \"start\": {\n            \"line\": 81,\n            \"character\": 6\n          },\n          \"end\": {\n            \"line\": 81,\n            \"character\": 22\n          }\n        }\n      }\n    ]\n  },\n  \"workspace\": {\n    \"root\": \"/data/CoordExp/serena-light\",\n    \"kind\": \"git\",\n    \"working_subdirectory\": \"/data/CoordExp/serena-light\"\n  },\n  \"adapter\": {\n    \"name\": \"pyright\",\n    \"language\": \"python\"\n  },\n  \"generations\": {\n    \"trust\": 0,\n    \"program\": 1,\n    \"document\": 11,\n    \"index\": 1,\n    \"scope\": \"path\"\n  }\n}",
+      "structured_content": {
+        "ok": true,
+        "data": {
+          "relative_path": "tests/integration/fixtures/compact_navigation/python_symbols.py",
+          "capabilities": {
+            "raw": {
+              "definitionProvider": true,
+              "declarationProvider": true,
+              "implementationProvider": false,
+              "referencesProvider": true,
+              "documentSymbolProvider": true,
+              "workspaceSymbolProvider": true
+            },
+            "derived": {
+              "find_declaration": true,
+              "find_implementations": false,
+              "find_referencing_symbols": true,
+              "get_symbols_overview": true,
+              "global_find_symbol": true
+            }
+          },
+          "locations": [
+            {
+              "absolute_path": "/root/miniconda3/envs/ms/lib/python3.12/site-packages/transformers/generation/configuration_utils.py",
+              "location_kind": "read_only_external",
+              "read_only_external": true,
+              "raw_lsp_range": {
+                "basis": "lsp_zero_based_line_utf16_code_unit_character",
+                "start": {
+                  "line": 81,
+                  "character": 6
+                },
+                "end": {
+                  "line": 81,
+                  "character": 22
+                }
+              }
+            }
+          ]
+        },
+        "workspace": {
+          "root": "/data/CoordExp/serena-light",
+          "kind": "git",
+          "working_subdirectory": "/data/CoordExp/serena-light"
+        },
+        "adapter": {
+          "name": "pyright",
+          "language": "python"
+        },
+        "generations": {
+          "trust": 0,
+          "program": 1,
+          "document": 11,
+          "index": 1,
+          "scope": "path"
+        }
+      },
+      "semantic_evidence": {
+        "relative_paths": [
+          "tests/integration/fixtures/compact_navigation/python_symbols.py"
+        ]
+      },
+      "is_error": false,
+      "character_count": 1469,
+      "utf8_byte_count": 1469,
+      "o200k_base_tokens": 381,
+      "tool_calls": 1,
+      "wall_time_seconds": 0.21038169786334038,
+      "content_sha256": "fa71fd5527906140192fc28084e2b5f9109ae5da85d0485d8a83aa09beaa471e"
+    },
+    {
+      "case": "true_empty_overview",
+      "tool": "get_symbols_overview",
+      "arguments": {
+        "relative_path": "tests/integration/fixtures/compact_navigation/empty.py",
+        "max_depth": 1,
+        "max_answer_chars": 12000
+      },
+      "content_text": "{\n  \"ok\": true,\n  \"data\": {\n    \"relative_path\": \"tests/integration/fixtures/compact_navigation/empty.py\",\n    \"sha256\": \"de91df678f490a898c8b0a45b10124567142b4877d49955a738a5fd715865294\",\n    \"max_depth\": 1,\n    \"depth_truncated\": false,\n    \"depth_omitted_count\": 0,\n    \"symbols\": []\n  },\n  \"workspace\": {\n    \"root\": \"/data/CoordExp/serena-light\",\n    \"kind\": \"git\",\n    \"working_subdirectory\": \"/data/CoordExp/serena-light\"\n  },\n  \"adapter\": {\n    \"name\": \"pyright\",\n    \"language\": \"python\"\n  },\n  \"generations\": {\n    \"trust\": 0,\n    \"program\": 1,\n    \"document\": 12,\n    \"index\": 1,\n    \"scope\": \"path\"\n  },\n  \"truncation\": {\n    \"truncated\": false,\n    \"omitted_count\": 0\n  }\n}",
+      "structured_content": {
+        "ok": true,
+        "data": {
+          "relative_path": "tests/integration/fixtures/compact_navigation/empty.py",
+          "sha256": "de91df678f490a898c8b0a45b10124567142b4877d49955a738a5fd715865294",
+          "max_depth": 1,
+          "depth_truncated": false,
+          "depth_omitted_count": 0,
+          "symbols": []
+        },
+        "workspace": {
+          "root": "/data/CoordExp/serena-light",
+          "kind": "git",
+          "working_subdirectory": "/data/CoordExp/serena-light"
+        },
+        "adapter": {
+          "name": "pyright",
+          "language": "python"
+        },
+        "generations": {
+          "trust": 0,
+          "program": 1,
+          "document": 12,
+          "index": 1,
+          "scope": "path"
+        },
+        "truncation": {
+          "truncated": false,
+          "omitted_count": 0
+        }
+      },
+      "semantic_evidence": {
+        "relative_paths": [
+          "tests/integration/fixtures/compact_navigation/empty.py"
+        ],
+        "sha256s": [
+          "de91df678f490a898c8b0a45b10124567142b4877d49955a738a5fd715865294"
+        ]
+      },
+      "is_error": false,
+      "character_count": 686,
+      "utf8_byte_count": 686,
+      "o200k_base_tokens": 239,
+      "tool_calls": 1,
+      "wall_time_seconds": 0.1181228794157505,
+      "content_sha256": "02afd7af58af8c98995b83e4f72b7f537108be7f1f7c196a9f679c04be477601"
+    }
+  ]
+}

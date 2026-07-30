@@ -23,12 +23,21 @@ from serena_light.lsp.normalize import (
     containing_symbol,
     normalize_document_symbols,
 )
-from serena_light.lsp.positions import FileSnapshot, LspPosition, PositionEncoding, PositionError, PositionMapper
+from serena_light.lsp.positions import (
+    FileSnapshot,
+    LspPosition,
+    PositionEncoding,
+    PositionError,
+    PositionMapper,
+    PublicPositionRenderer,
+    raw_lsp_range,
+)
 from serena_light.tools.envelopes import (
     AdapterMetadata,
     ErrorCode,
     ErrorEnvelope,
     GenerationMetadata,
+    RetryMetadata,
     ToolEnvelope,
     TruncationMetadata,
     WorkspaceMetadata,
@@ -48,6 +57,73 @@ class ReferenceRequest:
     workspace: WorkspaceMetadata | None = None
     adapter: AdapterMetadata | None = None
     generations: GenerationMetadata | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ReferenceCoverage:
+    """Bounded evidence for the one native semantic program that was queried.
+
+    The runtime, rather than this presentation layer, owns the projections and
+    generation check used to construct this value.  Keeping it immutable here
+    prevents a reference result from accidentally combining locations from one
+    dispatch with coverage from a later workspace scan.
+    """
+
+    adapter: str
+    language: str
+    scope_kind: str
+    configured_program_files: int
+    configured_program_digest: str
+    trusted_language_files: int
+    trusted_language_digest: str
+    uncovered_files: int
+    uncovered_digest: str
+    uncovered_sample: tuple[str, ...]
+    uncovered_total: int
+    uncovered_omitted: int
+
+    def __post_init__(self) -> None:
+        if (
+            not self.adapter
+            or not self.language
+            or not self.scope_kind
+            or self.configured_program_files < 0
+            or self.trusted_language_files < 0
+            or self.uncovered_files < 0
+            or self.uncovered_total < 0
+            or self.uncovered_omitted < 0
+            or self.uncovered_total != self.uncovered_files
+            or self.uncovered_omitted != self.uncovered_total - len(self.uncovered_sample)
+            or tuple(sorted(self.uncovered_sample)) != self.uncovered_sample
+            or len(set(self.uncovered_sample)) != len(self.uncovered_sample)
+        ):
+            raise ValueError("reference coverage is inconsistent")
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "adapter": self.adapter,
+            "language": self.language,
+            "scope_kind": self.scope_kind,
+            "configured_program_files": self.configured_program_files,
+            "configured_program_digest": self.configured_program_digest,
+            "trusted_language_files": self.trusted_language_files,
+            "trusted_language_digest": self.trusted_language_digest,
+            "uncovered_files": self.uncovered_files,
+            "uncovered_sample": {
+                "total": self.uncovered_total,
+                "items": list(self.uncovered_sample),
+                "digest": self.uncovered_digest,
+                "omitted": self.uncovered_omitted,
+            },
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class ReferenceQueryResult:
+    """One semantic adapter response paired with its dispatch-time coverage."""
+
+    locations: Sequence[Location]
+    coverage: ReferenceCoverage
 
 
 @dataclass(frozen=True, slots=True)
@@ -86,10 +162,31 @@ class ReferenceDocumentInput:
             raise ValueError("reference document uri must be non-empty")
 
 
+@dataclass(frozen=True, slots=True)
+class RawReferenceDocumentInput:
+    """One authorized reference target without response-owned source bytes.
+
+    This variant carries only the response adapter's coordinate basis.  It
+    cannot supply decoded-text ranges, containment, or snippets, and therefore
+    preserves an external semantic edge without inventing a source snapshot or
+    acquiring filesystem trust ownership in the presentation layer.
+    """
+
+    uri: str
+    position_encoding: PositionEncoding
+
+    def __post_init__(self) -> None:
+        if not self.uri:
+            raise ValueError("raw reference document uri must be non-empty")
+
+
+type ReferenceDocument = ReferenceDocumentInput | RawReferenceDocumentInput
+
+
 class ReferenceLocationProvider(Protocol):
     """Adapter seam that owns ``textDocument/references`` and normalization."""
 
-    def find_references(self, request: ReferenceRequest) -> Sequence[Location] | ErrorEnvelope: ...
+    def find_references(self, request: ReferenceRequest) -> ReferenceQueryResult | ErrorEnvelope: ...
 
 
 class ReferenceLocationClassifier(Protocol):
@@ -101,7 +198,7 @@ class ReferenceLocationClassifier(Protocol):
 class ReferenceDocumentProvider(Protocol):
     """Adapter seam for the one document-symbol tree of an authorized target."""
 
-    def load_reference_document(self, target: ReferenceTarget) -> ReferenceDocumentInput | ErrorEnvelope: ...
+    def load_reference_document(self, target: ReferenceTarget) -> ReferenceDocument | ErrorEnvelope: ...
 
 
 class ReferenceNavigationService:
@@ -139,9 +236,18 @@ class ReferenceNavigationService:
                 adapter=request.adapter,
                 generations=request.generations,
             )
-        raw_locations = self._locations.find_references(request)
-        if isinstance(raw_locations, ErrorEnvelope):
-            return raw_locations
+        query = self._locations.find_references(request)
+        if isinstance(query, ErrorEnvelope):
+            return query
+        if not isinstance(query, ReferenceQueryResult):
+            return error(
+                ErrorCode.INVALID_INPUT,
+                details={"field": "reference_query_result"},
+                workspace=request.workspace,
+                adapter=request.adapter,
+                generations=request.generations,
+            )
+        raw_locations = query.locations
         targets: list[ReferenceTarget] = []
         for location in raw_locations:
             if not isinstance(location, Location):
@@ -158,6 +264,7 @@ class ReferenceNavigationService:
             targets.append(classified)
         return _render_references(
             request,
+            query.coverage,
             targets,
             self._documents,
             max_snippet_chars=max_snippet_chars,
@@ -170,6 +277,7 @@ def find_referencing_symbols(
     locations: Sequence[Location],
     classifier: ReferenceLocationClassifier,
     documents: ReferenceDocumentProvider,
+    coverage: ReferenceCoverage,
     *,
     max_snippet_chars: int = 240,
     max_answer_chars: int = 12_000,
@@ -177,8 +285,8 @@ def find_referencing_symbols(
     """Functional form for callers that already dispatched the LSP request."""
 
     class _FixedLocations:
-        def find_references(self, _request: ReferenceRequest) -> Sequence[Location] | ErrorEnvelope:
-            return locations
+        def find_references(self, _request: ReferenceRequest) -> ReferenceQueryResult | ErrorEnvelope:
+            return ReferenceQueryResult(locations, coverage)
 
     service = ReferenceNavigationService(
         cast(ReferenceLocationProvider, _FixedLocations()),
@@ -192,6 +300,7 @@ def find_referencing_symbols(
 
 def _render_references(
     request: ReferenceRequest,
+    coverage: ReferenceCoverage,
     targets: Sequence[ReferenceTarget],
     documents: ReferenceDocumentProvider,
     *,
@@ -204,16 +313,53 @@ def _render_references(
         loaded = documents.load_reference_document(target)
         if isinstance(loaded, ErrorEnvelope):
             return loaded
+        if isinstance(loaded, RawReferenceDocumentInput):
+            if not target.read_only_external:
+                return _workspace_reference_not_ready(
+                    request,
+                    "workspace_reference_snapshot_unavailable",
+                    target,
+                )
+            trees[key] = _DocumentTree.unavailable(loaded.uri, loaded.position_encoding)
+            continue
+        if not isinstance(loaded, ReferenceDocumentInput):
+            return _workspace_reference_not_ready(
+                request,
+                "workspace_reference_document_invalid",
+                target,
+            )
+        if loaded.uri != target.location.uri:
+            return _workspace_reference_not_ready(
+                request,
+                "workspace_reference_uri_mismatch",
+                target,
+                document_uri=loaded.uri,
+            )
         try:
             trees[key] = _DocumentTree.from_input(loaded)
         except (PositionError, TypeError, ValueError):
-            # A usable reference must not disappear merely because an adapter
-            # cannot safely map a document tree.  The file-level fallback still
-            # preserves the normalized semantic edge.
-            trees[key] = _DocumentTree.unavailable(loaded.uri)
+            return _workspace_reference_not_ready(
+                request,
+                "workspace_reference_snapshot_unavailable",
+                target,
+            )
 
-    rendered = [_reference_data(target, trees[target.key], max_snippet_chars) for target in unique]
-    data = {"relative_path": request.relative_path, "reference_count": len(rendered), "references": rendered}
+    rendered: list[dict[str, Any]] = []
+    for target in unique:
+        try:
+            rendered.append(_reference_data(target, trees[target.key], max_snippet_chars))
+        except PositionError:
+            return _workspace_reference_not_ready(
+                request,
+                "workspace_reference_snapshot_range_mismatch",
+                target,
+            )
+    data = {
+        "relative_path": request.relative_path,
+        "reference_count": len(rendered),
+        "references": rendered,
+        "coverage": coverage.to_dict(),
+    }
     bounded, omitted = _bound_references(data, max_answer_chars)
     return success(
         bounded,
@@ -229,39 +375,50 @@ class _DocumentTree:
     uri: str
     snapshot: FileSnapshot | None
     mapper: PositionMapper | None
+    position_encoding: PositionEncoding
     symbols: tuple[NormalizedSymbol, ...]
 
     @classmethod
     def from_input(cls, value: ReferenceDocumentInput) -> _DocumentTree:
-        return cls(
-            uri=value.uri,
-            snapshot=value.snapshot,
-            mapper=PositionMapper(value.snapshot, value.position_encoding),
-            symbols=normalize_document_symbols(
+        mapper = PositionMapper(value.snapshot, value.position_encoding)
+        try:
+            symbols = normalize_document_symbols(
                 value.raw_symbols,
                 document_uri=value.uri,
                 recover_containment=value.recover_containment,
-            ),
+            )
+        except Exception:
+            # The response-owned source snapshot remains independently valid
+            # even if the server's symbol tree is malformed.  Retain its
+            # mapping and make containment explicitly empty.
+            symbols = ()
+        return cls(
+            uri=value.uri,
+            snapshot=value.snapshot,
+            mapper=mapper,
+            position_encoding=value.position_encoding,
+            symbols=symbols,
         )
 
     @classmethod
-    def unavailable(cls, uri: str) -> _DocumentTree:
-        return cls(uri=uri, snapshot=None, mapper=None, symbols=())
+    def unavailable(cls, uri: str, position_encoding: PositionEncoding) -> _DocumentTree:
+        return cls(uri=uri, snapshot=None, mapper=None, position_encoding=position_encoding, symbols=())
 
 
 def _reference_data(target: ReferenceTarget, document: _DocumentTree, max_snippet_chars: int) -> dict[str, Any]:
     location = target.location
-    mapped = document.uri == location.uri and document.mapper is not None
-    location_data = _raw_location_data(location)
-    container = None
-    if mapped:
-        assert document.mapper is not None
-        try:
-            location_data = _location_data(document.mapper, location)
-        except PositionError:
-            mapped = False
-        else:
-            container = containing_symbol(document.symbols, location)
+    if document.mapper is None:
+        if not target.read_only_external:
+            raise PositionError("workspace reference mapper is unavailable")
+        location_data = _raw_location_data(location, document.position_encoding)
+        container = None
+        mapped = False
+    else:
+        if document.uri != location.uri:
+            raise PositionError("reference document uri does not match location")
+        location_data = _location_data(document.mapper, location)
+        container = containing_symbol(document.symbols, location)
+        mapped = True
     data: dict[str, Any] = {
         "path": target.display_path,
         "read_only_external": target.read_only_external,
@@ -275,31 +432,46 @@ def _reference_data(target: ReferenceTarget, document: _DocumentTree, max_snippe
     return data
 
 
+def _workspace_reference_not_ready(
+    request: ReferenceRequest,
+    reason: str,
+    target: ReferenceTarget,
+    *,
+    document_uri: str | None = None,
+) -> ErrorEnvelope:
+    details: dict[str, object] = {
+        "reason": reason,
+        "path": target.display_path,
+    }
+    if document_uri is not None:
+        details["location_uri"] = target.location.uri
+        details["document_uri"] = document_uri
+    return error(
+        ErrorCode.NOT_READY,
+        retry=RetryMetadata(retryable=True),
+        details=details,
+        workspace=request.workspace,
+        adapter=request.adapter,
+        generations=request.generations,
+    )
+
+
 def _location_data(mapper: PositionMapper | None, location: Location) -> dict[str, dict[str, int]]:
     if mapper is None:
-        return _raw_location_data(location)
-    return {
-        "start": _source_position(mapper, location.range.start),
-        "end": _source_position(mapper, location.range.end),
-    }
+        raise PositionError("verified reference mapper is unavailable")
+    renderer = PublicPositionRenderer(mapper)
+    return renderer.range(
+        LspPosition(location.range.start.line, location.range.start.character),
+        LspPosition(location.range.end.line, location.range.end.character),
+    )
 
 
-def _raw_location_data(location: Location) -> dict[str, dict[str, int]]:
-    return {
-        "start": {"line": location.range.start.line + 1, "character": location.range.start.character},
-        "end": {"line": location.range.end.line + 1, "character": location.range.end.character},
-    }
-
-
-def _source_position(mapper: PositionMapper, value: Position) -> dict[str, int]:
-    offset = mapper.lsp_to_text_offset(LspPosition(value.line, value.character))
-    line_start = _line_start_offset(mapper.snapshot.text, offset)
-    return {
-        "line": value.line + 1,
-        "column": offset - line_start + 1,
-        "text_offset": offset,
-        "byte_offset": mapper.text_offset_to_byte_offset(offset),
-    }
+def _raw_location_data(location: Location, encoding: PositionEncoding) -> dict[str, object]:
+    return raw_lsp_range(
+        LspPosition(location.range.start.line, location.range.start.character),
+        LspPosition(location.range.end.line, location.range.end.character),
+        encoding,
+    )
 
 
 def _snippet(document: _DocumentTree, location: Location, limit: int) -> tuple[str, bool] | None:

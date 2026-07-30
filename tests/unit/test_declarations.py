@@ -6,11 +6,13 @@ from typing import Any
 import pytest
 
 from serena_light.lsp.adapter import RawLspProviders
+from serena_light.lsp.normalize import Position, Range
 from serena_light.lsp.positions import FileSnapshot, LspPosition, PositionEncoding
 from serena_light.tools.declarations import (
     DEFINITION_METHOD,
     IMPLEMENTATION_METHOD,
     CapabilityMatrix,
+    ClassifiedLocationInput,
     DeclarationNavigationService,
     SemanticDocumentInput,
 )
@@ -65,7 +67,7 @@ def _document(
 class FakeAdapter:
     semantic_document: SemanticDocumentInput
     raw_result: object = None
-    normalized: list[dict[str, Any]] | ErrorEnvelope = field(default_factory=list)
+    normalized: list[dict[str, Any] | ClassifiedLocationInput] | ErrorEnvelope = field(default_factory=list)
     requests: list[tuple[str, str, LspPosition]] = field(default_factory=list)
     normalization_calls: list[tuple[object, bool, bool]] = field(default_factory=list)
 
@@ -73,7 +75,15 @@ class FakeAdapter:
         assert relative_path == self.semantic_document.document.relative_path
         return self.semantic_document
 
-    def request_locations(self, method: str, *, document_uri: str, position: LspPosition) -> object:
+    def request_locations(
+        self,
+        method: str,
+        *,
+        document_uri: str,
+        position: LspPosition,
+        capture_target_symbols: bool = False,
+    ) -> object:
+        del capture_target_symbols
         self.requests.append((method, document_uri, position))
         return self.raw_result
 
@@ -83,22 +93,29 @@ class FakeAdapter:
         *,
         include_body: bool,
         include_info: bool,
-    ) -> list[dict[str, Any]] | ErrorEnvelope:
+    ) -> list[dict[str, Any] | ClassifiedLocationInput] | ErrorEnvelope:
         self.normalization_calls.append((raw_locations, include_body, include_info))
         return self.normalized
 
 
 def test_find_declaration_uses_definition_provider_and_method_when_declaration_provider_is_false() -> None:
     text = "// 😀\r\nconst value = api.\r\n  target();\r\n"
+    target_snapshot = FileSnapshot.from_bytes(b"\xef\xbb\xbf" + "😀const target = 1;\r\n".encode())
     adapter = FakeAdapter(
         _document(text, [], _capabilities(definition=True, declaration=False, implementation=True)),
         raw_result={"uri": "file:///repo/src/target.ts"},
         normalized=[
-            {
-                "relative_path": "src/target.ts",
-                "kind": 12,
-                "location_kind": "workspace",
-            }
+            ClassifiedLocationInput.verified(
+                {
+                    "relative_path": "src/target.ts",
+                    "kind": 12,
+                    "location_kind": "workspace",
+                },
+                Range(Position(0, 2), Position(0, 19)),
+                target_snapshot,
+                PositionEncoding.UTF16,
+                semantic_info={"detail": "const target"},
+            )
         ],
     )
 
@@ -119,6 +136,13 @@ def test_find_declaration_uses_definition_provider_and_method_when_declaration_p
     assert adapter.normalization_calls == [({"uri": "file:///repo/src/target.ts"}, True, True)]
     assert value["data"]["capabilities"]["raw"]["definitionProvider"] is True
     assert value["data"]["capabilities"]["raw"]["declarationProvider"] is False
+    location = value["data"]["locations"][0]
+    assert location["range"] == {
+        "start": {"line": 0, "column": 1, "text_offset": 1, "byte_offset": 7},
+        "end": {"line": 0, "column": 18, "text_offset": 18, "byte_offset": 24},
+    }
+    assert location["body"] == "const target = 1;"
+    assert location["info"] == {"detail": "const target"}
 
 
 def test_find_declaration_does_not_use_declaration_provider_as_a_fallback_gate() -> None:
@@ -229,12 +253,16 @@ def test_python_external_definition_is_returned_from_injected_classification_sea
         ),
         raw_result={"uri": "file:///conda/site-packages/transformers/configuration_utils.py"},
         normalized=[
-            {
-                "absolute_path": "/conda/site-packages/transformers/configuration_utils.py",
-                "kind": 5,
-                "location_kind": "read_only_external",
-                "read_only_external": True,
-            }
+            ClassifiedLocationInput.raw_lsp(
+                {
+                    "absolute_path": "/conda/site-packages/transformers/configuration_utils.py",
+                    "kind": 5,
+                    "location_kind": "read_only_external",
+                    "read_only_external": True,
+                },
+                Range(Position(40, 3), Position(40, 19)),
+                PositionEncoding.UTF16,
+            )
         ],
     )
 
@@ -244,7 +272,73 @@ def test_python_external_definition_is_returned_from_injected_classification_sea
 
     assert value["ok"] is True
     assert value["data"]["locations"][0]["read_only_external"] is True
+    assert "range" not in value["data"]["locations"][0]
+    assert value["data"]["locations"][0]["raw_lsp_range"] == {
+        "basis": "lsp_zero_based_line_utf16_code_unit_character",
+        "start": {"line": 40, "character": 3},
+        "end": {"line": 40, "character": 19},
+    }
     assert adapter.requests[0][0] == DEFINITION_METHOD
+
+
+def test_unmapped_external_definition_cannot_advertise_body_or_info() -> None:
+    adapter = FakeAdapter(
+        _document(
+            "from package import target\n",
+            [],
+            _capabilities(definition=True, declaration=False, implementation=False),
+            relative_path="src/main.py",
+        ),
+        normalized=[
+            ClassifiedLocationInput.raw_lsp(
+                {
+                    "absolute_path": "/external/package.py",
+                    "location_kind": "read_only_external",
+                    "read_only_external": True,
+                },
+                Range(Position(0, 4), Position(0, 10)),
+            )
+        ],
+    )
+
+    value = DeclarationNavigationService(adapter).find_declaration(
+        "src/main.py",
+        r"import\s+(target)",
+        include_body=True,
+    ).to_dict()
+
+    assert value["error"]["code"] == "UNSUPPORTED"
+    assert value["error"]["details"] == {
+        "operation": "render_semantic_location_content",
+        "reason": "verified_target_snapshot_unavailable",
+    }
+
+
+def test_pre_rendered_adapter_range_is_rejected_instead_of_mixing_bases() -> None:
+    adapter = FakeAdapter(
+        _document(
+            "target();\n",
+            [],
+            _capabilities(definition=True, declaration=False, implementation=False),
+        ),
+        normalized=[
+            {
+                "relative_path": "src/target.ts",
+                "range": {"start": {"line": 1, "column": 1}, "end": {"line": 1, "column": 7}},
+            }
+        ],
+    )
+
+    value = DeclarationNavigationService(adapter).find_declaration(
+        "src/example.ts",
+        r"(target)\(\)",
+    ).to_dict()
+
+    assert value["error"]["code"] == "INVALID_INPUT"
+    assert value["error"]["details"] == {
+        "field": "normalized_locations",
+        "reason": "adapter_result_is_invalid",
+    }
 
 
 def test_pyright_implementations_are_unsupported_with_raw_and_derived_matrices() -> None:
@@ -310,7 +404,7 @@ def test_typescript_implementations_use_implementation_method_filters_and_determ
     ]
     assert adapter.normalization_calls == [(adapter.raw_result, False, True)]
     assert value["data"]["locations"] == [{"relative_path": "src/a.ts", "name_path": "ARunner", "kind": 6}]
-    assert value["truncation"] == {"truncated": False, "omitted_count": 0}
+    assert value["truncation"] == {"truncated": True, "omitted_count": 2}
 
 
 def test_typescript_implementation_location_without_symbol_kind_is_preserved() -> None:
@@ -328,18 +422,31 @@ def test_typescript_implementation_location_without_symbol_kind_is_preserved() -
             }
         ],
         normalized=[
-            {
-                "relative_path": "src/runner.ts",
-                "location_kind": "workspace",
-                "range": {"start": {"line": 1, "column": 14}, "end": {"line": 1, "column": 20}},
-            }
+            ClassifiedLocationInput.verified(
+                {
+                    "relative_path": "src/runner.ts",
+                    "location_kind": "workspace",
+                },
+                Range(Position(0, 13), Position(0, 19)),
+                FileSnapshot.from_bytes(b"export class Runner {}\n"),
+                PositionEncoding.UTF16,
+            )
         ],
     )
 
     value = DeclarationNavigationService(adapter).find_implementations("Runner", "src/example.ts").to_dict()
 
     assert value["ok"] is True
-    assert value["data"]["locations"] == adapter.normalized
+    assert value["data"]["locations"] == [
+        {
+            "relative_path": "src/runner.ts",
+            "location_kind": "workspace",
+            "range": {
+                "start": {"line": 0, "column": 13, "text_offset": 13, "byte_offset": 13},
+                "end": {"line": 0, "column": 19, "text_offset": 19, "byte_offset": 19},
+            },
+        }
+    ]
     assert "kind" not in value["data"]["locations"][0]
 
 
@@ -368,10 +475,12 @@ def test_implementation_kind_filters_use_positive_evidence_for_unknown_kinds() -
     assert included["data"]["locations"] == [
         {"relative_path": "src/included.ts", "location_kind": "workspace", "kind": 6}
     ]
+    assert included["truncation"] == {"truncated": True, "omitted_count": 2}
     assert excluded["data"]["locations"] == [
         {"relative_path": "src/included.ts", "location_kind": "workspace", "kind": 6},
         unknown,
     ]
+    assert excluded["truncation"] == {"truncated": True, "omitted_count": 1}
 
 
 def test_implementation_answer_bound_is_deterministic() -> None:

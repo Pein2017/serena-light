@@ -1,0 +1,253 @@
+{
+  "evidence_kind": "reference_coverage_uncovered_real_mcp_comparison",
+  "captured_at_utc": "2026-07-30T18:54:51Z",
+  "workspace_kind": "temporary_independent_git_root_from_fixed_fixtures",
+  "workspace_removed_after_capture": true,
+  "fixture_source": "/data/CoordExp/serena-light/tests/integration/fixtures/compact_navigation",
+  "fixture_sha256": {
+    "python_symbols.py": "8419f2197b919cc3f69898a5240690c8cbef847b80b6584cb6a324f7c7b8fcaf",
+    "python_usage.py": "e474f0699cca4564f2b3b13aa7d22e576b2657cd3da31e1feabfad92035d5755",
+    "python_uncovered.py": "22f3417b9e53a7cf1c27369b55ecb4c88303c35bbeb8dcc3ac40f9e281636830",
+    "pyrightconfig.json": "23f154073cb02a721adc8399a232198e00e5782e974195f624cdcb359cac9d74"
+  },
+  "arguments": {
+    "relative_path": "python_symbols.py",
+    "name_path": "ANSWER",
+    "max_answer_chars": 12000,
+    "max_snippet_chars": 240
+  },
+  "connector": {
+    "python": "3.12.11",
+    "mcp": "1.27.1",
+    "tiktoken": "0.12.0",
+    "tokenizer": "o200k_base"
+  },
+  "results": [
+    {
+      "label": "schema2",
+      "build_identity": "4b0a5e2e4460afbfde1456045d3fc381833c7c1dc41959d36742dbb094371f77",
+      "daemon_id": "c5a2b4fd-fdac-44bc-96ca-17d2787c9021",
+      "content_text": "{\n  \"ok\": true,\n  \"data\": {\n    \"relative_path\": \"python_symbols.py\",\n    \"reference_count\": 3,\n    \"references\": [\n      {\n        \"path\": \"python_symbols.py\",\n        \"read_only_external\": false,\n        \"location\": {\n          \"start\": {\n            \"line\": 2,\n            \"column\": 0,\n            \"text_offset\": 76,\n            \"byte_offset\": 76\n          },\n          \"end\": {\n            \"line\": 2,\n            \"column\": 6,\n            \"text_offset\": 82,\n            \"byte_offset\": 82\n          }\n        },\n        \"container\": {\n          \"kind\": \"symbol\",\n          \"name_path\": \"ANSWER\",\n          \"symbol_kind\": 14\n        },\n        \"snippet\": \"ANSWER: int = 42\",\n        \"snippet_truncated\": false\n      },\n      {\n        \"path\": \"python_usage.py\",\n        \"read_only_external\": false,\n        \"location\": {\n          \"start\": {\n            \"line\": 0,\n            \"column\": 27,\n            \"text_offset\": 27,\n            \"byte_offset\": 27\n          },\n          \"end\": {\n            \"line\": 0,\n            \"column\": 33,\n            \"text_offset\": 33,\n            \"byte_offset\": 33\n          }\n        },\n        \"container\": {\n          \"kind\": \"file\",\n          \"name_path\": \"<file>\"\n        },\n        \"snippet\": \"from python_symbols import ANSWER, Calculator\",\n        \"snippet_truncated\": false\n      },\n      {\n        \"path\": \"python_usage.py\",\n        \"read_only_external\": false,\n        \"location\": {\n          \"start\": {\n            \"line\": 4,\n            \"column\": 28,\n            \"text_offset\": 100,\n            \"byte_offset\": 100\n          },\n          \"end\": {\n            \"line\": 4,\n            \"column\": 34,\n            \"text_offset\": 106,\n            \"byte_offset\": 106\n          }\n        },\n        \"container\": {\n          \"kind\": \"symbol\",\n          \"name_path\": \"calculate\",\n          \"symbol_kind\": 12\n        },\n        \"snippet\": \"    return Calculator().add(ANSWER, 1)\",\n        \"snippet_truncated\": false\n      }\n    ],\n    \"coverage\": {\n      \"adapter\": \"pyright\",\n      \"language\": \"python\",\n      \"scope_kind\": \"configured\",\n      \"configured_program_files\": 3,\n      \"configured_program_digest\": \"e13a863e18ee03d7707c6b94137ff4369f9353ee43c09f43968ca8c754c462f3\",\n      \"trusted_language_files\": 4,\n      \"trusted_language_digest\": \"5a591c959e4224d774e6517575375ca200ee58a04bcbb1e46d9091cc3ef2cdaf\",\n      \"uncovered_files\": 1,\n      \"uncovered_sample\": {\n        \"total\": 1,\n        \"items\": [\n          \"python_uncovered.py\"\n        ],\n        \"digest\": \"09bd6575f15f55b7607b91ae60d8a9e76a0e5c9633e007f32f0c65c8bbaff8f6\",\n        \"omitted\": 0\n      }\n    }\n  },\n  \"workspace\": {\n    \"root\": \"/data/serena-light-compact-evidence.d12b_f_e\",\n    \"kind\": \"git\",\n    \"working_subdirectory\": \"/data/serena-light-compact-evidence.d12b_f_e\"\n  },\n  \"adapter\": {\n    \"name\": \"pyright\",\n    \"language\": \"python\"\n  },\n  \"generations\": {\n    \"trust\": 0,\n    \"program\": 1,\n    \"document\": 1,\n    \"index\": 0,\n    \"scope\": \"path\"\n  },\n  \"truncation\": {\n    \"truncated\": false,\n    \"omitted_count\": 0\n  }\n}",
+      "structured_content": {
+        "ok": true,
+        "data": {
+          "relative_path": "python_symbols.py",
+          "reference_count": 3,
+          "references": [
+            {
+              "path": "python_symbols.py",
+              "read_only_external": false,
+              "location": {
+                "start": {
+                  "line": 2,
+                  "column": 0,
+                  "text_offset": 76,
+                  "byte_offset": 76
+                },
+                "end": {
+                  "line": 2,
+                  "column": 6,
+                  "text_offset": 82,
+                  "byte_offset": 82
+                }
+              },
+              "container": {
+                "kind": "symbol",
+                "name_path": "ANSWER",
+                "symbol_kind": 14
+              },
+              "snippet": "ANSWER: int = 42",
+              "snippet_truncated": false
+            },
+            {
+              "path": "python_usage.py",
+              "read_only_external": false,
+              "location": {
+                "start": {
+                  "line": 0,
+                  "column": 27,
+                  "text_offset": 27,
+                  "byte_offset": 27
+                },
+                "end": {
+                  "line": 0,
+                  "column": 33,
+                  "text_offset": 33,
+                  "byte_offset": 33
+                }
+              },
+              "container": {
+                "kind": "file",
+                "name_path": "<file>"
+              },
+              "snippet": "from python_symbols import ANSWER, Calculator",
+              "snippet_truncated": false
+            },
+            {
+              "path": "python_usage.py",
+              "read_only_external": false,
+              "location": {
+                "start": {
+                  "line": 4,
+                  "column": 28,
+                  "text_offset": 100,
+                  "byte_offset": 100
+                },
+                "end": {
+                  "line": 4,
+                  "column": 34,
+                  "text_offset": 106,
+                  "byte_offset": 106
+                }
+              },
+              "container": {
+                "kind": "symbol",
+                "name_path": "calculate",
+                "symbol_kind": 12
+              },
+              "snippet": "    return Calculator().add(ANSWER, 1)",
+              "snippet_truncated": false
+            }
+          ],
+          "coverage": {
+            "adapter": "pyright",
+            "language": "python",
+            "scope_kind": "configured",
+            "configured_program_files": 3,
+            "configured_program_digest": "e13a863e18ee03d7707c6b94137ff4369f9353ee43c09f43968ca8c754c462f3",
+            "trusted_language_files": 4,
+            "trusted_language_digest": "5a591c959e4224d774e6517575375ca200ee58a04bcbb1e46d9091cc3ef2cdaf",
+            "uncovered_files": 1,
+            "uncovered_sample": {
+              "total": 1,
+              "items": [
+                "python_uncovered.py"
+              ],
+              "digest": "09bd6575f15f55b7607b91ae60d8a9e76a0e5c9633e007f32f0c65c8bbaff8f6",
+              "omitted": 0
+            }
+          }
+        },
+        "workspace": {
+          "root": "/data/serena-light-compact-evidence.d12b_f_e",
+          "kind": "git",
+          "working_subdirectory": "/data/serena-light-compact-evidence.d12b_f_e"
+        },
+        "adapter": {
+          "name": "pyright",
+          "language": "python"
+        },
+        "generations": {
+          "trust": 0,
+          "program": 1,
+          "document": 1,
+          "index": 0,
+          "scope": "path"
+        },
+        "truncation": {
+          "truncated": false,
+          "omitted_count": 0
+        }
+      },
+      "is_error": false,
+      "character_count": 3036,
+      "o200k_base_tokens": 872,
+      "wall_time_seconds": 10.044603001326323,
+      "tool_calls": 1,
+      "content_sha256": "40aef9c74deade3155eb1cb4613295507c4420de88dccbe2e2ef74a58a19e3c1",
+      "canonical_text_equals_structured": false
+    },
+    {
+      "label": "schema3",
+      "build_identity": "4ff261a7ebda7bbddf182e836742103c47a11c18becce01dad266b6829df4290",
+      "daemon_id": "08e4bdf6-0bd1-44a2-8486-3e54310366f7",
+      "content_text": "{\"ok\":true,\"data\":{\"workspace\":\"/data/serena-light-compact-evidence.d12b_f_e\",\"files\":[{\"path\":\"python_symbols.py\",\"references\":[{\"range\":[[2,0],[2,6]],\"symbol\":\"ANSWER\",\"snippet\":\"ANSWER: int = 42\"}]},{\"path\":\"python_usage.py\",\"references\":[{\"range\":[[0,27],[0,33]],\"symbol\":\"<file>\",\"snippet\":\"from python_symbols import ANSWER, Calculator\"},{\"range\":[[4,28],[4,34]],\"symbol\":\"calculate\",\"snippet\":\"    return Calculator().add(ANSWER, 1)\"}]}],\"coverage\":{\"adapter\":\"pyright\",\"language\":\"python\",\"scope_kind\":\"configured\",\"configured_program_files\":3,\"configured_program_digest\":\"e13a863e18ee03d7707c6b94137ff4369f9353ee43c09f43968ca8c754c462f3\",\"trusted_language_files\":4,\"trusted_language_digest\":\"5a591c959e4224d774e6517575375ca200ee58a04bcbb1e46d9091cc3ef2cdaf\",\"uncovered_files\":1,\"uncovered_sample\":{\"total\":1,\"items\":[\"python_uncovered.py\"],\"digest\":\"09bd6575f15f55b7607b91ae60d8a9e76a0e5c9633e007f32f0c65c8bbaff8f6\",\"omitted\":0}},\"omitted\":0}}",
+      "structured_content": {
+        "ok": true,
+        "data": {
+          "workspace": "/data/serena-light-compact-evidence.d12b_f_e",
+          "files": [
+            {
+              "path": "python_symbols.py",
+              "references": [
+                {
+                  "range": [
+                    [
+                      2,
+                      0
+                    ],
+                    [
+                      2,
+                      6
+                    ]
+                  ],
+                  "symbol": "ANSWER",
+                  "snippet": "ANSWER: int = 42"
+                }
+              ]
+            },
+            {
+              "path": "python_usage.py",
+              "references": [
+                {
+                  "range": [
+                    [
+                      0,
+                      27
+                    ],
+                    [
+                      0,
+                      33
+                    ]
+                  ],
+                  "symbol": "<file>",
+                  "snippet": "from python_symbols import ANSWER, Calculator"
+                },
+                {
+                  "range": [
+                    [
+                      4,
+                      28
+                    ],
+                    [
+                      4,
+                      34
+                    ]
+                  ],
+                  "symbol": "calculate",
+                  "snippet": "    return Calculator().add(ANSWER, 1)"
+                }
+              ]
+            }
+          ],
+          "coverage": {
+            "adapter": "pyright",
+            "language": "python",
+            "scope_kind": "configured",
+            "configured_program_files": 3,
+            "configured_program_digest": "e13a863e18ee03d7707c6b94137ff4369f9353ee43c09f43968ca8c754c462f3",
+            "trusted_language_files": 4,
+            "trusted_language_digest": "5a591c959e4224d774e6517575375ca200ee58a04bcbb1e46d9091cc3ef2cdaf",
+            "uncovered_files": 1,
+            "uncovered_sample": {
+              "total": 1,
+              "items": [
+                "python_uncovered.py"
+              ],
+              "digest": "09bd6575f15f55b7607b91ae60d8a9e76a0e5c9633e007f32f0c65c8bbaff8f6",
+              "omitted": 0
+            }
+          },
+          "omitted": 0
+        }
+      },
+      "is_error": false,
+      "character_count": 952,
+      "o200k_base_tokens": 323,
+      "wall_time_seconds": 9.044748604297638,
+      "tool_calls": 1,
+      "content_sha256": "ca3d52289438c1fe725b455172f770479c41d6cf34100264e9e6568bb8794d6a",
+      "canonical_text_equals_structured": true
+    }
+  ]
+}

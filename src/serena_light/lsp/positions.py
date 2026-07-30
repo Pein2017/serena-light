@@ -173,3 +173,78 @@ class PositionMapper:
         if self.encoding is PositionEncoding.UTF32:
             return 1
         raise PositionError(f"unsupported LSP position encoding: {self.encoding!r}")
+
+
+@dataclass(frozen=True, slots=True)
+class PublicPositionRenderer:
+    """Render public coordinates from one already-verified snapshot mapper.
+
+    Tool cores pass the mapper that owns the immutable snapshot used for their
+    semantic response.  The renderer performs no I/O and exposes decoded-text
+    coordinates only: lines and Unicode code-point columns are both zero-based,
+    while compatibility offsets identify the same decoded and physical-file
+    boundary (including a UTF-8 BOM).
+    """
+
+    mapper: PositionMapper
+
+    @classmethod
+    def from_snapshot(
+        cls,
+        snapshot: FileSnapshot,
+        encoding: PositionEncoding = PositionEncoding.UTF16,
+    ) -> PublicPositionRenderer:
+        """Bind a renderer to an exact snapshot and negotiated LSP encoding."""
+
+        return cls(PositionMapper(snapshot, encoding))
+
+    @property
+    def snapshot(self) -> FileSnapshot:
+        return self.mapper.snapshot
+
+    def position(self, position: LspPosition) -> dict[str, int]:
+        """Render one valid LSP position in the public decoded-text basis."""
+
+        text_offset = self.mapper.lsp_to_text_offset(position)
+        line_start = self.snapshot._line_starts[position.line]
+        return {
+            "line": position.line,
+            "column": text_offset - line_start,
+            "text_offset": text_offset,
+            "byte_offset": self.mapper.text_offset_to_byte_offset(text_offset),
+        }
+
+    def range(
+        self,
+        start: LspPosition,
+        end: LspPosition,
+    ) -> dict[str, dict[str, int]]:
+        """Render both endpoints of one LSP range through this same mapper."""
+
+        return {"start": self.position(start), "end": self.position(end)}
+
+    def text(self, start: LspPosition, end: LspPosition) -> str:
+        """Slice source text from the same snapshot used for public offsets."""
+
+        start_offset = self.mapper.lsp_to_text_offset(start)
+        end_offset = self.mapper.lsp_to_text_offset(end)
+        return self.snapshot.text[start_offset:end_offset]
+
+
+def raw_lsp_range(
+    start: LspPosition,
+    end: LspPosition,
+    encoding: PositionEncoding,
+) -> dict[str, object]:
+    """Render an unmapped range under one explicit zero-based LSP basis."""
+
+    unit = {
+        PositionEncoding.UTF8: "utf8_byte",
+        PositionEncoding.UTF16: "utf16_code_unit",
+        PositionEncoding.UTF32: "unicode_code_point",
+    }[encoding]
+    return {
+        "basis": f"lsp_zero_based_line_{unit}_character",
+        "start": {"line": start.line, "character": start.character},
+        "end": {"line": end.line, "character": end.character},
+    }

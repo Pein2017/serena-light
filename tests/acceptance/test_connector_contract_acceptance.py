@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import os
 import socket
 import stat
@@ -128,12 +129,21 @@ class _Client:
         self.before_request: Callable[[], None] | None = None
         self.requests: list[str] = []
         self.notifications: list[str] = []
+        self.document_symbols: tuple[Mapping[str, Any], ...] = _SYMBOLS
+        self.selection_ranges: tuple[Mapping[str, Any], ...] = ()
+        self.references: tuple[Mapping[str, Any], ...] = ()
 
     def request(self, method: str, params: object = None, *, timeout: float | None = None) -> object:
         del params, timeout
         self.requests.append(method)
         if self.before_request is not None:
             self.before_request()
+        if method == "textDocument/documentSymbol":
+            return list(self.document_symbols)
+        if method == "textDocument/selectionRange":
+            return list(self.selection_ranges)
+        if method == "textDocument/references":
+            return list(self.references)
         return list(_SYMBOLS)
 
     def notify(self, method: str, params: object = None) -> None:
@@ -188,9 +198,7 @@ class _Adapter:
     ) -> Future[tuple[FileSnapshot, DocumentReadinessTarget]]:
         def worker() -> tuple[FileSnapshot, DocumentReadinessTarget]:
             self.document_generation += 1
-            target = DocumentReadinessTarget(
-                uri, relative_path, absolute_path, version, self.document_generation, 0
-            )
+            target = DocumentReadinessTarget(uri, relative_path, absolute_path, version, self.document_generation, 0)
             assert probe.observe(self.client, target, timeout=1.0)
             return FileSnapshot.from_bytes(absolute_path.read_bytes()), target
 
@@ -221,9 +229,7 @@ class _Adapter:
     ) -> DocumentReadinessTarget:
         del client, text
         self.document_generation += 1
-        return DocumentReadinessTarget(
-            uri, relative_path, absolute_path, version, self.document_generation, 0
-        )
+        return DocumentReadinessTarget(uri, relative_path, absolute_path, version, self.document_generation, 0)
 
     def notify_edit_with_client(
         self,
@@ -270,17 +276,13 @@ class _ObservedService:
     async def activate_workspace(self, *, lease_id: str, absolute_path: str) -> Mapping[str, object]:
         return await self._service.activate_workspace(lease_id=lease_id, absolute_path=absolute_path)
 
-    async def release_workspace(
-        self, *, lease_id: str, immediate: bool = False
-    ) -> Mapping[str, object]:
+    async def release_workspace(self, *, lease_id: str, immediate: bool = False) -> Mapping[str, object]:
         return await self._service.release_workspace(lease_id=lease_id, immediate=immediate)
 
     async def get_runtime_status(self, *, lease_id: str) -> Mapping[str, object]:
         return await self._service.get_runtime_status(lease_id=lease_id)
 
-    async def semantic_operation(
-        self, *, lease_id: str, operation: str, **kwargs: object
-    ) -> Mapping[str, object]:
+    async def semantic_operation(self, *, lease_id: str, operation: str, **kwargs: object) -> Mapping[str, object]:
         self._semantic_calls.append(operation)
         return await self._service.semantic_operation(lease_id=lease_id, operation=operation, **kwargs)
 
@@ -317,9 +319,7 @@ class _LostResponseSession:
     async def list_tools(self) -> types.ListToolsResult:
         return await self._inner.list_tools()
 
-    async def call_tool(
-        self, lease_id: str, name: str, arguments: Mapping[str, object] | None
-    ) -> types.CallToolResult:
+    async def call_tool(self, lease_id: str, name: str, arguments: Mapping[str, object] | None) -> types.CallToolResult:
         result = await self._inner.call_tool(lease_id, name, arguments)
         if name == self._owner.drop_tool and not self._owner.dropped:
             self._owner.dropped = True
@@ -363,6 +363,10 @@ class _Harness:
     @property
     def python(self) -> _Adapter:
         return self.adapters[LanguageFamily.PYTHON]
+
+    @property
+    def typescript(self) -> _Adapter:
+        return self.adapters[LanguageFamily.TYPESCRIPT]
 
     def connector(self, sessions: SessionFactory | None = None) -> Connector:
         return Connector(
@@ -500,9 +504,7 @@ def _acceptance(tmp_path: Path, *, future_timeout: float = 35.0) -> Iterator[_Ha
     service = _ObservedService(
         WorkspaceDaemonService[tuple[WorkspaceKind, Path], WorkspaceRuntime](
             lifecycle=LeaseLifecycle(clock=time.monotonic),
-            registry=WorkspaceRuntimeRegistry[tuple[WorkspaceKind, Path], WorkspaceRuntime, UUID](
-                build_runtime
-            ),
+            registry=WorkspaceRuntimeRegistry[tuple[WorkspaceKind, Path], WorkspaceRuntime, UUID](build_runtime),
             resolver=policy,
             runtime_stopper=lambda runtime: runtime.stop(),
         ),
@@ -541,9 +543,7 @@ def _acceptance(tmp_path: Path, *, future_timeout: float = 35.0) -> Iterator[_Ha
 
 
 @asynccontextmanager
-async def _connected(
-    harness: _Harness, sessions: SessionFactory | None = None
-) -> AsyncIterator[Connector]:
+async def _connected(harness: _Harness, sessions: SessionFactory | None = None) -> AsyncIterator[Connector]:
     connector = harness.connector(sessions)
     try:
         await connector.start()
@@ -564,6 +564,25 @@ async def _call(connector: Connector, name: str, **arguments: object) -> Mapping
     payload = result.structuredContent
     assert isinstance(payload, dict), f"{name} returned no structured envelope"
     return cast(Mapping[str, Any], payload)
+
+
+async def _call_content(
+    connector: Connector, name: str, **arguments: object
+) -> tuple[types.CallToolResult, Mapping[str, Any]]:
+    """Call the real connector and parse its public MCP text envelope.
+
+    ``structuredContent`` is deliberately not used as the acceptance oracle:
+    this helper makes the serialized ``CallToolResult.content`` payload the
+    contract consumed by an MCP client.
+    """
+
+    result = await connector.call_tool(name, arguments)
+    assert len(result.content) == 1
+    content = result.content[0]
+    assert isinstance(content, types.TextContent)
+    payload = json.loads(content.text)
+    assert isinstance(payload, dict)
+    return result, cast(Mapping[str, Any], payload)
 
 
 async def _replace(connector: Connector, expected_hash: str = _SOURCE_HASH) -> Mapping[str, Any]:
@@ -710,9 +729,7 @@ def test_connector_edit_timing_out_while_queued_is_timed_out_and_never_writes(
             release.set()
 
 
-def test_connector_edit_timing_out_while_running_is_uncertain(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_connector_edit_timing_out_while_running_is_uncertain(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _permit_edits(monkeypatch)
     started = threading.Event()
     release = threading.Event()
@@ -804,6 +821,7 @@ def test_connector_lost_edit_response_is_uncertain_and_is_never_replayed(
 
 def test_second_lease_on_the_same_root_reuses_the_runtime_and_refreshes_it(tmp_path: Path) -> None:
     with _acceptance(tmp_path) as harness:
+
         async def scenario() -> None:
             async with _connected(harness) as first:
                 assert (await _freshness(first))["changed"] == []
@@ -815,6 +833,263 @@ def test_second_lease_on_the_same_root_reuses_the_runtime_and_refreshes_it(tmp_p
                     assert (await _freshness(second))["changed"] == ["main.py"]
 
             assert len(harness.runtimes) == 1
+
+        asyncio.run(scenario())
+
+
+def test_connector_content_recovers_python_assignment_body_and_preserves_selection_range(
+    tmp_path: Path,
+) -> None:
+    """The public MCP text envelope must never advertise an identifier as a body."""
+
+    source = b"ANSWER: int = 42\r\n"
+    identifier_range = {
+        "start": {"line": 0, "character": 0},
+        "end": {"line": 0, "character": 6},
+    }
+    symbol = {
+        "name": "ANSWER",
+        "kind": 14,
+        "range": identifier_range,
+        "selectionRange": identifier_range,
+    }
+    with _acceptance(tmp_path) as harness:
+        (harness.root / "main.py").write_bytes(source)
+
+        async def scenario() -> None:
+            async with _connected(harness) as connector:
+                harness.python.client.document_symbols = (symbol,)
+                result, payload = await _call_content(
+                    connector,
+                    "find_symbol",
+                    relative_path="main.py",
+                    name_path="ANSWER",
+                    include_body=True,
+                    include_info=True,
+                )
+
+            assert result.isError is False
+            assert payload["ok"] is True
+            data = cast(Mapping[str, Any], payload["data"])
+            file = cast(Mapping[str, Any], cast(list[Any], data["files"])[0])
+            selected = cast(Mapping[str, Any], cast(list[Any], file["symbols"])[0])
+            assert file["sha256"] == hashlib.sha256(source).hexdigest()
+            assert selected["name_path"] == "ANSWER"
+            assert selected["body"] == "ANSWER: int = 42"
+            assert selected["range"] == [[0, 0], [0, 16]]
+            assert "info" not in selected
+
+        asyncio.run(scenario())
+
+
+def test_connector_content_recovers_complete_typescript_variable_statement(tmp_path: Path) -> None:
+    """The public MCP body includes declaration syntax, not only the binding suffix."""
+
+    source = b"export const multiline = (\n  1 +\n  2\n);\n"
+    selection = {
+        "start": {"line": 0, "character": 13},
+        "end": {"line": 0, "character": 22},
+    }
+    server_range = {
+        "start": {"line": 0, "character": 13},
+        "end": {"line": 3, "character": 1},
+    }
+    statement = {
+        "start": {"line": 0, "character": 0},
+        "end": {"line": 3, "character": 2},
+    }
+    symbol = {
+        "name": "multiline",
+        "kind": 14,
+        "range": server_range,
+        "selectionRange": selection,
+    }
+    with _acceptance(tmp_path) as harness:
+        (harness.root / "main.ts").write_bytes(source)
+
+        async def scenario() -> None:
+            async with _connected(harness) as connector:
+                harness.typescript.client.document_symbols = (symbol,)
+                harness.typescript.client.selection_ranges = ({"range": selection, "parent": {"range": statement}},)
+                result, payload = await _call_content(
+                    connector,
+                    "find_symbol",
+                    relative_path="main.ts",
+                    name_path="multiline",
+                    include_body=True,
+                    include_info=True,
+                )
+
+            assert result.isError is False
+            assert payload["ok"] is True
+            data = cast(Mapping[str, Any], payload["data"])
+            file = cast(Mapping[str, Any], cast(list[Any], data["files"])[0])
+            selected = cast(Mapping[str, Any], cast(list[Any], file["symbols"])[0])
+            assert file["sha256"] == hashlib.sha256(source).hexdigest()
+            assert selected["body"] == "export const multiline = (\n  1 +\n  2\n);"
+            assert selected["range"] == [[0, 0], [3, 2]]
+            assert "info" not in selected
+
+        asyncio.run(scenario())
+
+
+def test_connector_content_uses_zero_based_code_point_positions_after_astral_unicode(
+    tmp_path: Path,
+) -> None:
+    """A UTF-16 LSP range becomes decoded-text coordinates in MCP content."""
+
+    source = b'\xef\xbb\xbfprefix = "\xf0\x9f\x98\x80"; VALUE = 1\r\n'
+    # ``VALUE`` begins at decoded-text column 14 but UTF-16 column 15 because
+    # the preceding astral character consumes two UTF-16 code units.
+    identifier_range = {
+        "start": {"line": 0, "character": 15},
+        "end": {"line": 0, "character": 20},
+    }
+    symbol = {
+        "name": "VALUE",
+        "kind": 14,
+        "range": identifier_range,
+        "selectionRange": identifier_range,
+    }
+    with _acceptance(tmp_path) as harness:
+        (harness.root / "main.py").write_bytes(source)
+
+        async def scenario() -> None:
+            async with _connected(harness) as connector:
+                harness.python.client.document_symbols = (symbol,)
+                result, payload = await _call_content(
+                    connector,
+                    "find_symbol",
+                    relative_path="main.py",
+                    name_path="VALUE",
+                    include_body=True,
+                    include_info=True,
+                )
+
+            assert result.isError is False
+            data = cast(Mapping[str, Any], payload["data"])
+            file = cast(Mapping[str, Any], cast(list[Any], data["files"])[0])
+            selected = cast(Mapping[str, Any], cast(list[Any], file["symbols"])[0])
+            assert selected["body"] == "VALUE = 1"
+            assert selected["range"] == [[0, 14], [0, 23]]
+            assert "info" not in selected
+
+        asyncio.run(scenario())
+
+
+def test_connector_content_attaches_one_coverage_object_to_reference_successes(tmp_path: Path) -> None:
+    """Both non-empty and empty semantic answers disclose one program scope."""
+
+    with _acceptance(tmp_path) as harness:
+
+        async def scenario() -> None:
+            async with _connected(harness) as connector:
+                harness.python.client.references = (
+                    {
+                        "uri": (harness.root / "main.py").as_uri(),
+                        "range": {
+                            "start": {"line": 0, "character": 4},
+                            "end": {"line": 0, "character": 10},
+                        },
+                    },
+                )
+                result, non_empty_payload = await _call_content(
+                    connector,
+                    "find_referencing_symbols",
+                    relative_path="main.py",
+                    name_path="target",
+                )
+                harness.python.client.references = ()
+                empty_result, empty_payload = await _call_content(
+                    connector,
+                    "find_referencing_symbols",
+                    relative_path="main.py",
+                    name_path="target",
+                )
+
+            assert result.isError is False
+            assert empty_result.isError is False
+            assert non_empty_payload["ok"] is True
+            assert empty_payload["ok"] is True
+            non_empty_data = cast(Mapping[str, Any], non_empty_payload["data"])
+            empty_data = cast(Mapping[str, Any], empty_payload["data"])
+            non_empty_files = cast(list[Mapping[str, Any]], non_empty_data["files"])
+            assert len(non_empty_files) == 1
+            assert len(cast(list[Any], non_empty_files[0]["references"])) == 1
+            assert empty_data["files"] == []
+            assert empty_data["omitted"] == 0
+            coverage = cast(Mapping[str, Any], non_empty_data["coverage"])
+            assert empty_data["coverage"] == coverage
+            assert set(coverage) == {
+                "adapter",
+                "language",
+                "scope_kind",
+                "configured_program_files",
+                "configured_program_digest",
+                "trusted_language_files",
+                "trusted_language_digest",
+                "uncovered_files",
+                "uncovered_sample",
+            }
+            assert coverage["adapter"] == "pyright"
+            assert coverage["language"] == "python"
+            assert isinstance(coverage["configured_program_files"], int)
+            assert isinstance(coverage["trusted_language_files"], int)
+            sample = cast(Mapping[str, Any], coverage["uncovered_sample"])
+            assert set(sample) == {"total", "items", "digest", "omitted"}
+            assert sample["total"] == coverage["uncovered_files"]
+            assert isinstance(sample["items"], list)
+            assert sample["omitted"] == sample["total"] - len(sample["items"])
+            assert all("coverage" not in reference for file in non_empty_files for reference in file["references"])
+
+        asyncio.run(scenario())
+
+
+def test_connector_content_preserves_external_references_as_raw_read_only_targets(tmp_path: Path) -> None:
+    """The production connector keeps trusted external edges without inventing source text."""
+
+    external = tmp_path / "ms" / "lib" / "python3.12" / "site-packages" / "external_pkg.py"
+    with _acceptance(tmp_path) as harness:
+        external.write_text("def target(): pass\n")
+
+        async def scenario() -> None:
+            async with _connected(harness) as connector:
+                harness.python.client.references = (
+                    {
+                        "uri": external.as_uri(),
+                        "range": {
+                            "start": {"line": 0, "character": 4},
+                            "end": {"line": 0, "character": 10},
+                        },
+                    },
+                )
+                result, payload = await _call_content(
+                    connector,
+                    "find_referencing_symbols",
+                    relative_path="main.py",
+                    name_path="target",
+                )
+
+            assert result.isError is False
+            assert payload["ok"] is True
+            data = cast(Mapping[str, Any], payload["data"])
+            files = cast(list[Mapping[str, Any]], data["files"])
+            assert len(files) == 1
+            assert files[0]["path"] == str(external.resolve())
+            assert files[0]["read_only"] is True
+            assert set(files[0]) == {"path", "read_only", "references"}
+            references = cast(list[Mapping[str, Any]], files[0]["references"])
+            assert references == [
+                {
+                    "raw_range": [[0, 4], [0, 10]],
+                    "position_basis": "lsp_zero_based_line_utf16_code_unit_character",
+                    "symbol": "<file>",
+                }
+            ]
+            coverage = cast(Mapping[str, Any], data["coverage"])
+            assert coverage["adapter"] == "pyright"
+            assert coverage["language"] == "python"
+            assert coverage["scope_kind"] == "workspace_default"
 
         asyncio.run(scenario())
 
@@ -859,9 +1134,7 @@ def test_stdio_proxy_withholds_editing_and_preserves_typed_boundary_errors(
                                 "expected_hash": _SOURCE_HASH,
                             },
                         )
-                        refused = await agent.call_tool(
-                            "get_symbols_overview", {"relative_path": foreign_operand}
-                        )
+                        refused = await agent.call_tool("get_symbols_overview", {"relative_path": foreign_operand})
                 finally:
                     proxy_task.cancel()
                     with suppress(asyncio.CancelledError):

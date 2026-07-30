@@ -1,0 +1,429 @@
+{
+  "ok": true,
+  "data": {
+    "relative_path": "src/serena_light/lsp/positions.py",
+    "reference_count": 16,
+    "references": [
+      {
+        "path": "src/serena_light/lsp/positions.py",
+        "read_only_external": false,
+        "location": {
+          "start": {
+            "line": 109,
+            "column": 9,
+            "text_offset": 3379,
+            "byte_offset": 3379
+          },
+          "end": {
+            "line": 109,
+            "column": 27,
+            "text_offset": 3397,
+            "byte_offset": 3397
+          }
+        },
+        "container": {
+          "kind": "symbol",
+          "name_path": "PositionMapper/lsp_to_text_offset",
+          "symbol_kind": 6
+        },
+        "snippet": "    def lsp_to_text_offset(self, position: LspPosition) -> int:",
+        "snippet_truncated": false
+      },
+      {
+        "path": "src/serena_light/lsp/positions.py",
+        "read_only_external": false,
+        "location": {
+          "start": {
+            "line": 159,
+            "column": 53,
+            "text_offset": 5765,
+            "byte_offset": 5765
+          },
+          "end": {
+            "line": 159,
+            "column": 71,
+            "text_offset": 5783,
+            "byte_offset": 5783
+          }
+        },
+        "container": {
+          "kind": "symbol",
+          "name_path": "PositionMapper/lsp_to_byte_offset",
+          "symbol_kind": 6
+        },
+        "snippet": "        return self.text_offset_to_byte_offset(self.lsp_to_text_offset(position))",
+        "snippet_truncated": false
+      },
+      {
+        "path": "src/serena_light/tools/declarations.py",
+        "read_only_external": false,
+        "location": {
+          "start": {
+            "line": 150,
+            "column": 48,
+            "text_offset": 5529,
+            "byte_offset": 5529
+          },
+          "end": {
+            "line": 150,
+            "column": 66,
+            "text_offset": 5547,
+            "byte_offset": 5547
+          }
+        },
+        "container": {
+          "kind": "symbol",
+          "name_path": "DeclarationNavigationService/find_declaration",
+          "symbol_kind": 6
+        },
+        "snippet": "                search_start = document.mapper.lsp_to_text_offset(_lsp_position(container.location.range.start))",
+        "snippet_truncated": false
+      },
+      {
+        "path": "src/serena_light/tools/declarations.py",
+        "read_only_external": false,
+        "location": {
+          "start": {
+            "line": 151,
+            "column": 46,
+            "text_offset": 5640,
+            "byte_offset": 5640
+          },
+          "end": {
+            "line": 151,
+            "column": 64,
+            "text_offset": 5658,
+            "byte_offset": 5658
+          }
+        },
+        "container": {
+          "kind": "symbol",
+          "name_path": "DeclarationNavigationService/find_declaration",
+          "symbol_kind": 6
+        },
+        "snippet": "                search_end = document.mapper.lsp_to_text_offset(_lsp_position(container.location.range.end))",
+        "snippet_truncated": false
+      },
+      {
+        "path": "src/serena_light/tools/diagnostics.py",
+        "read_only_external": false,
+        "location": {
+          "start": {
+            "line": 563,
+            "column": 30,
+            "text_offset": 22154,
+            "byte_offset": 22154
+          },
+          "end": {
+            "line": 563,
+            "column": 48,
+            "text_offset": 22172,
+            "byte_offset": 22172
+          }
+        },
+        "container": {
+          "kind": "symbol",
+          "name_path": "_source_position",
+          "symbol_kind": 12
+        },
+        "snippet": "    offset = document.mapper.lsp_to_text_offset(LspPosition(value.line, value.character))",
+        "snippet_truncated": false
+      },
+      {
+        "path": "src/serena_light/tools/navigation.py",
+        "read_only_external": false,
+        "location": {
+          "start": {
+            "line": 384,
+            "column": 29,
+            "text_offset": 14489,
+            "byte_offset": 14489
+          },
+          "end": {
+            "line": 384,
+            "column": 47,
+            "text_offset": 14507,
+            "byte_offset": 14507
+          }
+        },
+        "container": {
+          "kind": "symbol",
+          "name_path": "_symbol_data",
+          "symbol_kind": 12
+        },
+        "snippet": "    start = document.mapper.lsp_to_text_offset(_lsp_position(symbol.location.range.start))",
+        "snippet_truncated": false
+      },
+      {
+        "path": "src/serena_light/tools/navigation.py",
+        "read_only_external": false,
+        "location": {
+          "start": {
+            "line": 385,
+            "column": 27,
+            "text_offset": 14578,
+            "byte_offset": 14578
+          },
+          "end": {
+            "line": 385,
+            "column": 45,
+            "text_offset": 14596,
+            "byte_offset": 14596
+          }
+        },
+        "container": {
+          "kind": "symbol",
+          "name_path": "_symbol_data",
+          "symbol_kind": 12
+        },
+        "snippet": "    end = document.mapper.lsp_to_text_offset(_lsp_position(symbol.location.range.end))",
+        "snippet_truncated": false
+      },
+      {
+        "path": "src/serena_light/tools/navigation.py",
+        "read_only_external": false,
+        "location": {
+          "start": {
+            "line": 415,
+            "column": 20,
+            "text_offset": 15668,
+            "byte_offset": 15668
+          },
+          "end": {
+            "line": 415,
+            "column": 38,
+            "text_offset": 15686,
+            "byte_offset": 15686
+          }
+        },
+        "container": {
+          "kind": "symbol",
+          "name_path": "source_body",
+          "symbol_kind": 12
+        },
+        "snippet": "    start = mapper.lsp_to_text_offset(_lsp_position(value.start))",
+        "snippet_truncated": false
+      },
+      {
+        "path": "src/serena_light/tools/navigation.py",
+        "read_only_external": false,
+        "location": {
+          "start": {
+            "line": 416,
+            "column": 18,
+            "text_offset": 15732,
+            "byte_offset": 15732
+          },
+          "end": {
+            "line": 416,
+            "column": 36,
+            "text_offset": 15750,
+            "byte_offset": 15750
+          }
+        },
+        "container": {
+          "kind": "symbol",
+          "name_path": "source_body",
+          "symbol_kind": 12
+        },
+        "snippet": "    end = mapper.lsp_to_text_offset(_lsp_position(value.end))",
+        "snippet_truncated": false
+      },
+      {
+        "path": "src/serena_light/tools/navigation.py",
+        "read_only_external": false,
+        "location": {
+          "start": {
+            "line": 422,
+            "column": 26,
+            "text_offset": 15959,
+            "byte_offset": 15959
+          },
+          "end": {
+            "line": 422,
+            "column": 44,
+            "text_offset": 15977,
+            "byte_offset": 15977
+          }
+        },
+        "container": {
+          "kind": "symbol",
+          "name_path": "_source_position",
+          "symbol_kind": 12
+        },
+        "snippet": "    text_offset = mapper.lsp_to_text_offset(lsp)",
+        "snippet_truncated": false
+      },
+      {
+        "path": "src/serena_light/tools/references.py",
+        "read_only_external": false,
+        "location": {
+          "start": {
+            "line": 295,
+            "column": 21,
+            "text_offset": 10498,
+            "byte_offset": 10498
+          },
+          "end": {
+            "line": 295,
+            "column": 39,
+            "text_offset": 10516,
+            "byte_offset": 10516
+          }
+        },
+        "container": {
+          "kind": "symbol",
+          "name_path": "_source_position",
+          "symbol_kind": 12
+        },
+        "snippet": "    offset = mapper.lsp_to_text_offset(LspPosition(value.line, value.character))",
+        "snippet_truncated": false
+      },
+      {
+        "path": "src/serena_light/tools/references.py",
+        "read_only_external": false,
+        "location": {
+          "start": {
+            "line": 309,
+            "column": 34,
+            "text_offset": 11039,
+            "byte_offset": 11039
+          },
+          "end": {
+            "line": 309,
+            "column": 52,
+            "text_offset": 11057,
+            "byte_offset": 11057
+          }
+        },
+        "container": {
+          "kind": "symbol",
+          "name_path": "_snippet",
+          "symbol_kind": 12
+        },
+        "snippet": "        offset = document.mapper.lsp_to_text_offset(",
+        "snippet_truncated": false
+      },
+      {
+        "path": "tests/unit/test_positions.py",
+        "read_only_external": false,
+        "location": {
+          "start": {
+            "line": 21,
+            "column": 26,
+            "text_offset": 669,
+            "byte_offset": 676
+          },
+          "end": {
+            "line": 21,
+            "column": 44,
+            "text_offset": 687,
+            "byte_offset": 694
+          }
+        },
+        "container": {
+          "kind": "symbol",
+          "name_path": "test_python_astral_prefix_converts_all_coordinate_kinds",
+          "symbol_kind": 12
+        },
+        "snippet": "    text_offset = mapper.lsp_to_text_offset(symbol)",
+        "snippet_truncated": false
+      },
+      {
+        "path": "tests/unit/test_positions.py",
+        "read_only_external": false,
+        "location": {
+          "start": {
+            "line": 38,
+            "column": 19,
+            "text_offset": 1455,
+            "byte_offset": 1473
+          },
+          "end": {
+            "line": 38,
+            "column": 37,
+            "text_offset": 1473,
+            "byte_offset": 1491
+          }
+        },
+        "container": {
+          "kind": "symbol",
+          "name_path": "test_mjs_astral_inside_symbol_and_eol_round_trip",
+          "symbol_kind": 12
+        },
+        "snippet": "    assert mapper.lsp_to_text_offset(rocket_position) == inside_rocket",
+        "snippet_truncated": false
+      },
+      {
+        "path": "tests/unit/test_positions.py",
+        "read_only_external": false,
+        "location": {
+          "start": {
+            "line": 39,
+            "column": 19,
+            "text_offset": 1526,
+            "byte_offset": 1544
+          },
+          "end": {
+            "line": 39,
+            "column": 37,
+            "text_offset": 1544,
+            "byte_offset": 1562
+          }
+        },
+        "container": {
+          "kind": "symbol",
+          "name_path": "test_mjs_astral_inside_symbol_and_eol_round_trip",
+          "symbol_kind": 12
+        },
+        "snippet": "    assert mapper.lsp_to_text_offset(mapper.text_offset_to_lsp(eol)) == eol",
+        "snippet_truncated": false
+      },
+      {
+        "path": "tests/unit/test_positions.py",
+        "read_only_external": false,
+        "location": {
+          "start": {
+            "line": 54,
+            "column": 19,
+            "text_offset": 2237,
+            "byte_offset": 2255
+          },
+          "end": {
+            "line": 54,
+            "column": 37,
+            "text_offset": 2255,
+            "byte_offset": 2273
+          }
+        },
+        "container": {
+          "kind": "symbol",
+          "name_path": "test_utf8_bom_and_mixed_newline_metadata_are_preserved",
+          "symbol_kind": 12
+        },
+        "snippet": "    assert mapper.lsp_to_text_offset(LspPosition(2, 5)) == len(snapshot.text)",
+        "snippet_truncated": false
+      }
+    ]
+  },
+  "workspace": {
+    "root": "/data/CoordExp/serena-light",
+    "kind": "git",
+    "working_subdirectory": "/data/CoordExp/serena-light"
+  },
+  "adapter": {
+    "name": "pyright",
+    "language": "python"
+  },
+  "generations": {
+    "trust": 0,
+    "program": 1,
+    "document": 698,
+    "index": 1,
+    "scope": "path"
+  },
+  "truncation": {
+    "truncated": false,
+    "omitted_count": 0
+  }
+}

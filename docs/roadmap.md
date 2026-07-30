@@ -12,6 +12,10 @@ release-blocking correctness and evidence gaps. Those gaps are now repaired and
 the current state is `PASS — V1 ARCHIVED`. Serena Light remains
 registered in parallel under `serena-light`; canonical `serena` is unchanged.
 Guarded editing (`replace_symbol_body`) is restored after reacceptance.
+The first Serena-versus-Serena-Light ablation subsequently exposed public
+coordinate, assignment-body, reference-coverage, and response-size issues. Two
+strictly ordered active changes now own that follow-up: first
+`fix-position-and-coverage-contract`, then `compact-success-schema`.
 
 ## Phase A: contain and repair v1
 
@@ -38,7 +42,7 @@ archived. See [the final acceptance record](../openspec/changes/archive/2026-07-
 ## Phase B: reaccept and release v1
 
 Run fresh Codex, Claude Code, and CC Agent acceptance across `/data/CoordExp`,
-`/data/CoordExp/cc-plugin-codex`, `/data/ms-swift`, and the pinned transformers
+`/data/CoordExp/cc-plugin-codex`, `/data/CoordExp/ms-swift`, and the pinned transformers
 package while retaining the model clients' required external-network proxy.
 Run clean and poisoned environments directly through the real stdio connector
 to test the localhost boundary. Restore `replace_symbol_body` only after its
@@ -70,7 +74,107 @@ push remains pending.
 Gate: every blocker is cleared and task 15 is complete. The authorized GitHub
 push follows the archive. No canonical Serena switch is part of this roadmap.
 
-## Phase C: agent-facing position queries
+## Phase C: repair post-archive semantic correctness
+
+Implement and accept `fix-position-and-coverage-contract`. Standardize all
+public navigation and diagnostic positions as 0-based decoded-text
+line/Unicode-column values, recover complete assignment bodies instead of
+identifier-only constants, and disclose bounded configured-program coverage on
+semantic reference success. Keep semantic references pure LSP results and keep
+the existing verbose success shape during this phase.
+
+Gate: real connector/MCP acceptance across Unicode/CRLF/BOM, Python and
+TypeScript, excluded native-program files, multi-session/multi-root reuse, and
+guarded-edit regression; then Sol-xhigh and Opus-max review, stable-spec sync,
+and archive.
+
+**Progress as of 2026-07-30:** predecessor build
+`b3b9952e7abcbca7554c8572499c5541888f6ecf3661fe8787dbde629a258f33`
+passed the snapshot-bound 714-test suite, static/bootstrap/provenance gates,
+clean and poisoned connector coverage, and fresh Codex, native Claude Code,
+and CC Agent inspection, including a real TypeScript guarded edit/restore. The
+repaired candidate adds exact runtime/capability-owned semantic replay,
+process-owned diagnostic/document state with late-publication recovery, a
+complete workspace-plus-external target cap, and shared read/edit assignment
+recovery after the Sol-xhigh and Opus-max HOLD audits. The final b3b Serena
+Light correctness-ablation arms score 99.5 (Sol/high) and 99.25 (Opus/high);
+both independently derived the correct `YES / YES / NO / NO` verdicts, and Sol
+ranks first by a small efficiency margin. This does not
+establish a response-efficiency winner. The frozen-tree audit first exposed an
+owner-after-`didChange` handoff race. Successor `481c45e...` installed the
+owner first, but its exact-build Sol-xhigh and Opus-max audits then established
+that the locked TypeScript server publishes no document version and reproduced
+a stale old publication crossing into the new owner. Candidate build
+`22c80421...` used a close/reopen epoch for unversioned diagnostics, but exact
+Sol-xhigh review found that notification delivery was not a server-processing
+barrier and Opus-max reproduced false `CLEAN` in six of six real product-seam
+trials. Sol-xhigh also found that assignment recovery trusted a candidate name
+without proving that the selected snapshot text named that binding. Build
+`e26ccf65...` then disowned tracking, sent `didClose`, awaited a bounded
+same-connection response, and only then installed the new owner before
+exact-full-text `didOpen`; it also required the exact selected text to equal the
+candidate name. Its full fixed-snapshot and three-client receipts passed, but
+final Sol-xhigh and Opus-max audits found a remaining exact-retry gap: after the
+first barrier timed out, the URI no longer looked open and retry skipped the
+barrier, permitting a late close `CLEAN` to consume the new generation.
+
+Build
+`ecc4689b781c2de8c4bf03788a4dc17388c28e402220b99519294f31010dc358`
+keeps process-tokened undrained-close state independent of open ownership,
+retains it across timeout/response failure, and clears it only after a
+successful same-connection barrier or with a dead process. It also drains all
+recorded closes before any later open and bounds LRU/watched/create markers.
+The adapter suite passes 52 tests, the unit suite passes 589 tests, six real
+pinned-TSLS timeout-retry trials return TS2322 `FINDINGS`, and a focused
+Sol/high checker found no causal or boundedness defect. The full fixed-snapshot
+suite passes 742 tests with one intentional performance skip. Exact-current
+Codex, hooks-isolated native Claude Code, and CC Agent clients pass both hash
+edit/restore and the four-root semantic matrix. Its final Sol-xhigh lane passed,
+but Opus-max reproduced a production watcher timeout/recreate chain that left a
+close marker overlapping local-open ownership; cached diagnostics reuse then
+accepted a close-empty publication as sticky false `CLEAN`.
+
+The current repair build
+`4b0a5e2e4460afbfde1456045d3fc381833c7c1dc41959d36742dbb094371f77`
+skips watcher-created temporary lifecycle for an already-owned URI, drains any
+surviving marker before cached diagnostics owner retention, and fails retryably
+while retaining the marker when that barrier does not complete. The exact
+two-file chain, focused unit suites, and the 12-test real pinned-engine file
+pass. The four-snapshot suite passes 747 tests with one intentional performance
+skip, and fresh Codex, native Claude Code, and CC Agent clients pass the
+affected diagnostics surface. Final Sol-xhigh and Opus-max audits both PASS;
+stable specs are synchronized and Phase C is archived. A pre-existing loud
+untyped transport/protocol-error path is recorded as non-blocking follow-up.
+
+## Phase D: compact agent-facing navigation success
+
+Phase C is archived, so implement `compact-success-schema`. Group
+results by file, remove repeated success-only runtime metadata, use compact
+ranges and kinds, add bounded `max_matches`, and enforce `max_answer_chars` on
+the actual MCP text content. Preserve rich errors and leave status,
+diagnostics, editing, workspace lifecycle, and control-plane contracts intact.
+
+Gate: deterministic client-visible character reductions on fixed fixtures with
+identical semantic evidence, fresh Codex/Claude Code/CC Agent acceptance, and a
+locked four-arm Serena-versus-Serena-Light ablation where each arm exposes only
+its assigned MCP while retaining recorded shell fallback. Finish with
+Sol-xhigh and Opus-max review, stable-spec sync, and archive.
+
+**Progress as of 2026-07-30:** fixed-fixture character gates and the locked
+four-arm ablation are complete. The first Sol-xhigh and Opus-max pass found
+workspace raw-coordinate fallback, overview structural pruning, stable-prefix
+minimum, multi-adapter authority, public ambiguity-budget, and response-owned
+implementation metadata defects. Build
+`92b2618eb6030d50260b9885a63feb358f94f05823e545e0d5f72f9f3b380242`
+repairs those contracts, passes 143 combined focused repair tests, the 821-test
+snapshot-bound suite, Ruff, Ty, bootstrap, provenance/census, strict OpenSpec,
+and the opt-in transformers performance case. Fresh Codex, native Claude Code,
+and CC Agent clients pass the repaired schema and release cleanly. The final
+Sol-xhigh static and Opus-max runtime/evidence audits both pass with no P0/P1
+findings. Stable specs are synchronized and Phase D is archived as
+`2026-07-30-compact-success-schema`.
+
+## Phase E: agent-facing position queries
 
 After v1 archive, create the independent OpenSpec change
 `add-agent-lsp-query`. Add a closed-enum `lsp_query` beginning with `hover`,
@@ -78,7 +182,7 @@ using the shared position mapper and capability gating. Extend the same tool to
 incoming/outgoing calls only after real Pyright and TypeScript probes establish
 stable call-hierarchy behavior. Do not expose arbitrary LSP RPC.
 
-## Phase D: client diagnostics adapters
+## Phase F: client diagnostics adapters
 
 After v1 archive, create the independent OpenSpec change
 `add-client-diagnostics-adapters`. Add connector-internal
@@ -88,6 +192,9 @@ is proven. Do not add polling sidecars or per-session language servers.
 
 ## Deferred
 
+- Typed retry envelopes for `LspTransportClosed` and `LspProtocolError` at the
+  public runtime boundary; current behavior fails loudly and never returns a
+  false semantic success.
 - A third language and a generic `LanguageServerSpec` abstraction.
 - UI, JetBrains integration, memories, modes, broad editing, ambient PATH, and
   automatic upstream synchronization.

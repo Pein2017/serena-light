@@ -1,0 +1,43 @@
+{
+  "ok": true,
+  "data": {
+    "relative_path": "src/serena_light/build_identity.py",
+    "sha256": "27b9288b6dbb3154dcef2cc8e248badc58a6d9d9d5f631f76c9e4ae06d5bc0dc",
+    "symbol": {
+      "name": "PUBLIC_TOOL_SCHEMA_VERSION",
+      "name_path": "PUBLIC_TOOL_SCHEMA_VERSION",
+      "kind": 14,
+      "range": {
+        "start": {
+          "line": 11,
+          "column": 1,
+          "text_offset": 216,
+          "byte_offset": 216
+        },
+        "end": {
+          "line": 11,
+          "column": 27,
+          "text_offset": 242,
+          "byte_offset": 242
+        }
+      },
+      "body": "PUBLIC_TOOL_SCHEMA_VERSION"
+    }
+  },
+  "workspace": {
+    "root": "/data/CoordExp/serena-light",
+    "kind": "git",
+    "working_subdirectory": "/data/CoordExp/serena-light"
+  },
+  "adapter": {
+    "name": "pyright",
+    "language": "python"
+  },
+  "generations": {
+    "trust": 2,
+    "program": 3,
+    "document": 714,
+    "index": 1,
+    "scope": "path"
+  }
+}

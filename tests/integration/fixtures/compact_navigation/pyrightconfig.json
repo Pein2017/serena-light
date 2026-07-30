@@ -1,0 +1,5 @@
+{
+  "include": ["*.py"],
+  "exclude": ["python_uncovered.py"],
+  "typeCheckingMode": "basic"
+}

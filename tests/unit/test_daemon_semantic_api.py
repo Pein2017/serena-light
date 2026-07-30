@@ -17,7 +17,15 @@ from serena_light.lsp.adapter import AdapterError, AdapterErrorCode, LspProcessL
 from serena_light.lsp.client import LspProtocolError, LspResponseError, LspTransportClosed
 from serena_light.lsp.executor import ExecutorBusyError
 from serena_light.runtime_files import BearerSecret
-from serena_light.tools.envelopes import ErrorCode, JsonValue, error, success
+from serena_light.tools.envelopes import (
+    AdapterMetadata,
+    ErrorCode,
+    GenerationMetadata,
+    JsonValue,
+    WorkspaceMetadata,
+    error,
+    success,
+)
 from serena_light.workspace.identity import WorkspaceError, WorkspaceErrorCode, WorkspaceErrorData
 from serena_light.workspace.registry import ResolvedWorkspace, WorkspaceRuntimeRegistry
 from serena_light.workspace.runtime import RuntimeErrorCode, WorkspaceRuntimeError
@@ -33,7 +41,69 @@ class FakeRuntime:
 
     def find_symbol(self, **kwargs: object) -> object:
         self.calls.append(("find_symbol", dict(kwargs)))
-        return success(cast(JsonValue, {"identity": self.identity, "query": kwargs["name_path"]}))
+        return success(
+            cast(
+                JsonValue,
+                {
+                    "relative_path": "src/main.py",
+                    "sha256": "a" * 64,
+                    "symbol": {
+                        "name_path": kwargs["name_path"],
+                        "kind": 5,
+                        "range": {
+                            "start": {"line": 0, "column": 0, "text_offset": 0, "byte_offset": 0},
+                            "end": {"line": 0, "column": 5, "text_offset": 5, "byte_offset": 5},
+                        },
+                    },
+                },
+            ),
+            workspace=WorkspaceMetadata(self.identity, "git", self.identity),
+            adapter=AdapterMetadata("pyright", "python"),
+            generations=GenerationMetadata(trust=1, program=1, document=1, index=1),
+        )
+
+    def find_implementations(self, **kwargs: object) -> object:
+        self.calls.append(("find_implementations", dict(kwargs)))
+        included = set(cast(list[int] | None, kwargs.get("include_kinds")) or ())
+        excluded = set(cast(list[int] | None, kwargs.get("exclude_kinds")) or ())
+        locations = [
+            {
+                "relative_path": "src/runner.ts",
+                "name_path": "Runner",
+                "kind": 5,
+                "range": {
+                    "start": {"line": 0, "column": 0, "text_offset": 0, "byte_offset": 0},
+                    "end": {"line": 0, "column": 6, "text_offset": 6, "byte_offset": 6},
+                },
+            },
+            {
+                "relative_path": "src/runner.ts",
+                "name_path": "Runner.run",
+                "kind": 6,
+                "range": {
+                    "start": {"line": 1, "column": 0, "text_offset": 7, "byte_offset": 7},
+                    "end": {"line": 1, "column": 3, "text_offset": 10, "byte_offset": 10},
+                },
+            },
+        ]
+        return success(
+            cast(
+                JsonValue,
+                {
+                    "relative_path": "src/main.py",
+                    "name_path": "Runner",
+                    "locations": [
+                        location
+                        for location in locations
+                        if (not included or location["kind"] in included)
+                        and location["kind"] not in excluded
+                    ],
+                },
+            ),
+            workspace=WorkspaceMetadata(self.identity, "git", self.identity),
+            adapter=AdapterMetadata("pyright", "python"),
+            generations=GenerationMetadata(trust=1, program=1, document=1, index=1),
+        )
 
 
 @dataclass(slots=True)
@@ -166,7 +236,16 @@ def test_public_semantic_tools_bind_only_through_meta_and_preserve_envelopes() -
         )
         assert activation["lease_id"] == lease
         result = _data(_call(client, authorization, session, "find_symbol", {"name_path": "Thing"}, lease))
-        assert result == {"identity": "/data/one", "query": "Thing"}
+        assert result == {
+            "workspace": "/data/one",
+            "files": [
+                {
+                    "path": "src/main.py",
+                    "symbols": [{"name_path": "Thing", "kind": "class", "range": [[0, 0], [0, 5]]}],
+                }
+            ],
+            "omitted": 0,
+        }
         assert created[0].calls == [
             (
                 "find_symbol",
@@ -174,10 +253,11 @@ def test_public_semantic_tools_bind_only_through_meta_and_preserve_envelopes() -
                     "name_path": "Thing",
                     "relative_path": None,
                     "substring_matching": False,
-                    "include_body": False,
-                    "include_info": False,
-                    "max_answer_chars": 12_000,
-                },
+                        "include_body": False,
+                        "include_info": False,
+                        "max_answer_chars": 2_147_483_647,
+                        "_error_max_answer_chars": 12_000,
+                    },
             )
         ]
 
@@ -199,6 +279,59 @@ def test_public_semantic_tools_bind_only_through_meta_and_preserve_envelopes() -
             lease,
         )
         assert _data_map(unsupported["error"])["code"] == "UNSUPPORTED"
+
+
+def test_public_implementation_kind_filters_reach_the_bound_runtime() -> None:
+    service, created = _service()
+    token = "u" * 48
+    app = create_daemon_app(service=service, bearer=BearerSecret(token), daemon_id=str(uuid4()))
+    authorization = f"Bearer {token}"
+
+    with TestClient(app, base_url="http://127.0.0.1:8000", client=("127.0.0.1", 50010)) as client:
+        session = _initialize(client, authorization)
+        lease = _data(_call(client, authorization, session, "acquire_lease"))["lease_id"]
+        assert isinstance(lease, str)
+        _call(client, authorization, session, "activate_workspace", {"absolute_path": "/data/one/subdir"}, lease)
+
+        result = _data(
+            _call(
+                client,
+                authorization,
+                session,
+                "find_implementations",
+                {
+                    "name_path": "Runner",
+                    "relative_path": "src/main.py",
+                    "include_kinds": [5, 6],
+                    "exclude_kinds": [5],
+                },
+                lease,
+            )
+        )
+
+    assert result["files"] == [
+        {
+            "path": "src/runner.ts",
+            "targets": [
+                {
+                    "range": [[1, 0], [1, 3]],
+                    "name_path": "Runner.run",
+                    "kind": "method",
+                }
+            ],
+        }
+    ]
+    assert created[0].calls[-1] == (
+        "find_implementations",
+        {
+            "name_path": "Runner",
+            "relative_path": "src/main.py",
+            "include_info": False,
+            "include_kinds": [5, 6],
+            "exclude_kinds": [5],
+            "max_answer_chars": 2_147_483_647,
+        },
+    )
 
 
 def test_release_workspace_keeps_lease_live_and_bindings_isolated() -> None:
@@ -336,7 +469,7 @@ def test_http_immediate_workspace_release_stops_only_the_last_holder() -> None:
         assert non_last["runtime_stop_pending"] is False
         assert stopped == []
         assert _data(_call(client, authorization, session, "find_symbol", {"name_path": "Thing"}, second))[
-            "identity"
+            "workspace"
         ] == "/data/project"
 
         last = _data(

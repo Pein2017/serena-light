@@ -1,0 +1,545 @@
+{
+  "evidence_kind": "postrepair_schema3_real_mcp_fixed_fixtures",
+  "captured_at_utc": "2026-07-30",
+  "build_identity": "ad9a36302533abd425cd742247d935734919acf98a1660150057c128b539750d",
+  "daemon_id": "9bc40cee-8724-4ef9-a91e-adc5348f1265",
+  "public_tool_schema_version": "3",
+  "server_version": "0.1.0",
+  "protocol_version": "2025-11-25",
+  "workspace": "/data/CoordExp/serena-light",
+  "connector": {
+    "python": "3.12.12",
+    "mcp": "1.27.1",
+    "loopback_trust_env": false
+  },
+  "results": [
+    {
+      "case": "exact_symbol_no_body",
+      "tool": "find_symbol",
+      "arguments": {
+        "relative_path": "tests/integration/fixtures/compact_navigation/python_symbols.py",
+        "name_path": "ANSWER",
+        "max_matches": 20,
+        "max_answer_chars": 12000
+      },
+      "content_text": "{\"ok\":true,\"data\":{\"workspace\":\"/data/CoordExp/serena-light\",\"files\":[{\"path\":\"tests/integration/fixtures/compact_navigation/python_symbols.py\",\"symbols\":[{\"name_path\":\"ANSWER\",\"kind\":\"constant\",\"range\":[[2,0],[2,16]]}]}],\"omitted\":0}}",
+      "structured_content": {
+        "ok": true,
+        "data": {
+          "workspace": "/data/CoordExp/serena-light",
+          "files": [
+            {
+              "path": "tests/integration/fixtures/compact_navigation/python_symbols.py",
+              "symbols": [
+                {
+                  "name_path": "ANSWER",
+                  "kind": "constant",
+                  "range": [
+                    [
+                      2,
+                      0
+                    ],
+                    [
+                      2,
+                      16
+                    ]
+                  ]
+                }
+              ]
+            }
+          ],
+          "omitted": 0
+        }
+      },
+      "characters": 235,
+      "utf8_bytes": 235,
+      "content_sha256": "4d415ffbcaed50e2fb1c889ce64451e4dcf7bba0541613c5c5ecde219d62cabd",
+      "wall_seconds": 0.159895
+    },
+    {
+      "case": "exact_symbol_with_body",
+      "tool": "find_symbol",
+      "arguments": {
+        "relative_path": "tests/integration/fixtures/compact_navigation/python_symbols.py",
+        "name_path": "ANSWER",
+        "include_body": true,
+        "max_matches": 20,
+        "max_answer_chars": 12000
+      },
+      "content_text": "{\"ok\":true,\"data\":{\"workspace\":\"/data/CoordExp/serena-light\",\"files\":[{\"path\":\"tests/integration/fixtures/compact_navigation/python_symbols.py\",\"sha256\":\"8419f2197b919cc3f69898a5240690c8cbef847b80b6584cb6a324f7c7b8fcaf\",\"symbols\":[{\"name_path\":\"ANSWER\",\"kind\":\"constant\",\"range\":[[2,0],[2,16]],\"body\":\"ANSWER: int = 42\"}]}],\"omitted\":0}}",
+      "structured_content": {
+        "ok": true,
+        "data": {
+          "workspace": "/data/CoordExp/serena-light",
+          "files": [
+            {
+              "path": "tests/integration/fixtures/compact_navigation/python_symbols.py",
+              "sha256": "8419f2197b919cc3f69898a5240690c8cbef847b80b6584cb6a324f7c7b8fcaf",
+              "symbols": [
+                {
+                  "name_path": "ANSWER",
+                  "kind": "constant",
+                  "range": [
+                    [
+                      2,
+                      0
+                    ],
+                    [
+                      2,
+                      16
+                    ]
+                  ],
+                  "body": "ANSWER: int = 42"
+                }
+              ]
+            }
+          ],
+          "omitted": 0
+        }
+      },
+      "characters": 337,
+      "utf8_bytes": 337,
+      "content_sha256": "b0e6454cb10c8a3419c62546947de5d66eac3460729a01e31d2feeb51fb4f0e5",
+      "wall_seconds": 0.17174
+    },
+    {
+      "case": "global_symbol",
+      "tool": "find_symbol",
+      "arguments": {
+        "name_path": "ANSWER",
+        "max_matches": 20,
+        "max_answer_chars": 12000
+      },
+      "content_text": "{\"ok\":true,\"data\":{\"workspace\":\"/data/CoordExp/serena-light\",\"files\":[{\"path\":\"tests/integration/fixtures/compact_navigation/python_symbols.py\",\"symbols\":[{\"name_path\":\"ANSWER\",\"kind\":\"constant\",\"range\":[[2,0],[2,16]]}]}],\"omitted\":0}}",
+      "structured_content": {
+        "ok": true,
+        "data": {
+          "workspace": "/data/CoordExp/serena-light",
+          "files": [
+            {
+              "path": "tests/integration/fixtures/compact_navigation/python_symbols.py",
+              "symbols": [
+                {
+                  "name_path": "ANSWER",
+                  "kind": "constant",
+                  "range": [
+                    [
+                      2,
+                      0
+                    ],
+                    [
+                      2,
+                      16
+                    ]
+                  ]
+                }
+              ]
+            }
+          ],
+          "omitted": 0
+        }
+      },
+      "characters": 235,
+      "utf8_bytes": 235,
+      "content_sha256": "4d415ffbcaed50e2fb1c889ce64451e4dcf7bba0541613c5c5ecde219d62cabd",
+      "wall_seconds": 0.548143
+    },
+    {
+      "case": "large_nested_overview",
+      "tool": "get_symbols_overview",
+      "arguments": {
+        "relative_path": "tests/integration/fixtures/compact_navigation/large_nested.py",
+        "max_depth": 1,
+        "max_answer_chars": 12000
+      },
+      "content_text": "{\"ok\":true,\"data\":{\"workspace\":\"/data/CoordExp/serena-light\",\"files\":[{\"path\":\"tests/integration/fixtures/compact_navigation/large_nested.py\",\"symbols\":[{\"name\":\"LargeFixture\",\"kind\":\"class\",\"children\":[{\"name\":\"method_00\",\"kind\":\"method\"},{\"name\":\"method_01\",\"kind\":\"method\"},{\"name\":\"method_02\",\"kind\":\"method\"},{\"name\":\"method_03\",\"kind\":\"method\"},{\"name\":\"method_04\",\"kind\":\"method\"},{\"name\":\"method_05\",\"kind\":\"method\"},{\"name\":\"method_06\",\"kind\":\"method\"},{\"name\":\"method_07\",\"kind\":\"method\"},{\"name\":\"method_08\",\"kind\":\"method\"},{\"name\":\"method_09\",\"kind\":\"method\"},{\"name\":\"method_10\",\"kind\":\"method\"},{\"name\":\"method_11\",\"kind\":\"method\"},{\"name\":\"method_12\",\"kind\":\"method\"},{\"name\":\"method_13\",\"kind\":\"method\"},{\"name\":\"method_14\",\"kind\":\"method\"},{\"name\":\"method_15\",\"kind\":\"method\"},{\"name\":\"method_16\",\"kind\":\"method\"},{\"name\":\"method_17\",\"kind\":\"method\"},{\"name\":\"method_18\",\"kind\":\"method\"},{\"name\":\"method_19\",\"kind\":\"method\"}]}]}],\"omitted\":0}}",
+      "structured_content": {
+        "ok": true,
+        "data": {
+          "workspace": "/data/CoordExp/serena-light",
+          "files": [
+            {
+              "path": "tests/integration/fixtures/compact_navigation/large_nested.py",
+              "symbols": [
+                {
+                  "name": "LargeFixture",
+                  "kind": "class",
+                  "children": [
+                    {
+                      "name": "method_00",
+                      "kind": "method"
+                    },
+                    {
+                      "name": "method_01",
+                      "kind": "method"
+                    },
+                    {
+                      "name": "method_02",
+                      "kind": "method"
+                    },
+                    {
+                      "name": "method_03",
+                      "kind": "method"
+                    },
+                    {
+                      "name": "method_04",
+                      "kind": "method"
+                    },
+                    {
+                      "name": "method_05",
+                      "kind": "method"
+                    },
+                    {
+                      "name": "method_06",
+                      "kind": "method"
+                    },
+                    {
+                      "name": "method_07",
+                      "kind": "method"
+                    },
+                    {
+                      "name": "method_08",
+                      "kind": "method"
+                    },
+                    {
+                      "name": "method_09",
+                      "kind": "method"
+                    },
+                    {
+                      "name": "method_10",
+                      "kind": "method"
+                    },
+                    {
+                      "name": "method_11",
+                      "kind": "method"
+                    },
+                    {
+                      "name": "method_12",
+                      "kind": "method"
+                    },
+                    {
+                      "name": "method_13",
+                      "kind": "method"
+                    },
+                    {
+                      "name": "method_14",
+                      "kind": "method"
+                    },
+                    {
+                      "name": "method_15",
+                      "kind": "method"
+                    },
+                    {
+                      "name": "method_16",
+                      "kind": "method"
+                    },
+                    {
+                      "name": "method_17",
+                      "kind": "method"
+                    },
+                    {
+                      "name": "method_18",
+                      "kind": "method"
+                    },
+                    {
+                      "name": "method_19",
+                      "kind": "method"
+                    }
+                  ]
+                }
+              ]
+            }
+          ],
+          "omitted": 0
+        }
+      },
+      "characters": 961,
+      "utf8_bytes": 961,
+      "content_sha256": "40aece4f66ccac8aa75d79f3dbdea48a6574fe71eb5171cd60649a7096b58611",
+      "wall_seconds": 0.189662
+    },
+    {
+      "case": "multi_file_references",
+      "tool": "find_referencing_symbols",
+      "arguments": {
+        "relative_path": "tests/integration/fixtures/compact_navigation/python_symbols.py",
+        "name_path": "ANSWER",
+        "max_snippet_chars": 240,
+        "max_answer_chars": 12000
+      },
+      "content_text": "{\"ok\":true,\"data\":{\"workspace\":\"/data/CoordExp/serena-light\",\"files\":[{\"path\":\"tests/integration/fixtures/compact_navigation/python_symbols.py\",\"references\":[{\"range\":[[2,0],[2,6]],\"symbol\":\"ANSWER\",\"snippet\":\"ANSWER: int = 42\"}]},{\"path\":\"tests/integration/fixtures/compact_navigation/python_uncovered.py\",\"references\":[{\"range\":[[0,27],[0,33]],\"symbol\":\"<file>\",\"snippet\":\"from python_symbols import ANSWER\"},{\"range\":[[4,11],[4,17]],\"symbol\":\"excluded_calculation\",\"snippet\":\"    return ANSWER + 100\"}]},{\"path\":\"tests/integration/fixtures/compact_navigation/python_usage.py\",\"references\":[{\"range\":[[0,27],[0,33]],\"symbol\":\"<file>\",\"snippet\":\"from python_symbols import ANSWER, Calculator\"},{\"range\":[[4,28],[4,34]],\"symbol\":\"calculate\",\"snippet\":\"    return Calculator().add(ANSWER, 1)\"}]}],\"coverage\":{\"adapter\":\"pyright\",\"language\":\"python\",\"scope_kind\":\"workspace_default\",\"configured_program_files\":134,\"configured_program_digest\":\"6d6a664663041ca7ede5271144ad69f8c78ef5d4ecfedb5dea4ab28dfbb2e119\",\"trusted_language_files\":134,\"trusted_language_digest\":\"6d6a664663041ca7ede5271144ad69f8c78ef5d4ecfedb5dea4ab28dfbb2e119\",\"uncovered_files\":0,\"uncovered_sample\":{\"total\":0,\"items\":[],\"digest\":\"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\",\"omitted\":0}},\"omitted\":0}}",
+      "structured_content": {
+        "ok": true,
+        "data": {
+          "workspace": "/data/CoordExp/serena-light",
+          "files": [
+            {
+              "path": "tests/integration/fixtures/compact_navigation/python_symbols.py",
+              "references": [
+                {
+                  "range": [
+                    [
+                      2,
+                      0
+                    ],
+                    [
+                      2,
+                      6
+                    ]
+                  ],
+                  "symbol": "ANSWER",
+                  "snippet": "ANSWER: int = 42"
+                }
+              ]
+            },
+            {
+              "path": "tests/integration/fixtures/compact_navigation/python_uncovered.py",
+              "references": [
+                {
+                  "range": [
+                    [
+                      0,
+                      27
+                    ],
+                    [
+                      0,
+                      33
+                    ]
+                  ],
+                  "symbol": "<file>",
+                  "snippet": "from python_symbols import ANSWER"
+                },
+                {
+                  "range": [
+                    [
+                      4,
+                      11
+                    ],
+                    [
+                      4,
+                      17
+                    ]
+                  ],
+                  "symbol": "excluded_calculation",
+                  "snippet": "    return ANSWER + 100"
+                }
+              ]
+            },
+            {
+              "path": "tests/integration/fixtures/compact_navigation/python_usage.py",
+              "references": [
+                {
+                  "range": [
+                    [
+                      0,
+                      27
+                    ],
+                    [
+                      0,
+                      33
+                    ]
+                  ],
+                  "symbol": "<file>",
+                  "snippet": "from python_symbols import ANSWER, Calculator"
+                },
+                {
+                  "range": [
+                    [
+                      4,
+                      28
+                    ],
+                    [
+                      4,
+                      34
+                    ]
+                  ],
+                  "symbol": "calculate",
+                  "snippet": "    return Calculator().add(ANSWER, 1)"
+                }
+              ]
+            }
+          ],
+          "coverage": {
+            "adapter": "pyright",
+            "language": "python",
+            "scope_kind": "workspace_default",
+            "configured_program_files": 134,
+            "configured_program_digest": "6d6a664663041ca7ede5271144ad69f8c78ef5d4ecfedb5dea4ab28dfbb2e119",
+            "trusted_language_files": 134,
+            "trusted_language_digest": "6d6a664663041ca7ede5271144ad69f8c78ef5d4ecfedb5dea4ab28dfbb2e119",
+            "uncovered_files": 0,
+            "uncovered_sample": {
+              "total": 0,
+              "items": [],
+              "digest": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+              "omitted": 0
+            }
+          },
+          "omitted": 0
+        }
+      },
+      "characters": 1293,
+      "utf8_bytes": 1293,
+      "content_sha256": "fd464f57c1bf6d2d000187ab7065904ef32e2d43944394faffa4a9e90aedffcf",
+      "wall_seconds": 0.352705
+    },
+    {
+      "case": "declaration",
+      "tool": "find_declaration",
+      "arguments": {
+        "relative_path": "tests/integration/fixtures/compact_navigation/python_usage.py",
+        "regex": "import (ANSWER), Calculator",
+        "max_answer_chars": 12000
+      },
+      "content_text": "{\"ok\":true,\"data\":{\"workspace\":\"/data/CoordExp/serena-light\",\"files\":[{\"path\":\"tests/integration/fixtures/compact_navigation/python_symbols.py\",\"targets\":[{\"range\":[[2,0],[2,6]]}]}],\"omitted\":0}}",
+      "structured_content": {
+        "ok": true,
+        "data": {
+          "workspace": "/data/CoordExp/serena-light",
+          "files": [
+            {
+              "path": "tests/integration/fixtures/compact_navigation/python_symbols.py",
+              "targets": [
+                {
+                  "range": [
+                    [
+                      2,
+                      0
+                    ],
+                    [
+                      2,
+                      6
+                    ]
+                  ]
+                }
+              ]
+            }
+          ],
+          "omitted": 0
+        }
+      },
+      "characters": 195,
+      "utf8_bytes": 195,
+      "content_sha256": "40f3db2a9fae2d7b0b7b531c593eb74183c2e99177c5c9fc2f42596e09905058",
+      "wall_seconds": 0.182915
+    },
+    {
+      "case": "typescript_implementation",
+      "tool": "find_implementations",
+      "arguments": {
+        "relative_path": "tests/integration/fixtures/compact_navigation/typescript_symbols.ts",
+        "name_path": "Runner",
+        "max_answer_chars": 12000
+      },
+      "content_text": "{\"ok\":true,\"data\":{\"workspace\":\"/data/CoordExp/serena-light\",\"files\":[{\"path\":\"tests/integration/fixtures/compact_navigation/typescript_symbols.ts\",\"targets\":[{\"range\":[[4,13],[4,27]]}]}],\"omitted\":0}}",
+      "structured_content": {
+        "ok": true,
+        "data": {
+          "workspace": "/data/CoordExp/serena-light",
+          "files": [
+            {
+              "path": "tests/integration/fixtures/compact_navigation/typescript_symbols.ts",
+              "targets": [
+                {
+                  "range": [
+                    [
+                      4,
+                      13
+                    ],
+                    [
+                      4,
+                      27
+                    ]
+                  ]
+                }
+              ]
+            }
+          ],
+          "omitted": 0
+        }
+      },
+      "characters": 201,
+      "utf8_bytes": 201,
+      "content_sha256": "6e604124303e40868c94ed8815a70685819e46b9ca1776d779aa45b9f3b3748b",
+      "wall_seconds": 0.179592
+    },
+    {
+      "case": "external_read_only_declaration",
+      "tool": "find_declaration",
+      "arguments": {
+        "relative_path": "tests/integration/fixtures/compact_navigation/python_symbols.py",
+        "regex": "return (GenerationConfig)\\(",
+        "max_answer_chars": 12000
+      },
+      "content_text": "{\"ok\":true,\"data\":{\"workspace\":\"/data/CoordExp/serena-light\",\"files\":[{\"path\":\"/root/miniconda3/envs/ms/lib/python3.12/site-packages/transformers/generation/configuration_utils.py\",\"read_only\":true,\"targets\":[{\"raw_range\":[[81,6],[81,22]],\"position_basis\":\"lsp_zero_based_line_utf16_code_unit_character\"}]}],\"omitted\":0}}",
+      "structured_content": {
+        "ok": true,
+        "data": {
+          "workspace": "/data/CoordExp/serena-light",
+          "files": [
+            {
+              "path": "/root/miniconda3/envs/ms/lib/python3.12/site-packages/transformers/generation/configuration_utils.py",
+              "read_only": true,
+              "targets": [
+                {
+                  "raw_range": [
+                    [
+                      81,
+                      6
+                    ],
+                    [
+                      81,
+                      22
+                    ]
+                  ],
+                  "position_basis": "lsp_zero_based_line_utf16_code_unit_character"
+                }
+              ]
+            }
+          ],
+          "omitted": 0
+        }
+      },
+      "characters": 321,
+      "utf8_bytes": 321,
+      "content_sha256": "155c26aa4e08bc82122410887611e1bdf23201fecfe0d6321cb3f55764c39867",
+      "wall_seconds": 0.203978
+    },
+    {
+      "case": "true_empty_overview",
+      "tool": "get_symbols_overview",
+      "arguments": {
+        "relative_path": "tests/integration/fixtures/compact_navigation/empty.py",
+        "max_depth": 1,
+        "max_answer_chars": 12000
+      },
+      "content_text": "{\"ok\":true,\"data\":{\"workspace\":\"/data/CoordExp/serena-light\",\"files\":[],\"omitted\":0}}",
+      "structured_content": {
+        "ok": true,
+        "data": {
+          "workspace": "/data/CoordExp/serena-light",
+          "files": [],
+          "omitted": 0
+        }
+      },
+      "characters": 85,
+      "utf8_bytes": 85,
+      "content_sha256": "85b47e523f10114352d5def9991bef811eab1fc5d785d68ea974455237cc6d60",
+      "wall_seconds": 0.139521
+    }
+  ],
+  "release": {
+    "ok": true,
+    "data": {
+      "lease_id": "15241ee9-4071-4303-9ca1-f4aa2ed6611f",
+      "released": true,
+      "bound": false,
+      "immediate": false,
+      "reason": "released",
+      "active_holders": 0,
+      "grace_deadline": 31584149.35650349,
+      "runtime_stopped": false,
+      "runtime_stop_pending": false
+    }
+  }
+}

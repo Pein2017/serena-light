@@ -1,0 +1,42 @@
+{
+  "ok": true,
+  "data": {
+    "relative_path": "src/serena_light/lsp/positions.py",
+    "sha256": "d55c51c75b3e6ec87558bf79e58d9a2d2d66d36163f07c8f819fc1a7bb49c9e7",
+    "symbol": {
+      "name": "lsp_to_text_offset",
+      "name_path": "PositionMapper/lsp_to_text_offset",
+      "kind": 6,
+      "range": {
+        "start": {
+          "line": 109,
+          "column": 5,
+          "text_offset": 3375,
+          "byte_offset": 3375
+        },
+        "end": {
+          "line": 126,
+          "column": 88,
+          "text_offset": 4238,
+          "byte_offset": 4238
+        }
+      }
+    }
+  },
+  "workspace": {
+    "root": "/data/CoordExp/serena-light",
+    "kind": "git",
+    "working_subdirectory": "/data/CoordExp/serena-light"
+  },
+  "adapter": {
+    "name": "pyright",
+    "language": "python"
+  },
+  "generations": {
+    "trust": 0,
+    "program": 1,
+    "document": 697,
+    "index": 1,
+    "scope": "path"
+  }
+}

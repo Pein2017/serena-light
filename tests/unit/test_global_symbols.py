@@ -215,14 +215,14 @@ def test_global_symbol_uses_exact_utf16_crlf_snapshot_for_ranges_body_and_info()
     symbol = result["data"]["symbols"][0]
     assert symbol["body"] == "def Target():\r\n    pass\r\n"
     assert symbol["location"]["range"] == {
-        "start": {"line": 1, "column": 2, "text_offset": 1, "byte_offset": 4},
-        "end": {"line": 3, "column": 1, "text_offset": 26, "byte_offset": 29},
+        "start": {"line": 0, "column": 1, "text_offset": 1, "byte_offset": 4},
+        "end": {"line": 2, "column": 0, "text_offset": 26, "byte_offset": 29},
     }
     assert symbol["info"] == {
         "detail": "class detail",
         "selection_range": {
-            "start": {"line": 1, "column": 6, "text_offset": 5, "byte_offset": 8},
-            "end": {"line": 1, "column": 12, "text_offset": 11, "byte_offset": 14},
+            "start": {"line": 0, "column": 5, "text_offset": 5, "byte_offset": 8},
+            "end": {"line": 0, "column": 11, "text_offset": 11, "byte_offset": 14},
         },
     }
 

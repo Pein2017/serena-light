@@ -23,6 +23,7 @@ from uuid import UUID, uuid4
 from weakref import WeakKeyDictionary
 
 import psutil
+from mcp import types
 from mcp.server.fastmcp import Context, FastMCP
 from mcp.types import LATEST_PROTOCOL_VERSION
 from pydantic import Field, StrictBool
@@ -42,6 +43,14 @@ from serena_light.runtime_files import (
     RuntimeFileError,
     prepare_runtime_directory,
 )
+from serena_light.tools.compact import (
+    DEFAULT_MAX_MATCHES,
+    validate_max_answer_chars,
+    validate_max_matches,
+    validate_overview_kind_filters,
+)
+from serena_light.tools.compact_adapter import NAVIGATION_OPERATIONS, compact_navigation_result
+from serena_light.tools.declarations import _MAX_SYMBOL_KIND, _MIN_SYMBOL_KIND
 from serena_light.tools.envelopes import ErrorCode, RetryMetadata, error
 
 LOOPBACK_HOST = "127.0.0.1"
@@ -51,6 +60,7 @@ MCP_PATH = "/mcp"
 STARTUP_LOCK_NAME = "startup.lock"
 DEFAULT_STARTUP_TIMEOUT_SECONDS = 10.0
 DEFAULT_HEALTH_POLL_SECONDS = 0.05
+_INTERNAL_NAVIGATION_MAX_ANSWER_CHARS = 2_147_483_647
 
 
 class DaemonConfigurationError(ValueError):
@@ -297,20 +307,50 @@ def create_daemon_app(
         except (LeaseExpiredError, LifecycleLeaseExpiredError):
             return _lease_expired()
 
-    async def bound_call(context: Context, operation: str, **kwargs: object) -> dict[str, object]:
+    async def bound_call(
+        context: Context, operation: str, **kwargs: object
+    ) -> dict[str, object] | types.CallToolResult:
         """Invoke one public bound operation with lease authority from request metadata."""
 
         try:
             lease_id = lease_id_from_context(context)
         except ValueError:
             return _lease_expired()
+        public_kwargs = dict(kwargs)
+        if operation in NAVIGATION_OPERATIONS:
+            invalid = _validate_navigation_request(operation, public_kwargs)
+            if invalid is not None:
+                return invalid
+            kwargs = _internal_navigation_kwargs(operation, public_kwargs)
         try:
             if operation in {"release_workspace", "get_runtime_status"}:
                 callback = cast(Callable[..., Any], getattr(service, operation))
                 return _as_tool_envelope(await callback(lease_id=lease_id))
-            return _as_tool_envelope(
+            result = _as_tool_envelope(
                 await service.semantic_operation(lease_id=lease_id, operation=operation, **kwargs)
             )
+            if operation in NAVIGATION_OPERATIONS and result.get("ok") is True:
+                return compact_navigation_result(
+                    operation,
+                    result,
+                    max_answer_chars=cast(int, public_kwargs.get("max_answer_chars", 12_000)),
+                    max_matches=cast(int, public_kwargs.get("max_matches", DEFAULT_MAX_MATCHES)),
+                    include_kinds=(
+                        cast(list[str] | None, public_kwargs.get("include_kinds"))
+                        if operation == "get_symbols_overview"
+                        else None
+                    ),
+                    exclude_kinds=(
+                        cast(list[str] | None, public_kwargs.get("exclude_kinds"))
+                        if operation == "get_symbols_overview"
+                        else None
+                    ),
+                    include_snippets=(
+                        operation == "find_referencing_symbols"
+                        and cast(int, public_kwargs.get("max_snippet_chars", 0)) > 0
+                    ),
+                )
+            return result
         except (LeaseExpiredError, LifecycleLeaseExpiredError):
             return _lease_expired()
 
@@ -334,6 +374,7 @@ def create_daemon_app(
         """Report bounded workspace, generation, adapter, and cleanup status for this lease."""
 
         result = await bound_call(context, "get_runtime_status")
+        assert isinstance(result, dict)
         if result.get("ok") is not True:
             return result
         data = result.get("data")
@@ -345,16 +386,32 @@ def create_daemon_app(
         relative_path: str,
         context: Context,
         max_depth: int = 1,
-        max_answer_chars: int = 12_000,
+        max_answer_chars: Annotated[
+            int,
+            Field(description="Final compact MCP text limit: 512 through 50000 characters; default 12000."),
+        ] = 12_000,
+        include_kinds: Annotated[
+            list[str] | None,
+            Field(description="Optional stable lowercase LSP kind names to retain; omitted means all kinds."),
+        ] = None,
+        exclude_kinds: Annotated[
+            list[str] | None,
+            Field(description="Optional stable lowercase LSP kind names to remove after include filtering."),
+        ] = None,
     ) -> dict[str, object]:
-        """Return a bounded semantic symbol tree for one trusted workspace file."""
+        """Return a compact symbol tree; optional filters use lowercase LSP kind names."""
 
-        return await bound_call(
-            context,
-            "get_symbols_overview",
-            relative_path=relative_path,
-            max_depth=max_depth,
-            max_answer_chars=max_answer_chars,
+        return cast(
+            dict[str, object],
+            await bound_call(
+                context,
+                "get_symbols_overview",
+                relative_path=relative_path,
+                max_depth=max_depth,
+                max_answer_chars=max_answer_chars,
+                include_kinds=include_kinds,
+                exclude_kinds=exclude_kinds,
+            ),
         )
 
     @mcp.tool(name="find_symbol", structured_output=True)
@@ -365,19 +422,30 @@ def create_daemon_app(
         substring_matching: bool = False,
         include_body: bool = False,
         include_info: bool = False,
-        max_answer_chars: int = 12_000,
+        max_answer_chars: Annotated[
+            int,
+            Field(description="Final compact MCP text limit: 512 through 50000 characters; default 12000."),
+        ] = 12_000,
+        max_matches: Annotated[
+            int,
+            Field(description="Maximum semantic matches after filtering and deduplication: 1 through 100; default 20."),
+        ] = DEFAULT_MAX_MATCHES,
     ) -> dict[str, object]:
-        """Find symbols by name path in one trusted file, directory, or the whole workspace."""
+        """Find at most 1-100 compact symbols; body requests are complete or fail typed."""
 
-        return await bound_call(
-            context,
-            "find_symbol",
-            name_path=name_path,
-            relative_path=relative_path,
-            substring_matching=substring_matching,
-            include_body=include_body,
-            include_info=include_info,
-            max_answer_chars=max_answer_chars,
+        return cast(
+            dict[str, object],
+            await bound_call(
+                context,
+                "find_symbol",
+                name_path=name_path,
+                relative_path=relative_path,
+                substring_matching=substring_matching,
+                include_body=include_body,
+                include_info=include_info,
+                max_answer_chars=max_answer_chars,
+                max_matches=max_matches,
+            ),
         )
 
     @mcp.tool(name="find_declaration", structured_output=True)
@@ -396,17 +464,25 @@ def create_daemon_app(
         containing_symbol_name_path: str | None = None,
         include_body: bool = False,
         include_info: bool = False,
+        max_answer_chars: Annotated[
+            int,
+            Field(description="Final compact MCP text limit: 512 through 50000 characters; default 12000."),
+        ] = 12_000,
     ) -> dict[str, object]:
-        """Resolve the declaration of the single symbol captured by a contextual source regex."""
+        """Resolve one declaration and return compact snapshot-owned locations."""
 
-        return await bound_call(
-            context,
-            "find_declaration",
-            relative_path=relative_path,
-            regex=regex,
-            containing_symbol_name_path=containing_symbol_name_path,
-            include_body=include_body,
-            include_info=include_info,
+        return cast(
+            dict[str, object],
+            await bound_call(
+                context,
+                "find_declaration",
+                relative_path=relative_path,
+                regex=regex,
+                containing_symbol_name_path=containing_symbol_name_path,
+                include_body=include_body,
+                include_info=include_info,
+                max_answer_chars=max_answer_chars,
+            ),
         )
 
     @mcp.tool(name="find_implementations", structured_output=True)
@@ -417,19 +493,25 @@ def create_daemon_app(
         include_info: bool = False,
         include_kinds: list[int] | None = None,
         exclude_kinds: list[int] | None = None,
-        max_answer_chars: int = 12_000,
+        max_answer_chars: Annotated[
+            int,
+            Field(description="Final compact MCP text limit: 512 through 50000 characters; default 12000."),
+        ] = 12_000,
     ) -> dict[str, object]:
-        """Find semantic implementations of a symbol identified in one trusted source file."""
+        """Find implementations and return normalized 0-based decoded-text locations."""
 
-        return await bound_call(
-            context,
-            "find_implementations",
-            name_path=name_path,
-            relative_path=relative_path,
-            include_info=include_info,
-            include_kinds=include_kinds,
-            exclude_kinds=exclude_kinds,
-            max_answer_chars=max_answer_chars,
+        return cast(
+            dict[str, object],
+            await bound_call(
+                context,
+                "find_implementations",
+                name_path=name_path,
+                relative_path=relative_path,
+                include_info=include_info,
+                include_kinds=include_kinds,
+                exclude_kinds=exclude_kinds,
+                max_answer_chars=max_answer_chars,
+            ),
         )
 
     @mcp.tool(name="find_referencing_symbols", structured_output=True)
@@ -437,18 +519,27 @@ def create_daemon_app(
         name_path: str,
         relative_path: str,
         context: Context,
-        max_snippet_chars: int = 240,
-        max_answer_chars: int = 12_000,
+        max_snippet_chars: Annotated[
+            int,
+            Field(description="Optional per-reference snippet limit; default 0 omits snippets."),
+        ] = 0,
+        max_answer_chars: Annotated[
+            int,
+            Field(description="Final compact MCP text limit: 512 through 50000 characters; default 12000."),
+        ] = 12_000,
     ) -> dict[str, object]:
-        """Find bounded semantic references to a symbol identified in one trusted source file."""
+        """Find compact semantic references; set max_snippet_chars above zero to include snippets."""
 
-        return await bound_call(
-            context,
-            "find_referencing_symbols",
-            name_path=name_path,
-            relative_path=relative_path,
-            max_snippet_chars=max_snippet_chars,
-            max_answer_chars=max_answer_chars,
+        return cast(
+            dict[str, object],
+            await bound_call(
+                context,
+                "find_referencing_symbols",
+                name_path=name_path,
+                relative_path=relative_path,
+                max_snippet_chars=max_snippet_chars,
+                max_answer_chars=max_answer_chars,
+            ),
         )
 
     @mcp.tool(name="get_diagnostics_for_file", structured_output=True)
@@ -459,15 +550,18 @@ def create_daemon_app(
         maximum_severity: int = 2,
         max_answer_chars: int = 12_000,
     ) -> dict[str, object]:
-        """Return current-generation advisory LSP diagnostics for one trusted source file."""
+        """Return current-generation diagnostics with 0-based decoded-text ranges."""
 
-        return await bound_call(
-            context,
-            "get_diagnostics_for_file",
-            relative_path=relative_path,
-            timeout_seconds=timeout_seconds,
-            maximum_severity=maximum_severity,
-            max_answer_chars=max_answer_chars,
+        return cast(
+            dict[str, object],
+            await bound_call(
+                context,
+                "get_diagnostics_for_file",
+                relative_path=relative_path,
+                timeout_seconds=timeout_seconds,
+                maximum_severity=maximum_severity,
+                max_answer_chars=max_answer_chars,
+            ),
         )
 
     @mcp.tool(name="get_diagnostics_for_symbol", structured_output=True)
@@ -479,16 +573,19 @@ def create_daemon_app(
         maximum_severity: int = 2,
         max_answer_chars: int = 12_000,
     ) -> dict[str, object]:
-        """Return current-generation advisory diagnostics overlapping one semantic symbol."""
+        """Return current-generation symbol diagnostics with 0-based decoded-text ranges."""
 
-        return await bound_call(
-            context,
-            "get_diagnostics_for_symbol",
-            relative_path=relative_path,
-            name_path=name_path,
-            timeout_seconds=timeout_seconds,
-            maximum_severity=maximum_severity,
-            max_answer_chars=max_answer_chars,
+        return cast(
+            dict[str, object],
+            await bound_call(
+                context,
+                "get_diagnostics_for_symbol",
+                relative_path=relative_path,
+                name_path=name_path,
+                timeout_seconds=timeout_seconds,
+                maximum_severity=maximum_severity,
+                max_answer_chars=max_answer_chars,
+            ),
         )
 
     @mcp.tool(name="replace_symbol_body", structured_output=True)
@@ -501,13 +598,16 @@ def create_daemon_app(
     ) -> dict[str, object]:
         """Hash-guard and atomically replace one complete semantic symbol body in an editable Git root."""
 
-        return await bound_call(
-            context,
-            "replace_symbol_body",
-            name_path=name_path,
-            relative_path=relative_path,
-            body=body,
-            expected_hash=expected_hash,
+        return cast(
+            dict[str, object],
+            await bound_call(
+                context,
+                "replace_symbol_body",
+                name_path=name_path,
+                relative_path=relative_path,
+                body=body,
+                expected_hash=expected_hash,
+            ),
         )
 
     return _BearerAuthentication(mcp.streamable_http_app(), bearer)
@@ -731,6 +831,92 @@ def _as_tool_envelope(value: Mapping[str, object]) -> dict[str, object]:
 
     data = dict(value)
     return data if isinstance(data.get("ok"), bool) else _success(data)
+
+
+def _validate_navigation_request(
+    operation: str, arguments: Mapping[str, object]
+) -> dict[str, object] | None:
+    try:
+        validate_max_answer_chars(arguments.get("max_answer_chars", 12_000))
+        if operation == "find_symbol":
+            validate_max_matches(arguments.get("max_matches", DEFAULT_MAX_MATCHES))
+        if operation == "get_symbols_overview":
+            validate_overview_kind_filters(
+                cast(list[str] | None, arguments.get("include_kinds")),
+                cast(list[str] | None, arguments.get("exclude_kinds")),
+            )
+        if operation == "find_implementations":
+            _validate_implementation_kind_filters(
+                arguments.get("include_kinds"),
+                arguments.get("exclude_kinds"),
+            )
+        if operation == "find_referencing_symbols":
+            snippet_chars = arguments.get("max_snippet_chars", 0)
+            if isinstance(snippet_chars, bool) or not isinstance(snippet_chars, int) or snippet_chars < 0:
+                raise ValueError("max_snippet_chars must be a non-negative integer")
+    except (TypeError, ValueError):
+        field = "max_answer_chars"
+        if operation == "find_symbol":
+            value = arguments.get("max_matches", DEFAULT_MAX_MATCHES)
+            try:
+                validate_max_matches(value)
+            except (TypeError, ValueError):
+                field = "max_matches"
+        if operation == "get_symbols_overview" and field == "max_answer_chars":
+            try:
+                validate_max_answer_chars(arguments.get("max_answer_chars", 12_000))
+            except (TypeError, ValueError):
+                pass
+            else:
+                field = "include_kinds or exclude_kinds"
+        if operation == "find_implementations" and field == "max_answer_chars":
+            try:
+                validate_max_answer_chars(arguments.get("max_answer_chars", 12_000))
+            except (TypeError, ValueError):
+                pass
+            else:
+                field = "include_kinds or exclude_kinds"
+        if operation == "find_referencing_symbols" and field == "max_answer_chars":
+            try:
+                validate_max_answer_chars(arguments.get("max_answer_chars", 12_000))
+            except (TypeError, ValueError):
+                pass
+            else:
+                field = "max_snippet_chars"
+        return error(ErrorCode.INVALID_INPUT, details={"field": field}).to_dict()
+    return None
+
+
+def _internal_navigation_kwargs(
+    operation: str, arguments: Mapping[str, object]
+) -> dict[str, object]:
+    internal = dict(arguments)
+    internal.pop("max_matches", None)
+    if operation != "find_implementations":
+        internal.pop("include_kinds", None)
+        internal.pop("exclude_kinds", None)
+    if operation == "find_declaration":
+        internal.pop("max_answer_chars", None)
+    else:
+        internal["max_answer_chars"] = _INTERNAL_NAVIGATION_MAX_ANSWER_CHARS
+    if operation == "find_symbol":
+        internal["_error_max_answer_chars"] = arguments.get("max_answer_chars", 12_000)
+    if operation == "find_referencing_symbols" and internal.get("max_snippet_chars") == 0:
+        internal["max_snippet_chars"] = 1
+    return internal
+
+
+def _validate_implementation_kind_filters(include_kinds: object, exclude_kinds: object) -> None:
+    """Match the declaration service's accepted LSP ``SymbolKind`` filters."""
+
+    for kinds in (include_kinds, exclude_kinds):
+        if kinds is None:
+            continue
+        if not isinstance(kinds, Sequence) or isinstance(kinds, str | bytes | bytearray):
+            raise ValueError("implementation kind filters must be sequences of SymbolKind integers")
+        for kind in kinds:
+            if isinstance(kind, bool) or not isinstance(kind, int) or not _MIN_SYMBOL_KIND <= kind <= _MAX_SYMBOL_KIND:
+                raise ValueError("implementation kind filters contain an invalid SymbolKind")
 
 
 def _lease_expired() -> dict[str, object]:

@@ -27,6 +27,11 @@ from serena_light.lsp.adapter import (
     read_only_client_request_handlers,
 )
 from serena_light.lsp.normalize import Location, normalize_location
+from serena_light.lsp.positions import FileSnapshot, PositionEncoding
+from serena_light.lsp.python_assignment_recovery import (
+    AssignmentRecoveryResult,
+    recover_python_module_assignment_symbols,
+)
 from serena_light.processes import LanguageServerSubprocessLauncher
 from serena_light.workspace.identity import (
     MS_INTERPRETER,
@@ -288,6 +293,31 @@ class PyrightFacts:
                 )
             )
         return tuple(normalized)
+
+    def recover_assignment_document_symbols(
+        self,
+        raw_symbols: Sequence[Mapping[str, Any]] | None,
+        *,
+        snapshot: FileSnapshot,
+        position_encoding: PositionEncoding,
+    ) -> AssignmentRecoveryResult:
+        """Recover complete module-level assignment ranges for this document.
+
+        Pyright can report a module variable or constant document symbol
+        whose ``range`` covers only its identifier.  This adapter-owned seam
+        expands that range to the unique enclosing module-level ``Assign`` or
+        ``AnnAssign`` statement using the exact verified snapshot, preserving
+        the identifier as the selection range.  A symbol that cannot be
+        recovered unambiguously keeps its original identifier-only range and
+        is reported through the result's ``unresolved`` entries instead of
+        being silently expanded.
+        """
+
+        return recover_python_module_assignment_symbols(
+            raw_symbols,
+            snapshot=snapshot,
+            position_encoding=position_encoding,
+        )
 
     def attribute_program(
         self,

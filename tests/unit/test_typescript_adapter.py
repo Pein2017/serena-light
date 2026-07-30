@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from pathlib import Path
+from typing import Any
 
 import pytest
 
+from serena_light.lsp.positions import FileSnapshot, LspPosition, PositionEncoding, PositionMapper
 from serena_light.lsp.typescript import (
     LANGUAGE_IDS,
     TYPESCRIPT_EXTENSIONS,
@@ -15,7 +18,124 @@ from serena_light.lsp.typescript import (
     project_info_to_scope,
     select_default_entry,
 )
+from serena_light.lsp.typescript_assignment_recovery import (
+    TypeScriptAssignmentRecoveryReason,
+    UnresolvedAssignmentSymbol,
+)
 from serena_light.workspace.scope import DifferenceReason, ProjectKind, ScopeCode
+
+_VARIABLE_KIND = 13
+_CONSTANT_KIND = 14
+
+
+def _snapshot_and_mapper(source: str) -> tuple[FileSnapshot, PositionMapper]:
+    snapshot = FileSnapshot.from_bytes(source.encode("utf-8"))
+    return snapshot, PositionMapper(snapshot, PositionEncoding.UTF16)
+
+
+def _identifier_only_symbol(
+    mapper: PositionMapper,
+    source: str,
+    name: str,
+    *,
+    kind: int = _CONSTANT_KIND,
+    occurrence: int = 0,
+) -> dict[str, Any]:
+    """Build a raw tsserver-shaped DocumentSymbol whose range is identifier-only."""
+
+    start_offset = -1
+    for _ in range(occurrence + 1):
+        start_offset = source.index(name, start_offset + 1)
+    end_offset = start_offset + len(name)
+    start = mapper.text_offset_to_lsp(start_offset)
+    end = mapper.text_offset_to_lsp(end_offset)
+    selection = {
+        "start": {"line": start.line, "character": start.character},
+        "end": {"line": end.line, "character": end.character},
+    }
+    return {"name": name, "kind": kind, "range": dict(selection), "selectionRange": dict(selection), "children": []}
+
+
+def _recovered_text(mapper: PositionMapper, source: str, raw_symbol: Mapping[str, Any]) -> str:
+    start = raw_symbol["range"]["start"]
+    end = raw_symbol["range"]["end"]
+    start_offset = mapper.lsp_to_text_offset(_lsp(start))
+    end_offset = mapper.lsp_to_text_offset(_lsp(end))
+    return source[start_offset:end_offset]
+
+
+def _lsp(position: dict[str, int]) -> LspPosition:
+    return LspPosition(position["line"], position["character"])
+
+
+def _selection_chain(
+    mapper: PositionMapper,
+    source: str,
+    name: str,
+    recovered_body: str,
+) -> dict[str, Any]:
+    """Build server-shaped syntax evidence from an explicit expected span."""
+
+    identifier_start = source.index(name)
+    body_start = source.index(recovered_body)
+    body_end = body_start + len(recovered_body)
+    statement_end = body_end + (source[body_end : body_end + 1] == ";")
+
+    def raw_range(start_offset: int, end_offset: int) -> dict[str, dict[str, int]]:
+        start = mapper.text_offset_to_lsp(start_offset)
+        end = mapper.text_offset_to_lsp(end_offset)
+        return {
+            "start": {"line": start.line, "character": start.character},
+            "end": {"line": end.line, "character": end.character},
+        }
+
+    binding_end = max(recovered_body.rfind("] ="), recovered_body.rfind("} =")) + 1
+    if binding_end <= 0:
+        raise ValueError("expected body does not contain a destructured binding assignment")
+    binding = recovered_body[:binding_end]
+    return {
+        "range": raw_range(identifier_start, identifier_start + len(name)),
+        "parent": {
+            "range": raw_range(body_start, body_start + len(binding)),
+            "parent": {"range": raw_range(0, statement_end)},
+        },
+    }
+
+
+def _plain_declaration_symbol_and_chain(
+    mapper: PositionMapper,
+    source: str,
+    name: str,
+    server_body: str,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Build the pinned server's identifier-start range and syntax ancestry."""
+
+    identifier_start = source.index(name)
+    body_start = source.index(server_body)
+    assert body_start == identifier_start
+    body_end = body_start + len(server_body)
+    statement_end = len(source.rstrip("\n"))
+
+    def raw_range(start_offset: int, end_offset: int) -> dict[str, dict[str, int]]:
+        start = mapper.text_offset_to_lsp(start_offset)
+        end = mapper.text_offset_to_lsp(end_offset)
+        return {
+            "start": {"line": start.line, "character": start.character},
+            "end": {"line": end.line, "character": end.character},
+        }
+
+    selection = raw_range(identifier_start, identifier_start + len(name))
+    symbol = {
+        "name": name,
+        "kind": _CONSTANT_KIND,
+        "range": raw_range(body_start, body_end),
+        "selectionRange": selection,
+        "children": [],
+    }
+    return symbol, {
+        "range": selection,
+        "parent": {"range": raw_range(0, statement_end)},
+    }
 
 
 def _config(tmp_path: Path) -> TypeScriptAdapterConfig:
@@ -321,3 +441,407 @@ def test_real_locked_engine_library_file_is_excluded_from_configured_program(tmp
 
     assert attributed.projection.configured_program.paths == ("src/main.ts",)
     assert attributed.scope_compatible is True
+
+
+@pytest.mark.parametrize(
+    ("source", "name", "server_body", "expected_body"),
+    [
+        (
+            "export const multiline = (\n  1 +\n  2\n);\n",
+            "multiline",
+            "multiline = (\n  1 +\n  2\n)",
+            "export const multiline = (\n  1 +\n  2\n);",
+        ),
+        (
+            "declare const declared: number;\n",
+            "declared",
+            "declared: number",
+            "declare const declared: number;",
+        ),
+        (
+            "export declare let mutable: string;\n",
+            "mutable",
+            "mutable: string",
+            "export declare let mutable: string;",
+        ),
+        ("var legacy = 1;\n", "legacy", "legacy = 1", "var legacy = 1;"),
+        ("let mutable = 1\n", "mutable", "mutable = 1", "let mutable = 1"),
+    ],
+)
+def test_typescript_adapter_recovers_identifier_start_variable_statements(
+    tmp_path: Path,
+    source: str,
+    name: str,
+    server_body: str,
+    expected_body: str,
+) -> None:
+    """A server range beginning at the binding omits required declaration syntax."""
+
+    snapshot, mapper = _snapshot_and_mapper(source)
+    raw_symbol, chain = _plain_declaration_symbol_and_chain(mapper, source, name, server_body)
+    original_selection = dict(raw_symbol["selectionRange"])
+
+    result = _config(tmp_path).recover_assignment_document_symbols(
+        [raw_symbol],
+        selection_ranges=[chain],
+        snapshot=snapshot,
+        position_encoding=PositionEncoding.UTF16,
+    )
+
+    assert not result.unresolved
+    (recovered,) = result.raw_symbols
+    assert _recovered_text(mapper, source, recovered) == expected_body
+    assert recovered["selectionRange"] == original_selection
+
+
+def test_typescript_identifier_start_recovery_fails_body_closed_without_syntax_evidence(tmp_path: Path) -> None:
+    source = "export const multiline = (\n  1 +\n  2\n);\n"
+    snapshot, mapper = _snapshot_and_mapper(source)
+    raw_symbol, _chain = _plain_declaration_symbol_and_chain(
+        mapper,
+        source,
+        "multiline",
+        "multiline = (\n  1 +\n  2\n)",
+    )
+
+    result = _config(tmp_path).recover_assignment_document_symbols(
+        [raw_symbol],
+        selection_ranges=None,
+        snapshot=snapshot,
+        position_encoding=PositionEncoding.UTF16,
+    )
+
+    assert result.raw_symbols == (raw_symbol,)
+    assert result.body_incomplete_reason(raw_symbol) == TypeScriptAssignmentRecoveryReason.SELECTION_RANGE_UNAVAILABLE
+
+
+@pytest.mark.parametrize(
+    ("case_id", "source", "name", "expected_body"),
+    [
+        ("array-simple", "const [a, b] = [1, 2];\n", "a", "[a, b] = [1, 2];"),
+        ("array-second", "const [a, b] = [1, 2];\n", "b", "[a, b] = [1, 2];"),
+        (
+            "object-shorthand",
+            "const { objA, objB } = { objA: 1, objB: 2 };\n",
+            "objA",
+            "{ objA, objB } = { objA: 1, objB: 2 };",
+        ),
+        ("no-semicolon-asi", "const [a, b] = [1, 2]\nconsole.log(a);\n", "a", "[a, b] = [1, 2]"),
+        (
+            "multi-declarator-comma",
+            "const [a, b] = [1, 2], c = 3;\n",
+            "a",
+            "[a, b] = [1, 2], c = 3;",
+        ),
+        (
+            "trailing-line-comment",
+            "const [a, b] = [1, 2]; // has ] and ; inside a comment\n",
+            "a",
+            "[a, b] = [1, 2];",
+        ),
+        (
+            "string-with-brackets-and-semicolon",
+            'const [a, b] = ["];", 2];\n',
+            "a",
+            '[a, b] = ["];", 2];',
+        ),
+        (
+            "template-literal-interpolation",
+            "const [a, b] = [`x${1 + 2}y`, 2];\n",
+            "a",
+            "[a, b] = [`x${1 + 2}y`, 2];",
+        ),
+        (
+            "block-comment-inside-pattern",
+            "const [/* first */ a, b] = [1, 2];\n",
+            "a",
+            "[/* first */ a, b] = [1, 2];",
+        ),
+        (
+            "object-default-values",
+            "const { a = 1, b = 2 } = {};\n",
+            "a",
+            "{ a = 1, b = 2 } = {};",
+        ),
+        ("let-keyword", "let [a, b] = [1, 2];\n", "a", "[a, b] = [1, 2];"),
+        ("var-keyword", "var [x, y] = [1, 2];\n", "x", "[x, y] = [1, 2];"),
+    ],
+)
+def test_typescript_adapter_recovers_identifier_only_destructured_ranges(
+    tmp_path: Path,
+    case_id: str,
+    source: str,
+    name: str,
+    expected_body: str,
+) -> None:
+    """Task 3.3: an identifier-only top-level destructured binding range is
+    expanded to the exact complete variable statement, never a truncated
+    or comment/string-absorbing slice, while the identifier stays the
+    selection range and name-path anchor."""
+
+    snapshot, mapper = _snapshot_and_mapper(source)
+    raw_symbol = _identifier_only_symbol(mapper, source, name)
+    original_selection = dict(raw_symbol["selectionRange"])
+
+    result = _config(tmp_path).recover_assignment_document_symbols(
+        [raw_symbol],
+        selection_ranges=[_selection_chain(mapper, source, name, expected_body)],
+        snapshot=snapshot,
+        position_encoding=PositionEncoding.UTF16,
+    )
+
+    assert not result.unresolved, case_id
+    (recovered,) = result.raw_symbols
+    declarator_end = source.index(expected_body) + len(expected_body)
+    assert _recovered_text(mapper, source, recovered) == source[:declarator_end], case_id
+    assert recovered["selectionRange"] == original_selection, "identifier stays the selection range anchor"
+    assert result.incomplete_range_reason(name=name, selection_range=original_selection) is None
+
+
+@pytest.mark.parametrize(
+    ("case_id", "source", "name", "expected_reason"),
+    [
+        (
+            "for-of-loop-is-not-a-declarator",
+            "for (const [a, b] of pairs) {\n  console.log(a);\n}\n",
+            "a",
+            TypeScriptAssignmentRecoveryReason.NO_ENCLOSING_ASSIGNMENT,
+        ),
+        (
+            "nested-pattern-is-out-of-scope",
+            "const [[a], b] = [[1], 2];\n",
+            "a",
+            TypeScriptAssignmentRecoveryReason.NO_ENCLOSING_ASSIGNMENT,
+        ),
+        (
+            "unterminated-string-fails-closed",
+            'const [a, b] = ["oops, 2];\n',
+            "a",
+            TypeScriptAssignmentRecoveryReason.NO_ENCLOSING_ASSIGNMENT,
+        ),
+        (
+            "not-inside-any-bracket",
+            "const answer = 1;\n",
+            "answer",
+            TypeScriptAssignmentRecoveryReason.NO_ENCLOSING_ASSIGNMENT,
+        ),
+    ],
+)
+def test_typescript_adapter_assignment_recovery_fails_closed(
+    tmp_path: Path,
+    case_id: str,
+    source: str,
+    name: str,
+    expected_reason: str,
+) -> None:
+    """Task 3.3: unsupported forms fail closed instead of guessing a range,
+    keeping the original identifier-only range as an accurately labelled
+    (if incomplete) location for ordinary lookup."""
+
+    snapshot, mapper = _snapshot_and_mapper(source)
+    raw_symbol = _identifier_only_symbol(mapper, source, name)
+    original_selection = dict(raw_symbol["selectionRange"])
+
+    result = _config(tmp_path).recover_assignment_document_symbols(
+        [raw_symbol],
+        selection_ranges=[{"range": original_selection}],
+        snapshot=snapshot,
+        position_encoding=PositionEncoding.UTF16,
+    )
+
+    assert result.unresolved[0].reason == expected_reason, case_id
+    (unchanged,) = result.raw_symbols
+    assert unchanged["range"] == unchanged["selectionRange"] == original_selection, case_id
+    assert result.incomplete_range_reason(name=name, selection_range=original_selection) == expected_reason
+
+
+def test_typescript_adapter_assignment_recovery_is_ambiguous_when_two_names_claim_the_same_span(
+    tmp_path: Path,
+) -> None:
+    """Task 3.3: two differently named symbols reported for the exact same
+    identifier span is an inconsistent/duplicate server response; recovery
+    refuses to guess which name really owns that position."""
+
+    source = "const [a, b] = [1, 2];\n"
+    snapshot, mapper = _snapshot_and_mapper(source)
+    conflicting = dict(_identifier_only_symbol(mapper, source, "a")["selectionRange"])
+    raw_symbols = [
+        {
+            "name": "a",
+            "kind": _CONSTANT_KIND,
+            "range": dict(conflicting),
+            "selectionRange": dict(conflicting),
+            "children": [],
+        },
+        {
+            "name": "unexpected",
+            "kind": _CONSTANT_KIND,
+            "range": dict(conflicting),
+            "selectionRange": dict(conflicting),
+            "children": [],
+        },
+    ]
+
+    result = _config(tmp_path).recover_assignment_document_symbols(
+        raw_symbols,
+        selection_ranges=None,
+        snapshot=snapshot,
+        position_encoding=PositionEncoding.UTF16,
+    )
+
+    assert {item.reason for item in result.unresolved} == {TypeScriptAssignmentRecoveryReason.AMBIGUOUS}
+    assert {item.name for item in result.unresolved} == {"a", "unexpected"}
+    for recovered in result.raw_symbols:
+        assert recovered["range"] == recovered["selectionRange"]
+
+
+def test_typescript_adapter_plain_recovery_rejects_name_anchored_on_a_different_binding(
+    tmp_path: Path,
+) -> None:
+    """A candidate whose ``name`` does not match the text at its own
+    selection position is not real evidence of which binding it is: the
+    server-reported name is untrusted and must never be trusted over the
+    verified snapshot text. Recovery must fail closed instead of returning
+    the unrelated ``other`` statement's body under the ``good`` name."""
+
+    source = "const good = 1;\nconst other = 2;\n"
+    snapshot, mapper = _snapshot_and_mapper(source)
+
+    def raw_range(start_offset: int, end_offset: int) -> dict[str, dict[str, int]]:
+        start = mapper.text_offset_to_lsp(start_offset)
+        end = mapper.text_offset_to_lsp(end_offset)
+        return {
+            "start": {"line": start.line, "character": start.character},
+            "end": {"line": end.line, "character": end.character},
+        }
+
+    identifier_start = source.index("other")
+    identifier_end = identifier_start + len("other")
+    server_body_end = identifier_start + len("other = 2")
+    statement_start = source.index("const other")
+    statement_end = statement_start + len("const other = 2;")
+
+    selection = raw_range(identifier_start, identifier_end)
+    mislabelled = {
+        "name": "good",
+        "kind": _CONSTANT_KIND,
+        "range": raw_range(identifier_start, server_body_end),
+        "selectionRange": selection,
+        "children": [],
+    }
+    chain = {"range": dict(selection), "parent": {"range": raw_range(statement_start, statement_end)}}
+    original_selection = dict(mislabelled["selectionRange"])
+
+    result = _config(tmp_path).recover_assignment_document_symbols(
+        [mislabelled],
+        selection_ranges=[chain],
+        snapshot=snapshot,
+        position_encoding=PositionEncoding.UTF16,
+    )
+
+    assert result.unresolved == (
+        UnresolvedAssignmentSymbol(
+            "good", original_selection, TypeScriptAssignmentRecoveryReason.NO_ENCLOSING_ASSIGNMENT
+        ),
+    )
+    assert result.raw_symbols == (mislabelled,)
+    assert (
+        result.incomplete_range_reason(name="good", selection_range=original_selection)
+        == TypeScriptAssignmentRecoveryReason.NO_ENCLOSING_ASSIGNMENT
+    )
+
+
+def test_typescript_adapter_destructured_recovery_rejects_name_anchored_on_a_different_binding(
+    tmp_path: Path,
+) -> None:
+    """Same anchor-mismatch guarantee for a destructured top-level binding:
+    a candidate claiming to be ``a`` but positioned at ``b``'s identifier
+    must not recover (or later expose) ``b``'s statement under ``a``."""
+
+    source = "const [a, b] = [1, 2];\n"
+    snapshot, mapper = _snapshot_and_mapper(source)
+    raw_symbol = _identifier_only_symbol(mapper, source, "b")
+    mislabelled = dict(raw_symbol)
+    mislabelled["name"] = "a"
+    original_selection = dict(mislabelled["selectionRange"])
+    chain = _selection_chain(mapper, source, "b", "[a, b] = [1, 2];")
+
+    result = _config(tmp_path).recover_assignment_document_symbols(
+        [mislabelled],
+        selection_ranges=[chain],
+        snapshot=snapshot,
+        position_encoding=PositionEncoding.UTF16,
+    )
+
+    assert result.unresolved == (
+        UnresolvedAssignmentSymbol("a", original_selection, TypeScriptAssignmentRecoveryReason.NO_ENCLOSING_ASSIGNMENT),
+    )
+    (unchanged,) = result.raw_symbols
+    assert unchanged["range"] == unchanged["selectionRange"] == original_selection
+
+
+def test_typescript_adapter_assignment_recovery_leaves_already_complete_ranges_untouched(tmp_path: Path) -> None:
+    """A symbol whose ``range`` already differs from its ``selectionRange``
+    is left alone: the server already reported a complete body for it
+    (true for every non-destructured top-level form per the probe evidence)."""
+
+    source = "const answer = 1;\n"
+    snapshot, mapper = _snapshot_and_mapper(source)
+    selection = _identifier_only_symbol(mapper, source, "answer")["selectionRange"]
+    start = mapper.text_offset_to_lsp(0)
+    end = mapper.text_offset_to_lsp(len(source.rstrip("\n")) - 1)
+    already_complete = {
+        "name": "answer",
+        "kind": _CONSTANT_KIND,
+        "range": {
+            "start": {"line": start.line, "character": start.character},
+            "end": {"line": end.line, "character": end.character},
+        },
+        "selectionRange": selection,
+        "children": [],
+    }
+
+    result = _config(tmp_path).recover_assignment_document_symbols(
+        [already_complete],
+        selection_ranges=None,
+        snapshot=snapshot,
+        position_encoding=PositionEncoding.UTF16,
+    )
+
+    assert not result.unresolved
+    assert result.raw_symbols[0]["range"] == already_complete["range"]
+
+
+def test_typescript_adapter_assignment_recovery_leaves_nested_and_non_variable_symbols_untouched(
+    tmp_path: Path,
+) -> None:
+    """Recovery only inspects top-level entries: nested ``children`` and
+    non-variable kinds (e.g. a function) pass through unchanged."""
+
+    source = "function f() {\n  return 1;\n}\n"
+    snapshot, _mapper = _snapshot_and_mapper(source)
+    function_symbol = {
+        "name": "f",
+        "kind": 12,  # SymbolKind.Function
+        "range": {"start": {"line": 0, "character": 0}, "end": {"line": 2, "character": 1}},
+        "selectionRange": {"start": {"line": 0, "character": 9}, "end": {"line": 0, "character": 10}},
+        "children": [
+            {
+                "name": "inner",
+                "kind": _CONSTANT_KIND,
+                "range": {"start": {"line": 1, "character": 9}, "end": {"line": 1, "character": 9}},
+                "selectionRange": {"start": {"line": 1, "character": 9}, "end": {"line": 1, "character": 9}},
+                "children": [],
+            }
+        ],
+    }
+
+    result = _config(tmp_path).recover_assignment_document_symbols(
+        [function_symbol],
+        selection_ranges=None,
+        snapshot=snapshot,
+        position_encoding=PositionEncoding.UTF16,
+    )
+
+    assert not result.unresolved
+    assert result.raw_symbols == (function_symbol,)

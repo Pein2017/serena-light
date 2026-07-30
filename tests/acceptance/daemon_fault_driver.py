@@ -91,7 +91,36 @@ class AcceptanceRuntime:
         elif name_path == "crash-read" and self._block_crash_operations:
             _record(self._state_path, "crash_read_started", identity=self.identity)
             time.sleep(300.0)
-        return {"ok": True, "data": {"name_path": name_path, "identity": self.identity}}
+        return {
+            "ok": True,
+            "data": {
+                "relative_path": "synthetic.py",
+                "symbol": {
+                    "name_path": name_path,
+                    "kind": 12,
+                    "location": {
+                        "range": {
+                            "start": {"line": 0, "column": 0},
+                            "end": {"line": 0, "column": len(name_path)},
+                        }
+                    },
+                },
+            },
+            "workspace": {
+                "root": self.identity,
+                "kind": "git",
+                "working_subdirectory": self.identity,
+            },
+            "adapter": {"name": "pyright", "language": "python"},
+            "generations": {
+                "trust": 0,
+                "program": 1,
+                "document": 1,
+                "index": 0,
+                "scope": "path",
+            },
+            "truncation": {"truncated": False, "omitted_count": 0},
+        }
 
     def _edit(self) -> Mapping[str, object]:
         if self._block_crash_operations:

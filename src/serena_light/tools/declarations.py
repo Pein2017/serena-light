@@ -9,6 +9,7 @@ classification of returned locations.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from collections.abc import Mapping, Sequence
@@ -16,8 +17,15 @@ from dataclasses import dataclass
 from typing import Any, Protocol, cast
 
 from serena_light.lsp.adapter import DerivedToolAvailability, RawLspProviders
-from serena_light.lsp.normalize import NormalizedSymbol, Position
-from serena_light.lsp.positions import LspPosition, PositionError
+from serena_light.lsp.normalize import NormalizedSymbol, Position, Range
+from serena_light.lsp.positions import (
+    FileSnapshot,
+    LspPosition,
+    PositionEncoding,
+    PositionError,
+    PublicPositionRenderer,
+    raw_lsp_range,
+)
 from serena_light.tools.envelopes import (
     ErrorCode,
     ErrorEnvelope,
@@ -36,7 +44,65 @@ _MIN_SYMBOL_KIND = 1
 _MAX_SYMBOL_KIND = 26
 
 type RawLocations = object
-type NormalizedLocation = Mapping[str, Any]
+type NormalizedLocation = Mapping[str, Any] | ClassifiedLocationInput
+
+
+@dataclass(frozen=True, slots=True)
+class ClassifiedLocationInput:
+    """One classified adapter location before public coordinate rendering.
+
+    A verified location carries the exact immutable target snapshot used for
+    classification.  When no authorized snapshot is available, the same raw
+    LSP range may be retained, but it is emitted only under an explicitly
+    named raw coordinate basis.  ``metadata`` must never contain coordinates;
+    this core is their single public renderer.
+    """
+
+    metadata: Mapping[str, Any]
+    lsp_range: Range | None = None
+    snapshot: FileSnapshot | None = None
+    position_encoding: PositionEncoding = PositionEncoding.UTF16
+    semantic_info: Mapping[str, Any] | None = None
+
+    def __post_init__(self) -> None:
+        forbidden = {"range", "raw_lsp_range", "body", "info"}.intersection(self.metadata)
+        if forbidden:
+            raise ValueError(f"classified location metadata contains rendered fields: {sorted(forbidden)!r}")
+        if self.snapshot is not None and self.lsp_range is None:
+            raise ValueError("a classified location snapshot requires an LSP range")
+        if self.semantic_info is not None and {
+            "range",
+            "raw_lsp_range",
+            "selection_range",
+            "selectionRange",
+            "body",
+        }.intersection(self.semantic_info):
+            raise ValueError("classified location semantic info contains a rendered or raw field")
+
+    @classmethod
+    def verified(
+        cls,
+        metadata: Mapping[str, Any],
+        lsp_range: Range,
+        snapshot: FileSnapshot,
+        position_encoding: PositionEncoding = PositionEncoding.UTF16,
+        *,
+        semantic_info: Mapping[str, Any] | None = None,
+    ) -> ClassifiedLocationInput:
+        """Build a location backed by the adapter's exact verified snapshot."""
+
+        return cls(metadata, lsp_range, snapshot, position_encoding, semantic_info)
+
+    @classmethod
+    def raw_lsp(
+        cls,
+        metadata: Mapping[str, Any],
+        lsp_range: Range,
+        position_encoding: PositionEncoding = PositionEncoding.UTF16,
+    ) -> ClassifiedLocationInput:
+        """Build an explicitly raw LSP-basis location without a snapshot."""
+
+        return cls(metadata, lsp_range, None, position_encoding)
 
 
 @dataclass(frozen=True, slots=True)
@@ -95,6 +161,7 @@ class DeclarationAdapterSeam(Protocol):
         *,
         document_uri: str,
         position: LspPosition,
+        capture_target_symbols: bool = False,
     ) -> RawLocations: ...
 
     def normalize_and_classify_locations(
@@ -179,8 +246,14 @@ class DeclarationNavigationService:
             DEFINITION_METHOD,
             document_uri=document.uri,
             position=position,
+            capture_target_symbols=include_info,
         )
-        locations = self._normalize(raw_locations, include_body=include_body, include_info=include_info)
+        locations = self._normalize(
+            document,
+            raw_locations,
+            include_body=include_body,
+            include_info=include_info,
+        )
         if isinstance(locations, ErrorEnvelope):
             return locations
         if not locations:
@@ -241,12 +314,19 @@ class DeclarationNavigationService:
             IMPLEMENTATION_METHOD,
             document_uri=document.uri,
             position=_lsp_position(source_symbol.selection_range.start),
+            capture_target_symbols=include_info or bool(included) or bool(excluded),
         )
-        normalized = self._normalize(raw_locations, include_body=False, include_info=include_info)
+        normalized = self._normalize(
+            document,
+            raw_locations,
+            include_body=False,
+            include_info=include_info,
+        )
         if isinstance(normalized, ErrorEnvelope):
             return normalized
 
         filtered: list[dict[str, Any]] = []
+        kind_omitted = 0
         for location in normalized:
             if "kind" not in location:
                 # Location and LocationLink responses do not carry SymbolKind.
@@ -254,13 +334,17 @@ class DeclarationNavigationService:
                 # filter cannot reject an unknown kind without inventing one.
                 if not included:
                     filtered.append(dict(location))
+                else:
+                    kind_omitted += 1
                 continue
             kind = location.get("kind")
             if isinstance(kind, bool) or not isinstance(kind, int):
                 return _invalid_adapter_result(document, "normalized_locations.kind")
             if included and kind not in included:
+                kind_omitted += 1
                 continue
             if kind in excluded:
+                kind_omitted += 1
                 continue
             filtered.append(dict(location))
         filtered.sort(key=_canonical_json)
@@ -280,7 +364,7 @@ class DeclarationNavigationService:
             if len(_canonical_json(candidate)) > max_answer_chars:
                 break
             kept.append(location)
-        omitted = len(filtered) - len(kept)
+        omitted = kind_omitted + len(filtered) - len(kept)
         result_data = {**base, "locations": kept}
         return success(
             cast(JsonValue, result_data),
@@ -303,6 +387,7 @@ class DeclarationNavigationService:
 
     def _normalize(
         self,
+        document: DocumentNavigation,
         raw_locations: RawLocations,
         *,
         include_body: bool,
@@ -318,15 +403,73 @@ class DeclarationNavigationService:
         locations: list[dict[str, Any]] = []
         try:
             for location in normalized:
+                if isinstance(location, ClassifiedLocationInput):
+                    copied = _render_classified_location(
+                        location,
+                        include_body=include_body,
+                        include_info=include_info,
+                    )
+                    if copied is None:
+                        return _unmapped_requested_content(document)
+                    _canonical_json(copied)
+                    locations.append(copied)
+                    continue
                 if not isinstance(location, Mapping):
                     raise TypeError
                 copied = dict(location)
+                if {"range", "raw_lsp_range", "body", "info"}.intersection(copied):
+                    raise ValueError("adapter mappings must not contain pre-rendered location fields")
                 _canonical_json(copied)
                 locations.append(copied)
         except (TypeError, ValueError):
-            return error(ErrorCode.INVALID_INPUT, details={"field": "normalized_locations"})
+            return _invalid_adapter_result(document, "normalized_locations")
         locations.sort(key=_canonical_json)
         return locations
+
+
+def _render_classified_location(
+    location: ClassifiedLocationInput,
+    *,
+    include_body: bool,
+    include_info: bool,
+) -> dict[str, Any] | None:
+    data = dict(location.metadata)
+    lsp_range = location.lsp_range
+    if lsp_range is None:
+        return data
+    if location.snapshot is None:
+        if include_body or include_info:
+            return None
+        data["raw_lsp_range"] = raw_lsp_range(
+            _lsp_position(lsp_range.start),
+            _lsp_position(lsp_range.end),
+            location.position_encoding,
+        )
+        return data
+    renderer = PublicPositionRenderer.from_snapshot(location.snapshot, location.position_encoding)
+    start = _lsp_position(lsp_range.start)
+    end = _lsp_position(lsp_range.end)
+    rendered_range = renderer.range(start, end)
+    data["range"] = rendered_range
+    if include_body:
+        data["body"] = renderer.text(start, end)
+        data["sha256"] = hashlib.sha256(location.snapshot.raw_bytes).hexdigest()
+    if include_info and location.semantic_info:
+        data["info"] = dict(location.semantic_info)
+    return data
+
+
+def _unmapped_requested_content(document: DocumentNavigation) -> ErrorEnvelope:
+    return error(
+        ErrorCode.UNSUPPORTED,
+        details={
+            "operation": "render_semantic_location_content",
+            "reason": "verified_target_snapshot_unavailable",
+        },
+        workspace=document.workspace,
+        adapter=document.adapter,
+        generations=document.generations,
+    )
 
 
 def _compile_locator(value: object) -> tuple[re.Pattern[str] | None, str | None]:

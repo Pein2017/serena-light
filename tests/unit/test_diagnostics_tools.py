@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -157,7 +158,7 @@ def test_default_severity_grouping_and_utf16_crlf_positions_are_deterministic() 
     assert warning["severity"] == "warning"
     # The initial astral character consumes two UTF-16 units but only one text
     # character; CRLF remains two physical bytes.
-    assert warning["range"]["start"] == {"line": 3, "column": 12, "text_offset": 30, "byte_offset": 33}
+    assert warning["range"]["start"] == {"line": 2, "column": 11, "text_offset": 30, "byte_offset": 33}
     engine = value["data"]["engine"]
     assert engine["version"] == "1.1.403"
     assert engine["interpreter"] == "/root/miniconda3/envs/ms/bin/python"
@@ -166,6 +167,41 @@ def test_default_severity_grouping_and_utf16_crlf_positions_are_deterministic() 
     assert any(
         finding["message"] == "info" for group in with_information["data"]["groups"] for finding in group["findings"]
     )
+
+
+def test_diagnostic_after_astral_uses_decoded_column_and_same_bom_snapshot_offsets() -> None:
+    raw = b"\xef\xbb\xbf" + "😀 bad\r\n".encode()
+    document = DocumentSymbolInput(
+        "src/unicode.py",
+        "file:///repo/src/unicode.py",
+        FileSnapshot.from_bytes(raw),
+        (),
+        PositionEncoding.UTF16,
+        WorkspaceMetadata("/repo", "git", "/repo"),
+        AdapterMetadata("pyright", "python"),
+        GenerationMetadata(trust=1, program=2, document=9, index=4, scope="path"),
+    )
+    publication = DiagnosticsSnapshot(
+        DiagnosticsState.FINDINGS,
+        document.uri,
+        Path("/repo/src/unicode.py"),
+        1,
+        9,
+        21,
+        ({"severity": 1, "message": "bad", "range": _range(0, 3, 0, 6)},),
+    )
+
+    value = get_diagnostics_for_file(
+        DiagnosticDocumentInput(document, 9, _engine(), publication)
+    ).to_dict()
+
+    finding = value["data"]["groups"][0]["findings"][0]
+    assert finding["range"] == {
+        "start": {"line": 0, "column": 2, "text_offset": 2, "byte_offset": 8},
+        "end": {"line": 0, "column": 5, "text_offset": 5, "byte_offset": 11},
+    }
+    assert value["data"]["sha256"] == hashlib.sha256(raw).hexdigest()
+    assert value["generations"]["document"] == 9
 
 
 def test_truncation_is_deterministic_and_typescript_is_explicitly_advisory() -> None:

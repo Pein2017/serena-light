@@ -51,6 +51,7 @@ class NormalizedSymbol:
     selection_range: Range
     detail: str | None
     children: tuple[NormalizedSymbol, ...] = ()
+    body_incomplete_reason: str | None = None
 
     def iter_depth_first(self) -> Iterator[NormalizedSymbol]:
         yield self
@@ -62,6 +63,12 @@ class ContainmentRecovery(Protocol):
     """Adapter seam for engines that return a flat or incomplete hierarchy."""
 
     def __call__(self, symbols: tuple[NormalizedSymbol, ...]) -> Sequence[NormalizedSymbol]: ...
+
+
+class BodyCompleteness(Protocol):
+    """Adapter-owned classifier for a raw symbol's body-range completeness."""
+
+    def __call__(self, raw_symbol: Mapping[str, Any]) -> str | None: ...
 
 
 def normalize_location(raw: Mapping[str, Any]) -> Location:
@@ -78,6 +85,7 @@ def normalize_document_symbols(
     document_uri: str,
     normalize_name: Callable[[str], str] | None = None,
     recover_containment: ContainmentRecovery | None = None,
+    body_completeness: BodyCompleteness | None = None,
 ) -> tuple[NormalizedSymbol, ...]:
     """Normalize either DocumentSymbol trees or flat SymbolInformation.
 
@@ -87,7 +95,13 @@ def normalize_document_symbols(
     if not raw_symbols:
         return ()
     name_fn = normalize_name or (lambda name: name)
-    roots = _normalize_siblings(raw_symbols, document_uri=document_uri, parent_path=(), name_fn=name_fn)
+    roots = _normalize_siblings(
+        raw_symbols,
+        document_uri=document_uri,
+        parent_path=(),
+        name_fn=name_fn,
+        body_completeness=body_completeness,
+    )
     if recover_containment is None:
         return roots
     recovered = tuple(recover_containment(roots))
@@ -115,6 +129,7 @@ def _normalize_siblings(
     document_uri: str,
     parent_path: tuple[str, ...],
     name_fn: Callable[[str], str],
+    body_completeness: BodyCompleteness | None,
 ) -> tuple[NormalizedSymbol, ...]:
     normalized_names: list[str] = []
     for raw in raw_symbols:
@@ -159,6 +174,7 @@ def _normalize_siblings(
             document_uri=document_uri,
             parent_path=name_path,
             name_fn=name_fn,
+            body_completeness=body_completeness,
         )
         detail = raw.get("detail")
         result.append(
@@ -171,6 +187,7 @@ def _normalize_siblings(
                 selection_range=selection,
                 detail=str(detail) if detail is not None else None,
                 children=children,
+                body_incomplete_reason=body_completeness(raw) if body_completeness is not None else None,
             )
         )
     return tuple(result)

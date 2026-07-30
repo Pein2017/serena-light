@@ -1,7 +1,301 @@
 {
-  "schema_version": 1,
+  "schema_version": 3,
   "scope": "parallel serena-light registration; not canonical-serena replacement",
-  "classification_values": ["supported", "dropped", "shimmed"],
+  "semantic_contract": {
+    "coordinates": {
+      "line": "0-based decoded-text line",
+      "column": "0-based Unicode code-point column",
+      "text_offset": "decoded-text offset in the exact verified snapshot",
+      "byte_offset": "physical UTF-8 file offset in the same snapshot, including any BOM"
+    },
+    "navigation_success_coordinates": "compact [[start_line,start_column],[end_line,end_column]] ranges retain the same 0-based decoded-text line and Unicode code-point column semantics; text and byte offsets remain internal",
+    "assignment_bodies": "Python module-executed variables/constants and TypeScript/JavaScript top-level variable bindings return a unique complete assignment statement when include_body=true; TypeScript/JavaScript includes an existing terminal semicolon and requires the exact selected snapshot text to equal the semantic candidate name; body lookup and guarded editing share the same fail-closed recovery",
+    "semantic_replay": "at most 64 unique workspace plus external target URIs; exact runtime token, complete capability identity, encoding, generations, and canonical location multiset must remain stable; deterministic overflow is non-retryable UNSUPPORTED",
+    "diagnostics_publication": "versioned engines install ownership before didChange and require integer publication version evidence; unversioned engines disown old tracking, send didClose, await a bounded same-connection response barrier, and only then install a new owner before exact-full-text didOpen or cached diagnostics reuse; watcher-created temporary opens never close a URI already owned open, and close publications plus barrier or notification failures cannot satisfy or leave the new generation",
+    "reference_coverage": {
+      "scope": "owning adapter configured semantic program",
+      "fields": [
+        "adapter",
+        "language",
+        "scope_kind",
+        "configured_program_files",
+        "configured_program_digest",
+        "trusted_language_files",
+        "trusted_language_digest",
+        "uncovered_files",
+        "uncovered_sample"
+      ],
+      "uncovered_sample_fields": [
+        "total",
+        "items",
+        "digest",
+        "omitted"
+      ],
+      "lexical_fallback": false
+    },
+    "external_identity": "a trusted external file's identity is its own authoritative absolute path plus an optional read_only=true marker on its compact file group; no second non-forgeable external identifier or alternate trust owner is introduced",
+    "raw_position_fallback": "a reference, declaration, or implementation record backed by an exact response-owned snapshot uses compact range; only an authorized read-only external target lacking that snapshot may carry raw_range plus a position_basis naming the raw LSP coordinate system; a workspace target that cannot be mapped exactly fails retryably with typed NOT_READY rather than degrading to raw coordinates"
+  },
+  "migration_examples": {
+    "common_old_to_new": {
+      "workspace.root": "data.workspace",
+      "data.relative_path and per-record relative_path/path": "data.files[*].path once",
+      "data.sha256 and repeated record hashes": "data.files[*].sha256 once, only when a returned record includes body",
+      "numeric kind": "stable lowercase kind string; unknown values become unknown:<integer>",
+      "decoded range object with text_offset/byte_offset": "compact range [[start_line,start_column],[end_line,end_column]]",
+      "workspace/adapter/generations/configured-program/query echoes": "removed from navigation success; detailed runtime state remains in get_runtime_status and rich errors",
+      "truncation.omitted_count plus tool-local truncation": "single data.omitted integer",
+      "FastMCP pretty text": "one canonical UTF-8 JSON text block equal to structuredContent"
+    },
+    "optional_field_contract": {
+      "file_group.language": "present only for mixed-language results or when path identity does not reveal the language",
+      "file_group.read_only": "true only for authoritative read-only external paths",
+      "file_group.sha256": "present once only when at least one record in the group contains body",
+      "overview.children": "present only when non-empty; a nonmatching structural ancestor is removed and counted if final budgeting removes its last matching descendant",
+      "symbol.body_or_info": "body or info appears only when requested and available",
+      "reference.symbol": "containing name path or typed <file> container when available",
+      "reference.snippet": "omitted by default; a positive max_snippet_chars requests a complete bounded snippet",
+      "data.coverage": "present once for reference success only, including empty reference success",
+      "target.name_path_kind_body_info": "response-owned workspace targets expose bounded semantic name_path, kind, body, or info only when available or requested; positive kind filters remove and count unknown targets, while exclusions preserve unknown targets",
+      "target.raw_range_position_basis": "mutually exclusive with decoded range; only for a read-only external target without an exact response-owned snapshot"
+    },
+    "get_symbols_overview": {
+      "old": "data.relative_path/sha256/max_depth/depth flags plus verbose nodes with name_path, ranges, selection ranges, detail, and child booleans",
+      "new_example": {
+        "ok": true,
+        "data": {
+          "workspace": "/data/CoordExp/serena-light",
+          "files": [
+            {
+              "path": "tests/integration/fixtures/compact_navigation/large_nested.py",
+              "symbols": [
+                {
+                  "name": "LargeFixture",
+                  "kind": "class",
+                  "children": [
+                    {
+                      "name": "method_00",
+                      "kind": "method"
+                    }
+                  ]
+                }
+              ]
+            }
+          ],
+          "omitted": 19
+        }
+      },
+      "parameters": "max_answer_chars 512..50000 default 12000; include_kinds/exclude_kinds use stable lowercase kind names; filtering retains only the minimum ancestor path for matching descendants and counts every removed node in omitted"
+    },
+    "find_symbol": {
+      "old": "single-symbol or global adapters/symbols envelopes with repeated path, adapter, generations, configured-program and rich range offsets",
+      "new_example": {
+        "ok": true,
+        "data": {
+          "workspace": "/data/CoordExp/serena-light",
+          "files": [
+            {
+              "path": "tests/integration/fixtures/compact_navigation/python_symbols.py",
+              "sha256": "8419f2197b919cc3f69898a5240690c8cbef847b80b6584cb6a324f7c7b8fcaf",
+              "symbols": [
+                {
+                  "name_path": "ANSWER",
+                  "kind": "constant",
+                  "range": [
+                    [
+                      2,
+                      0
+                    ],
+                    [
+                      2,
+                      16
+                    ]
+                  ],
+                  "body": "ANSWER: int = 42"
+                }
+              ]
+            }
+          ],
+          "omitted": 0
+        }
+      },
+      "parameters": "max_matches 1..100 default 20 after filter/dedup/sort; max_answer_chars 512..50000 default 12000"
+    },
+    "find_referencing_symbols": {
+      "old": "flat references repeat path/read-only and carry rich ranges, snippet flags, adapter/generations, truncation and coverage inside verbose success",
+      "new_example": {
+        "ok": true,
+        "data": {
+          "workspace": "/data/serena-light-compact-evidence",
+          "files": [
+            {
+              "path": "python_symbols.py",
+              "references": [
+                {
+                  "range": [
+                    [
+                      2,
+                      0
+                    ],
+                    [
+                      2,
+                      6
+                    ]
+                  ],
+                  "symbol": "ANSWER",
+                  "snippet": "ANSWER: int = 42"
+                }
+              ]
+            },
+            {
+              "path": "python_usage.py",
+              "references": [
+                {
+                  "range": [
+                    [
+                      0,
+                      27
+                    ],
+                    [
+                      0,
+                      33
+                    ]
+                  ],
+                  "symbol": "<file>"
+                },
+                {
+                  "range": [
+                    [
+                      4,
+                      28
+                    ],
+                    [
+                      4,
+                      34
+                    ]
+                  ],
+                  "symbol": "calculate"
+                }
+              ]
+            }
+          ],
+          "coverage": {
+            "adapter": "pyright",
+            "language": "python",
+            "scope_kind": "configured",
+            "configured_program_files": 3,
+            "configured_program_digest": "e13a863e18ee03d7707c6b94137ff4369f9353ee43c09f43968ca8c754c462f3",
+            "trusted_language_files": 4,
+            "trusted_language_digest": "5a591c959e4224d774e6517575375ca200ee58a04bcbb1e46d9091cc3ef2cdaf",
+            "uncovered_files": 1,
+            "uncovered_sample": {
+              "total": 1,
+              "items": [
+                "python_uncovered.py"
+              ],
+              "digest": "09bd6575f15f55b7607b91ae60d8a9e76a0e5c9633e007f32f0c65c8bbaff8f6",
+              "omitted": 0
+            }
+          },
+          "omitted": 0
+        }
+      },
+      "parameters": "max_snippet_chars default 0 omits snippets; positive values request them; max_answer_chars 512..50000 default 12000"
+    },
+    "find_declaration": {
+      "old": "data.locations contains absolute/relative path, capability matrix, location kind and rich or raw LSP ranges",
+      "new_workspace_example": {
+        "ok": true,
+        "data": {
+          "workspace": "/data/CoordExp/serena-light",
+          "files": [
+            {
+              "path": "tests/integration/fixtures/compact_navigation/python_symbols.py",
+              "targets": [
+                {
+                  "range": [
+                    [
+                      2,
+                      0
+                    ],
+                    [
+                      2,
+                      6
+                    ]
+                  ]
+                }
+              ]
+            }
+          ],
+          "omitted": 0
+        }
+      },
+      "new_external_example": {
+        "ok": true,
+        "data": {
+          "workspace": "/data/CoordExp/serena-light",
+          "files": [
+            {
+              "path": "/root/miniconda3/envs/ms/lib/python3.12/site-packages/transformers/generation/configuration_utils.py",
+              "read_only": true,
+              "targets": [
+                {
+                  "raw_range": [
+                    [
+                      81,
+                      6
+                    ],
+                    [
+                      81,
+                      22
+                    ]
+                  ],
+                  "position_basis": "lsp_zero_based_line_utf16_code_unit_character"
+                }
+              ]
+            }
+          ],
+          "omitted": 0
+        }
+      },
+      "parameters": "regex requires exactly one capture group; max_answer_chars 512..50000 default 12000"
+    },
+    "find_implementations": {
+      "old": "data.locations repeats request path/name, capability matrix, adapter/generations and rich target ranges",
+      "new_example": {
+        "ok": true,
+        "data": {
+          "workspace": "/data/CoordExp/serena-light",
+          "files": [
+            {
+              "path": "tests/integration/fixtures/compact_navigation/typescript_symbols.ts",
+              "targets": [
+                {
+                  "range": [
+                    [
+                      4,
+                      13
+                    ],
+                    [
+                      4,
+                      27
+                    ]
+                  ]
+                }
+              ]
+            }
+          ],
+          "omitted": 0
+        }
+      },
+      "parameters": "max_answer_chars 512..50000 default 12000; integer include_kinds/exclude_kinds filter verified response-owned target kinds within the replay transaction, and include_info adds bounded semantic detail without raw LSP blobs"
+    }
+  },
+  "classification_values": [
+    "supported",
+    "dropped",
+    "shimmed"
+  ],
   "result_envelopes": {
     "serena": {
       "classification": "dropped",
@@ -9,41 +303,340 @@
     },
     "serena-light": {
       "classification": "supported",
-      "success": {"ok": true, "data": "object", "workspace": "optional object", "adapter": "optional object", "generations": "optional object", "truncation": "optional object"},
-      "error": {"ok": false, "error": {"code": "typed string", "message": "fixed string", "retry": "object or null", "details": "object"}, "workspace": "optional object", "adapter": "optional object", "generations": "optional object"}
+      "success": {
+        "ok": true,
+        "data": "object",
+        "workspace": "optional object",
+        "adapter": "optional object",
+        "generations": "optional object",
+        "truncation": "optional object"
+      },
+      "navigation_success": {
+        "ok": true,
+        "data": {
+          "workspace": "absolute physical root",
+          "files": "deterministically grouped tool-specific records",
+          "coverage": "references only; omitted otherwise",
+          "omitted": "non-negative integer"
+        }
+      },
+      "error": {
+        "ok": false,
+        "error": {
+          "code": "typed string",
+          "message": "fixed string",
+          "retry": "object or null",
+          "details": "object"
+        },
+        "workspace": "optional object",
+        "adapter": "optional object",
+        "generations": "optional object"
+      }
     }
   },
   "mcp_tools": [
-    {"name": "get_daemon_status", "visibility": "connector_internal", "serena_name": null, "required_args": [], "classification": "supported", "delta": "new daemon control-plane status"},
-    {"name": "acquire_lease", "visibility": "connector_internal", "serena_name": null, "required_args": [], "classification": "supported", "delta": "new daemon control-plane lease acquisition"},
-    {"name": "heartbeat", "visibility": "connector_internal", "serena_name": null, "required_args": ["lease_id"], "classification": "supported", "delta": "new daemon control-plane lease renewal"},
-    {"name": "release_lease", "visibility": "connector_internal", "serena_name": null, "required_args": ["lease_id"], "classification": "supported", "delta": "new daemon control-plane lease release"},
-    {"name": "activate_workspace", "visibility": "agent_public", "serena_name": "activate_project", "required_args": ["absolute_path"], "classification": "shimmed", "delta": "absolute path and session-scoped binding replace project name/path and global active project"},
-    {"name": "release_workspace", "visibility": "agent_public", "serena_name": null, "required_args": [], "optional_args": ["immediate"], "classification": "supported", "delta": "detaches the binding while retaining the lease; immediate=true skips grace only for the final holder; runtime_stopped and runtime_stop_pending distinguish settled from retained cleanup"},
-    {"name": "get_runtime_status", "visibility": "agent_public", "serena_name": "get_current_config", "required_args": [], "classification": "shimmed", "delta": "typed daemon, lease, capability, scope, and generation status replaces agent configuration"},
-    {"name": "get_symbols_overview", "visibility": "agent_public", "serena_name": "get_symbols_overview", "required_args": ["relative_path"], "classification": "supported", "delta": "typed envelope; max_depth replaces depth"},
-    {"name": "find_symbol", "visibility": "agent_public", "serena_name": "find_symbol", "required_args": ["name_path"], "classification": "shimmed", "delta": "name_path replaces name_path_pattern; typed envelope"},
-    {"name": "find_referencing_symbols", "visibility": "agent_public", "serena_name": "find_referencing_symbols", "required_args": ["name_path", "relative_path"], "classification": "supported", "delta": "typed envelope and bounded snippets"},
-    {"name": "find_declaration", "visibility": "agent_public", "serena_name": "find_declaration", "required_args": ["relative_path", "regex"], "classification": "supported", "delta": "definitionProvider dispatch and typed normalized locations; regex schema requires exactly one capture group selecting the queried symbol"},
-    {"name": "find_implementations", "visibility": "agent_public", "serena_name": "find_implementations", "required_args": ["name_path", "relative_path"], "classification": "supported", "delta": "capability-gated typed result"},
-    {"name": "get_diagnostics_for_file", "visibility": "agent_public", "serena_name": "get_diagnostics_for_file", "required_args": ["relative_path"], "classification": "shimmed", "delta": "generation-aware status replaces line-range interface"},
-    {"name": "get_diagnostics_for_symbol", "visibility": "agent_public", "serena_name": "get_diagnostics_for_symbol", "required_args": ["relative_path", "name_path"], "classification": "shimmed", "delta": "path plus symbol required; no reference-file expansion"},
-    {"name": "replace_symbol_body", "visibility": "agent_public", "serena_name": "replace_symbol_body", "required_args": ["name_path", "relative_path", "body", "expected_hash"], "classification": "shimmed", "delta": "whole-file expected_hash is mandatory; parent-rename races are fail-closed or UNCERTAIN after installation; never replay after unknown completion"}
+    {
+      "name": "get_daemon_status",
+      "visibility": "connector_internal",
+      "serena_name": null,
+      "required_args": [],
+      "classification": "supported",
+      "delta": "new daemon control-plane status"
+    },
+    {
+      "name": "acquire_lease",
+      "visibility": "connector_internal",
+      "serena_name": null,
+      "required_args": [],
+      "classification": "supported",
+      "delta": "new daemon control-plane lease acquisition"
+    },
+    {
+      "name": "heartbeat",
+      "visibility": "connector_internal",
+      "serena_name": null,
+      "required_args": [
+        "lease_id"
+      ],
+      "classification": "supported",
+      "delta": "new daemon control-plane lease renewal"
+    },
+    {
+      "name": "release_lease",
+      "visibility": "connector_internal",
+      "serena_name": null,
+      "required_args": [
+        "lease_id"
+      ],
+      "classification": "supported",
+      "delta": "new daemon control-plane lease release"
+    },
+    {
+      "name": "activate_workspace",
+      "visibility": "agent_public",
+      "serena_name": "activate_project",
+      "required_args": [
+        "absolute_path"
+      ],
+      "classification": "shimmed",
+      "delta": "absolute path and session-scoped binding replace project name/path and global active project"
+    },
+    {
+      "name": "release_workspace",
+      "visibility": "agent_public",
+      "serena_name": null,
+      "required_args": [],
+      "optional_args": [
+        "immediate"
+      ],
+      "classification": "supported",
+      "delta": "detaches the binding while retaining the lease; immediate=true skips grace only for the final holder; runtime_stopped and runtime_stop_pending distinguish settled from retained cleanup"
+    },
+    {
+      "name": "get_runtime_status",
+      "visibility": "agent_public",
+      "serena_name": "get_current_config",
+      "required_args": [],
+      "classification": "shimmed",
+      "delta": "typed daemon, lease, capability, scope, and generation status replaces agent configuration"
+    },
+    {
+      "name": "get_symbols_overview",
+      "visibility": "agent_public",
+      "serena_name": "get_symbols_overview",
+      "required_args": [
+        "relative_path"
+      ],
+      "optional_args": [
+        "max_depth",
+        "max_answer_chars",
+        "include_kinds",
+        "exclude_kinds"
+      ],
+      "classification": "supported",
+      "delta": "compact name/kind/non-empty-children tree; lowercase kind filters; no ranges or runtime metadata"
+    },
+    {
+      "name": "find_symbol",
+      "visibility": "agent_public",
+      "serena_name": "find_symbol",
+      "required_args": [
+        "name_path"
+      ],
+      "optional_args": [
+        "relative_path",
+        "substring_matching",
+        "include_body",
+        "include_info",
+        "max_answer_chars",
+        "max_matches"
+      ],
+      "classification": "shimmed",
+      "delta": "file-grouped compact symbols with default max_matches=20; body requests retain complete recovered statements and one file hash"
+    },
+    {
+      "name": "find_referencing_symbols",
+      "visibility": "agent_public",
+      "serena_name": "find_referencing_symbols",
+      "required_args": [
+        "name_path",
+        "relative_path"
+      ],
+      "optional_args": [
+        "max_snippet_chars",
+        "max_answer_chars"
+      ],
+      "classification": "supported",
+      "delta": "file-grouped compact semantic references plus one query-level configured-program coverage object; snippets are omitted by default and included only when max_snippet_chars is above zero; no lexical fallback"
+    },
+    {
+      "name": "find_declaration",
+      "visibility": "agent_public",
+      "serena_name": "find_declaration",
+      "required_args": [
+        "relative_path",
+        "regex"
+      ],
+      "optional_args": [
+        "containing_symbol_name_path",
+        "include_body",
+        "include_info",
+        "max_answer_chars"
+      ],
+      "classification": "supported",
+      "delta": "definitionProvider dispatch and compact grouped targets; regex schema requires exactly one capture group"
+    },
+    {
+      "name": "find_implementations",
+      "visibility": "agent_public",
+      "serena_name": "find_implementations",
+      "required_args": [
+        "name_path",
+        "relative_path"
+      ],
+      "optional_args": [
+        "include_info",
+        "include_kinds",
+        "exclude_kinds",
+        "max_answer_chars"
+      ],
+      "classification": "supported",
+      "delta": "capability-gated compact grouped targets"
+    },
+    {
+      "name": "get_diagnostics_for_file",
+      "visibility": "agent_public",
+      "serena_name": "get_diagnostics_for_file",
+      "required_args": [
+        "relative_path"
+      ],
+      "classification": "shimmed",
+      "delta": "generation-aware status replaces line-range interface; returned ranges use 0-based decoded-text positions"
+    },
+    {
+      "name": "get_diagnostics_for_symbol",
+      "visibility": "agent_public",
+      "serena_name": "get_diagnostics_for_symbol",
+      "required_args": [
+        "relative_path",
+        "name_path"
+      ],
+      "classification": "shimmed",
+      "delta": "path plus symbol required; no reference-file expansion; returned ranges use 0-based decoded-text positions"
+    },
+    {
+      "name": "replace_symbol_body",
+      "visibility": "agent_public",
+      "serena_name": "replace_symbol_body",
+      "required_args": [
+        "name_path",
+        "relative_path",
+        "body",
+        "expected_hash"
+      ],
+      "classification": "shimmed",
+      "delta": "whole-file expected_hash is mandatory; Python and TypeScript/JavaScript assignment edits use the same complete fail-closed recovery as body lookup; parent-rename races are fail-closed or UNCERTAIN after installation; never replay after unknown completion"
+    }
   ],
   "session_start": {
-    "serena": {"consumer": "serena-hooks activate --client=codex", "classification": "dropped", "reason": "serena-light binds inherited connector cwd without a hook"},
-    "serena-light": {"consumer": "connector startup cwd", "classification": "supported", "behavior": "auto-activate startup cwd; explicit activate_workspace for another root"}
+    "serena": {
+      "consumer": "serena-hooks activate --client=codex",
+      "classification": "dropped",
+      "reason": "serena-light binds inherited connector cwd without a hook"
+    },
+    "serena-light": {
+      "consumer": "connector startup cwd",
+      "classification": "supported",
+      "behavior": "auto-activate startup cwd; explicit activate_workspace for another root"
+    }
   },
   "instruction_consumers": [
-    {"name": "initial_instructions", "classification": "dropped", "reason": "no Serena agent manual or mode system"},
-    {"name": "serena-hooks remind", "classification": "dropped", "reason": "no hook-based instruction injection"},
-    {"name": "client MCP tool metadata", "classification": "supported", "reason": "tool schemas and typed envelopes are the client-facing contract"}
+    {
+      "name": "initial_instructions",
+      "classification": "dropped",
+      "reason": "no Serena agent manual or mode system"
+    },
+    {
+      "name": "serena-hooks remind",
+      "classification": "dropped",
+      "reason": "no hook-based instruction injection"
+    },
+    {
+      "name": "client MCP tool metadata",
+      "classification": "supported",
+      "reason": "tool schemas and typed envelopes are the client-facing contract"
+    }
   ],
   "excluded_serena_tools": [
-    {"family": "file and shell", "tools": ["read_file", "create_text_file", "list_dir", "find_file", "replace_content", "replace_in_files", "delete_lines", "replace_lines", "insert_at_line", "search_for_pattern", "execute_shell_command"], "classification": "dropped"},
-    {"family": "memory, onboarding, configuration, and project management", "tools": ["onboarding", "initial_instructions", "serena_info", "read_memory", "write_memory", "list_memories", "delete_memory", "rename_memory", "edit_memory", "list_queryable_projects", "query_project", "get_current_config", "remove_project", "open_dashboard"], "classification": "dropped"},
-    {"family": "broad or non-v1 editing", "tools": ["insert_after_symbol", "insert_before_symbol", "rename_symbol", "safe_delete_symbol", "restart_language_server"], "classification": "dropped"},
-    {"family": "JetBrains", "tools": ["jet_brains_debug", "jet_brains_find_declaration", "jet_brains_find_implementations", "jet_brains_find_referencing_symbols", "jet_brains_find_symbol", "jet_brains_get_symbols_overview", "jet_brains_inline_symbol", "jet_brains_list_inspections", "jet_brains_move", "jet_brains_rename", "jet_brains_run_inspections", "jet_brains_safe_delete", "jet_brains_type_hierarchy"], "classification": "dropped"}
+    {
+      "family": "file and shell",
+      "tools": [
+        "read_file",
+        "create_text_file",
+        "list_dir",
+        "find_file",
+        "replace_content",
+        "replace_in_files",
+        "delete_lines",
+        "replace_lines",
+        "insert_at_line",
+        "search_for_pattern",
+        "execute_shell_command"
+      ],
+      "classification": "dropped"
+    },
+    {
+      "family": "memory, onboarding, configuration, and project management",
+      "tools": [
+        "onboarding",
+        "initial_instructions",
+        "serena_info",
+        "read_memory",
+        "write_memory",
+        "list_memories",
+        "delete_memory",
+        "rename_memory",
+        "edit_memory",
+        "list_queryable_projects",
+        "query_project",
+        "get_current_config",
+        "remove_project",
+        "open_dashboard"
+      ],
+      "classification": "dropped"
+    },
+    {
+      "family": "broad or non-v1 editing",
+      "tools": [
+        "insert_after_symbol",
+        "insert_before_symbol",
+        "rename_symbol",
+        "safe_delete_symbol",
+        "restart_language_server"
+      ],
+      "classification": "dropped"
+    },
+    {
+      "family": "JetBrains",
+      "tools": [
+        "jet_brains_debug",
+        "jet_brains_find_declaration",
+        "jet_brains_find_implementations",
+        "jet_brains_find_referencing_symbols",
+        "jet_brains_find_symbol",
+        "jet_brains_get_symbols_overview",
+        "jet_brains_inline_symbol",
+        "jet_brains_list_inspections",
+        "jet_brains_move",
+        "jet_brains_rename",
+        "jet_brains_run_inspections",
+        "jet_brains_safe_delete",
+        "jet_brains_type_hierarchy"
+      ],
+      "classification": "dropped"
+    }
   ],
-  "acceptance": {"historical_fresh_session_accepted": true, "current_candidate_fresh_session_accepted": true, "canonical_switch_approved": false, "edit_reacceptance_pending": false, "dual_audit_hold": false}
+  "known_limitations": {
+    "rich_error_text_budget": "candidate-bearing semantic error evidence is bounded using the caller's public answer budget, but rich error envelopes remain on FastMCP's ordinary renderer and their client-visible pretty text is not itself hard-capped by max_answer_chars; compact success is hard-capped",
+    "declaration_ambiguity_candidates": "declaration and implementation source-symbol ambiguity candidates are bounded by the symbols in one authorized file but do not yet receive the caller's public answer budget",
+    "external_include_info": "when a read-only external target lacks a response-owned snapshot, requesting body or info fails closed with a typed unsupported result rather than returning unverified detail"
+  },
+  "acceptance": {
+    "historical_fresh_session_accepted": true,
+    "current_candidate_fresh_session_accepted": true,
+    "canonical_switch_approved": false,
+    "edit_reacceptance_pending": false,
+    "dual_audit_hold": false,
+    "compact_success_schema": {
+      "status": "pass",
+      "full_suite_evidence": "complete",
+      "ablation_evidence": "complete",
+      "postrepair_build_identity": "92b2618eb6030d50260b9885a63feb358f94f05823e545e0d5f72f9f3b380242",
+      "postrepair_fresh_clients": "complete",
+      "remaining_gate": null,
+      "final_dual_audit": "pass",
+      "archived_change": "openspec/changes/archive/2026-07-30-compact-success-schema",
+      "release_pass": true
+    }
+  }
 }

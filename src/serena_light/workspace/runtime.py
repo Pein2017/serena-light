@@ -9,6 +9,7 @@ shared object.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import threading
 import time
@@ -24,18 +25,24 @@ from urllib.parse import unquote, urlparse
 
 from serena_light.lsp.adapter import (
     AdapterClient,
+    AdapterLanguageFacts,
     AdapterPhase,
+    AdapterRuntimeProvider,
     AdapterSnapshot,
+    CrashPolicy,
+    DerivedToolAvailability,
     DocumentReadinessProbe,
     DocumentReadinessTarget,
+    DocumentReadinessWitness,
     GlobalReadinessWitness,
     LanguageAdapter,
     PublishedDiagnosticsWitness,
+    RawLspProviders,
 )
 from serena_light.lsp.client import LspProtocolError, LspResponseError, LspTransportClosed
 from serena_light.lsp.executor import BoundedLspExecutor, EditCommit, EditCommitState, ExecutorBusyError
-from serena_light.lsp.normalize import Location, NormalizedSymbol, Position, Range
-from serena_light.lsp.positions import FileSnapshot, LspPosition, PositionError, PositionMapper
+from serena_light.lsp.normalize import Location, NormalizedSymbol, Position, Range, containing_symbol
+from serena_light.lsp.positions import FileSnapshot, LspPosition, PositionEncoding, PositionError
 from serena_light.lsp.pyright import PyrightFacts
 from serena_light.lsp.state import DiagnosticsSnapshot, DiagnosticsState, LspState
 from serena_light.lsp.typescript import (
@@ -45,7 +52,16 @@ from serena_light.lsp.typescript import (
     attribute_native_program,
     select_default_entry,
 )
-from serena_light.tools.declarations import CapabilityMatrix, DeclarationNavigationService, SemanticDocumentInput
+from serena_light.lsp.typescript_assignment_recovery import (
+    assignment_recovery_positions,
+    recover_typescript_top_level_variable_symbols,
+)
+from serena_light.tools.declarations import (
+    CapabilityMatrix,
+    ClassifiedLocationInput,
+    DeclarationNavigationService,
+    SemanticDocumentInput,
+)
 from serena_light.tools.diagnostics import (
     DiagnosticDocumentInput,
     DiagnosticEngineFacts,
@@ -85,12 +101,13 @@ from serena_light.tools.navigation import (
     DocumentNavigation,
     DocumentNavigationService,
     DocumentSymbolInput,
-    source_body,
-    source_range,
 )
 from serena_light.tools.references import (
+    RawReferenceDocumentInput,
+    ReferenceCoverage,
     ReferenceDocumentInput,
     ReferenceNavigationService,
+    ReferenceQueryResult,
     ReferenceRequest,
     ReferenceTarget,
 )
@@ -121,6 +138,27 @@ from serena_light.workspace.scope import (
 type PhysicalWorkspaceKey = tuple[WorkspaceKind, Path]
 type ProgramAttributor = Callable[[Path, tuple[str, ...]], ScopeProjection]
 type ContentIdentity = tuple[int | None, int | None, int | None, int | None, str | None]
+type AdapterResponseIdentity = tuple[
+    int,
+    AdapterPhase,
+    RawLspProviders,
+    DerivedToolAvailability,
+    int,
+    int,
+    int,
+    int,
+    PositionEncoding,
+]
+type AdapterReplayIdentity = tuple[
+    int,
+    AdapterPhase,
+    RawLspProviders,
+    DerivedToolAvailability,
+    int,
+    int,
+    int,
+    PositionEncoding,
+]
 
 _FAMILY_EXTENSIONS: Mapping[LanguageFamily, frozenset[str]] = {
     LanguageFamily.PYTHON: PYTHON_EXTENSIONS,
@@ -150,6 +188,8 @@ _LANGUAGE_IDS: Mapping[str, str] = {
 
 # One freshness pass may not open an unbounded number of newly created files.
 MAX_CONTROLLED_OPENS = 32
+MAX_RESPONSE_OWNED_TARGETS = 64
+REFERENCE_COVERAGE_SAMPLE_LIMIT = 16
 
 
 class RuntimeErrorCode(StrEnum):
@@ -212,6 +252,17 @@ class RuntimeAdapter(Protocol):
 
     def diagnostics_snapshot(self, target: DocumentReadinessTarget) -> DiagnosticsSnapshot: ...
 
+    def open_snapshot_document_with_client(
+        self,
+        client: AdapterClient,
+        *,
+        absolute_path: Path,
+        relative_path: str,
+        uri: str,
+        version: int,
+        text: str,
+    ) -> DocumentReadinessTarget: ...
+
     def open_edit_document_with_client(
         self,
         client: AdapterClient,
@@ -259,8 +310,10 @@ type ExecutorFactory = Callable[[Path], BoundedLspExecutor]
 class _DocumentSymbolCapture:
     """Capture one bounded document-symbol response through the adapter probe seam."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, capture_selection_ranges: bool = False) -> None:
         self.raw_symbols: tuple[Mapping[str, Any], ...] | None = None
+        self.selection_ranges: tuple[Mapping[str, Any], ...] | None = None
+        self._capture_selection_ranges = capture_selection_ranges
 
     def observe(
         self,
@@ -282,11 +335,103 @@ class _DocumentSymbolCapture:
         if not all(isinstance(item, Mapping) for item in result):
             return False
         self.raw_symbols = tuple(cast(Mapping[str, Any], item) for item in result)
+        positions = assignment_recovery_positions(self.raw_symbols) if self._capture_selection_ranges else ()
+        if positions:
+            try:
+                raw_ranges = client.request(
+                    "textDocument/selectionRange",
+                    {
+                        "textDocument": {"uri": target.uri},
+                        "positions": list(positions),
+                    },
+                    timeout=timeout,
+                )
+            except LspResponseError:
+                raw_ranges = None
+            if (
+                isinstance(raw_ranges, Sequence)
+                and not isinstance(raw_ranges, str | bytes)
+                and all(isinstance(item, Mapping) for item in raw_ranges)
+            ):
+                self.selection_ranges = tuple(cast(Mapping[str, Any], item) for item in raw_ranges)
         return True
+
+
+@dataclass(frozen=True, slots=True)
+class _ClassifiedSemanticLocation:
+    """One canonicalized location from a single semantic response."""
+
+    raw: Mapping[str, object]
+    location: Location
+    semantic: SemanticLocation
+    adapter: RuntimeAdapter
+
+
+@dataclass(frozen=True, slots=True)
+class _BoundSemanticTarget:
+    """Exact client-open snapshot retained for the authoritative response."""
+
+    path: Path
+    adapter: RuntimeAdapter
+    snapshot: FileSnapshot
+    position_encoding: PositionEncoding
+    reference_document: ReferenceDocumentInput | None = None
+    symbol_document: DocumentSymbolInput | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _ResponseAdapterState:
+    adapter: RuntimeAdapter
+    identity: AdapterResponseIdentity
+
+
+@dataclass(frozen=True, slots=True)
+class _ResponseOwnedSemanticLocations:
+    """Second semantic response plus the exact snapshots it observed."""
+
+    locations: tuple[_ClassifiedSemanticLocation, ...]
+    targets: tuple[_BoundSemanticTarget, ...]
+    adapter_states: tuple[_ResponseAdapterState, ...]
 
 
 class _WorkspaceLanguageAdapter(LanguageAdapter):
     """Add the workspace-owned atomic snapshot/open/probe seam."""
+
+    def __init__(
+        self,
+        *,
+        workspace_root: Path,
+        facts: AdapterLanguageFacts,
+        runtime_provider: AdapterRuntimeProvider,
+        executor: BoundedLspExecutor,
+        scope_tracker: ScopeGenerationTracker,
+        lsp_state: LspState,
+        document_witness: DocumentReadinessWitness,
+        operation_lock: threading.RLock | threading.Lock,
+        crash_policy: CrashPolicy | None = None,
+        readiness_timeout: float = 30.0,
+        clock: Callable[[], float] = time.monotonic,
+        timestamp: Callable[[], float] = time.time,
+        notification_handler: Callable[[str, Any], None] | None = None,
+        debug_reporter: Callable[[str, str], object] | None = None,
+    ) -> None:
+        super().__init__(
+            workspace_root=workspace_root,
+            facts=facts,
+            runtime_provider=runtime_provider,
+            executor=executor,
+            scope_tracker=scope_tracker,
+            lsp_state=lsp_state,
+            document_witness=document_witness,
+            operation_lock=operation_lock,
+            crash_policy=crash_policy,
+            readiness_timeout=readiness_timeout,
+            clock=clock,
+            timestamp=timestamp,
+            notification_handler=notification_handler,
+            debug_reporter=debug_reporter,
+        )
+        self._diagnostic_snapshots: dict[str, tuple[int, str]] = {}
 
     def snapshot_open_and_probe_document(
         self,
@@ -299,14 +444,16 @@ class _WorkspaceLanguageAdapter(LanguageAdapter):
     ) -> Future[tuple[FileSnapshot, DocumentReadinessTarget]]:
         def worker() -> tuple[FileSnapshot, DocumentReadinessTarget]:
             with self._operation_lock:
+                client = self._ensure_started_worker()
                 snapshot = FileSnapshot.from_bytes(absolute_path.read_bytes())
-                target = self._open_document_worker(
+                target = self._open_document_with_client(
+                    client,
                     relative_path=relative_path,
                     uri=uri,
                     version=version,
                     text=snapshot.text,
                 )
-                observed = self._probe_document_worker(target, probe)
+                observed = self._probe_document_with_client(client, target, probe)
                 return snapshot, observed
 
         return self._executor.submit(worker)
@@ -320,47 +467,69 @@ class _WorkspaceLanguageAdapter(LanguageAdapter):
         version: int,
         probe: DocumentReadinessProbe,
     ) -> Future[tuple[FileSnapshot, DocumentReadinessTarget]]:
-        """Open or change one document while retaining push-diagnostic correlation."""
+        """Bind diagnostics to one unchanged snapshot without synthetic changes."""
 
         def worker() -> tuple[FileSnapshot, DocumentReadinessTarget]:
             with self._operation_lock:
+                client = self._ensure_started_worker()
+                owner_token = self._runtime_token
                 snapshot = FileSnapshot.from_bytes(absolute_path.read_bytes())
+                # A same-process close marker must be causally drained before
+                # this path retains a diagnostics publication owner.  If the
+                # barrier fails, its marker remains for retry and this worker
+                # propagates the failure instead of returning a false CLEAN.
+                self._drain_recorded_unversioned_closes(client)
                 current = self._lsp_state.document(uri)
-                if current is None:
-                    target = self._open_document_worker(
-                        relative_path=relative_path,
-                        uri=uri,
-                        version=version,
-                        text=snapshot.text,
-                    )
-                else:
-                    client = self._ensure_started_worker()
-                    document = self._lsp_state.update_document(uri=uri, path=absolute_path, version=version)
-                    if document is None:
-                        raise ValueError(f"document version {version} is not newer for {uri}")
-                    self._lsp_state.advance_source_generation()
-                    path_generation = self._scope.generations.path_scoped.get(relative_path, 0)
+                cached = self._diagnostic_snapshots.get(uri)
+                if (
+                    current is not None
+                    and current.path == absolute_path
+                    and isinstance(current.version, int)
+                    and uri in self._open_documents
+                    and cached == (owner_token, snapshot.text)
+                ):
+                    # A prior document-symbol load already opened these exact
+                    # bytes.  Do not manufacture a version/generation merely
+                    # to start diagnostics; retain the existing target so a
+                    # delayed publication remains correlated.
+                    self._open_documents.move_to_end(uri)
                     target = DocumentReadinessTarget(
                         uri,
                         relative_path,
                         absolute_path,
-                        version,
-                        document.generation,
-                        path_generation,
+                        current.version,
+                        current.generation,
+                        self._scope.generations.path_scoped.get(relative_path, 0),
                     )
-                    with self._state_lock:
-                        self._pending_documents[uri] = target
-                    client.notify(
-                        "textDocument/didChange",
-                        {
-                            "textDocument": {"uri": uri, "version": version},
-                            "contentChanges": [{"text": snapshot.text}],
-                        },
-                    )
-                observed = self._probe_document_worker(target, probe)
+                    self._retain_diagnostics_target(target)
+                    # Diagnostics-for-symbol still needs the current document
+                    # symbols even though the bytes and generation are reused.
+                    # Re-probe without sending a synthetic didChange; the
+                    # workspace override keeps the diagnostics target eligible
+                    # for a later asynchronous publication.
+                    observed = self._probe_document_with_client(client, target, probe)
+                    return snapshot, observed
+                target = self._open_document_with_client(
+                    client,
+                    relative_path=relative_path,
+                    uri=uri,
+                    version=version,
+                    text=snapshot.text,
+                    retain_diagnostics_target=True,
+                )
+                observed = self._probe_document_with_client(client, target, probe)
                 return snapshot, observed
 
         return self._executor.submit(worker)
+
+    def _on_document_forgotten(self, uri: str) -> None:
+        self._diagnostic_snapshots.pop(uri, None)
+
+    def _on_all_documents_forgotten(self) -> None:
+        self._diagnostic_snapshots.clear()
+
+    def _on_document_text(self, uri: str, text: str) -> None:
+        self._diagnostic_snapshots[uri] = (self._runtime_token, text)
 
     def _mark_document_ready(self, target: DocumentReadinessTarget) -> bool:
         """Keep the current target routable for diagnostics after readiness."""
@@ -385,6 +554,29 @@ class _WorkspaceLanguageAdapter(LanguageAdapter):
 
         return self._lsp_state.diagnostics_snapshot(target.uri, generation=target.document_generation)
 
+    def open_snapshot_document_with_client(
+        self,
+        client: AdapterClient,
+        *,
+        absolute_path: Path,
+        relative_path: str,
+        uri: str,
+        version: int,
+        text: str,
+    ) -> DocumentReadinessTarget:
+        """Open an exact snapshot from an already-owned adapter worker."""
+
+        expected = (self.workspace_root / relative_path).resolve()
+        if absolute_path.resolve() != expected:
+            raise ValueError("snapshot document path does not match its workspace-relative path")
+        return self._open_document_with_client(
+            client,
+            relative_path=relative_path,
+            uri=uri,
+            version=version,
+            text=text,
+        )
+
     def open_edit_document_with_client(
         self,
         client: AdapterClient,
@@ -397,8 +589,14 @@ class _WorkspaceLanguageAdapter(LanguageAdapter):
     ) -> DocumentReadinessTarget:
         """Open the exact pre-install snapshot from an already-owned edit worker."""
 
-        del absolute_path
-        return self._open_document_worker(relative_path=relative_path, uri=uri, version=version, text=text)
+        return self.open_snapshot_document_with_client(
+            client,
+            absolute_path=absolute_path,
+            relative_path=relative_path,
+            uri=uri,
+            version=version,
+            text=text,
+        )
 
     def notify_edit_with_client(
         self,
@@ -411,28 +609,14 @@ class _WorkspaceLanguageAdapter(LanguageAdapter):
         if notification.uri != target.uri or notification.path != target.absolute_path:
             raise ValueError("replacement notification does not match the opened edit document")
         version = target.version + 1
-        client.notify(
-            "textDocument/didChange",
-            {
-                "textDocument": {"uri": target.uri, "version": version},
-                "contentChanges": [{"text": notification.text}],
-            },
+        changed = self._open_document_with_client(
+            client,
+            relative_path=target.relative_path,
+            uri=target.uri,
+            version=version,
+            text=notification.text,
         )
-        document = self._lsp_state.update_document(uri=target.uri, path=target.absolute_path, version=version)
-        if document is None:
-            raise ValueError("replacement document version is not newer")
-        self._lsp_state.advance_source_generation()
-        changed = DocumentReadinessTarget(
-            target.uri,
-            target.relative_path,
-            target.absolute_path,
-            version,
-            document.generation,
-            target.path_generation,
-        )
-        with self._state_lock:
-            self._pending_documents[target.uri] = changed
-        return NotificationResult("notified", document.generation, _path_generations(self.snapshot()))
+        return NotificationResult("notified", changed.document_generation, _path_generations(self.snapshot()))
 
 
 @dataclass(frozen=True, slots=True)
@@ -616,9 +800,7 @@ class FreshnessCoordinator:
     def _capture_baseline(self, inventory: TrustInventory) -> None:
         """Record the stat facts a later scan compares against."""
 
-        self._states = {
-            state.path: state.content_identity for state in inventory.targeted_states(inventory.paths)
-        }
+        self._states = {state.path: state.content_identity for state in inventory.targeted_states(inventory.paths)}
         self._config_states = self._observe_configs(inventory)
 
     def _observe_configs(self, inventory: TrustInventory) -> dict[str, ContentIdentity]:
@@ -644,12 +826,7 @@ class FreshnessCoordinator:
         unsafe_sources = tuple(sorted(state.path for state in observed_states if not state.trusted))
         config_states = self._config_states_for(rebuilt)
         unsafe_configs = tuple(
-            sorted(
-                state.path
-                for state in config_states
-                if state.reason is not None
-                and state.reason != "missing"
-            )
+            sorted(state.path for state in config_states if state.reason is not None and state.reason != "missing")
         )
         unsafe = tuple(sorted({*unsafe_sources, *unsafe_configs}))
         if unsafe:
@@ -660,13 +837,9 @@ class FreshnessCoordinator:
             )
         states = {state.path: state for state in observed_states}
         changed = tuple(
-            path
-            for path in sorted(after & before)
-            if self._states.get(path) != states[path].content_identity
+            path for path in sorted(after & before) if self._states.get(path) != states[path].content_identity
         )
-        symlinked = tuple(
-            sorted(item.path for item in rebuilt.rejected if item.reason.startswith("symlink"))
-        )
+        symlinked = tuple(sorted(item.path for item in rebuilt.rejected if item.reason.startswith("symlink")))
         configs = {state.path: state.content_identity for state in config_states}
         config_changed = tuple(
             sorted(name for name, value in configs.items() if self._config_states.get(name) != value)
@@ -679,9 +852,7 @@ class FreshnessCoordinator:
         # failures are installed as unavailable state without blocking healthy
         # families or reverting the rebuilt lexical inventory.
         affected = _affected_families((*created, *deleted, *symlinked), config_changed)
-        projections = (
-            runtime.build_projections(rebuilt, affected) if membership_changed or config_changed else {}
-        )
+        projections = runtime.build_projections(rebuilt, affected) if membership_changed or config_changed else {}
         with self._lock:
             self._states = {path: state.content_identity for path, state in states.items()}
             self._config_states = configs
@@ -1518,7 +1689,7 @@ class WorkspaceRuntime:
             relative_path,
             lambda: DocumentNavigationService(self).get_symbols_overview(
                 relative_path, max_depth=max_depth, max_answer_chars=max_answer_chars
-            )
+            ),
         )
 
     def find_symbol(
@@ -1531,6 +1702,7 @@ class WorkspaceRuntime:
         include_info: bool = False,
         max_answer_chars: int = 12_000,
         max_candidates_per_adapter: int = 128,
+        _error_max_answer_chars: int | None = None,
     ) -> ToolEnvelope:
         """Find a symbol in one selected file, or via bounded configured-program search."""
 
@@ -1553,9 +1725,7 @@ class WorkspaceRuntime:
                         self._route(normalized_scope)
                         raise AssertionError("workspace policy accepted an invalid directory scope") from None
                     if selected:
-                        available = tuple(
-                            path for path in selected if _family_of(path) in self._adapters
-                        )
+                        available = tuple(path for path in selected if _family_of(path) in self._adapters)
                         if not available:
                             raise WorkspaceRuntimeError(
                                 RuntimeErrorCode.SCOPE_INCOMPATIBLE,
@@ -1588,14 +1758,13 @@ class WorkspaceRuntime:
                     include_body=include_body,
                     include_info=include_info,
                     max_answer_chars=max_answer_chars,
+                    _error_max_answer_chars=_error_max_answer_chars,
                 )
             if not self._adapters and self._family_errors:
                 raise WorkspaceRuntimeError(
                     RuntimeErrorCode.SCOPE_INCOMPATIBLE,
                     "all attributed language families are unavailable",
-                    paths=tuple(
-                        sorted({path for failure in self._family_errors.values() for path in failure.paths})
-                    ),
+                    paths=tuple(sorted({path for failure in self._family_errors.values() for path in failure.paths})),
                 )
             warmed = self._warm_global_candidates(name_path)
             return GlobalSymbolService(
@@ -1611,9 +1780,7 @@ class WorkspaceRuntime:
 
         return self._tool_envelope(operation)
 
-    def _warm_global_candidates(
-        self, name_path: str | Sequence[str]
-    ) -> Mapping[LanguageFamily, _WarmGlobalSeed]:
+    def _warm_global_candidates(self, name_path: str | Sequence[str]) -> Mapping[LanguageFamily, _WarmGlobalSeed]:
         """Warm fixed adapters from one controlled witness within one shared budget.
 
         A newly started language server may answer ``workspace/symbol`` before
@@ -1704,15 +1871,16 @@ class WorkspaceRuntime:
         include_body: bool = False,
         include_info: bool = False,
     ) -> ToolEnvelope:
+        response_owner = _ResponseOwnedDeclarationProvider(self)
         return self._semantic_envelope(
             relative_path,
-            lambda: DeclarationNavigationService(self).find_declaration(
+            lambda: DeclarationNavigationService(response_owner).find_declaration(
                 relative_path,
                 regex,
                 containing_symbol_name_path=containing_symbol_name_path,
                 include_body=include_body,
                 include_info=include_info,
-            )
+            ),
         )
 
     def find_implementations(
@@ -1724,16 +1892,17 @@ class WorkspaceRuntime:
         exclude_kinds: Sequence[int] | None = None,
         max_answer_chars: int = 12_000,
     ) -> ToolEnvelope:
+        response_owner = _ResponseOwnedDeclarationProvider(self)
         return self._semantic_envelope(
             relative_path,
-            lambda: DeclarationNavigationService(self).find_implementations(
+            lambda: DeclarationNavigationService(response_owner).find_implementations(
                 name_path,
                 relative_path,
                 include_info=include_info,
                 include_kinds=include_kinds,
                 exclude_kinds=exclude_kinds,
                 max_answer_chars=max_answer_chars,
-            )
+            ),
         )
 
     def find_referencing_symbols(
@@ -1761,7 +1930,8 @@ class WorkspaceRuntime:
                 document.adapter,
                 document.generations,
             )
-            return ReferenceNavigationService(self, self, self).find_referencing_symbols(
+            response_owner = _ResponseOwnedReferenceProvider(self, loaded.document)
+            return ReferenceNavigationService(response_owner, response_owner, response_owner).find_referencing_symbols(
                 request, max_snippet_chars=max_snippet_chars, max_answer_chars=max_answer_chars
             )
 
@@ -1782,7 +1952,7 @@ class WorkspaceRuntime:
                 timeout_seconds=timeout_seconds,
                 maximum_severity=maximum_severity,
                 max_answer_chars=max_answer_chars,
-            )
+            ),
         )
 
     def get_diagnostics_for_symbol(
@@ -1802,7 +1972,7 @@ class WorkspaceRuntime:
                 timeout_seconds=timeout_seconds,
                 maximum_severity=maximum_severity,
                 max_answer_chars=max_answer_chars,
-            )
+            ),
         )
 
     def replace_symbol_body(
@@ -1870,9 +2040,7 @@ class WorkspaceRuntime:
             raise WorkspaceRuntimeError(
                 RuntimeErrorCode.UNSUPPORTED, "edit path has no unique adapter", paths=(normalized,)
             )
-        return routed[0], AuthorizedEdit(
-            authorized, normalized, _workspace_metadata(self.identity), self.identity.root
-        )
+        return routed[0], AuthorizedEdit(authorized, normalized, _workspace_metadata(self.identity), self.identity.root)
 
     def authorize_edit(self, relative_path: str) -> Path:
         """Check lexical membership and every guarded path component once."""
@@ -1918,9 +2086,7 @@ class WorkspaceRuntime:
         except (OSError, TypeError, ValueError):
             return error(ErrorCode.INVALID_INPUT)
 
-    def _semantic_envelope(
-        self, relative_path: str, operation: Callable[[], ToolEnvelope]
-    ) -> ToolEnvelope:
+    def _semantic_envelope(self, relative_path: str, operation: Callable[[], ToolEnvelope]) -> ToolEnvelope:
         def authorized() -> ToolEnvelope:
             self._route(relative_path)
             return operation()
@@ -1936,7 +2102,31 @@ class WorkspaceRuntime:
         return SemanticDocumentInput(document, CapabilityMatrix.from_raw(adapter.snapshot().raw_providers))
 
     def request_locations(
-        self, method: str, *, document_uri: str, position: LspPosition
+        self,
+        method: str,
+        *,
+        document_uri: str,
+        position: LspPosition,
+        capture_target_symbols: bool = False,
+    ) -> object:
+        return self._request_locations(
+            method,
+            document_uri=document_uri,
+            position=position,
+            source_document=None,
+            source_identity=None,
+            capture_target_symbols=capture_target_symbols,
+        )
+
+    def _request_locations(
+        self,
+        method: str,
+        *,
+        document_uri: str,
+        position: LspPosition,
+        source_document: DocumentSymbolInput | None,
+        source_identity: AdapterResponseIdentity | None,
+        capture_target_symbols: bool = False,
     ) -> object:
         adapter = self._adapter_for_workspace_uri(document_uri)
         if method not in {
@@ -1951,9 +2141,15 @@ class WorkspaceRuntime:
         }
         if method == "textDocument/references":
             params["context"] = {"includeDeclaration": True}
-        return adapter.submit_read(
-            lambda client: client.request(method, params, timeout=self._future_timeout)
-        ).result(timeout=self._future_timeout)
+        return self._stabilize_semantic_locations(
+            adapter,
+            method,
+            params,
+            capture_reference_documents=False,
+            capture_target_symbols=capture_target_symbols,
+            source_document=source_document,
+            source_identity=source_identity,
+        )
 
     def normalize_and_classify_locations(
         self,
@@ -1961,56 +2157,436 @@ class WorkspaceRuntime:
         *,
         include_body: bool,
         include_info: bool,
-    ) -> Sequence[Mapping[str, object]] | ErrorEnvelope:
-        """Classify and render locations against each target's immutable snapshot."""
+    ) -> Sequence[ClassifiedLocationInput] | ErrorEnvelope:
+        """Render only the snapshots owned by the authoritative second response."""
+
+        del include_body
+        if isinstance(raw_locations, ErrorEnvelope):
+            return raw_locations
+        if not isinstance(raw_locations, _ResponseOwnedSemanticLocations):
+            return error(ErrorCode.INVALID_INPUT, details={"field": "semantic_locations"})
+        if not self._response_adapter_states_are_current(raw_locations.adapter_states):
+            return _semantic_locations_not_ready("semantic target generation changed")
+        targets = {target.path: target for target in raw_locations.targets}
+        classified: list[ClassifiedLocationInput] = []
+        for item in raw_locations.locations:
+            location = item.location
+            semantic = item.semantic
+            metadata: dict[str, object] = {
+                "absolute_path": str(semantic.path),
+                "location_kind": semantic.kind.value,
+            }
+            if semantic.kind is LocationKind.WORKSPACE:
+                metadata["relative_path"] = str(semantic.path.relative_to(self.identity.root))
+            else:
+                metadata["read_only_external"] = True
+            if semantic.kind is LocationKind.READ_ONLY_EXTERNAL:
+                classified.append(
+                    ClassifiedLocationInput.raw_lsp(
+                        metadata,
+                        location.range,
+                        item.adapter.snapshot().position_encoding,
+                    )
+                )
+                continue
+            target = targets.get(semantic.path)
+            if target is None or target.adapter is not item.adapter:
+                return _semantic_locations_not_ready(
+                    "verified target snapshot unavailable",
+                    paths=(str(semantic.path),),
+                )
+            semantic_info: dict[str, object] | None = None
+            symbol = _response_owned_target_symbol(target, location)
+            if symbol is not None:
+                metadata["kind"] = symbol.kind
+                if include_info:
+                    metadata["name_path"] = "/".join(symbol.name_path)
+                    if symbol.detail:
+                        semantic_info = {"detail": symbol.detail}
+            classified.append(
+                ClassifiedLocationInput.verified(
+                    metadata,
+                    location.range,
+                    target.snapshot,
+                    target.position_encoding,
+                    semantic_info=semantic_info,
+                )
+            )
+        if not self._response_adapter_states_are_current(raw_locations.adapter_states):
+            return _semantic_locations_not_ready("semantic target generation changed")
+        return classified
+
+    def _stabilize_semantic_locations(
+        self,
+        source_adapter: RuntimeAdapter,
+        method: str,
+        params: Mapping[str, object],
+        *,
+        capture_reference_documents: bool,
+        capture_target_symbols: bool = False,
+        source_document: DocumentSymbolInput | None = None,
+        source_identity: AdapterResponseIdentity | None = None,
+        location_filter: Callable[[_ClassifiedSemanticLocation], bool] | None = None,
+    ) -> _ResponseOwnedSemanticLocations | ErrorEnvelope:
+        """Issue exactly two semantic requests in one adapter-owned transaction."""
+
+        deadline = time.monotonic() + self._future_timeout
+        expected_identity = source_identity or _adapter_response_identity(source_adapter.snapshot())
+        expected_replay_identity = _adapter_replay_identity_from_response(expected_identity)
+
+        if source_document is not None and (
+            not _semantic_document_is_current(source_adapter, source_document)
+            or _adapter_response_identity(source_adapter.snapshot()) != expected_identity
+        ):
+            return _semantic_locations_not_ready("semantic source adapter identity changed")
+
+        def transaction(client: AdapterClient) -> _ResponseOwnedSemanticLocations | ErrorEnvelope:
+            if _adapter_response_identity(source_adapter.snapshot()) != expected_identity:
+                return _semantic_locations_not_ready("semantic source adapter identity changed")
+            if source_document is not None and not _semantic_document_is_current(source_adapter, source_document):
+                return _semantic_locations_not_ready("semantic source adapter identity changed")
+            first_raw = client.request(method, params, timeout=_remaining_semantic_timeout(deadline))
+            if _adapter_response_identity(source_adapter.snapshot()) != expected_identity:
+                return _semantic_locations_not_ready("semantic source adapter identity changed")
+            first = self._classify_semantic_response(first_raw)
+            if isinstance(first, ErrorEnvelope):
+                return first
+            if location_filter is not None:
+                first = tuple(item for item in first if location_filter(item))
+            if any(item.adapter is not source_adapter for item in first):
+                return _semantic_locations_not_ready("semantic target crossed adapter family")
+            bound = self._bind_semantic_targets_with_client(
+                source_adapter,
+                client,
+                first,
+                capture_reference_documents=capture_reference_documents,
+                capture_target_symbols=capture_target_symbols,
+                source_document=source_document,
+                deadline=deadline,
+            )
+            if isinstance(bound, ErrorEnvelope):
+                return bound
+            # Opening response-owned targets intentionally advances the adapter's
+            # document generation.  Every other process, capability, phase,
+            # configured-program, index, and encoding fact must still match the
+            # source owner captured before dispatch.
+            if _adapter_replay_identity(source_adapter.snapshot()) != expected_replay_identity:
+                return _semantic_locations_not_ready("semantic source adapter identity changed")
+            states = (_response_adapter_state(source_adapter),)
+            if not self._response_adapter_states_are_current(states):
+                return _semantic_locations_not_ready("semantic target generation changed")
+            second_raw = client.request(method, params, timeout=_remaining_semantic_timeout(deadline))
+            if not self._response_adapter_states_are_current(states):
+                return _semantic_locations_not_ready("semantic target generation changed")
+            second = self._classify_semantic_response(second_raw)
+            if isinstance(second, ErrorEnvelope):
+                return second
+            if location_filter is not None:
+                second = tuple(item for item in second if location_filter(item))
+            if any(item.adapter is not source_adapter for item in second):
+                return _semantic_locations_not_ready("semantic target crossed adapter family")
+            if _canonical_semantic_locations(first) != _canonical_semantic_locations(second):
+                return _semantic_locations_not_ready("semantic target locations changed")
+            if not self._response_adapter_states_are_current(states):
+                return _semantic_locations_not_ready("semantic target generation changed")
+            return _ResponseOwnedSemanticLocations(second, bound, states)
+
+        return source_adapter.submit_read(transaction).result(timeout=self._future_timeout)
+
+    def _classify_semantic_response(
+        self,
+        raw_locations: object,
+    ) -> tuple[_ClassifiedSemanticLocation, ...] | ErrorEnvelope:
         locations = _raw_location_mappings(raw_locations)
         if locations is None:
             return error(ErrorCode.INVALID_INPUT, details={"field": "semantic_locations"})
-        rendered: list[Mapping[str, object]] = []
-        for raw in locations:
-            try:
+        classified: list[_ClassifiedSemanticLocation] = []
+        try:
+            with self._state_lock:
+                adapters = tuple(self._adapters.values())
+            for raw in locations:
                 location = _location_from_raw(raw)
                 semantic = self._classify_semantic_location(location.uri)
-                target_adapter = _unique_routing_adapter(tuple(self._adapters.values()), semantic.path)
-                mapper = PositionMapper(
-                    FileSnapshot.from_bytes(semantic.path.read_bytes()), target_adapter.snapshot().position_encoding
-                )
-                rendered_range = source_range(mapper, location.range)
-                rendered_body = source_body(mapper, location.range) if include_body else None
-            except (OSError, PositionError, TypeError, ValueError):
-                return error(ErrorCode.UNTRUSTED_ROOT, details={"field": "semantic_location"})
-            data: dict[str, object] = {
-                "absolute_path": str(semantic.path),
-                "location_kind": semantic.kind.value,
-                "range": rendered_range,
-            }
-            if semantic.kind is LocationKind.WORKSPACE:
-                data["relative_path"] = str(semantic.path.relative_to(self.identity.root))
-            else:
-                data["read_only_external"] = True
-            raw_kind = raw.get("kind")
-            if isinstance(raw_kind, int) and not isinstance(raw_kind, bool):
-                data["kind"] = raw_kind
-            if include_body:
-                data["body"] = rendered_body
-            if include_info:
-                data["info"] = {"selection_range": rendered_range}
-            rendered.append(data)
-        return rendered
+                target_adapter = _unique_routing_adapter(adapters, semantic.path)
+                classified.append(_ClassifiedSemanticLocation(raw, location, semantic, target_adapter))
+        except (OSError, PositionError, TypeError, ValueError):
+            return error(ErrorCode.UNTRUSTED_ROOT, details={"field": "semantic_location"})
+        return tuple(classified)
 
-    def find_references(self, request: ReferenceRequest) -> Sequence[Location] | ErrorEnvelope:
-        try:
-            raw = self.request_locations(
-                "textDocument/references",
-                document_uri=(self.identity.root / request.relative_path).resolve(strict=True).as_uri(),
-                position=LspPosition(request.position.line, request.position.character),
+    def _bind_semantic_targets_with_client(
+        self,
+        adapter: RuntimeAdapter,
+        client: AdapterClient,
+        locations: Sequence[_ClassifiedSemanticLocation],
+        *,
+        capture_reference_documents: bool,
+        capture_target_symbols: bool,
+        source_document: DocumentSymbolInput | None,
+        deadline: float,
+    ) -> tuple[_BoundSemanticTarget, ...] | ErrorEnvelope:
+        unique: dict[Path, _ClassifiedSemanticLocation] = {}
+        for location in locations:
+            prior = unique.setdefault(location.semantic.path, location)
+            if prior.adapter is not location.adapter or prior.semantic.kind is not location.semantic.kind:
+                return error(ErrorCode.UNTRUSTED_ROOT, details={"field": "semantic_location"})
+        # Bound the complete canonical target set before separating workspace
+        # from external paths or reading/opening any target snapshot.  External
+        # targets consume the same response-owned evidence budget even though
+        # they are never materialized for workspace rendering.
+        if len(unique) > MAX_RESPONSE_OWNED_TARGETS:
+            ordered_paths = tuple(sorted(str(path) for path in unique))
+            return error(
+                ErrorCode.UNSUPPORTED,
+                details={
+                    "reason": "semantic target set exceeds snapshot bound",
+                    "paths": ordered_paths[:MAX_RESPONSE_OWNED_TARGETS],
+                    "total": len(ordered_paths),
+                    "omitted": len(ordered_paths) - MAX_RESPONSE_OWNED_TARGETS,
+                },
             )
-            locations = _raw_location_mappings(raw)
-            if locations is None:
-                raise ValueError("references are not locations")
-            normalized = tuple(_location_from_raw(item) for item in locations)
-            return normalized
-        except (OSError, TypeError, ValueError, WorkspaceRuntimeError):
+        bound: list[_BoundSemanticTarget] = []
+        source_path = _file_uri_path(source_document.uri) if source_document is not None else None
+        try:
+            for path, item in sorted(unique.items(), key=lambda pair: str(pair[0])):
+                if item.semantic.kind is LocationKind.READ_ONLY_EXTERNAL:
+                    continue
+                _remaining_semantic_timeout(deadline)
+                relative_path = str(path.relative_to(self.identity.root))
+                if source_document is not None and path == source_path:
+                    snapshot = source_document.snapshot
+                    position_encoding = source_document.position_encoding
+                    raw_symbols = source_document.raw_symbols
+                    target = None
+                else:
+                    snapshot = FileSnapshot.from_bytes(path.read_bytes())
+                    with self._state_lock:
+                        version = self._versions.get(relative_path, 0) + 1
+                        self._versions[relative_path] = version
+                    target = adapter.open_snapshot_document_with_client(
+                        client,
+                        absolute_path=path,
+                        relative_path=relative_path,
+                        uri=path.as_uri(),
+                        version=version,
+                        text=snapshot.text,
+                    )
+                    position_encoding = adapter.snapshot().position_encoding
+                    raw_symbols = None
+                reference_document = None
+                symbol_document = None
+                if capture_reference_documents or capture_target_symbols:
+                    family = _family_of(relative_path)
+                    if family is None:
+                        raise ValueError("semantic target has no language family")
+                    if target is not None:
+                        capture = _DocumentSymbolCapture(capture_selection_ranges=family is LanguageFamily.TYPESCRIPT)
+                        if not capture.observe(client, target, timeout=_remaining_semantic_timeout(deadline)):
+                            return error(ErrorCode.INVALID_INPUT, details={"field": "semantic_target_symbols"})
+                        raw_symbols = capture.raw_symbols
+                        if family is LanguageFamily.PYTHON:
+                            recovered = PyrightFacts.locked().recover_assignment_document_symbols(
+                                raw_symbols,
+                                snapshot=snapshot,
+                                position_encoding=position_encoding,
+                            )
+                            raw_symbols = recovered.raw_symbols
+                        else:
+                            recovered = recover_typescript_top_level_variable_symbols(
+                                raw_symbols,
+                                selection_ranges=capture.selection_ranges,
+                                snapshot=snapshot,
+                                position_encoding=position_encoding,
+                            )
+                            raw_symbols = recovered.raw_symbols
+                    if capture_reference_documents:
+                        reference_document = ReferenceDocumentInput(
+                            path.as_uri(),
+                            snapshot,
+                            raw_symbols,
+                            position_encoding,
+                        )
+                    if capture_target_symbols:
+                        symbol_document = DocumentSymbolInput(
+                            relative_path,
+                            path.as_uri(),
+                            snapshot,
+                            raw_symbols,
+                            position_encoding,
+                        )
+                bound.append(
+                    _BoundSemanticTarget(
+                        path,
+                        item.adapter,
+                        snapshot,
+                        position_encoding,
+                        reference_document,
+                        symbol_document,
+                    )
+                )
+        except TimeoutError:
+            return error(
+                ErrorCode.TIMED_OUT,
+                retry=RetryMetadata(True),
+                details={"field": "semantic_location"},
+            )
+        except WorkspaceRuntimeError as caught:
+            return _runtime_error_envelope(caught, field="semantic_location")
+        except (OSError, PositionError, TypeError, ValueError):
+            return _semantic_locations_not_ready("verified target snapshot unavailable")
+        return tuple(bound)
+
+    def _response_adapter_states_are_current(self, states: Sequence[_ResponseAdapterState]) -> bool:
+        with self._state_lock:
+            active = tuple(self._adapters.values())
+        return all(
+            any(adapter is state.adapter for adapter in active)
+            and _adapter_response_identity(state.adapter.snapshot()) == state.identity
+            for state in states
+        )
+
+    def find_references(self, request: ReferenceRequest) -> ReferenceQueryResult | ErrorEnvelope:
+        """Compatibility seam for callers that do not render reference content."""
+
+        owned = self._find_response_owned_references(request)
+        return owned if isinstance(owned, ErrorEnvelope) else owned[0]
+
+    def _find_response_owned_references(
+        self,
+        request: ReferenceRequest,
+        source_document: DocumentSymbolInput | None = None,
+        source_identity: AdapterResponseIdentity | None = None,
+    ) -> tuple[ReferenceQueryResult, _ResponseOwnedSemanticLocations] | ErrorEnvelope:
+        """Dispatch references and retain the exact target documents for rendering."""
+
+        try:
+            family, adapter = self._route(request.relative_path)
+            snapshot = adapter.snapshot()
+            if not snapshot.derived_tools.find_referencing_symbols:
+                return error(
+                    ErrorCode.UNSUPPORTED,
+                    details={"operation": "find_referencing_symbols"},
+                    workspace=request.workspace,
+                    adapter=request.adapter,
+                    generations=request.generations,
+                )
+            if snapshot.phase is AdapterPhase.COOLDOWN:
+                return error(
+                    ErrorCode.COOLDOWN,
+                    retry=RetryMetadata(True, retry_after_seconds=snapshot.crash.cooldown_remaining_seconds),
+                    workspace=request.workspace,
+                    adapter=request.adapter,
+                    generations=request.generations,
+                )
+            if snapshot.phase in {
+                AdapterPhase.COLD,
+                AdapterPhase.STARTING,
+                AdapterPhase.GLOBAL_WARMING,
+                AdapterPhase.DEGRADED,
+                AdapterPhase.STOPPING,
+            }:
+                return error(
+                    ErrorCode.NOT_READY,
+                    retry=RetryMetadata(True, retry_after_seconds=0.1),
+                    workspace=request.workspace,
+                    adapter=request.adapter,
+                    generations=request.generations,
+                )
+            if request.adapter != _adapter_metadata(family) or (
+                request.generations is None
+                or request.generations.trust != snapshot.generations.trust
+                or request.generations.program != snapshot.generations.program
+            ):
+                return error(
+                    ErrorCode.NOT_READY,
+                    retry=RetryMetadata(True, retry_after_seconds=0.1),
+                    details={"reason": "reference dispatch generation changed"},
+                    workspace=request.workspace,
+                    adapter=request.adapter,
+                    generations=request.generations,
+                )
+            with self._state_lock:
+                projection = self._projections.get(family)
+                active = self._adapters.get(family)
+            if projection is None or active is not adapter:
+                return error(
+                    ErrorCode.NOT_READY,
+                    retry=RetryMetadata(True, retry_after_seconds=0.1),
+                    details={"reason": "reference adapter changed before dispatch"},
+                    workspace=request.workspace,
+                    adapter=request.adapter,
+                    generations=request.generations,
+                )
+            if not projection.compatible:
+                return error(
+                    ErrorCode.SCOPE_INCOMPATIBLE,
+                    details={"paths": tuple(item.path for item in projection.configured_program_outside_trust)},
+                    workspace=request.workspace,
+                    adapter=request.adapter,
+                    generations=request.generations,
+                )
+            coverage = _reference_coverage(family, projection)
+            response = self._stabilize_semantic_locations(
+                adapter,
+                "textDocument/references",
+                {
+                    "textDocument": {
+                        "uri": (self.identity.root / request.relative_path).resolve(strict=True).as_uri()
+                    },
+                    "position": {"line": request.position.line, "character": request.position.character},
+                    "context": {"includeDeclaration": True},
+                },
+                capture_reference_documents=True,
+                source_document=source_document,
+                source_identity=source_identity,
+                location_filter=lambda item: _reference_location_is_in_configured_program(
+                    item,
+                    self.identity.root,
+                    projection.configured_program.paths,
+                ),
+            )
+            if isinstance(response, ErrorEnvelope):
+                return _with_reference_context(response, request)
+            with self._state_lock:
+                current_projection = self._projections.get(family)
+                current_adapter = self._adapters.get(family)
+            if (
+                current_adapter is not adapter
+                or current_projection is not projection
+                or not self._response_adapter_states_are_current(response.adapter_states)
+            ):
+                return error(
+                    ErrorCode.NOT_READY,
+                    retry=RetryMetadata(True, retry_after_seconds=0.1),
+                    details={"reason": "reference configured-program generation changed"},
+                    workspace=request.workspace,
+                    adapter=request.adapter,
+                    generations=request.generations,
+                )
+            return ReferenceQueryResult(tuple(item.location for item in response.locations), coverage), response
+        except TimeoutError:
+            return error(
+                ErrorCode.TIMED_OUT,
+                retry=RetryMetadata(True),
+                workspace=request.workspace,
+                adapter=request.adapter,
+                generations=request.generations,
+            )
+        except WorkspaceRuntimeError as caught:
+            try:
+                code = ErrorCode(caught.code)
+            except ValueError:
+                code = ErrorCode.UNSUPPORTED
+            return error(
+                code,
+                retry=(
+                    RetryMetadata(True) if code in {ErrorCode.NOT_READY, ErrorCode.BUSY, ErrorCode.TIMED_OUT} else None
+                ),
+                details={"paths": caught.paths} if caught.paths else {},
+                workspace=request.workspace,
+                adapter=request.adapter,
+                generations=request.generations,
+            )
+        except (OSError, TypeError, ValueError):
             return error(ErrorCode.INVALID_INPUT, details={"field": "references"})
 
     def classify_reference_location(self, location: Location) -> ReferenceTarget | ErrorEnvelope:
@@ -2028,32 +2604,23 @@ class WorkspaceRuntime:
         )
 
     def load_reference_document(self, target: ReferenceTarget) -> ReferenceDocumentInput | ErrorEnvelope:
-        try:
-            if target.read_only_external:
-                path = Path(target.key).resolve(strict=True)
-                semantic = self._classify_semantic_location(path.as_uri())
-                routed = tuple(adapter for adapter in self._adapters.values() if adapter.routes(path))
-                if semantic.kind is not LocationKind.READ_ONLY_EXTERNAL or len(routed) != 1:
-                    raise ValueError("external reference is not safely routable")
-                return ReferenceDocumentInput(
-                    path.as_uri(),
-                    FileSnapshot.from_bytes(path.read_bytes()),
-                    None,
-                    routed[0].snapshot().position_encoding,
-                )
-            relative_path = str(Path(target.key).relative_to(self.identity.root))
-            document, _target, _family, _adapter = self._load_document(relative_path)
-            return ReferenceDocumentInput(
-                document.uri,
-                document.snapshot,
-                document.raw_symbols,
-                document.position_encoding,
-            )
-        except (OSError, TypeError, ValueError, WorkspaceRuntimeError):
-            return error(ErrorCode.INVALID_PATH, details={"path": target.display_path})
+        return _semantic_locations_not_ready(
+            "response-owned reference snapshot required",
+            paths=(target.display_path,),
+        )
 
     def load_diagnostics(self, relative_path: str, *, timeout_seconds: float) -> DiagnosticDocumentInput:
-        document, target, family, adapter = self._load_document(relative_path, for_diagnostics=True)
+        try:
+            document, target, family, adapter = self._load_document(relative_path, for_diagnostics=True)
+        except LspResponseError as error:
+            # In particular, an unversioned close-drain barrier may reject its
+            # no-op request.  The recorded marker remains for a same-process
+            # retry; expose that state as a retryable semantic readiness error
+            # instead of allowing callers to mistake it for a clean result.
+            raise WorkspaceRuntimeError(
+                RuntimeErrorCode.NOT_READY,
+                "diagnostics admission response was not ready for retry",
+            ) from error
         initial = adapter.snapshot()
         if initial.phase.value in {"cold", "starting", "cooldown", "degraded"}:
             return DiagnosticDocumentInput(
@@ -2068,6 +2635,17 @@ class WorkspaceRuntime:
         publication = adapter.diagnostics_snapshot(target)
         while publication.state in {DiagnosticsState.MISSING, DiagnosticsState.STALE} and time.monotonic() < deadline:
             time.sleep(min(0.01, max(0.0, deadline - time.monotonic())))
+            publication = adapter.diagnostics_snapshot(target)
+        cancel = getattr(adapter, "cancel_diagnostics_target", None)
+        if callable(cancel):
+            # Stop this synchronous waiter without discarding the current
+            # document's publication owner.  A late matching push remains
+            # eligible for caching and can satisfy a retry.
+            cancel(target)
+            # If publication won between the loop's last sample and
+            # cancellation, its handler removed the owner first.  Re-sample
+            # after cancellation so that accepted result is not reported as a
+            # retryable false timeout.
             publication = adapter.diagnostics_snapshot(target)
         waited = max(0.0, timeout_seconds - max(0.0, deadline - time.monotonic()))
         readiness = (
@@ -2099,9 +2677,12 @@ class WorkspaceRuntime:
         absolute = (self.identity.root / normalized).resolve(strict=True)
         with self._state_lock:
             version = self._versions.get(normalized, 0) + 1
+            # Reserve a unique version before dispatch so a concurrent normal
+            # document load cannot reuse the candidate.  A diagnostics reuse
+            # rolls this reservation back below when no document changed.
             self._versions[normalized] = version
         uri = absolute.as_uri()
-        capture = _DocumentSymbolCapture()
+        capture = _DocumentSymbolCapture(capture_selection_ranges=family is LanguageFamily.TYPESCRIPT)
         loader = (
             getattr(adapter, "snapshot_open_and_probe_diagnostics", adapter.snapshot_open_and_probe_document)
             if for_diagnostics
@@ -2114,13 +2695,36 @@ class WorkspaceRuntime:
             version=version,
             probe=capture,
         ).result(timeout=self._future_timeout if timeout is None else timeout)
+        if for_diagnostics:
+            with self._state_lock:
+                if self._versions.get(normalized) == version and target.version != version:
+                    self._versions[normalized] = target.version
         adapter_status = adapter.snapshot()
         generations = adapter_status.generations
+        raw_symbols = capture.raw_symbols
+        body_completeness = None
+        if family is LanguageFamily.PYTHON:
+            recovered = PyrightFacts.locked().recover_assignment_document_symbols(
+                raw_symbols,
+                snapshot=snapshot,
+                position_encoding=adapter_status.position_encoding,
+            )
+            raw_symbols = recovered.raw_symbols
+            body_completeness = recovered.body_incomplete_reason
+        elif family is LanguageFamily.TYPESCRIPT:
+            recovered = recover_typescript_top_level_variable_symbols(
+                raw_symbols,
+                selection_ranges=capture.selection_ranges,
+                snapshot=snapshot,
+                position_encoding=adapter_status.position_encoding,
+            )
+            raw_symbols = recovered.raw_symbols
+            body_completeness = recovered.body_incomplete_reason
         document = DocumentSymbolInput(
             relative_path=normalized,
             uri=uri,
             snapshot=snapshot,
-            raw_symbols=capture.raw_symbols,
+            raw_symbols=raw_symbols,
             position_encoding=adapter_status.position_encoding,
             workspace=WorkspaceMetadata(
                 root=str(self.identity.root),
@@ -2138,6 +2742,7 @@ class WorkspaceRuntime:
                 index=generations.index,
                 scope="path",
             ),
+            body_completeness=body_completeness,
         )
         return document, target, family, adapter
 
@@ -2274,6 +2879,118 @@ class WorkspaceRuntime:
                 raise WorkspaceRuntimeError(RuntimeErrorCode.STOPPED, "workspace runtime is stopped")
 
 
+class _ResponseOwnedDeclarationProvider:
+    """Call-local bridge that retains the exact semantic source snapshot."""
+
+    def __init__(self, runtime: WorkspaceRuntime) -> None:
+        self._runtime = runtime
+        self._source: DocumentSymbolInput | None = None
+        self._source_identity: AdapterResponseIdentity | None = None
+
+    def load_semantic_document(self, relative_path: str) -> SemanticDocumentInput | ErrorEnvelope:
+        loaded = self._runtime.load_semantic_document(relative_path)
+        if isinstance(loaded, ErrorEnvelope):
+            return loaded
+        self._source = loaded.document
+        adapter = self._runtime._adapter_for_workspace_uri(loaded.document.uri)
+        self._source_identity = _adapter_response_identity(adapter.snapshot())
+        return loaded
+
+    def request_locations(
+        self,
+        method: str,
+        *,
+        document_uri: str,
+        position: LspPosition,
+        capture_target_symbols: bool = False,
+    ) -> object:
+        source = self._source
+        source_identity = self._source_identity
+        if source is None or source_identity is None or source.uri != document_uri:
+            return error(ErrorCode.INVALID_INPUT, details={"field": "semantic_source_owner"})
+        return self._runtime._request_locations(
+            method,
+            document_uri=document_uri,
+            position=position,
+            source_document=source,
+            source_identity=source_identity,
+            capture_target_symbols=capture_target_symbols,
+        )
+
+    def normalize_and_classify_locations(
+        self,
+        raw_locations: object,
+        *,
+        include_body: bool,
+        include_info: bool,
+    ) -> Sequence[ClassifiedLocationInput] | ErrorEnvelope:
+        return self._runtime.normalize_and_classify_locations(
+            raw_locations,
+            include_body=include_body,
+            include_info=include_info,
+        )
+
+
+class _ResponseOwnedReferenceProvider:
+    """Call-local bridge that never reloads a target after references return."""
+
+    def __init__(self, runtime: WorkspaceRuntime, source_document: DocumentSymbolInput) -> None:
+        self._runtime = runtime
+        self._source_document = source_document
+        source_adapter = runtime._adapter_for_workspace_uri(source_document.uri)
+        self._source_identity = _adapter_response_identity(source_adapter.snapshot())
+        self._request: ReferenceRequest | None = None
+        self._response: _ResponseOwnedSemanticLocations | None = None
+
+    def find_references(self, request: ReferenceRequest) -> ReferenceQueryResult | ErrorEnvelope:
+        owned = self._runtime._find_response_owned_references(
+            request,
+            self._source_document,
+            self._source_identity,
+        )
+        if isinstance(owned, ErrorEnvelope):
+            return owned
+        query, response = owned
+        self._request = request
+        self._response = response
+        return query
+
+    def classify_reference_location(self, location: Location) -> ReferenceTarget | ErrorEnvelope:
+        return self._runtime.classify_reference_location(location)
+
+    def load_reference_document(
+        self, target: ReferenceTarget
+    ) -> ReferenceDocumentInput | RawReferenceDocumentInput | ErrorEnvelope:
+        request = self._request
+        response = self._response
+        if request is None or response is None:
+            return error(ErrorCode.INVALID_INPUT, details={"field": "reference_response_owner"})
+        if not self._runtime._response_adapter_states_are_current(response.adapter_states):
+            return _reference_not_ready(request, "semantic target generation changed")
+        if target.read_only_external:
+            if len(response.adapter_states) != 1:
+                return _reference_not_ready(request, "semantic target generation changed")
+            return RawReferenceDocumentInput(
+                target.location.uri,
+                response.adapter_states[0].identity[-1],
+            )
+        bound = next((item for item in response.targets if str(item.path) == target.key), None)
+        if bound is None or bound.reference_document is None:
+            return _reference_not_ready(
+                request,
+                "verified target snapshot unavailable",
+                paths=(target.display_path,),
+            )
+        document = bound.reference_document
+        return ReferenceDocumentInput(
+            target.location.uri,
+            document.snapshot,
+            document.raw_symbols,
+            document.position_encoding,
+            document.recover_containment,
+        )
+
+
 @dataclass(frozen=True, slots=True)
 class _WarmGlobalSeed:
     """Call-local current-generation evidence reused by the global core."""
@@ -2349,6 +3066,7 @@ class _GlobalProvider:
                 self.seed.generations,
                 self.seed.document.snapshot,
                 self.seed.document.position_encoding,
+                body_completeness=self.seed.document.body_completeness,
             )
         # The core gives us only workspace/symbol candidates that already passed
         # its configured-program authorization; this re-check is fail-closed.
@@ -2362,6 +3080,7 @@ class _GlobalProvider:
             _global_generations(self._adapter.snapshot()),
             document.snapshot,
             document.position_encoding,
+            body_completeness=document.body_completeness,
         )
 
 
@@ -2423,19 +3142,79 @@ class _EditBridge:
             {"textDocument": {"uri": opened.uri}},
             timeout=self._runtime._future_timeout,
         )
-        if raw is not None and (not isinstance(raw, Sequence) or isinstance(raw, str | bytes)):
+        if raw is not None and (
+            not isinstance(raw, Sequence)
+            or isinstance(raw, str | bytes)
+            or not all(isinstance(symbol, Mapping) for symbol in raw)
+        ):
             raise TypeError("document-symbol response is not a sequence")
         self._target = opened
         status = self._adapter.snapshot()
+        raw_symbols = (
+            tuple(cast(Mapping[str, Any], symbol) for symbol in raw)
+            if isinstance(raw, Sequence)
+            else None
+        )
+        body_completeness = None
+        metadata = _adapter_metadata_for_snapshot(status)
+        if metadata.language == LanguageFamily.PYTHON.value:
+            recovered = PyrightFacts.locked().recover_assignment_document_symbols(
+                raw_symbols,
+                snapshot=snapshot,
+                position_encoding=status.position_encoding,
+            )
+            # Editing cannot safely use an identifier-only assignment range.
+            # Keep the ordinary read-only lookup contract elsewhere, but do not
+            # expose an unresolved assignment as a replacement candidate.
+            raw_symbols = tuple(
+                symbol
+                for symbol in recovered.raw_symbols
+                if recovered.body_incomplete_reason(symbol) is None
+            )
+            body_completeness = recovered.body_incomplete_reason
+        elif metadata.language == LanguageFamily.TYPESCRIPT.value:
+            positions = assignment_recovery_positions(raw_symbols)
+            selection_ranges: tuple[Mapping[str, Any], ...] | None = None
+            if positions:
+                try:
+                    raw_ranges = self._client.request(
+                        "textDocument/selectionRange",
+                        {
+                            "textDocument": {"uri": opened.uri},
+                            "positions": list(positions),
+                        },
+                        timeout=self._runtime._future_timeout,
+                    )
+                except LspResponseError:
+                    raw_ranges = None
+                if (
+                    isinstance(raw_ranges, Sequence)
+                    and not isinstance(raw_ranges, str | bytes)
+                    and all(isinstance(item, Mapping) for item in raw_ranges)
+                ):
+                    selection_ranges = tuple(cast(Mapping[str, Any], item) for item in raw_ranges)
+            recovered = recover_typescript_top_level_variable_symbols(
+                raw_symbols,
+                selection_ranges=selection_ranges,
+                snapshot=snapshot,
+                position_encoding=status.position_encoding,
+            )
+            raw_symbols = tuple(
+                symbol
+                for symbol in recovered.raw_symbols
+                if recovered.body_incomplete_reason(symbol) is None
+            )
+            body_completeness = recovered.body_incomplete_reason
         return DocumentSymbolInput(
             target.relative_path,
             opened.uri,
             snapshot,
-            cast(Sequence[Mapping[str, Any]] | None, raw),
+            raw_symbols,
             status.position_encoding,
             _workspace_metadata(self._runtime.identity),
-            _adapter_metadata_for_snapshot(status),
+            metadata,
             _path_generations(status),
+            body_completeness=body_completeness,
         )
 
     def notify_replaced(self, notification: ReplacementNotification) -> NotificationResult:
@@ -2508,9 +3287,7 @@ def _projection_error(family: LanguageFamily, projection: ScopeProjection) -> Wo
     )
 
 
-def _affected_families(
-    membership_paths: Sequence[str], config_paths: Sequence[str]
-) -> frozenset[LanguageFamily]:
+def _affected_families(membership_paths: Sequence[str], config_paths: Sequence[str]) -> frozenset[LanguageFamily]:
     """Reattribute only families whose membership or native config may have moved."""
 
     affected = {family for path in membership_paths if (family := _family_of(path)) is not None}
@@ -2533,6 +3310,44 @@ def _workspace_metadata(identity: WorkspaceIdentity) -> WorkspaceMetadata:
 
 def _adapter_metadata(family: LanguageFamily) -> AdapterMetadata:
     return AdapterMetadata("pyright" if family is LanguageFamily.PYTHON else "typescript", family.value)
+
+
+def _reference_coverage(family: LanguageFamily, projection: ScopeProjection) -> ReferenceCoverage:
+    """Render maintained projection evidence without discovering any paths."""
+
+    uncovered = tuple(sorted(item.path for item in projection.trusted_not_in_configured_program))
+    digest = hashlib.sha256("\0".join(uncovered).encode("utf-8", "surrogateescape")).hexdigest()
+    sample = uncovered[:REFERENCE_COVERAGE_SAMPLE_LIMIT]
+    return ReferenceCoverage(
+        adapter=_adapter_metadata(family).name,
+        language=family.value,
+        scope_kind=projection.project_kind.value,
+        configured_program_files=projection.configured_program.count,
+        configured_program_digest=projection.configured_program.sha256,
+        trusted_language_files=projection.trust_inventory.count,
+        trusted_language_digest=projection.trust_inventory.sha256,
+        uncovered_files=len(uncovered),
+        uncovered_digest=digest,
+        uncovered_sample=sample,
+        uncovered_total=len(uncovered),
+        uncovered_omitted=len(uncovered) - len(sample),
+    )
+
+
+def _reference_location_is_in_configured_program(
+    location: _ClassifiedSemanticLocation,
+    workspace_root: Path,
+    configured_program_paths: Collection[str],
+) -> bool:
+    """Keep external targets and only configured-program workspace targets."""
+
+    if location.semantic.read_only_external:
+        return True
+    try:
+        relative_path = location.semantic.path.relative_to(workspace_root).as_posix()
+    except ValueError:
+        return False
+    return relative_path in configured_program_paths
 
 
 def _adapter_metadata_for_snapshot(snapshot: AdapterSnapshot) -> AdapterMetadata:
@@ -2596,6 +3411,148 @@ def _native_typecheck_command(root: Path) -> str | None:
         return None
     typecheck = scripts.get("typecheck")
     return "npm run typecheck" if isinstance(typecheck, str) and typecheck.strip() else None
+
+
+def _adapter_response_identity(
+    snapshot: AdapterSnapshot,
+) -> AdapterResponseIdentity:
+    generations = snapshot.generations
+    return (
+        snapshot.runtime_token,
+        snapshot.phase,
+        snapshot.raw_providers,
+        snapshot.derived_tools,
+        generations.trust,
+        generations.program,
+        generations.document,
+        generations.index,
+        snapshot.position_encoding,
+    )
+
+
+def _adapter_replay_identity(snapshot: AdapterSnapshot) -> AdapterReplayIdentity:
+    return _adapter_replay_identity_from_response(_adapter_response_identity(snapshot))
+
+
+def _adapter_replay_identity_from_response(identity: AdapterResponseIdentity) -> AdapterReplayIdentity:
+    runtime_token, phase, raw, derived, trust, program, _document, index, encoding = identity
+    return runtime_token, phase, raw, derived, trust, program, index, encoding
+
+
+def _response_adapter_state(adapter: RuntimeAdapter) -> _ResponseAdapterState:
+    return _ResponseAdapterState(adapter, _adapter_response_identity(adapter.snapshot()))
+
+
+def _response_owned_target_symbol(
+    target: _BoundSemanticTarget,
+    location: Location,
+) -> NormalizedSymbol | None:
+    """Resolve target metadata only from the response-owned symbol snapshot."""
+
+    if target.symbol_document is None:
+        return None
+    try:
+        document = DocumentNavigation.from_input(target.symbol_document)
+    except (PositionError, TypeError, ValueError):
+        return None
+    symbols = tuple(symbol for root in document.symbols for symbol in root.iter_depth_first())
+    exact = tuple(symbol for symbol in symbols if symbol.selection_range == location.range)
+    if exact:
+        return min(exact, key=lambda symbol: symbol.name_path)
+    target_location = Location(document.uri, location.range, str(target.path))
+    return containing_symbol(document.symbols, target_location)
+
+
+def _semantic_document_is_current(adapter: RuntimeAdapter, document: DocumentSymbolInput) -> bool:
+    snapshot = adapter.snapshot()
+    generations = document.generations
+    return (
+        generations is not None
+        and document.adapter == _adapter_metadata_for_snapshot(snapshot)
+        and document.position_encoding is snapshot.position_encoding
+        and generations.trust == snapshot.generations.trust
+        and generations.program == snapshot.generations.program
+        and generations.document == snapshot.generations.document
+        and generations.index == snapshot.generations.index
+    )
+
+
+def _remaining_semantic_timeout(deadline: float) -> float:
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise TimeoutError
+    return remaining
+
+
+def _canonical_semantic_locations(locations: Sequence[_ClassifiedSemanticLocation]) -> tuple[str, ...]:
+    canonical: list[str] = []
+    for item in locations:
+        raw_kind = item.raw.get("kind")
+        canonical.append(
+            json.dumps(
+                {
+                    "path": str(item.semantic.path),
+                    "location_kind": item.semantic.kind.value,
+                    "range": {
+                        "start": {
+                            "line": item.location.range.start.line,
+                            "character": item.location.range.start.character,
+                        },
+                        "end": {
+                            "line": item.location.range.end.line,
+                            "character": item.location.range.end.character,
+                        },
+                    },
+                    "kind": raw_kind if isinstance(raw_kind, int) and not isinstance(raw_kind, bool) else None,
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+        )
+    return tuple(sorted(canonical))
+
+
+def _semantic_locations_not_ready(reason: str, *, paths: tuple[str, ...] = ()) -> ErrorEnvelope:
+    details: dict[str, object] = {"reason": reason}
+    if paths:
+        details["paths"] = paths
+    return error(
+        ErrorCode.NOT_READY,
+        retry=RetryMetadata(True, retry_after_seconds=0.1),
+        details=details,
+    )
+
+
+def _runtime_error_envelope(caught: WorkspaceRuntimeError, *, field: str) -> ErrorEnvelope:
+    try:
+        code = ErrorCode(caught.code)
+    except ValueError:
+        code = ErrorCode.UNSUPPORTED
+    return error(
+        code,
+        retry=(RetryMetadata(True) if code in {ErrorCode.NOT_READY, ErrorCode.BUSY, ErrorCode.TIMED_OUT} else None),
+        details={"paths": caught.paths} if caught.paths else {"field": field},
+    )
+
+
+def _with_reference_context(value: ErrorEnvelope, request: ReferenceRequest) -> ErrorEnvelope:
+    return error(
+        value.code,
+        retry=value.retry,
+        details=value.details,
+        workspace=request.workspace,
+        adapter=request.adapter,
+        generations=request.generations,
+    )
+
+
+def _reference_not_ready(
+    request: ReferenceRequest,
+    reason: str,
+    *,
+    paths: tuple[str, ...] = (),
+) -> ErrorEnvelope:
+    return _with_reference_context(_semantic_locations_not_ready(reason, paths=paths), request)
 
 
 def _raw_location_mappings(value: object) -> tuple[Mapping[str, object], ...] | None:
@@ -2816,12 +3773,8 @@ def _adapter_status(snapshot: AdapterSnapshot, projection: ScopeProjection) -> M
             "count": projection.configured_program.count,
             "sha256": projection.configured_program.sha256,
         },
-        "trusted_not_in_configured_program": bounded_difference_status(
-            projection.trusted_not_in_configured_program
-        ),
-        "configured_program_outside_trust": bounded_difference_status(
-            projection.configured_program_outside_trust
-        ),
+        "trusted_not_in_configured_program": bounded_difference_status(projection.trusted_not_in_configured_program),
+        "configured_program_outside_trust": bounded_difference_status(projection.configured_program_outside_trust),
         "scope_compatible": projection.compatible,
         "overlay_generated": projection.overlay_generated,
         "generations": {

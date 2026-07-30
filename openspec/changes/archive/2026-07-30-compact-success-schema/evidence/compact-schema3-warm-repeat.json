@@ -1,0 +1,307 @@
+{
+  "evidence_kind": "compact_schema3_cold_warm_repeat",
+  "captured_at_utc": "2026-07-30T18:56:24Z",
+  "runtime_status": {
+    "ok": true,
+    "data": {
+      "lease": {
+        "lease_id": "630112cc-8a6e-4eab-87f2-30da70c0bf22",
+        "bound": true,
+        "issued_at": 31575681.347981665,
+        "last_heartbeat_at": 31575681.347981665,
+        "heartbeat_interval_seconds": 15,
+        "expiry_seconds": 60,
+        "workspace": {
+          "identity": "/data/CoordExp/serena-light",
+          "working_subdirectory": "/data/CoordExp/serena-light"
+        }
+      },
+      "binding": {
+        "identity": "/data/CoordExp/serena-light",
+        "working_subdirectory": "/data/CoordExp/serena-light"
+      },
+      "runtime": {
+        "identity": {
+          "root": "/data/CoordExp/serena-light",
+          "kind": "git"
+        },
+        "trust_inventory": {
+          "kind": "git",
+          "count": 147,
+          "sha256": "0dde9c3f326730ede57654a210df71dd96e7f1529092da6d46ed6eea871af444",
+          "rejected": []
+        },
+        "freshness": {
+          "created": [],
+          "changed": [],
+          "deleted": [],
+          "symlinked": [],
+          "config_changed": [],
+          "reattributed": [],
+          "notified": [],
+          "opened": [],
+          "unopened": []
+        },
+        "adapters": {
+          "python": {
+            "phase": "cold",
+            "running": false,
+            "raw_providers": {
+              "definition": false,
+              "declaration": false,
+              "implementation": false,
+              "references": false,
+              "document_symbols": false,
+              "workspace_symbols": false
+            },
+            "derived_tools": {
+              "find_declaration": false,
+              "find_implementations": false,
+              "find_referencing_symbols": false,
+              "get_symbols_overview": false,
+              "global_find_symbol": false
+            },
+            "engine": {
+              "name": "pyright",
+              "version": "1.1.403",
+              "executable": "/data/CoordExp/.codex/runtime/serena-light/deps/eff6ebdf252faff7f77cb3a2f3894d17b9a0dfc89b46bd193fafdaa9e9ab4941/node-packages/node_modules/pyright/langserver.index.js",
+              "interpreter": "/root/miniconda3/envs/ms/bin/python"
+            },
+            "position_encoding": "utf-16",
+            "selected_native_config": null,
+            "project_kind": "workspace_default",
+            "trust_inventory": {
+              "count": 134,
+              "sha256": "6d6a664663041ca7ede5271144ad69f8c78ef5d4ecfedb5dea4ab28dfbb2e119"
+            },
+            "configured_program": {
+              "count": 134,
+              "sha256": "6d6a664663041ca7ede5271144ad69f8c78ef5d4ecfedb5dea4ab28dfbb2e119"
+            },
+            "trusted_not_in_configured_program": {
+              "items": [],
+              "total": 0,
+              "digest": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+              "omitted_count": 0
+            },
+            "configured_program_outside_trust": {
+              "items": [],
+              "total": 0,
+              "digest": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+              "omitted_count": 0
+            },
+            "scope_compatible": true,
+            "overlay_generated": false,
+            "generations": {
+              "trust": 0,
+              "program": 1,
+              "document": 0,
+              "index": 0
+            },
+            "crash": {
+              "total": 0,
+              "window_count": 0,
+              "last_timestamp": null,
+              "last_error": null
+            },
+            "cooldown": {
+              "until": null,
+              "remaining_seconds": 0
+            },
+            "transitions": [
+              {
+                "phase": "cold",
+                "timestamp": 1785437768.8211396,
+                "reason": "registered"
+              }
+            ]
+          },
+          "typescript": {
+            "phase": "cold",
+            "running": false,
+            "raw_providers": {
+              "definition": false,
+              "declaration": false,
+              "implementation": false,
+              "references": false,
+              "document_symbols": false,
+              "workspace_symbols": false
+            },
+            "derived_tools": {
+              "find_declaration": false,
+              "find_implementations": false,
+              "find_referencing_symbols": false,
+              "get_symbols_overview": false,
+              "global_find_symbol": false
+            },
+            "engine": {
+              "name": "typescript-language-server",
+              "version": "5.1.3",
+              "executable": "/data/CoordExp/.codex/runtime/serena-light/deps/eff6ebdf252faff7f77cb3a2f3894d17b9a0dfc89b46bd193fafdaa9e9ab4941/node-packages/node_modules/typescript-language-server/lib/cli.mjs",
+              "interpreter": null
+            },
+            "position_encoding": "utf-16",
+            "selected_native_config": null,
+            "project_kind": "workspace_default",
+            "trust_inventory": {
+              "count": 13,
+              "sha256": "137e5c878d224cf2066267d7a6a9145fb61d135b139dd3e9f04162b67f5f69de"
+            },
+            "configured_program": {
+              "count": 1,
+              "sha256": "7aaeb59ea4e6ccedb9c5fb050d8c648e5f19dc48273eb576dafcfb941e2c9ade"
+            },
+            "trusted_not_in_configured_program": {
+              "items": [
+                {
+                  "path": "tests/admission/fixtures/ts-scope/src/helper.ts",
+                  "reason": "omitted_by_engine_workspace_program"
+                },
+                {
+                  "path": "tests/admission/fixtures/ts-scope/src/main.ts",
+                  "reason": "omitted_by_engine_workspace_program"
+                },
+                {
+                  "path": "tests/admission/pyright_owned_files_probe.mjs",
+                  "reason": "omitted_by_engine_workspace_program"
+                },
+                {
+                  "path": "tests/admission/pyright_owned_files_probe.test.mjs",
+                  "reason": "omitted_by_engine_workspace_program"
+                },
+                {
+                  "path": "tests/integration/fixtures/assignment_probe/typescript/src/top_level.js",
+                  "reason": "omitted_by_engine_workspace_program"
+                },
+                {
+                  "path": "tests/integration/fixtures/assignment_probe/typescript/src/top_level.mjs",
+                  "reason": "omitted_by_engine_workspace_program"
+                },
+                {
+                  "path": "tests/integration/fixtures/assignment_probe/typescript/src/top_level.ts",
+                  "reason": "omitted_by_engine_workspace_program"
+                },
+                {
+                  "path": "tests/integration/fixtures/assignment_probe/typescript/src/top_level.tsx",
+                  "reason": "omitted_by_engine_workspace_program"
+                },
+                {
+                  "path": "tests/integration/fixtures/compact_navigation/typescript_symbols.ts",
+                  "reason": "omitted_by_engine_workspace_program"
+                },
+                {
+                  "path": "tests/integration/fixtures/compact_navigation/typescript_usage.ts",
+                  "reason": "omitted_by_engine_workspace_program"
+                },
+                {
+                  "path": "tests/integration/fixtures/readiness/typescript/src/empty.ts",
+                  "reason": "omitted_by_engine_workspace_program"
+                },
+                {
+                  "path": "tests/integration/fixtures/readiness/typescript/src/sentinel.ts",
+                  "reason": "omitted_by_engine_workspace_program"
+                }
+              ],
+              "total": 12,
+              "digest": "5442e3d02edbb705026a6570639b7f6b2692199bd85e7217fc3e77718c6263fb",
+              "omitted_count": 0
+            },
+            "configured_program_outside_trust": {
+              "items": [],
+              "total": 0,
+              "digest": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+              "omitted_count": 0
+            },
+            "scope_compatible": true,
+            "overlay_generated": false,
+            "generations": {
+              "trust": 0,
+              "program": 1,
+              "document": 0,
+              "index": 0
+            },
+            "crash": {
+              "total": 0,
+              "window_count": 0,
+              "last_timestamp": null,
+              "last_error": null
+            },
+            "cooldown": {
+              "until": null,
+              "remaining_seconds": 0
+            },
+            "transitions": [
+              {
+                "phase": "cold",
+                "timestamp": 1785437769.9466467,
+                "reason": "registered"
+              }
+            ]
+          }
+        },
+        "unavailable_language_families": {},
+        "skipped_language_families": [],
+        "executor": {
+          "queue_size": 0,
+          "queue_capacity": 32,
+          "active": false,
+          "stopping": false
+        },
+        "stopping": false,
+        "stopped": false
+      },
+      "daemon_id": "779bf8ca-5017-447d-a10f-0a3528647aa7",
+      "build_identity": "4ff261a7ebda7bbddf182e836742103c47a11c18becce01dad266b6829df4290",
+      "server_version": "0.1.0",
+      "protocol_version": "2025-11-25"
+    }
+  },
+  "observations": [
+    {
+      "case": "exact_symbol_no_body",
+      "ordinal": 1,
+      "wall_time_seconds": 9.440442502498627,
+      "character_count": 235,
+      "content_sha256": "4d415ffbcaed50e2fb1c889ce64451e4dcf7bba0541613c5c5ecde219d62cabd",
+      "canonical_text_equals_structured": true
+    },
+    {
+      "case": "exact_symbol_no_body",
+      "ordinal": 2,
+      "wall_time_seconds": 0.2238364815711975,
+      "character_count": 235,
+      "content_sha256": "4d415ffbcaed50e2fb1c889ce64451e4dcf7bba0541613c5c5ecde219d62cabd",
+      "canonical_text_equals_structured": true
+    },
+    {
+      "case": "global_symbol",
+      "ordinal": 1,
+      "wall_time_seconds": 3.689676944166422,
+      "character_count": 236,
+      "content_sha256": "69e12cb2b5cef9c5a590dacdeddf1d25d736112c758275435a2895c264ef401e",
+      "canonical_text_equals_structured": true
+    },
+    {
+      "case": "global_symbol",
+      "ordinal": 2,
+      "wall_time_seconds": 0.5212225876748562,
+      "character_count": 236,
+      "content_sha256": "69e12cb2b5cef9c5a590dacdeddf1d25d736112c758275435a2895c264ef401e",
+      "canonical_text_equals_structured": true
+    }
+  ],
+  "release_result": {
+    "ok": true,
+    "data": {
+      "lease_id": "630112cc-8a6e-4eab-87f2-30da70c0bf22",
+      "released": true,
+      "bound": false,
+      "immediate": true,
+      "reason": "released",
+      "active_holders": 0,
+      "grace_deadline": null,
+      "runtime_stopped": true,
+      "runtime_stop_pending": false
+    }
+  }
+}

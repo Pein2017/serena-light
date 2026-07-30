@@ -72,6 +72,28 @@ def test_publication_diagnostics_are_immutable() -> None:
     assert stored["related"] == ("one",)  # type: ignore[index]
 
 
+def test_process_restart_drops_documents_and_publications_but_keeps_monotonic_generations() -> None:
+    state = LspState()
+    path = Path("/data/example.py")
+    document = state.update_document(uri="file:///data/example.py", path=path, version=1)
+    assert document is not None
+    state.advance_source_generation()
+    assert state.publish_diagnostics(
+        uri=document.uri,
+        path=path,
+        version=1,
+        generation=document.generation,
+        diagnostics=[{"message": "old process"}],
+    )
+    before = state.generations
+
+    state.reset_documents()
+
+    assert state.document(document.uri) is None
+    assert state.diagnostics_snapshot(document.uri).state is DiagnosticsState.MISSING
+    assert state.generations == before
+
+
 def test_concurrent_updates_do_not_lose_or_regress_versions() -> None:
     state = LspState()
     path = Path("/data/example.py")

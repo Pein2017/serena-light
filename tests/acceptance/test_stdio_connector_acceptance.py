@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import os
 import shutil
 import signal
@@ -143,7 +144,19 @@ def _terminate_owned_daemon(owned: _DaemonProcess, descendants: tuple[_DaemonPro
     while _is_live(owned) and time.monotonic() < deadline:
         time.sleep(0.05)
     assert not _is_live(owned), "test-owned daemon did not terminate during teardown"
-    assert not any(_is_live(child) for child in descendants), "test-owned daemon left a descendant behind"
+    survivors = [child for child in descendants if _is_live(child)]
+    for child in survivors:
+        os.kill(child.pid, signal.SIGTERM)
+    deadline = time.monotonic() + 5.0
+    while any(_is_live(child) for child in survivors) and time.monotonic() < deadline:
+        time.sleep(0.05)
+    for child in survivors:
+        if _is_live(child):
+            os.kill(child.pid, signal.SIGKILL)
+    deadline = time.monotonic() + 5.0
+    while any(_is_live(child) for child in survivors) and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert not any(_is_live(child) for child in survivors), "test-owned daemon left a descendant behind"
 
 
 def test_isolated_build_discovery_reclaims_only_the_exact_daemon_identity(
@@ -287,6 +300,153 @@ async def _run_fresh_stdio_client(
         return daemon_id
 
 
+async def _run_compact_navigation_stdio_client(
+    workspace: Path,
+    *,
+    child_environment: Mapping[str, str],
+    expected_build_identity: str,
+    fixture_root: str,
+) -> str:
+    """Exercise every compact navigation tool through a real stdio connector."""
+
+    parameters = StdioServerParameters(
+        command=str(_service_connector_executable()),
+        args=[],
+        cwd=workspace,
+        env=dict(child_environment),
+    )
+    prefix = f"{fixture_root}/" if fixture_root else ""
+    cases: tuple[tuple[str, Mapping[str, object]], ...] = (
+        (
+            "get_symbols_overview",
+            {"relative_path": f"{prefix}large_nested.py", "max_depth": 1, "max_answer_chars": 12_000},
+        ),
+        (
+            "find_symbol",
+            {
+                "relative_path": f"{prefix}python_symbols.py",
+                "name_path": "ANSWER",
+                "include_body": True,
+                "max_answer_chars": 12_000,
+            },
+        ),
+        (
+            "find_symbol",
+            {
+                "relative_path": fixture_root or ".",
+                "name_path": "ANSWER",
+                "max_matches": 20,
+                "max_answer_chars": 12_000,
+            },
+        ),
+        (
+            "find_referencing_symbols",
+            {
+                "relative_path": f"{prefix}python_symbols.py",
+                "name_path": "ANSWER",
+                "max_answer_chars": 12_000,
+            },
+        ),
+        (
+            "find_declaration",
+            {
+                "relative_path": f"{prefix}python_usage.py",
+                "regex": r"import (ANSWER), Calculator",
+                "max_answer_chars": 12_000,
+            },
+        ),
+        (
+            "find_implementations",
+            {
+                "relative_path": f"{prefix}typescript_symbols.ts",
+                "name_path": "Runner",
+                "max_answer_chars": 12_000,
+            },
+        ),
+        (
+            "find_declaration",
+            {
+                "relative_path": f"{prefix}python_symbols.py",
+                "regex": r"return (GenerationConfig)\(",
+                "max_answer_chars": 12_000,
+            },
+        ),
+        (
+            "get_symbols_overview",
+            {"relative_path": f"{prefix}empty.py", "max_depth": 1, "max_answer_chars": 12_000},
+        ),
+    )
+    async with stdio_client(parameters, errlog=sys.stderr) as (read_stream, write_stream), ClientSession(
+        read_stream, write_stream
+    ) as client:
+        initialized = await client.initialize()
+        assert initialized.serverInfo.name == "serena-light"
+        status = _data(await client.call_tool("get_runtime_status"))
+        assert status["build_identity"] == expected_build_identity
+        daemon_id = status["daemon_id"]
+        assert isinstance(daemon_id, str)
+        observed: list[Mapping[str, object]] = []
+        for tool, arguments in cases:
+            result = await client.call_tool(tool, dict(arguments))
+            assert result.isError is not True, (tool, result)
+            assert len(result.content) == 1
+            block = result.content[0]
+            assert isinstance(block, types.TextContent)
+            assert result.structuredContent is not None
+            assert block.text == json.dumps(
+                result.structuredContent,
+                ensure_ascii=False,
+                allow_nan=False,
+                separators=(",", ":"),
+            )
+            assert len(block.text) <= cast(int, arguments["max_answer_chars"])
+            data = _data(result)
+            assert data["workspace"] == str(workspace)
+            assert isinstance(data["files"], list)
+            assert isinstance(data["omitted"], int)
+            observed.append(data)
+
+        (
+            overview,
+            exact_body,
+            directory_symbols,
+            references,
+            declaration,
+            implementation,
+            external,
+            empty,
+        ) = observed
+        assert overview["files"] and overview["omitted"] == 0
+        body_file = cast(list[Mapping[str, object]], exact_body["files"])[0]
+        fixture_hash = hashlib.sha256((workspace / f"{prefix}python_symbols.py").read_bytes()).hexdigest()
+        assert body_file["sha256"] == fixture_hash
+        assert cast(list[Mapping[str, object]], body_file["symbols"])[0]["body"] == "ANSWER: int = 42"
+        scoped_files = cast(list[Mapping[str, object]], directory_symbols["files"])
+        assert len(scoped_files) == 2
+        assert {file["language"] for file in scoped_files} == {"python", "typescript"}
+        assert all(
+            cast(list[Mapping[str, object]], file["symbols"])[0]["name_path"] == "ANSWER"
+            for file in scoped_files
+        )
+        coverage = cast(Mapping[str, object], references["coverage"])
+        assert coverage["uncovered_files"] == 1
+        uncovered_sample = cast(Mapping[str, object], coverage["uncovered_sample"])
+        assert uncovered_sample["items"] == ["python_uncovered.py"]
+        assert len(cast(list[Mapping[str, object]], references["files"])) == 2
+        assert cast(list[Mapping[str, object]], declaration["files"])[0]["targets"]
+        assert cast(list[Mapping[str, object]], implementation["files"])[0]["targets"]
+        external_file = cast(list[Mapping[str, object]], external["files"])[0]
+        assert external_file["read_only"] is True
+        external_target = cast(list[Mapping[str, object]], external_file["targets"])[0]
+        assert external_target["position_basis"] == "lsp_zero_based_line_utf16_code_unit_character"
+        assert "raw_range" in external_target and "range" not in external_target
+        assert empty["files"] == [] and empty["omitted"] == 0
+
+        released = _data(await client.call_tool("release_workspace", {"immediate": True}))
+        assert released["bound"] is False
+        return daemon_id
+
+
 class _HeldStdioClient:
     """A test-owned stdio client whose lease remains active until explicitly closed."""
 
@@ -349,6 +509,62 @@ class _HeldStdioClient:
                 self._started.set_exception(exc)
                 return
             raise
+
+
+def test_real_stdio_connector_returns_exact_compact_navigation_results(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """All five navigation tools cross the real connector with one exact compact representation."""
+
+    runtime_root = (tmp_path / "isolated-compact-runtime").resolve()
+    compact_workspace = (tmp_path / "compact-workspace").resolve()
+    compact_workspace.mkdir()
+    completed = subprocess.run(
+        ["git", "init", "--quiet", str(compact_workspace)],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+    assert completed.returncode == 0, completed.stderr
+    fixture_source = REPOSITORY_ROOT / "tests/integration/fixtures/compact_navigation"
+    for source in fixture_source.iterdir():
+        if source.is_file():
+            shutil.copy2(source, compact_workspace / source.name)
+    typescript_symbols = compact_workspace / "typescript_symbols.ts"
+    typescript_symbols.write_text(
+        typescript_symbols.read_text() + "\nexport const ANSWER: number = 42;\n"
+    )
+    build_root: Path | None = None
+    expected_daemon_id: str | None = None
+    with _proxy_environment(monkeypatch, poisoned=False) as child_environment:
+        child_environment.update(
+            {
+                cli.ACCEPTANCE_RUNTIME_ROOT_ENV: str(runtime_root),
+                cli.ACCEPTANCE_BUILD_VARIANT_ENV: "compactSchema3RealConnector1",
+                cli.ACCEPTANCE_WARM_GRACE_SECONDS_ENV: "1",
+                cli.ACCEPTANCE_IDLE_EXIT_SECONDS_ENV: "8",
+            }
+        )
+        acceptance = cli._acceptance_overrides(child_environment)
+        assert acceptance is not None
+        build_identity = cli._acceptance_build_identity(acceptance)
+        build_root = prepare_runtime_layout(runtime_root, build_identity).build_root
+        try:
+            expected_daemon_id = asyncio.run(
+                _run_compact_navigation_stdio_client(
+                    compact_workspace,
+                    child_environment=child_environment,
+                    expected_build_identity=build_identity,
+                    fixture_root="",
+                )
+            )
+        finally:
+            if build_root is not None and (metadata := _read_daemon(build_root)) is not None:
+                owned = _DaemonProcess(metadata.daemon_id, metadata.pid, metadata.process_start_time)
+                assert expected_daemon_id is None or owned.daemon_id == expected_daemon_id
+                _terminate_owned_daemon(owned, _descendants(owned))
 
 
 def test_real_stdio_connector_contains_proxy_environment_and_releases_to_warm_grace(
