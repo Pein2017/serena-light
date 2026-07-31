@@ -32,7 +32,12 @@ from serena_light.lsp.executor import BoundedLspExecutor
 from serena_light.lsp.positions import FileSnapshot, PositionEncoding
 from serena_light.tools.navigation import DocumentSymbolInput
 from serena_light.workspace.identity import WorkspaceIdentity, WorkspaceKind
-from serena_light.workspace.inventory import SupportedPathTree, TrustInventory, git_trust_inventory
+from serena_light.workspace.inventory import (
+    SupportedPathTree,
+    TrustInventory,
+    git_trust_inventory,
+    transformers_trust_inventory,
+)
 from serena_light.workspace.runtime import (
     AdapterBuildContext,
     AdapterFactory,
@@ -2314,7 +2319,7 @@ def test_read_only_non_git_root_uses_targeted_stat_instead_of_a_full_scan(tmp_pa
         adapter_factories=_factories(adapters, contexts),
     )
     try:
-        runtime.load_document_symbols("main.py")
+        assert runtime.get_symbols_overview("main.py").to_dict()["ok"] is True
         python = adapters[LanguageFamily.PYTHON]
         python.client.notifications.clear()
         rebuilds_after_construction = rebuilds
@@ -2322,7 +2327,7 @@ def test_read_only_non_git_root_uses_targeted_stat_instead_of_a_full_scan(tmp_pa
 
         assert runtime.ensure_fresh() == FreshnessScan()
         source.write_text("value = 22222\n")
-        runtime.load_document_symbols("main.py")
+        assert runtime.get_symbols_overview("main.py").to_dict()["ok"] is True
         runtime.executor.submit(lambda: None).result(timeout=5)
 
         # The allowlisted root is never re-walked; only the named operand is stat-ed.
@@ -2418,5 +2423,460 @@ def test_read_only_non_git_unstable_hash_fails_closed_and_recovers_without_a_ful
             "workspace/didChangeWatchedFiles",
             "textDocument/didChange",
         ]
+    finally:
+        runtime.stop()
+
+
+def _non_git_runtime(
+    root: Path,
+    adapters: dict[LanguageFamily, _Adapter],
+    contexts: dict[LanguageFamily, AdapterBuildContext],
+    *,
+    walks: list[int],
+    symbols: Sequence[Mapping[str, Any]] = (),
+    on_snapshot: Callable[[], None] | None = None,
+) -> WorkspaceRuntime:
+    """One runtime over the allowlisted read-only root that counts whole-root walks."""
+
+    def counted_inventory(identity: Any) -> TrustInventory:
+        walks[0] += 1
+        return transformers_trust_inventory(identity.root)
+
+    return WorkspaceRuntime(
+        (WorkspaceKind.ALLOWLISTED_NON_GIT, root),
+        path_policy=_PathPolicy(),
+        inventory_factory=counted_inventory,
+        attributors={LanguageFamily.PYTHON: lambda _root, paths: _projection(LanguageFamily.PYTHON, paths)},
+        adapter_factories=_factories(adapters, contexts, symbols=symbols, on_snapshot=on_snapshot),
+        future_timeout=5.0,
+    )
+
+
+def _observed_paths(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, ...]]:
+    """Ledger of every targeted observation, so read scope is asserted, not assumed."""
+
+    observed: list[tuple[str, ...]] = []
+    real_targeted_states = TrustInventory.targeted_states
+
+    def recording(self: TrustInventory, paths: Any) -> Any:
+        materialized = tuple(str(path) for path in paths)
+        observed.append(materialized)
+        return real_targeted_states(self, materialized)
+
+    monkeypatch.setattr(TrustInventory, "targeted_states", recording)
+    return observed
+
+
+def _document_symbol_covering_first_line(name: str) -> dict[str, Any]:
+    """One document symbol whose body is the whole first line of the file.
+
+    The body therefore differs between raced and settled bytes, so a returned
+    body identifies which attempt's source it came from.
+    """
+
+    return {
+        "name": name,
+        "kind": 13,
+        "range": {"start": {"line": 0, "character": 0}, "end": {"line": 1, "character": 0}},
+        "selectionRange": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": len(name)}},
+    }
+
+
+def _workspace_symbol(name: str, path: Path) -> dict[str, Any]:
+    """One workspace-symbol candidate that also serves as this file's document symbol."""
+
+    return {
+        "name": name,
+        "kind": 13,
+        "location": {
+            "uri": path.as_uri(),
+            "range": {
+                "start": {"line": 0, "character": 0},
+                "end": {"line": 0, "character": len(name)},
+            },
+        },
+    }
+
+
+def test_non_git_explicit_file_read_validates_only_that_path_before_and_after(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "main.py").write_text("value = 1\n")
+    (tmp_path / "sibling.py").write_text("sibling = 1\n")
+    adapters: dict[LanguageFamily, _Adapter] = {}
+    contexts: dict[LanguageFamily, AdapterBuildContext] = {}
+    walks = [0]
+    runtime = _non_git_runtime(tmp_path, adapters, contexts, walks=walks)
+    try:
+        observed = _observed_paths(monkeypatch)
+        walked_before = walks[0]
+
+        result = runtime.get_symbols_overview("main.py").to_dict()
+
+        assert result["ok"] is True
+        # Exactly one targeted preflight and one targeted postflight of the one
+        # requested path: the sibling is never observed and the package is never
+        # re-walked for an explicitly selected file.
+        assert observed == [("main.py",), ("main.py",)]
+        assert walks[0] == walked_before
+    finally:
+        runtime.stop()
+
+
+def test_non_git_targeted_read_raced_once_replays_and_returns_the_settled_result(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "main.py"
+    first_attempt_bytes = "value = 1\n"
+    settled_bytes = "value = 22222\n"
+    source.write_text(first_attempt_bytes)
+    adapters: dict[LanguageFamily, _Adapter] = {}
+    contexts: dict[LanguageFamily, AdapterBuildContext] = {}
+    walks = [0]
+    operations = 0
+
+    def race_first_operation_only() -> None:
+        # The operation already owns its bytes; this foreign write lands before
+        # the targeted postflight can validate them.
+        nonlocal operations
+        operations += 1
+        if operations == 1:
+            source.write_text(settled_bytes)
+
+    runtime = _non_git_runtime(
+        tmp_path,
+        adapters,
+        contexts,
+        walks=walks,
+        symbols=(_document_symbol_covering_first_line("value"),),
+        on_snapshot=race_first_operation_only,
+    )
+    try:
+        observed = _observed_paths(monkeypatch)
+        walked_before = walks[0]
+
+        result = runtime.find_symbol("value", relative_path="main.py", include_body=True).to_dict()
+
+        assert result["ok"] is True
+        # Body, range and file digest all come from the settled second-attempt
+        # source; the first attempt owned the superseded bytes and was discarded
+        # whole rather than returned or merged.
+        symbol = result["data"]["symbol"]
+        assert symbol["body"] == settled_bytes
+        assert symbol["range"]["end"]["byte_offset"] == len(settled_bytes) > len(first_attempt_bytes)
+        assert result["data"]["sha256"] == hashlib.sha256(settled_bytes.encode()).hexdigest()
+        assert operations == 2
+        # Two complete targeted transactions, and still no package walk.
+        assert observed == [("main.py",)] * 4
+        assert walks[0] == walked_before
+        opened = adapters[LanguageFamily.PYTHON].open_versions
+        assert len(opened) == 2 and opened[1] > opened[0]
+    finally:
+        runtime.stop()
+
+
+def test_non_git_targeted_read_raced_twice_returns_retryable_not_ready_without_payload(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "main.py"
+    source.write_text("value = 1\n")
+    adapters: dict[LanguageFamily, _Adapter] = {}
+    contexts: dict[LanguageFamily, AdapterBuildContext] = {}
+    walks = [0]
+    operations = 0
+
+    def race_every_operation() -> None:
+        nonlocal operations
+        operations += 1
+        source.write_text("raced = " + "x" * operations + "\n")
+
+    runtime = _non_git_runtime(tmp_path, adapters, contexts, walks=walks, on_snapshot=race_every_operation)
+    try:
+        observed = _observed_paths(monkeypatch)
+        walked_before = walks[0]
+
+        result = runtime.get_symbols_overview("main.py").to_dict()
+
+        assert result["ok"] is False
+        assert "data" not in result
+        assert result["error"]["code"] == "NOT_READY"
+        assert result["error"]["retry"]["retryable"] is True
+        details = result["error"]["details"]
+        assert details["reason"] == "workspace_changed_during_read"
+        assert details["attempts"] == 2
+        assert details["paths"] == ["main.py"]
+        assert details["postflight_freshness_version"] == details["preflight_freshness_version"] + 1
+        # Churn is bounded to one replay and never escalates to a package walk.
+        assert operations == 2
+        assert observed == [("main.py",)] * 4
+        assert walks[0] == walked_before
+    finally:
+        runtime.stop()
+
+
+def test_non_git_restored_bytes_are_caught_by_the_targeted_response_witness(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Bytes B reach the operation and bytes A are restored before the postflight.
+
+    The targeted postflight observes exactly the stat facts and digest the
+    preflight committed, so only the response-owned byte witness can report the
+    race on the read-only root.
+    """
+
+    source = tmp_path / "main.py"
+    original = b"value = 1\n"
+    intruded = b"value = 9\n"
+    assert len(original) == len(intruded)
+    source.write_bytes(original)
+    real_fstat = os.fstat
+    real_stat = os.stat
+    real_lstat = os.lstat
+    monkeypatch.setattr(inventory_module.os, "fstat", lambda fd: _stat_with_fixed_times(real_fstat(fd)))
+    monkeypatch.setattr(
+        inventory_module.os,
+        "stat",
+        lambda path, *args, **kwargs: _stat_with_fixed_times(real_stat(path, *args, **kwargs)),
+    )
+    monkeypatch.setattr(
+        inventory_module.os,
+        "lstat",
+        lambda path, *args, **kwargs: _stat_with_fixed_times(real_lstat(path, *args, **kwargs)),
+    )
+    adapters: dict[LanguageFamily, _Adapter] = {}
+    contexts: dict[LanguageFamily, AdapterBuildContext] = {}
+    walks = [0]
+    runtime = _non_git_runtime(tmp_path, adapters, contexts, walks=walks)
+    adapter = adapters[LanguageFamily.PYTHON]
+    real_load = adapter.snapshot_open_and_probe_document
+    loads = 0
+
+    def restoring_load(**kwargs: Any) -> Future[Any]:
+        nonlocal loads
+        loads += 1
+        if loads > 1:
+            return real_load(**kwargs)
+        source.write_bytes(intruded)
+        future = real_load(**kwargs)
+        # The worker has now read B; restore A before the postflight observes it.
+        observed_document = future.result(timeout=5)
+        source.write_bytes(original)
+        settled: Future[Any] = Future()
+        settled.set_result(observed_document)
+        return settled
+
+    monkeypatch.setattr(adapter, "snapshot_open_and_probe_document", restoring_load)
+    try:
+        observed = _observed_paths(monkeypatch)
+        walked_before = walks[0]
+        version_before = runtime.freshness._version
+
+        result = runtime.get_symbols_overview("main.py").to_dict()
+
+        assert result["ok"] is True
+        assert loads == 2
+        assert observed == [("main.py",)] * 4
+        assert walks[0] == walked_before
+        # No committed freshness fact ever moved: only the witness saw B.
+        assert runtime.freshness._version == version_before
+        assert source.read_bytes() == original
+    finally:
+        runtime.stop()
+
+
+def test_non_git_global_read_takes_one_bounded_full_root_preflight_and_postflight(tmp_path: Path) -> None:
+    (tmp_path / "a_main.py").write_text("Target = 1\n")
+    adapters: dict[LanguageFamily, _Adapter] = {}
+    contexts: dict[LanguageFamily, AdapterBuildContext] = {}
+    walks = [0]
+    runtime = _non_git_runtime(
+        tmp_path,
+        adapters,
+        contexts,
+        walks=walks,
+        symbols=(_workspace_symbol("Target", tmp_path / "a_main.py"),),
+    )
+    try:
+        walked_before = walks[0]
+
+        result = runtime.find_symbol("Target").to_dict()
+
+        assert result["ok"] is True
+        assert [item["relative_path"] for item in result["data"]["symbols"]] == ["a_main.py"]
+        # A query with no explicit target cannot claim targeted freshness: it
+        # takes one bounded whole-root scan before and one after the read.
+        assert walks[0] - walked_before == 2
+    finally:
+        runtime.stop()
+
+
+@pytest.mark.parametrize("mutation", ["created", "changed", "deleted", "symlinked"])
+def test_non_git_global_read_replays_once_when_root_membership_or_content_moves(tmp_path: Path, mutation: str) -> None:
+    (tmp_path / "a_main.py").write_text("Target = 1\n")
+    extra = tmp_path / "z_extra.py"
+    extra.write_text("extra = 1\n")
+    adapters: dict[LanguageFamily, _Adapter] = {}
+    contexts: dict[LanguageFamily, AdapterBuildContext] = {}
+    walks = [0]
+    operations = 0
+
+    def race_first_operation_only() -> None:
+        nonlocal operations
+        operations += 1
+        if operations != 1:
+            return
+        if mutation == "created":
+            (tmp_path / "z_created.py").write_text("fresh = 1\n")
+        elif mutation == "changed":
+            extra.write_text("extra = 22222\n")
+        elif mutation == "deleted":
+            extra.unlink()
+        else:
+            extra.unlink()
+            extra.symlink_to(tmp_path / "a_main.py")
+
+    runtime = _non_git_runtime(
+        tmp_path,
+        adapters,
+        contexts,
+        walks=walks,
+        symbols=(_workspace_symbol("Target", tmp_path / "a_main.py"),),
+        on_snapshot=race_first_operation_only,
+    )
+    try:
+        walked_before = walks[0]
+
+        result = runtime.find_symbol("Target").to_dict()
+
+        assert result["ok"] is True
+        assert operations == 2
+        # Two whole-root transactions: the first success is discarded whole.
+        assert walks[0] - walked_before == 4
+        assert (mutation == "created") == ("z_created.py" in runtime.inventory.paths)
+        assert (mutation in {"created", "changed"}) == ("z_extra.py" in runtime.inventory.paths)
+    finally:
+        runtime.stop()
+
+
+def test_non_git_global_read_raced_twice_returns_retryable_not_ready_without_payload(tmp_path: Path) -> None:
+    (tmp_path / "a_main.py").write_text("Target = 1\n")
+    adapters: dict[LanguageFamily, _Adapter] = {}
+    contexts: dict[LanguageFamily, AdapterBuildContext] = {}
+    walks = [0]
+    operations = 0
+
+    def race_every_operation() -> None:
+        nonlocal operations
+        operations += 1
+        (tmp_path / f"z_created_{operations}.py").write_text("fresh = 1\n")
+
+    runtime = _non_git_runtime(
+        tmp_path,
+        adapters,
+        contexts,
+        walks=walks,
+        symbols=(_workspace_symbol("Target", tmp_path / "a_main.py"),),
+        on_snapshot=race_every_operation,
+    )
+    try:
+        walked_before = walks[0]
+
+        result = runtime.find_symbol("Target").to_dict()
+
+        assert result["ok"] is False
+        assert "data" not in result
+        assert result["error"]["code"] == "NOT_READY"
+        assert result["error"]["retry"]["retryable"] is True
+        details = result["error"]["details"]
+        assert details["reason"] == "workspace_changed_during_read"
+        assert details["attempts"] == 2
+        assert details["paths"] == ["z_created_2.py"]
+        # Exactly one replay, then a typed retryable failure rather than churn.
+        assert operations == 2
+        assert walks[0] - walked_before == 4
+    finally:
+        runtime.stop()
+
+
+def test_non_git_edit_takes_one_preflight_and_is_never_replayed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The read transaction never reaches editing, which keeps its own preflight."""
+
+    source = tmp_path / "main.py"
+    source.write_text("value = 1\n")
+    adapters: dict[LanguageFamily, _Adapter] = {}
+    contexts: dict[LanguageFamily, AdapterBuildContext] = {}
+    walks = [0]
+    runtime = _non_git_runtime(tmp_path, adapters, contexts, walks=walks)
+    try:
+        observed = _observed_paths(monkeypatch)
+        walked_before = walks[0]
+
+        result = runtime.replace_symbol_body("value", "main.py", "value = 2\n", "sha256:unused").to_dict()
+
+        assert result["ok"] is False
+        # One explicit targeted edit preflight, no postflight, no replay, and the
+        # read-only root is never written.
+        assert observed == [("main.py",)]
+        assert walks[0] == walked_before
+        assert source.read_text() == "value = 1\n"
+    finally:
+        runtime.stop()
+
+
+def test_non_git_directory_scoped_read_takes_a_bounded_root_scan_that_sees_new_members(tmp_path: Path) -> None:
+    """A directory scope is a membership question, so it cannot stay targeted.
+
+    Statting the paths the current index already holds would silently omit a
+    source file created under that directory since the last scan, so the read
+    takes the same bounded whole-root scan a global query takes.
+    """
+
+    package = tmp_path / "pkg"
+    package.mkdir()
+    (package / "a_main.py").write_text("Target = 1\n")
+    adapters: dict[LanguageFamily, _Adapter] = {}
+    contexts: dict[LanguageFamily, AdapterBuildContext] = {}
+    walks = [0]
+    runtime = _non_git_runtime(
+        tmp_path,
+        adapters,
+        contexts,
+        walks=walks,
+        symbols=(_workspace_symbol("Target", package / "a_main.py"),),
+    )
+    try:
+        walked_before = walks[0]
+        (package / "z_added.py").write_text("Target = 2\n")
+
+        result = runtime.find_symbol("Target", relative_path="pkg").to_dict()
+
+        assert result["ok"] is True
+        assert walks[0] - walked_before == 2
+        assert "pkg/z_added.py" in runtime.inventory.paths
+        assert [item["relative_path"] for item in result["data"]["symbols"]] == ["pkg/a_main.py", "pkg/z_added.py"]
+    finally:
+        runtime.stop()
+
+
+def test_non_git_targeted_read_whose_file_disappears_fails_closed_without_payload(tmp_path: Path) -> None:
+    source = tmp_path / "main.py"
+    source.write_text("value = 1\n")
+    adapters: dict[LanguageFamily, _Adapter] = {}
+    contexts: dict[LanguageFamily, AdapterBuildContext] = {}
+    walks = [0]
+
+    def delete_during_the_operation() -> None:
+        source.unlink(missing_ok=True)
+
+    runtime = _non_git_runtime(tmp_path, adapters, contexts, walks=walks, on_snapshot=delete_during_the_operation)
+    try:
+        result = runtime.get_symbols_overview("main.py").to_dict()
+
+        assert result["ok"] is False
+        assert "data" not in result
+        assert result["error"]["code"] == "NOT_READY"
+        assert result["error"]["retry"]["retryable"] is True
     finally:
         runtime.stop()

@@ -722,12 +722,16 @@ class FreshnessCoordinator:
     thread, never on the shared LSP executor, because notifications and edits
     are submitted to that single worker and a scan waiting on it would
     deadlock.
+
+    A scan is either whole-root or targeted at exactly the paths a caller named.
+    Both kinds observe and commit the same state, so both take the same
+    admission queue; a targeted scan claims freshness for its named paths only
+    and never answers a membership question.
     """
 
     def __init__(self, runtime: WorkspaceRuntime) -> None:
         self._runtime = runtime
         self._lock = threading.Lock()
-        self._path_refresh_lock = threading.Lock()
         self._admission_condition = threading.Condition()
         self._next_ticket = 0
         self._serving_ticket = 0
@@ -763,12 +767,26 @@ class FreshnessCoordinator:
         """
 
         if self._runtime.identity.kind is not WorkspaceKind.GIT:
-            # The allowlisted read-only root is never fully walked per call; its
-            # freshness is the targeted stat in ensure_path_fresh.
+            # The allowlisted read-only root is never fully walked for an
+            # activation or an edit preflight; a read states its own scope
+            # through ensure_paths_fresh_admitted or ensure_root_fresh_admitted.
             return self._admission(FreshnessScan(), witnessed)
+        return self.ensure_root_fresh_admitted(witnessed=witnessed)
+
+    def ensure_root_fresh_admitted(self, *, witnessed: Sequence[str] = ()) -> _FreshnessAdmission:
+        """Run one whole-root guarded scan for a read that names no single file.
+
+        A global query, and a directory scope, both depend on root membership:
+        a file created, deleted, or replaced by a symlink since the last scan is
+        invisible to any per-path observation, so targeted freshness can never
+        authorize them.  On the one allowlisted non-Git root this is the same
+        bounded no-symlink inventory the workspace was built from, reconciled by
+        the same owner as Git rather than by a second mechanism.
+        """
+
         ticket = self._enter_admission_queue()
         try:
-            scan = self._scan_git()
+            scan = self._scan_root()
             # Commit the result before handing admission to the next ticket, so
             # a later ticket's own commit can never be overwritten by this one
             # resuming after it.
@@ -805,39 +823,62 @@ class FreshnessCoordinator:
     def ensure_path_fresh(self, relative_path: str) -> FreshnessScan:
         """Stat exactly one operand on the read-only non-Git root."""
 
+        return self.ensure_paths_fresh_admitted((relative_path,)).scan
+
+    def ensure_paths_fresh_admitted(
+        self, paths: Sequence[str], *, witnessed: Sequence[str] = ()
+    ) -> _FreshnessAdmission:
+        """Validate exactly the caller-named operands on the read-only non-Git root.
+
+        Only the named paths are observed, so a read that repeatedly selects one
+        file never walks the package.  The named set is therefore the whole
+        freshness claim: membership questions belong to
+        ``ensure_root_fresh_admitted``.
+        """
+
         if self._runtime.identity.kind is WorkspaceKind.GIT:
-            return FreshnessScan()
-        # Unlike Git scans, targeted external-root stats do not use the ticketed
-        # admission queue.  Serialize their compare/commit/delivery sequence so
-        # two paths in one family cannot overwrite one pending batch.
-        with self._path_refresh_lock:
-            runtime = self._runtime
-            self._settle_pending_reconciles()
-            inventory = runtime.inventory
-            if not inventory.contains(relative_path):
-                return FreshnessScan()
-            states = inventory.targeted_states([relative_path])
-            if not states:
-                return FreshnessScan()
-            observed = states[0]
-            if not observed.trusted:
-                raise WorkspaceRuntimeError(
-                    RuntimeErrorCode.NOT_READY,
-                    f"{observed.path} could not be observed safely for freshness",
-                    paths=(observed.path,),
-                )
-            with self._lock:
-                if self._states.get(observed.path) == observed.content_identity:
-                    return FreshnessScan()
-                self._states[observed.path] = observed.content_identity
-                self._version += 1
-            notified, _opened, _unopened = self._apply_events(
-                (WatchedFileEvent(observed.path, FileChangeType.CHANGED),)
-            )
-            scan = FreshnessScan(changed=(observed.path,), notified=notified)
+            return self._admission(FreshnessScan(), witnessed)
+        # Targeted and whole-root scans share one admission queue: they observe,
+        # commit, and deliver against the same state, so a targeted call must not
+        # interleave with a root scan on this workspace's inventory, committed
+        # identities, or pending reconciles.
+        ticket = self._enter_admission_queue()
+        try:
+            scan = self._refresh_paths(paths)
             with self._lock:
                 self._last = scan
-            return scan
+            return self._admission(scan, witnessed)
+        finally:
+            self._leave_admission_queue(ticket)
+
+    def _refresh_paths(self, paths: Sequence[str]) -> FreshnessScan:
+        """Observe the named paths once and deliver exactly the changes found."""
+
+        self._settle_pending_reconciles()
+        inventory = self._runtime.inventory
+        selected = sorted({path for path in paths if inventory.contains(path)})
+        if not selected:
+            return FreshnessScan()
+        states = inventory.targeted_states(selected)
+        unsafe = tuple(sorted(state.path for state in states if not state.trusted))
+        if unsafe:
+            raise WorkspaceRuntimeError(
+                RuntimeErrorCode.NOT_READY,
+                "workspace paths could not be observed safely for freshness",
+                paths=unsafe,
+            )
+        with self._lock:
+            changed = tuple(state.path for state in states if self._states.get(state.path) != state.content_identity)
+            for state in states:
+                self._states[state.path] = state.content_identity
+            if changed:
+                self._version += 1
+        if not changed:
+            return FreshnessScan()
+        notified, _opened, _unopened = self._apply_events(
+            tuple(WatchedFileEvent(path, FileChangeType.CHANGED) for path in changed)
+        )
+        return FreshnessScan(changed=changed, notified=notified)
 
     def _capture_baseline(self, inventory: TrustInventory) -> None:
         """Record the stat facts a later scan compares against."""
@@ -852,7 +893,15 @@ class FreshnessCoordinator:
         candidates = _native_config_candidates(inventory, self._runtime.projections)
         return inventory.targeted_states(sorted(candidates))
 
-    def _scan_git(self) -> FreshnessScan:
+    def _scan_root(self) -> FreshnessScan:
+        """Rebuild the whole owning inventory and reconcile everything it moved.
+
+        The owning source is the workspace's own inventory factory: Git for a
+        repository, the bounded no-symlink package index for the allowlisted
+        non-Git root.  Membership, content, symlink substitution, and native
+        config are therefore reconciled identically for both.
+        """
+
         runtime = self._runtime
         # A failed config restart remains decision-bearing even after its
         # filesystem facts have been committed.  Resolve that exact pending stop
@@ -1693,11 +1742,16 @@ class WorkspaceRuntime:
         return self._route(relative_path)[1]
 
     def _route(self, relative_path: str) -> tuple[LanguageFamily, RuntimeAdapter]:
-        """Return the fixed family together with its authorized adapter."""
+        """Return the fixed family together with its authorized adapter.
+
+        Routing owns authorization and adapter selection only.  Freshness for a
+        read belongs to the enclosing fresh-read transaction, which already
+        observed this operand under its own scope, so routing inside an
+        operation must not open a second, unvalidated preflight.
+        """
 
         normalized = _relative_path(relative_path, allow_parent=True)
         self._require_running()
-        self._freshness.ensure_path_fresh(normalized)
         if ".." in PurePosixPath(normalized).parts and not (self.identity.root / normalized).exists():
             raise ValueError(f"path does not exist: {relative_path!r}")
         inventory_paths = tuple(self.identity.root / path for path in self.inventory.paths)
@@ -1828,7 +1882,7 @@ class WorkspaceRuntime:
                 max_answer_chars=max_answer_chars,
             )
 
-        return self._fresh_read_envelope(operation)
+        return self._fresh_read_envelope(operation, scope=self._read_scope(relative_path))
 
     def _warm_global_candidates(self, name_path: str | Sequence[str]) -> Mapping[LanguageFamily, _WarmGlobalSeed]:
         """Warm fixed adapters from one controlled witness within one shared budget.
@@ -2154,12 +2208,38 @@ class WorkspaceRuntime:
             self._route(relative_path)
             return operation()
 
-        return self._fresh_read_envelope(authorized)
+        return self._fresh_read_envelope(authorized, scope=self._read_scope(relative_path))
 
-    def _fresh_read_envelope(self, operation: Callable[[], ToolEnvelope]) -> ToolEnvelope:
-        return self._tool_envelope(lambda: self._run_fresh_read(operation))
+    def _read_scope(self, relative_path: str | None) -> tuple[str, ...] | None:
+        """The exact paths a read may validate targeted, or ``None`` for whole-root.
 
-    def _run_fresh_read(self, operation: Callable[[], ToolEnvelope]) -> ToolEnvelope:
+        Only an operand that already is one indexed file can be validated by
+        observing that file.  A global query, a directory scope, and a path the
+        current inventory does not contain all depend on membership evidence a
+        per-path observation cannot produce—most plainly a source file created
+        since the last scan—so they take the whole-root guarded scan.  A Git
+        workspace always scans its whole root, so this only chooses scope on the
+        allowlisted non-Git root.
+        """
+
+        if relative_path is None:
+            return None
+        scope = relative_path.rstrip("/") or "."
+        return (scope,) if self.inventory.contains(scope) else None
+
+    def _fresh_read_envelope(
+        self, operation: Callable[[], ToolEnvelope], *, scope: tuple[str, ...] | None = None
+    ) -> ToolEnvelope:
+        return self._tool_envelope(lambda: self._run_fresh_read(operation, scope=scope))
+
+    def _admit_fresh_read(self, scope: tuple[str, ...] | None, *, witnessed: Sequence[str] = ()) -> _FreshnessAdmission:
+        """Run one guarded scan over exactly the scope this read claims."""
+
+        if scope is None or self.identity.kind is WorkspaceKind.GIT:
+            return self._freshness.ensure_root_fresh_admitted(witnessed=witnessed)
+        return self._freshness.ensure_paths_fresh_admitted(scope, witnessed=witnessed)
+
+    def _run_fresh_read(self, operation: Callable[[], ToolEnvelope], *, scope: tuple[str, ...] | None) -> ToolEnvelope:
         """Own one read transaction: preflight, operation, guarded postflight.
 
         Only source-derived success is validated.  A success whose workspace
@@ -2168,17 +2248,17 @@ class WorkspaceRuntime:
         empty success.  The response witnesses close the case where the
         operation observed bytes B that were restored to bytes A before the
         postflight, which no aggregate workspace identity can see.
+
+        ``scope`` names the paths a targeted transaction validates, or is
+        ``None`` for a whole-root transaction.  A targeted postflight also
+        validates every path the response actually owns bytes from, so a
+        response-owned file outside the requested scope is still observed before
+        that response can be returned.
         """
 
-        if self.identity.kind is not WorkspaceKind.GIT:
-            # The allowlisted read-only root keeps its existing targeted
-            # per-path freshness.  A guarded traversal able to authorize global
-            # freshness there is deliberately outside this change.
-            self.ensure_fresh()
-            return operation()
         for attempt in range(1, MAX_FRESH_READ_ATTEMPTS + 1):
             self._require_running()
-            admitted = self._freshness.ensure_fresh_admitted()
+            admitted = self._admit_fresh_read(scope)
             witnesses = self._begin_read_attempt()
             try:
                 result = operation()
@@ -2186,7 +2266,8 @@ class WorkspaceRuntime:
                 self._end_read_attempt()
             if not isinstance(result, SuccessEnvelope):
                 return result
-            final = self._freshness.ensure_fresh_admitted(witnessed=tuple(witnesses))
+            final_scope = None if scope is None else tuple(sorted({*scope, *witnesses}))
+            final = self._admit_fresh_read(final_scope, witnessed=tuple(witnesses))
             changed = _fresh_read_change_evidence(admitted, final, witnesses)
             if changed is None:
                 return result

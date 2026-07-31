@@ -34,6 +34,7 @@ from serena_light.lsp.adapter import (
 from serena_light.lsp.positions import FileSnapshot, PositionEncoding
 from serena_light.tools.editing import NotificationResult, ReplacementNotification
 from serena_light.workspace.identity import PinnedMsRoots, WorkspacePolicy
+from serena_light.workspace.inventory import TrustInventory, transformers_trust_inventory
 from serena_light.workspace.runtime import AdapterBuildContext, AdapterFactory, WorkspaceRuntime
 from serena_light.workspace.scope import (
     LanguageFamily,
@@ -469,5 +470,53 @@ def test_read_only_transformers_root_is_not_editable(tmp_path: Path) -> None:
 
         assert result["error"]["code"] == "READ_ONLY_ROOT"
         assert (transformers / "module.py").read_bytes() == _SOURCE
+    finally:
+        runtime.stop()
+
+
+def test_transformers_read_scope_is_targeted_for_an_indexed_file_and_bounded_root_otherwise(
+    tmp_path: Path,
+) -> None:
+    """The read-only root claims freshness only for what it actually observed.
+
+    A repeated explicit-file read stays targeted, so the package is never walked
+    per call.  A path the current index does not contain is a membership
+    question, which only the bounded no-symlink root scan can answer.
+    """
+
+    policy, _data_root = _policy(tmp_path)
+    transformers = policy.allowed_non_git_root
+    (transformers / "module.py").write_bytes(_SOURCE)
+    adapters: list[_Adapter] = []
+    walks = [0]
+
+    def build(context: AdapterBuildContext) -> _Adapter:
+        adapter = _Adapter(context)
+        adapters.append(adapter)
+        return adapter
+
+    def counted_inventory(identity: Any) -> TrustInventory:
+        walks[0] += 1
+        return transformers_trust_inventory(identity.root)
+
+    runtime = WorkspaceRuntime(
+        policy.resolve_activation(transformers),
+        path_policy=policy,
+        inventory_factory=counted_inventory,
+        attributors={LanguageFamily.PYTHON: _projection},
+        adapter_factories={LanguageFamily.PYTHON: cast(AdapterFactory, build)},
+    )
+    try:
+        assert runtime.get_symbols_overview("module.py").to_dict()["ok"] is True
+        walked = walks[0]
+
+        (transformers / "module.py").write_bytes(_SOURCE + b"\n")
+        assert runtime.get_symbols_overview("module.py").to_dict()["ok"] is True
+        assert walks[0] == walked
+
+        (transformers / "added.py").write_bytes(_SOURCE)
+        assert runtime.get_symbols_overview("added.py").to_dict()["ok"] is True
+        assert walks[0] > walked
+        assert "added.py" in runtime.inventory.paths
     finally:
         runtime.stop()
