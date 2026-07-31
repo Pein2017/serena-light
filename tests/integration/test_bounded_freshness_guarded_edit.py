@@ -380,15 +380,20 @@ def test_freshness_runs_before_a_semantic_operation_on_the_real_git_root(tmp_pat
             "textDocument/didOpen",
             "textDocument/didClose",
         ]
+        # status() reports the latest completed guarded scan.  A source-derived
+        # read runs a clean postflight scan after the preflight above already
+        # reconciled the new file, so the reported scan is that later, empty
+        # pass; the preflight reconciliation itself is independently proven by
+        # the inventory membership and notification assertions above.
         freshness = cast(Mapping[str, Any], cast(Mapping[str, Any], runtime.status())["freshness"])
-        assert freshness["created"] == ("created.py",)
-        assert freshness["opened"] == ("created.py",)
+        assert freshness["created"] == ()
+        assert freshness["opened"] == ()
     finally:
         runtime.stop()
 
 
 def test_replace_symbol_body_takes_exactly_one_preflight_scan_and_one_edit_submission_and_is_never_replayed(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Guards the edit/read ownership split ahead of the ``_tool_envelope`` refactor.
 
@@ -415,8 +420,8 @@ def test_replace_symbol_body_takes_exactly_one_preflight_scan_and_one_edit_submi
         edit_submissions += 1
         return real_submit_edit(operation)
 
-    runtime._freshness.ensure_fresh = counting_ensure_fresh
-    adapter.submit_edit = counting_submit_edit
+    monkeypatch.setattr(runtime._freshness, "ensure_fresh", counting_ensure_fresh)
+    monkeypatch.setattr(adapter, "submit_edit", counting_submit_edit)
 
     def disturb_during_edit() -> None:
         # This change lands after the one preflight scan has already run and

@@ -626,7 +626,7 @@
     "current_candidate_fresh_session_accepted": true,
     "canonical_switch_approved": false,
     "edit_reacceptance_pending": false,
-    "dual_audit_hold": false,
+    "dual_audit_hold": true,
     "compact_success_schema": {
       "status": "pass",
       "full_suite_evidence": "complete",
