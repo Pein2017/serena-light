@@ -2007,6 +2007,32 @@ def test_read_only_transport_loss_restarts_and_retries_exactly_once() -> None:
         harness.close()
 
 
+def test_read_only_transport_loss_twice_raises_after_exactly_two_attempts() -> None:
+    """The read-only retry bound is exactly two executions, not a loop.
+
+    Both attempts fail with transport loss; only two clients may ever be
+    started, and the second failure must propagate rather than starting a
+    third attempt.
+    """
+
+    provider = FakeRuntimeProvider(
+        [
+            lambda: FakeClient(_initialize_result(), {"textDocument/definition": [LspTransportClosed("lost first")]}),
+            lambda: FakeClient(_initialize_result(), {"textDocument/definition": [LspTransportClosed("lost second")]}),
+        ]
+    )
+    harness = AdapterHarness(provider)
+    try:
+        with pytest.raises(LspTransportClosed, match="lost second"):
+            harness.adapter.submit_read(
+                lambda client: client.request("textDocument/definition", {"position": {}})
+            ).result(timeout=1)
+        assert len(provider.clients) == 2
+        assert harness.adapter.snapshot().crash.total == 2
+    finally:
+        harness.close()
+
+
 @pytest.mark.parametrize(
     "error",
     [
