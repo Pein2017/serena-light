@@ -203,3 +203,90 @@ and `git diff --check` success.
 The requested ms-swift root was corrected from the nonexistent
 `/data/CoordExp/ms-swift` to the live Git root `/data/ms-swift`; no symlink or
 repository relocation was introduced.
+
+## Real-root and latency evidence
+
+The external-root matrix was pinned immediately before execution:
+
+```text
+SERENA_LIGHT_CC_PLUGIN_CODEX_SNAPSHOT=git:deff2f5d117dbe9f9c47e7cd8d5fe3407f1469f7:2b2860a444149de1c69f6ad70dc7156d672f5486e0bb2cb9cbb6a3755fe45a90
+SERENA_LIGHT_COORDEXP_SNAPSHOT=git:0490f73b56b352826de5f4b3e697575037582718:107c365432ff36acd2c2af7309487c4dc013108935563951e42bd3e9b0140310
+SERENA_LIGHT_MS_SWIFT_SNAPSHOT=git:f2797138dba0e224cfff735cd89a528a08d8732a:45696b3ae91193e921ccb9b1dbd5b33c27b7462d4b6281801d22f90d825de19a
+SERENA_LIGHT_TRANSFORMERS_SNAPSHOT=transformers:4.57.1:4880a9c5bf65f2bb124b7739c74991c1bc2aaf7755133b7fa77ce1e017745dcf
+```
+
+`900ea93` adds observation-only navigation and diagnostics timing on the live
+`/data/CoordExp` and `/data/ms-swift` Git roots. Each operation has two samples,
+uses a nearest-rank empirical p50/p95, asserts the expected symbol and path for
+global and scoped lookup, and has no latency pass threshold. The recorded
+seconds were:
+
+| root | operation | p50 | p95 |
+|---|---|---:|---:|
+| `/data/CoordExp` | global symbol | 12.53 | 33.95 |
+| `/data/CoordExp` | scoped symbol | 10.96 | 11.60 |
+| `/data/CoordExp` | overview | 11.57 | 11.74 |
+| `/data/CoordExp` | diagnostics | 11.00 | 11.04 |
+| `/data/ms-swift` | global symbol | 1.49 | 15.21 |
+| `/data/ms-swift` | scoped symbol | 0.46 | 0.87 |
+| `/data/ms-swift` | overview | 0.47 | 0.55 |
+| `/data/ms-swift` | diagnostics | 0.47 | 0.47 |
+
+The larger CoordExp numbers reflect the deliberately authoritative per-call
+Git scan and are evidence for the later, separately owned warm-runtime change;
+they are not a failure of this correctness change. The worker's complete
+snapshot-bound Python file passed `8 tests` in 331 seconds. Lead review then
+strengthened the symbol assertions, caught and corrected a test-only scoped
+envelope path mistake, and independently reran both timing cases: `2 passed`
+in 158.78 seconds. Ruff and Ty passed.
+
+Fresh Serena Light-only CC/Claude sessions selected current production build
+`1a940728c705c5b1b2f460ec1950884727c91d4ddcebfb98a025171c88cff5cd`
+and shared daemon `cfb31059-c2d5-48b1-8e5d-afb0e020aa0b`. The Sonnet session
+queried `PipelinePlanner` and current diagnostics in `/data/CoordExp`, switched
+to `/data/CoordExp/cc-plugin-codex`, found TypeScript-language-server symbols,
+and repeated identical current diagnostics after same-root reactivation. The
+Opus session resolved `GenerationConfig` from `/data/ms-swift` into the
+read-only transformers package, switched to the transformers root, and repeated
+a scoped `Qwen2VLForConditionalGeneration/forward` read after same-root
+reactivation. Typed ambiguity and unavailable external `include_info` were
+reported explicitly rather than silently degraded. Both sessions released
+their bindings with `runtime_stop_pending=false` and observed no stale result.
+
+The fixed-snapshot TypeScript real acceptance separately passed `6 tests` in
+10.87 seconds, covering `/data/CoordExp/cc-plugin-codex`. These results close
+the four-root, cross-root, same-root-reactivation, navigation, diagnostics, and
+observation-only latency portions of task 5.2.
+
+## Shared-client and lifecycle evidence in progress
+
+`1eda55d` adds a real locked-service connector test with three independent
+stdio clients, two temporary Git roots, and one isolated build slot. It proves
+that two clients share one root and daemon, a second root coexists, one lease
+can switch cross-root and reactivate the same root without replacing the daemon,
+and releasing one or two leases cannot retire a daemon still held by another
+client. With zero holders, the exact PID+create-time daemon and all four
+observed locked-runtime language-server descendants retire, and its discovery
+and bearer files disappear. One client inherits a fully poisoned proxy
+environment while test-side loopback HTTP uses `trust_env=False`.
+
+Lead verification of that test was `1 passed` in 14.30 seconds; the worker also
+ran it three times and in combination with rollover and stdio proxy acceptance
+for `6 passed` in 52.49 seconds. Existing supporting evidence passed as well:
+real versioned rollover `1 passed`, stdio clean/poisoned proxy `4 passed`, lease
+lifecycle `17 passed`, and parent-death cleanup `5 passed`. The test records and
+cleans only identities it created; it performs no name-based or broad process
+kill.
+
+A read-only process census also identified 14 pre-build-slot flat-layout
+legacy daemons that predate current lifecycle ownership, have no established
+connections, and cannot be discovered by current connectors. They are an
+explicit pre-existing baseline, not newly created task-5.3 orphans. Current
+older-build daemon `92b2618e...` and current-build daemon `1a940728...` have
+real holders and remain untouched. Any manual cleanup of the legacy set needs
+separate authorization and a fresh exact PID+create-time/connection check.
+
+The generic multi-client, multi-root, proxy, rollover, release, and zero-new-
+orphan portions of task 5.3 now have real process evidence. The task remains
+open until a fresh Codex lane joins the completed CC/Claude receipts during the
+planned independent review.
