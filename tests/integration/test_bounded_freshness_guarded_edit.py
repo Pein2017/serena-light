@@ -387,6 +387,56 @@ def test_freshness_runs_before_a_semantic_operation_on_the_real_git_root(tmp_pat
         runtime.stop()
 
 
+def test_replace_symbol_body_takes_exactly_one_preflight_scan_and_one_edit_submission_and_is_never_replayed(
+    tmp_path: Path,
+) -> None:
+    """Guards the edit/read ownership split ahead of the ``_tool_envelope`` refactor.
+
+    ``replace_symbol_body`` must run the Git freshness scan exactly once, as a
+    preflight only; it must submit the edit transaction exactly once; and it
+    must not gain a postflight scan or an automatic replay even when the
+    workspace changes during the edit itself, since edits stay outside the
+    fresh-read replay boundary.
+    """
+    runtime, adapter = _runtime(tmp_path)
+    root = runtime.identity.root
+    scan_calls = 0
+    edit_submissions = 0
+    real_ensure_fresh = runtime._freshness.ensure_fresh
+    real_submit_edit = adapter.submit_edit
+
+    def counting_ensure_fresh() -> Any:
+        nonlocal scan_calls
+        scan_calls += 1
+        return real_ensure_fresh()
+
+    def counting_submit_edit(operation: Callable[[_Client], Any]) -> Future[Any]:
+        nonlocal edit_submissions
+        edit_submissions += 1
+        return real_submit_edit(operation)
+
+    runtime._freshness.ensure_fresh = counting_ensure_fresh
+    adapter.submit_edit = counting_submit_edit
+
+    def disturb_during_edit() -> None:
+        # This change lands after the one preflight scan has already run and
+        # while the edit transaction itself is in flight.  A postflight scan or
+        # an automatic replay would observe it; `replace_symbol_body` must not
+        # take either action.
+        (root / "created_during_edit.py").write_text("late = 1\n")
+
+    adapter.before_edit = disturb_during_edit
+    try:
+        result = _replace(runtime)
+
+        assert result["ok"] is True
+        assert (root / "main.py").read_bytes() == b"def target():\n    return 2\n"
+        assert scan_calls == 1
+        assert edit_submissions == 1
+    finally:
+        runtime.stop()
+
+
 def test_read_only_transformers_root_is_not_editable(tmp_path: Path) -> None:
     policy, _data_root = _policy(tmp_path)
     transformers = policy.allowed_non_git_root

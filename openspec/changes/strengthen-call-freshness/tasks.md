@@ -1,7 +1,7 @@
 ## 1. Admission and Transaction Baseline
 
-- [ ] 1.1 Confirm `strengthen-call-freshness` is the only active owner of call-freshness behavior, record the implementation-start commit/build/schema identities, and verify that no production-code changes from either dependent change are present.
-- [ ] 1.2 Trace and record every current content-bearing read entrypoint, the shared in-flight scan state, read/edit envelope split, diagnostics `clean` path, adapter-process retry, semantic target replay, and targeted transformers freshness path before changing ownership.
+- [x] 1.1 Confirm `strengthen-call-freshness` is the only active owner of call-freshness behavior, record the implementation-start commit/build/schema identities, and verify that no production-code changes from either dependent change are present.
+- [x] 1.2 Trace and record every current content-bearing read entrypoint, the shared in-flight scan state, read/edit envelope split, diagnostics `clean` path, adapter-process retry, semantic target replay, and targeted transformers freshness path before changing ownership.
 - [ ] 1.3 Add deterministic test barriers around call arrival, guarded scan start/finish, operation completion, and postflight so race tests do not depend on sleeps.
 
 ## 2. Per-Call Freshness Admission
