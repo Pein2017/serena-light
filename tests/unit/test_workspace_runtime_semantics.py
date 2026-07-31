@@ -2300,20 +2300,30 @@ def test_reference_cold_cooldown_and_capability_failures_are_not_empty_success(t
     source.write_text("target()\n")
     replies = {"textDocument/documentSymbol": [_symbol("target")], "textDocument/references": []}
     runtime, adapter, _policy = _runtime(tmp_path, replies, phase=AdapterPhase.COLD)
+    scans = _count_scans(runtime)
     try:
         assert runtime.find_referencing_symbols("source.py", "target").to_dict()["error"]["code"] == "NOT_READY"
+        # A typed readiness failure keeps its own authority: one preflight per
+        # call, no postflight, and no replay that could manufacture another
+        # result.
+        assert scans[0] == 1
         adapter.phase = AdapterPhase.COOLDOWN
         assert runtime.find_referencing_symbols("source.py", "target").to_dict()["error"]["code"] == "COOLDOWN"
+        assert scans[0] == 2
+        assert [method for method, _ in adapter.client.requests if method == "textDocument/references"] == []
     finally:
         runtime.stop()
 
-    runtime, _adapter, _policy = _runtime(
+    runtime, adapter, _policy = _runtime(
         tmp_path,
         replies,
         raw_providers=RawLspProviders(document_symbols=True, references=False),
     )
+    scans = _count_scans(runtime)
     try:
         assert runtime.find_referencing_symbols("source.py", "target").to_dict()["error"]["code"] == "UNSUPPORTED"
+        assert scans[0] == 1
+        assert [method for method, _ in adapter.client.requests if method == "textDocument/references"] == []
     finally:
         runtime.stop()
 
