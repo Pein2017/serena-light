@@ -108,3 +108,37 @@ Lead verification after `a668f87`:
 The skipped tests require recorded external snapshots or opt-in performance
 inputs and remain part of the later real-root acceptance tasks; they are not
 counted as completed evidence here.
+
+## Bounded retry composition evidence
+
+The retry census after `a668f87` found three independent finite owners rather
+than one nested retry loop:
+
+- the outer fresh-read transaction runs at most two complete attempts;
+- semantic target stabilization issues exactly two native requests per outer
+  attempt;
+- the adapter runtime executes read-only work at most twice after transport or
+  process loss, while edit work executes once.
+
+Existing tests already prove two outer attempts multiplied by two semantic
+requests (`calls == 4`), typed trust and readiness failures returning after one
+preflight, queue saturation remaining pending until a later call, diagnostics
+cancellation ownership, cooldown/timeout preservation, and edit non-replay.
+`22be317` added the missing hard-ceiling test: two consecutive read-only
+transport losses raise the second failure after exactly two client starts and
+two recorded crashes. `08c440b` strengthened the COLD, COOLDOWN, and
+UNSUPPORTED reference cases to prove one preflight and zero reference requests
+per typed failure.
+
+Both additions were falsified against temporary production weakenings: raising
+the adapter retry allowance to three made the transport test fail, and forcing
+an `ErrorEnvelope` through read postflight made the typed-failure scan count
+fail. Production sources were restored before acceptance. Lead verification of
+the three owning unit files was `174 passed`; Ruff, Ty, and diff checks passed.
+
+No unit test composes the real adapter transport retry inside the outer
+workspace transaction because the workspace tests use protocol fakes and the
+adapter tests own the real transport runtime. Constructing retry behavior in a
+fake would duplicate the implementation. The owners are independently bounded
+and meet through one opaque future; a real-daemon fault case remains part of
+the later acceptance stage rather than a new parallel retry model.

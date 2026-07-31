@@ -16,7 +16,7 @@
 - [x] 3.2 On a changed postflight, discard all source-derived data and replay the complete read once; on a second race, return rich retryable `NOT_READY` with reason `workspace_changed_during_read` and bounded attempt/generation evidence.
 - [x] 3.3 Route every semantic navigation and file/symbol diagnostics success path, including diagnostic `clean`, through `run_fresh_read`; keep invalid/trust/readiness errors typed and finite.
 - [x] 3.4 Keep `replace_symbol_body` and all future editing outside the read-replay owner; verify queued/running/installed commit states, timeout mapping, lost-response handling, and `UNCERTAIN` are unchanged and no edit callable can be replayed.
-- [ ] 3.5 Audit the combined freshness replay, adapter-process retry, and semantic target-stabilization loops and add assertions proving each bound terminates without an accidental nested unbounded loop.
+- [x] 3.5 Audit the combined freshness replay, adapter-process retry, and semantic target-stabilization loops and add assertions proving each bound terminates without an accidental nested unbounded loop.
 
 ## 4. Deterministic Correctness Tests
 
@@ -25,7 +25,7 @@
 - [ ] 4.3 Cover one raced navigation/diagnostics read followed by successful replay and two consecutive races followed by retryable `NOT_READY`, asserting that no first-attempt body, range, reference, diagnostic, or `clean` state escapes.
 - [x] 4.4 Cover a write after final guarded validation and prove the linearized result may return while the next call's own preflight observes the new bytes.
 - [x] 4.5 Cover a same-tick write to bytes B followed by restoration of bytes A before postflight; prove an operation-owned B snapshot fails final A witness comparison and cannot escape.
-- [ ] 4.6 Cover adapter crash/retry, target-snapshot replay, client cancellation, queue saturation, cooldown, and freshness failure combinations with finite exact invocation counts.
+- [x] 4.6 Cover adapter crash/retry, target-snapshot replay, client cancellation, queue saturation, cooldown, and freshness failure combinations with finite exact invocation counts.
 - [x] 4.7 Cover explicit transformers file queries using targeted pre/post validation and global transformers queries using bounded full-root pre/post validation.
 
 ## 5. Real-Daemon Acceptance and Documentation
