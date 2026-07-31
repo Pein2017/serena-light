@@ -21,8 +21,8 @@
 ## 4. Deterministic Correctness Tests
 
 - [x] 4.1 Replace the old shared-scan unit expectation with a barrier test where call B arrives after scan A starts, waits, then runs a distinct scan begun after B's arrival.
-- [ ] 4.2 Cover stable file create, ordinary change, delete, rename, native-config change, ignored/tracked membership change, symlink substitution, and same-size/inode/timestamp byte rewrite between arrival, preflight, operation, and postflight.
-- [ ] 4.3 Cover one raced navigation/diagnostics read followed by successful replay and two consecutive races followed by retryable `NOT_READY`, asserting that no first-attempt body, range, reference, diagnostic, or `clean` state escapes.
+- [x] 4.2 Cover stable file create, ordinary change, delete, rename, native-config change, ignored/tracked membership change, symlink substitution, and same-size/inode/timestamp byte rewrite between arrival, preflight, operation, and postflight.
+- [x] 4.3 Cover one raced navigation/diagnostics read followed by successful replay and two consecutive races followed by retryable `NOT_READY`, asserting that no first-attempt body, range, reference, diagnostic, or `clean` state escapes.
 - [x] 4.4 Cover a write after final guarded validation and prove the linearized result may return while the next call's own preflight observes the new bytes.
 - [x] 4.5 Cover a same-tick write to bytes B followed by restoration of bytes A before postflight; prove an operation-owned B snapshot fails final A witness comparison and cannot escape.
 - [x] 4.6 Cover adapter crash/retry, target-snapshot replay, client cancellation, queue saturation, cooldown, and freshness failure combinations with finite exact invocation counts.

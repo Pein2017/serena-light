@@ -142,3 +142,32 @@ adapter tests own the real transport runtime. Constructing retry behavior in a
 fake would duplicate the implementation. The owners are independently bounded
 and meet through one opaque future; a real-daemon fault case remains part of
 the later acceptance stage rather than a new parallel retry model.
+
+## Deterministic Git race and membership evidence
+
+The task-4.2 census traces rename handling to the same `created`/`deleted` set
+difference already exercised by the stable membership tests; there is no
+rename-specific production branch. Existing tests also cover native-config
+restart, source symlink rejection, and same-size/inode/timestamp byte changes
+at both scan and final-witness boundaries.
+
+`96ff397` closed the two remaining distinct gaps:
+
+- a pure Git ignore-rule transition now proves tracked-to-ignored and
+  ignored-to-inventory membership changes without deleting or creating the
+  file bytes; both changes advance family attribution;
+- a Git file-scoped `find_symbol(include_body=True)` race now proves that the
+  returned body, range, and hash all belong to the settled second attempt.
+
+The membership test was falsified by temporarily removing
+`--exclude-standard` from Git inventory discovery, and the raced-body test by
+temporarily bypassing read postflight. Each became red for the intended reason,
+and both production files were restored byte-for-byte. Together with the
+existing one/two-race navigation and diagnostic-clean tests, semantic target
+stabilization tests, response-witness restoration test, and exact scan counts,
+this closes deterministic tasks 4.2 and 4.3. Lead verification of the three
+owning files was `127 passed`; Ruff, Ty, and diff checks passed.
+
+Real `git mv` behavior with live open documents remains a real-daemon
+acceptance concern, not a separate unit mechanism: the coordinator intentionally
+models it as one deletion plus one creation.
