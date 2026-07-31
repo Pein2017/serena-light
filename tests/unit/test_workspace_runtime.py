@@ -822,6 +822,7 @@ def _git_runtime(
     future_timeout: float = 35.0,
     executor_factory: Callable[[Path], BoundedLspExecutor] | None = None,
     on_snapshot: Callable[[], None] | None = None,
+    symbols: Sequence[Mapping[str, Any]] = (),
 ) -> WorkspaceRuntime:
     def attribute(family: LanguageFamily) -> Callable[[Path, tuple[str, ...]], ScopeProjection]:
         def attributor(_root: Path, paths: tuple[str, ...]) -> ScopeProjection:
@@ -839,7 +840,7 @@ def _git_runtime(
             LanguageFamily.PYTHON: attribute(LanguageFamily.PYTHON),
             LanguageFamily.TYPESCRIPT: attribute(LanguageFamily.TYPESCRIPT),
         },
-        adapter_factories=_factories(adapters, contexts, symbols=[], on_snapshot=on_snapshot),
+        adapter_factories=_factories(adapters, contexts, symbols=symbols, on_snapshot=on_snapshot),
         future_timeout=future_timeout,
         executor_factory=executor_factory,
     )
@@ -1366,6 +1367,58 @@ def test_read_raced_twice_returns_retryable_not_ready_without_any_source_payload
         runtime.stop()
 
 
+def test_git_read_raced_once_replays_and_returns_the_settled_body(tmp_path: Path) -> None:
+    """The Git-workspace boundary must not let a first-attempt body escape.
+
+    The existing Git-path race tests only add an unrelated file, so a symbol
+    body that is identical on both attempts cannot prove which attempt it came
+    from. Here the read's own target changes content mid-transaction, matching
+    the non-Git targeted-read proof already accepted for the allowlisted root.
+    """
+
+    _git_repository(tmp_path)
+    source = tmp_path / "main.py"
+    first_attempt_bytes = "value = 1\n"
+    settled_bytes = "value = 22222\n"
+    source.write_text(first_attempt_bytes)
+    adapters: dict[LanguageFamily, _Adapter] = {}
+    contexts: dict[LanguageFamily, AdapterBuildContext] = {}
+    scans = [0]
+    operations = 0
+
+    def race_first_operation_only() -> None:
+        nonlocal operations
+        operations += 1
+        if operations == 1:
+            source.write_text(settled_bytes)
+
+    runtime = _git_runtime(
+        tmp_path,
+        adapters,
+        contexts,
+        inventory_factory=_scan_counting_inventory(scans),
+        on_snapshot=race_first_operation_only,
+        symbols=(_document_symbol_covering_first_line("value"),),
+    )
+    try:
+        before = scans[0]
+
+        result = runtime.find_symbol("value", relative_path="main.py", include_body=True).to_dict()
+
+        assert result["ok"] is True
+        symbol = result["data"]["symbol"]
+        # Body, range, and file digest all come from the settled second-attempt
+        # source; the first attempt owned the superseded bytes and was discarded
+        # whole rather than returned or merged.
+        assert symbol["body"] == settled_bytes
+        assert symbol["range"]["end"]["byte_offset"] == len(settled_bytes) > len(first_attempt_bytes)
+        assert result["data"]["sha256"] == hashlib.sha256(settled_bytes.encode()).hexdigest()
+        assert scans[0] - before == 4
+        assert operations == 2
+    finally:
+        runtime.stop()
+
+
 def test_restored_bytes_are_caught_by_the_response_witness_when_workspace_identity_is_unchanged(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1641,6 +1694,53 @@ def test_freshness_detects_symlink_substitution_and_native_config_change(tmp_pat
 
         assert config_scan.config_changed == ("pyrightconfig.json",)
         assert config_scan.reattributed == (LanguageFamily.PYTHON,)
+    finally:
+        runtime.stop()
+
+
+def test_freshness_reports_ignored_to_tracked_and_tracked_to_ignored_membership_change(tmp_path: Path) -> None:
+    """Git membership can move without any create/delete/unlink of file bytes.
+
+    ``git rm --cached`` plus a matching ``.gitignore`` pattern removes a file
+    from inventory while its bytes stay untouched on disk, and removing that
+    pattern restores an already-present file to inventory.  Create/delete tests
+    that add or unlink bytes cannot prove this pure ignore-rule-driven
+    attribution, because ``git ls-files --cached --others --exclude-standard``
+    is the only place membership is decided.
+    """
+
+    _git_repository(tmp_path)
+    (tmp_path / "tracked.py").write_text("value = 1\n")
+    (tmp_path / "future_tracked.py").write_text("later = 1\n")
+    (tmp_path / ".gitignore").write_text("future_tracked.py\n")
+    subprocess.run(["git", "add", "tracked.py", ".gitignore"], cwd=tmp_path, check=True, capture_output=True)
+    adapters: dict[LanguageFamily, _Adapter] = {}
+    contexts: dict[LanguageFamily, AdapterBuildContext] = {}
+    runtime = _git_runtime(tmp_path, adapters, contexts)
+    try:
+        runtime.ensure_fresh()
+        assert "tracked.py" in runtime.inventory.paths
+        assert "future_tracked.py" not in runtime.inventory.paths
+
+        # tracked -> ignored: the file stays byte-for-byte identical on disk.
+        subprocess.run(["git", "rm", "--cached", "-q", "tracked.py"], cwd=tmp_path, check=True, capture_output=True)
+        (tmp_path / ".gitignore").write_text("future_tracked.py\ntracked.py\n")
+        untrack_scan = runtime.ensure_fresh()
+
+        assert untrack_scan.deleted == ("tracked.py",)
+        assert untrack_scan.created == ()
+        assert (tmp_path / "tracked.py").read_text() == "value = 1\n"
+        assert "tracked.py" not in runtime.inventory.paths
+        assert untrack_scan.reattributed == (LanguageFamily.PYTHON,)
+
+        # ignored -> tracked: the file was already present, only the rule moved.
+        (tmp_path / ".gitignore").write_text("tracked.py\n")
+        track_scan = runtime.ensure_fresh()
+
+        assert track_scan.created == ("future_tracked.py",)
+        assert track_scan.deleted == ()
+        assert "future_tracked.py" in runtime.inventory.paths
+        assert track_scan.reattributed == (LanguageFamily.PYTHON,)
     finally:
         runtime.stop()
 
