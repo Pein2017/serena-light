@@ -8,14 +8,19 @@ active OpenSpec change, OpenSpec wins.
 
 Archived change `2026-07-29-build-serena-light-v1` was the sole repair owner. Its 2026-07-28 PASS was
 superseded by HOLD. The 2026-07-29 Sol-xhigh and Opus-max audits found new
-release-blocking correctness and evidence gaps. Those gaps are now repaired and
-the current state is `PASS — V1 ARCHIVED`. Serena Light remains
+release-blocking correctness and evidence gaps. Those gaps were repaired, v1
+reached `PASS — V1 ARCHIVED`, and both follow-up ablation changes have since
+been accepted and archived: `fix-position-and-coverage-contract`
+(Phase C), then `compact-success-schema` (Phase D). Serena Light remains
 registered in parallel under `serena-light`; canonical `serena` is unchanged.
 Guarded editing (`replace_symbol_body`) is restored after reacceptance.
-The first Serena-versus-Serena-Light ablation subsequently exposed public
-coordinate, assignment-body, reference-coverage, and response-size issues. Two
-strictly ordered active changes now own that follow-up: first
-`fix-position-and-coverage-contract`, then `compact-success-schema`.
+
+The active implementation owner today is `strengthen-call-freshness`
+(Phase E below), currently in progress at candidate build
+`1a940728c705c5b1b2f460ec1950884727c91d4ddcebfb98a025171c88cff5cd` and not
+yet PASS. `add-lexical-discovery` and `improve-warm-runtime-reuse` are the
+next two strictly ordered changes in that same phase and remain
+planning-only until each predecessor is accepted, synced, and archived.
 
 ## Phase A: contain and repair v1
 
@@ -42,7 +47,7 @@ archived. See [the final acceptance record](../openspec/changes/archive/2026-07-
 ## Phase B: reaccept and release v1
 
 Run fresh Codex, Claude Code, and CC Agent acceptance across `/data/CoordExp`,
-`/data/CoordExp/cc-plugin-codex`, `/data/CoordExp/ms-swift`, and the pinned transformers
+`/data/CoordExp/cc-plugin-codex`, `/data/ms-swift`, and the pinned transformers
 package while retaining the model clients' required external-network proxy.
 Run clean and poisoned environments directly through the real stdio connector
 to test the localhost boundary. Restore `replace_symbol_body` only after its
@@ -174,7 +179,76 @@ Sol-xhigh static and Opus-max runtime/evidence audits both pass with no P0/P1
 findings. Stable specs are synchronized and Phase D is archived as
 `2026-07-30-compact-success-schema`.
 
-## Phase E: agent-facing position queries
+## Phase E: strengthen call freshness, then lexical discovery, then warm runtime reuse
+
+Phase D is archived, so implement three strictly ordered OpenSpec changes on
+top of the compact schema: first `strengthen-call-freshness`, then
+`add-lexical-discovery`, then `improve-warm-runtime-reuse`. Each later change
+remains planning-only, with no production-code changes, until its
+predecessor is accepted, synced, and archived.
+
+1. `strengthen-call-freshness` gives every content-bearing read its own FIFO
+   per-call freshness admission ticket instead of letting a later caller
+   accept an already-running scan. Git-tracked source and native config bytes
+   get a guarded preflight, the operation with retained response-owned byte
+   witnesses, and a real postflight; a changed postflight replays the
+   complete read once, and a second race returns typed retryable `NOT_READY`
+   with reason `workspace_changed_during_read`. The explicitly trusted
+   non-Git conda `ms` transformers root keeps targeted stat-plus-byte
+   pre/post validation for scoped/indexed reads and adds a bounded
+   no-symlink full-root pre/post scan for global, directory, or
+   not-yet-indexed reads. Editing stays outside this replay boundary. This
+   change adds no authoritative background watcher, persistent content
+   index, or cooperative external-writer lock.
+2. `add-lexical-discovery` adds bounded `find_paths` and `search_text` tools
+   over a full-file trust catalog, using a pinned Serena-Light-owned ripgrep
+   executable and the strengthened freshness contract from step 1. It bumps
+   the public tool schema from 3 to 4.
+3. `improve-warm-runtime-reuse` replaces the fixed ten-minute zero-holder
+   grace with a bounded, LRU-evicted warm pool (at most three zero-holder
+   workspaces, 30 minutes, 1.5 GiB soft RSS cap) and finite opportunistic
+   adapter prewarm, without weakening freshness or adding public
+   configuration.
+
+Gate: each change independently passes its own deterministic tests, real
+daemon/connector acceptance across `/data/CoordExp`,
+`/data/CoordExp/cc-plugin-codex`, `/data/ms-swift`, and the read-only conda
+`ms` transformers package, strict OpenSpec/provenance gates, and independent
+correctness/runtime review before it syncs and archives; only then may the
+next change in the sequence begin implementation.
+
+**Progress as of 2026-07-31:** `strengthen-call-freshness` implementation is
+in progress at candidate build
+`1a940728c705c5b1b2f460ec1950884727c91d4ddcebfb98a025171c88cff5cd`. The
+deterministic race-test suite and a real daemon/connector race harness
+(production `Connector` against a spawned writer process over loopback) both
+pass. A real shared-daemon acceptance run proved three simultaneous clients
+across two roots, same-root reactivation, a partial release, a
+poisoned-proxy environment, and zero newly created test-owned LSP orphans;
+fresh CC Sonnet and Opus clients used Serena Light exclusively and shared
+this daemon build across all four live roots, releasing cleanly. Task 5.2
+(targeted fresh-client smokes) is now complete: both parametrized
+latency-smoke cases pass after strengthened semantic assertions (`2 passed
+in 158.78s`; the prior full Python real-acceptance suite passed `8 in
+331s`). Recorded per-call latency is observation-only (2 samples per call,
+nearest-rank p50/p95, no threshold): `/data/CoordExp` global 12.53/33.95s,
+scoped 10.96/11.60s, overview 11.57/11.74s, diagnostics 11.00/11.04s;
+`/data/ms-swift` global 1.49/15.21s, scoped 0.46/0.87s, overview
+0.47/0.55s, diagnostics 0.47/0.47s. These numbers motivate the later
+`improve-warm-runtime-reuse` warm-pool work but are not a failure. Task 5.3
+(shared-daemon acceptance) is only partially complete: the process-level
+shared-client lifecycle portion is done, but the host-client matrix is not
+yet closed — a planned fresh Codex/Sol lane must still join the two existing
+CC/Claude receipts. Task 5.4 documentation is updated; tasks 5.5 (full gate
+suite), 5.6 (design-review stop conditions), and 5.7 (independent
+correctness/runtime review) remain open, so the change stays **HOLD / in
+progress**, not PASS.
+`add-lexical-discovery` and `improve-warm-runtime-reuse` have not started
+implementation. See
+[`openspec/changes/strengthen-call-freshness`](../openspec/changes/strengthen-call-freshness)
+for the owning tasks and acceptance evidence.
+
+## Phase F: agent-facing position queries
 
 After v1 archive, create the independent OpenSpec change
 `add-agent-lsp-query`. Add a closed-enum `lsp_query` beginning with `hover`,
@@ -182,7 +256,7 @@ using the shared position mapper and capability gating. Extend the same tool to
 incoming/outgoing calls only after real Pyright and TypeScript probes establish
 stable call-hierarchy behavior. Do not expose arbitrary LSP RPC.
 
-## Phase F: client diagnostics adapters
+## Phase G: client diagnostics adapters
 
 After v1 archive, create the independent OpenSpec change
 `add-client-diagnostics-adapters`. Add connector-internal

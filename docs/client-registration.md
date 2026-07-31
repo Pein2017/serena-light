@@ -152,6 +152,79 @@ handle for a read-only external target lacking an exact response-owned
 snapshot. This accepted rollover leaves canonical Serena unchanged; known
 nonblocking error-budget limitations are recorded in that inventory.
 
+## Call-freshness strengthening rollover (in progress)
+
+OpenSpec change `strengthen-call-freshness` is the current active
+implementation owner; `add-lexical-discovery` and then
+`improve-warm-runtime-reuse` remain strictly later and planning-only until
+each predecessor is accepted, synced, and archived. Candidate build
+`1a940728c705c5b1b2f460ec1950884727c91d4ddcebfb98a025171c88cff5cd` keeps the
+same public tool schema (`3`) and the same dependency digest (`eff6ebdf...`)
+as the archived compact-success-schema build above. This is a source-only
+build-identity rollover: it does **not** change the registration command or
+path in this file, because both already reference the digest directory
+rather than a specific build identity. It does mean that a client process
+already running from before this rollover remains bound to whichever build
+its connector resolved at its own startup — that client keeps serving the
+pre-rollover build until it is stopped and a fresh client is started (or
+reconnects) from its workspace cwd, at which point the connector's next
+startup resolves the current build identity. Verify the actual build
+identity in effect by calling `get_runtime_status` after restart, rather
+than assuming any particular build is current without checking.
+
+Every content-bearing read now admits under its own FIFO per-call freshness
+ticket rather than accepting an already-running scan. Git-backed source and
+native config bytes are validated with a guarded preflight, then the
+operation itself while retaining response-owned byte witnesses, then a real
+postflight, all before the result reaches a client. A change observed at
+postflight discards that attempt and replays the complete read once; a
+second race returns a typed retryable `NOT_READY` with reason
+`workspace_changed_during_read` — a well-behaved client should retry such a
+call rather than treat it as a hard failure. This guarantee is anchored at
+the call's own final guarded byte observation, not at response-delivery
+time, and there is no background watcher. Editing remains outside this
+replay: `replace_symbol_body` keeps its existing non-replayable commit-point
+contract and `UNCERTAIN` handling. The explicitly trusted non-Git conda `ms`
+transformers root keeps targeted stat-plus-byte pre/post validation for
+scoped/indexed reads and adds a bounded no-symlink full-root pre/post scan
+for global, directory, or not-yet-indexed reads on that root.
+
+Current evidence is candidate-only, not PASS. The deterministic race-test
+suite and a real daemon/connector race harness both pass. A real
+shared-daemon acceptance run proved three simultaneous clients across two
+roots, same-root reactivation, a partial release, a poisoned-proxy
+environment, and zero newly created test-owned LSP process orphans; fresh CC
+Sonnet and Opus clients used Serena Light exclusively and shared this daemon
+build across all four live roots (`/data/CoordExp`,
+`/data/CoordExp/cc-plugin-codex`, `/data/ms-swift`, and the read-only conda
+`ms` transformers package), releasing cleanly. Targeted fresh-client
+latency smokes are now complete: both parametrized latency-smoke cases pass
+after strengthened semantic assertions (`2 passed in 158.78s`; the prior
+full Python real-acceptance suite passed `8 in 331s`). Recorded per-call
+navigation/diagnostics latency is observation-only (2 samples per call,
+nearest-rank p50/p95, no threshold): `/data/CoordExp` global 12.53/33.95s,
+scoped 10.96/11.60s, overview 11.57/11.74s, diagnostics 11.00/11.04s;
+`/data/ms-swift` global 1.49/15.21s, scoped 0.46/0.87s, overview 0.47/0.55s,
+diagnostics 0.47/0.47s — these motivate the later `improve-warm-runtime-reuse`
+warm-pool work but are not themselves a failure or a registration gate. The
+shared-daemon acceptance above is only partially complete: its process-level
+shared-client lifecycle portion is done, but the host-client matrix is not
+yet closed until a planned fresh Codex/Sol lane joins the two existing
+CC/Claude receipts. The documentation is updated, but the full
+pytest/Ruff/Ty/provenance gate run and independent correctness/runtime review
+are not yet complete, so do not register this candidate as an accepted release
+path.
+
+A pre-existing environment separately has 14 flat-layout legacy daemons that
+predate the current build-slot registration scheme, with no active
+connections; current connectors cannot discover or reuse them, and this
+rollover only claims zero *newly created* orphans, not cleanup of that
+legacy set. Do not stop them by PID as part of ordinary registration — a
+legacy flat artifact is fail-closed, and any manual cleanup requires
+separately authorized PID-plus-create-time (or connection) revalidation
+outside this rollover. A live build-slot holder, including one created by
+this rollover, still retires normally through the existing lease/grace path.
+
 ## Stop, rollback, and limits
 
 For a normal stop, exit the client session; its connector releases its lease.

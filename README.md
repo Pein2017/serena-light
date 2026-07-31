@@ -40,7 +40,10 @@ The current real-stdio connector independently passes its guarded-edit and
 cross-library declaration contracts.
 Canonical `serena` remains unchanged pending a separate user decision.
 
-**Current state: `PASS — V1 ARCHIVED`.** Exact-head audits
+**V1 milestone state: `PASS — V1 ARCHIVED`.** (This is the archived v1
+repair's own terminal state, not the repository's present overall state; see
+[Current active work: call-freshness strengthening](#current-active-work-call-freshness-strengthening)
+below.) Exact-head audits
 of `6fce244` confirmed the prior freshness, transport, adapter-admission, native
 source, and hermetic-stdio blockers were closed, then found that a runtime owner
 could still pin one failed cleanup future forever and that the native TypeScript
@@ -150,6 +153,99 @@ non-forgeable external identifier. See
 for exact old-to-new field mappings and representative compact payloads for
 all five navigation tools. Both final audits passed and the compatibility
 inventory records release acceptance without changing canonical Serena.
+
+## Current active work: call-freshness strengthening
+
+The active implementation owner is OpenSpec change `strengthen-call-freshness`.
+`add-lexical-discovery` and then `improve-warm-runtime-reuse` are strictly
+later and remain planning-only until each predecessor is accepted, synced,
+and archived; see
+[the roadmap](docs/roadmap.md#phase-e-strengthen-call-freshness-then-lexical-discovery-then-warm-runtime-reuse).
+The candidate production build identity is
+`1a940728c705c5b1b2f460ec1950884727c91d4ddcebfb98a025171c88cff5cd`; the
+public compact success schema stays at version `3` and the locked dependency
+digest `eff6ebdf252faff7f77cb3a2f3894d17b9a0dfc89b46bd193fafdaa9e9ab4941`
+is unchanged, so this rollover is a source-only build-slot change, not a
+schema or dependency change. Production LOC is 18,569 and remains
+informational only (`maximum_production_lines=null`); Serena provenance
+commit `9a9d07e83d8c1cba3458992707f440c624446c6d` is unchanged.
+
+**Freshness contract (agent-facing summary).** Every content-bearing read
+call gets its own FIFO per-call freshness admission ticket: a later call may
+wait for an older in-flight scan to finish, but it always runs its own
+validation rather than accepting that older scan as its admission evidence.
+For Git-tracked source and native language-server config bytes, a call runs a
+guarded preflight, then the operation itself while retaining response-owned
+byte witnesses, then a real postflight. A postflight that observes a change
+discards that attempt and replays the complete read exactly once; a second
+race on replay returns a typed retryable `NOT_READY` with reason
+`workspace_changed_during_read` instead of stale or mixed success. The
+guarantee is anchored at the call's own final guarded byte observation, not
+at response-delivery time — there is **no background watcher**; a write that
+lands after that observation is only ever picked up by the *next* call's own
+admission. For the explicitly trusted non-Git conda `ms` transformers root,
+a scoped/indexed read uses targeted stat-plus-byte pre/post validation, while
+a global, directory, or not-yet-indexed read on that root instead runs a
+bounded no-symlink full-root pre/post scan, because a targeted stat cannot
+prove membership there. Editing stays outside this replay boundary:
+`replace_symbol_body` keeps its existing non-replayable commit-point contract
+and `UNCERTAIN` handling unchanged. Canonical `serena` remains unchanged.
+
+The four live roots for this work are `/data/CoordExp`,
+`/data/CoordExp/cc-plugin-codex`, `/data/ms-swift` (**not**
+`/data/CoordExp/ms-swift`), and
+`/root/miniconda3/envs/ms/lib/python3.12/site-packages/transformers`.
+
+**Evidence is candidate-only.** The deterministic race-test suite and a real
+daemon/connector race harness (a spawned writer process against the
+production `Connector` over loopback) both pass. A real shared-daemon
+acceptance run additionally proved three simultaneous clients across two
+roots, same-root reactivation, a partial release, a poisoned-proxy
+environment, and zero newly created test-owned LSP process orphans; fresh CC
+Sonnet and Opus clients used Serena Light exclusively and shared daemon build
+`1a940728...`, covering all four roots above and releasing cleanly. Targeted
+fresh-client smokes (task 5.2) are now complete: both parametrized
+latency-smoke cases pass after strengthened semantic assertions (`2 passed
+in 158.78s`; the prior full Python real-acceptance suite passed `8 in
+331s`). Task 5.3 (shared-daemon acceptance) is only partially complete: the
+process-level shared-client lifecycle portion above is done, but the
+host-client matrix is not yet closed — a planned fresh Codex/Sol lane must
+still join the two existing CC/Claude receipts before 5.3 itself can be
+marked complete. Recorded navigation/
+diagnostics per-call latency is observation-only — 2 samples per call,
+nearest-rank p50/p95, no pass threshold:
+
+| Root | Call | p50 (s) | p95 (s) |
+|---|---|---|---|
+| `/data/CoordExp` | global | 12.53 | 33.95 |
+| `/data/CoordExp` | scoped | 10.96 | 11.60 |
+| `/data/CoordExp` | overview | 11.57 | 11.74 |
+| `/data/CoordExp` | diagnostics | 11.00 | 11.04 |
+| `/data/ms-swift` | global | 1.49 | 15.21 |
+| `/data/ms-swift` | scoped | 0.46 | 0.87 |
+| `/data/ms-swift` | overview | 0.47 | 0.55 |
+| `/data/ms-swift` | diagnostics | 0.47 | 0.47 |
+
+These numbers motivate the later `improve-warm-runtime-reuse` warm-pool work
+but are not themselves a failure or a gate. The documentation is updated, but
+the remaining full gate suite and independent correctness/runtime review are
+not yet complete, so this candidate stays **HOLD / in progress**, not PASS —
+do not treat it as archived or as a new v1-style acceptance.
+
+A pre-existing environment also has 14 flat-layout legacy daemons that
+predate the current build-slot scheme, with no active connections. Current
+connectors cannot discover or reuse them, and this change only claims zero
+*newly created* orphans — it does not clean up that legacy set. Do not
+document their live PIDs or recommend broad automatic kills: a legacy flat
+artifact is fail-closed, and any manual cleanup requires separately
+authorized PID-plus-create-time (or connection) revalidation outside this
+rollover. A live build-slot holder, including one created by this rollover,
+still retires normally through the existing lease/grace path.
+
+As a narrow tool-use limitation (not a freshness failure), `get_symbols_overview`
+requires a single file `relative_path` and does not enumerate a directory
+such as `"."`; directory enumeration is planned for the later
+`add-lexical-discovery` change.
 
 ## Local checks
 
