@@ -61,11 +61,50 @@ target identities. The new outer filesystem transaction must remain bounded to
 two complete attempts and must not turn this inner two-request stabilization or
 adapter-process retry into an unbounded nested loop.
 
-For the allowlisted read-only transformers root,
-`WorkspaceRuntime._route` invokes
-`FreshnessCoordinator.ensure_path_fresh` for an explicit target. That targeted
-stat/digest path remains the owner for path-scoped preflight and postflight.
-Pre-change global transformers reads had no honest full-root freshness owner;
-the separate bounded full-root implementation remains an explicit task in
-this change.
+Before `a668f87`, the allowlisted read-only transformers root received one
+targeted stat from `WorkspaceRuntime._route`, but it had no matching
+postflight and global reads had no honest full-root freshness owner.
 
+## Accepted fresh-read implementation slices
+
+- `8b517430af2c702f240493284e6f5e20d2c36693` moved all seven public
+  content-bearing navigation and diagnostics paths through one bounded Git
+  fresh-read transaction. Each successful attempt owns a preflight, exact
+  response-byte witnesses, and a real postflight; one changed attempt is
+  discarded and replayed, while a second change returns retryable `NOT_READY`
+  with reason `workspace_changed_during_read`. Editing remains outside this
+  boundary.
+- `a668f87` extended the same transaction to the allowlisted non-Git
+  transformers root. An indexed file uses targeted preflight and postflight;
+  response-owned witness paths join the postflight set. Global, directory, and
+  not-yet-indexed path queries use the existing bounded no-symlink root
+  inventory because targeted stats cannot prove membership. Targeted and root
+  scans share the same FIFO admission queue and publish the latest completed
+  scan, including a clean postflight.
+- Same-root reactivation of a Git workspace retains its immediate ticketed
+  refresh. Reactivating the non-Git transformers root remains a control-plane
+  no-op: it returns no source-derived content, and the next content-bearing
+  file or global query performs the authoritative scoped preflight. This avoids
+  adding a full-package digest walk to reactivation without weakening any tool
+  success.
+
+## Non-Git deterministic evidence
+
+The accepted tests prove exact targeted pre/post observations without a root
+walk, one-race replay to settled body/range/hash, two-race payload suppression,
+same-stat B-to-A witness rejection, bounded global root scans, create/change/
+delete/symlink membership reconciliation, directory membership discovery,
+missing-target fail-closed behavior, and edit non-replay. The settled-body test
+was falsified by temporarily bypassing targeted postflight and correctly failed
+on the first-attempt body before the production file was restored byte-for-byte.
+
+Lead verification after `a668f87`:
+
+- focused runtime and bounded-freshness tests: `67 passed`;
+- full `tests` suite: `819 passed, 31 skipped` in 185.83 seconds;
+- Ruff and Ty on all three changed files: pass;
+- `git diff --check`: pass.
+
+The skipped tests require recorded external snapshots or opt-in performance
+inputs and remain part of the later real-root acceptance tasks; they are not
+counted as completed evidence here.

@@ -8,13 +8,13 @@
 
 - [x] 2.1 Add monotonic arrival tickets and a bounded FIFO scan owner to `FreshnessCoordinator`; make every content-bearing read run a guarded scan that starts after its own ticket is issued.
 - [x] 2.2 Remove the contract that a later caller can accept an already-running scan, while preserving a single filesystem scan at a time, retained failed reconciliation batches, same-stat full-byte detection, and same-root activation refresh.
-- [ ] 2.3 Preserve Git create/change/delete/config/symlink attribution; keep targeted transformers scans for path-scoped reads and add bounded full-root scans only for existing global transformers reads.
+- [x] 2.3 Preserve Git create/change/delete/config/symlink attribution; keep targeted transformers scans for path-scoped reads and add bounded full-root scans only for existing global transformers reads.
 
 ## 3. Fresh Read Boundary
 
-- [ ] 3.1 Introduce one workspace-owned `run_fresh_read` transaction that performs per-call preflight, records the accepted identity/generations, executes the read while retaining internal response-owned byte witnesses, and performs a real guarded postflight.
-- [ ] 3.2 On a changed postflight, discard all source-derived data and replay the complete read once; on a second race, return rich retryable `NOT_READY` with reason `workspace_changed_during_read` and bounded attempt/generation evidence.
-- [ ] 3.3 Route every semantic navigation and file/symbol diagnostics success path, including diagnostic `clean`, through `run_fresh_read`; keep invalid/trust/readiness errors typed and finite.
+- [x] 3.1 Introduce one workspace-owned `run_fresh_read` transaction that performs per-call preflight, records the accepted identity/generations, executes the read while retaining internal response-owned byte witnesses, and performs a real guarded postflight.
+- [x] 3.2 On a changed postflight, discard all source-derived data and replay the complete read once; on a second race, return rich retryable `NOT_READY` with reason `workspace_changed_during_read` and bounded attempt/generation evidence.
+- [x] 3.3 Route every semantic navigation and file/symbol diagnostics success path, including diagnostic `clean`, through `run_fresh_read`; keep invalid/trust/readiness errors typed and finite.
 - [x] 3.4 Keep `replace_symbol_body` and all future editing outside the read-replay owner; verify queued/running/installed commit states, timeout mapping, lost-response handling, and `UNCERTAIN` are unchanged and no edit callable can be replayed.
 - [ ] 3.5 Audit the combined freshness replay, adapter-process retry, and semantic target-stabilization loops and add assertions proving each bound terminates without an accidental nested unbounded loop.
 
@@ -26,7 +26,7 @@
 - [x] 4.4 Cover a write after final guarded validation and prove the linearized result may return while the next call's own preflight observes the new bytes.
 - [x] 4.5 Cover a same-tick write to bytes B followed by restoration of bytes A before postflight; prove an operation-owned B snapshot fails final A witness comparison and cannot escape.
 - [ ] 4.6 Cover adapter crash/retry, target-snapshot replay, client cancellation, queue saturation, cooldown, and freshness failure combinations with finite exact invocation counts.
-- [ ] 4.7 Cover explicit transformers file queries using targeted pre/post validation and global transformers queries using bounded full-root pre/post validation.
+- [x] 4.7 Cover explicit transformers file queries using targeted pre/post validation and global transformers queries using bounded full-root pre/post validation.
 
 ## 5. Real-Daemon Acceptance and Documentation
 
