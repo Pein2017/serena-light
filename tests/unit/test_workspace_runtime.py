@@ -816,6 +816,7 @@ def _git_runtime(
     attributions: dict[LanguageFamily, int] | None = None,
     future_timeout: float = 35.0,
     executor_factory: Callable[[Path], BoundedLspExecutor] | None = None,
+    on_snapshot: Callable[[], None] | None = None,
 ) -> WorkspaceRuntime:
     def attribute(family: LanguageFamily) -> Callable[[Path, tuple[str, ...]], ScopeProjection]:
         def attributor(_root: Path, paths: tuple[str, ...]) -> ScopeProjection:
@@ -833,7 +834,7 @@ def _git_runtime(
             LanguageFamily.PYTHON: attribute(LanguageFamily.PYTHON),
             LanguageFamily.TYPESCRIPT: attribute(LanguageFamily.TYPESCRIPT),
         },
-        adapter_factories=_factories(adapters, contexts, symbols=[]),
+        adapter_factories=_factories(adapters, contexts, symbols=[], on_snapshot=on_snapshot),
         future_timeout=future_timeout,
         executor_factory=executor_factory,
     )
@@ -1245,6 +1246,365 @@ def test_a_failed_scan_propagates_only_to_its_own_caller_and_unblocks_the_next_t
         assert isinstance(errors.get("a"), _Boom)
         assert results["b"] == FreshnessScan()
         assert rebuilds == 3
+    finally:
+        runtime.stop()
+
+
+def _scan_counting_inventory(counter: list[int]) -> Callable[[Any], TrustInventory]:
+    """Count guarded scans: exactly one inventory rebuild happens per scan."""
+
+    def factory(identity: Any) -> TrustInventory:
+        counter[0] += 1
+        return git_trust_inventory(identity.root)
+
+    return factory
+
+
+def test_stable_source_derived_read_takes_one_preflight_one_operation_and_one_postflight(tmp_path: Path) -> None:
+    _git_repository(tmp_path)
+    (tmp_path / "main.py").write_text("value = 1\n")
+    adapters: dict[LanguageFamily, _Adapter] = {}
+    contexts: dict[LanguageFamily, AdapterBuildContext] = {}
+    scans = [0]
+    runtime = _git_runtime(tmp_path, adapters, contexts, inventory_factory=_scan_counting_inventory(scans))
+    try:
+        before = scans[0]
+
+        result = runtime.get_symbols_overview("main.py").to_dict()
+
+        assert result["ok"] is True
+        assert scans[0] - before == 2
+        assert adapters[LanguageFamily.PYTHON].open_versions == [1]
+    finally:
+        runtime.stop()
+
+
+def test_read_raced_once_replays_the_whole_transaction_and_returns_the_settled_result(tmp_path: Path) -> None:
+    _git_repository(tmp_path)
+    (tmp_path / "main.py").write_text("value = 1\n")
+    adapters: dict[LanguageFamily, _Adapter] = {}
+    contexts: dict[LanguageFamily, AdapterBuildContext] = {}
+    scans = [0]
+    operations = 0
+
+    def race_first_operation_only() -> None:
+        # The operation has already captured its bytes; this foreign write
+        # completes before the postflight can validate them.
+        nonlocal operations
+        operations += 1
+        if operations == 1:
+            (tmp_path / "created.py").write_text("fresh = 1\n")
+
+    runtime = _git_runtime(
+        tmp_path,
+        adapters,
+        contexts,
+        inventory_factory=_scan_counting_inventory(scans),
+        on_snapshot=race_first_operation_only,
+    )
+    try:
+        before = scans[0]
+
+        result = runtime.get_symbols_overview("main.py").to_dict()
+
+        assert result["ok"] is True
+        # Two complete transactions: preflight, operation, postflight each.
+        assert scans[0] - before == 4
+        assert operations == 2
+        assert adapters[LanguageFamily.PYTHON].open_versions == [1, 2]
+        # The replay reconciled the change rather than returning around it.
+        assert "created.py" in runtime.inventory.paths
+    finally:
+        runtime.stop()
+
+
+def test_read_raced_twice_returns_retryable_not_ready_without_any_source_payload(tmp_path: Path) -> None:
+    _git_repository(tmp_path)
+    (tmp_path / "main.py").write_text("value = 1\n")
+    adapters: dict[LanguageFamily, _Adapter] = {}
+    contexts: dict[LanguageFamily, AdapterBuildContext] = {}
+    scans = [0]
+    operations = 0
+
+    def race_every_operation() -> None:
+        nonlocal operations
+        operations += 1
+        (tmp_path / f"created_{operations}.py").write_text("fresh = 1\n")
+
+    runtime = _git_runtime(
+        tmp_path,
+        adapters,
+        contexts,
+        inventory_factory=_scan_counting_inventory(scans),
+        on_snapshot=race_every_operation,
+    )
+    try:
+        before = scans[0]
+
+        result = runtime.get_symbols_overview("main.py").to_dict()
+
+        assert result["ok"] is False
+        assert "data" not in result
+        assert result["error"]["code"] == "NOT_READY"
+        assert result["error"]["retry"]["retryable"] is True
+        details = result["error"]["details"]
+        assert details["reason"] == "workspace_changed_during_read"
+        assert details["attempts"] == 2
+        # Named once per path even though several observations disagreed.
+        assert details["paths"] == ["created_2.py"]
+        # Bounded generation evidence for the failing attempt.
+        assert details["postflight_freshness_version"] == details["preflight_freshness_version"] + 1
+        # Churn is bounded to exactly one replay; it never becomes a retry loop.
+        assert scans[0] - before == 4
+        assert operations == 2
+    finally:
+        runtime.stop()
+
+
+def test_restored_bytes_are_caught_by_the_response_witness_when_workspace_identity_is_unchanged(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Bytes B reach the operation and bytes A are restored before the postflight.
+
+    Both guarded workspace observations describe A, so no aggregate identity and
+    no committed change can report the race.  Only the response-owned byte
+    witness disagrees, and it must still discard the attempt.
+    """
+
+    source = tmp_path / "main.py"
+    original = b"value = 1\n"
+    intruded = b"value = 9\n"
+    assert len(original) == len(intruded)
+    source.write_bytes(original)
+    _git_repository(tmp_path)
+    real_fstat = os.fstat
+    real_stat = os.stat
+    real_lstat = os.lstat
+    # Fix the observable timestamps so the restored file is stat-identical to the
+    # preflight observation; only the guarded digest can tell A from B.
+    monkeypatch.setattr(inventory_module.os, "fstat", lambda fd: _stat_with_fixed_times(real_fstat(fd)))
+    monkeypatch.setattr(
+        inventory_module.os,
+        "stat",
+        lambda path, *args, **kwargs: _stat_with_fixed_times(real_stat(path, *args, **kwargs)),
+    )
+    monkeypatch.setattr(
+        inventory_module.os,
+        "lstat",
+        lambda path, *args, **kwargs: _stat_with_fixed_times(real_lstat(path, *args, **kwargs)),
+    )
+    adapters: dict[LanguageFamily, _Adapter] = {}
+    contexts: dict[LanguageFamily, AdapterBuildContext] = {}
+    scans = [0]
+    runtime = _git_runtime(tmp_path, adapters, contexts, inventory_factory=_scan_counting_inventory(scans))
+    adapter = adapters[LanguageFamily.PYTHON]
+    real_load = adapter.snapshot_open_and_probe_document
+    loads = 0
+
+    def restoring_load(**kwargs: Any) -> Future[Any]:
+        nonlocal loads
+        loads += 1
+        if loads > 1:
+            return real_load(**kwargs)
+        source.write_bytes(intruded)
+        future = real_load(**kwargs)
+        # The worker has now read B; restore A before the postflight observes it.
+        observed = future.result(timeout=5)
+        source.write_bytes(original)
+        settled: Future[Any] = Future()
+        settled.set_result(observed)
+        return settled
+
+    adapter.snapshot_open_and_probe_document = restoring_load  # type: ignore[method-assign]
+    try:
+        before = scans[0]
+        version_before = runtime.freshness._version
+
+        result = runtime.get_symbols_overview("main.py").to_dict()
+
+        assert result["ok"] is True
+        assert loads == 2
+        assert scans[0] - before == 4
+        # No freshness state ever changed: detection came from the witness alone.
+        assert runtime.freshness._version == version_before
+        assert source.read_bytes() == original
+    finally:
+        runtime.stop()
+
+
+def test_an_earlier_owned_snapshot_cannot_be_concealed_by_a_later_agreeing_one(tmp_path: Path) -> None:
+    """One attempt owns bytes A then bytes B for the same path, and final is B.
+
+    The later snapshot agrees with the final guarded digest, so retaining only
+    the newest witness per path would report a stable read while a portion of
+    the response was still derived from A.  Every distinct owned digest must be
+    compared, so the attempt is discarded and replayed.
+    """
+
+    _git_repository(tmp_path)
+    source = tmp_path / "main.py"
+    settled = b"value = 2\n"
+    superseded = b"value = 1\n"
+    source.write_bytes(settled)
+    adapters: dict[LanguageFamily, _Adapter] = {}
+    contexts: dict[LanguageFamily, AdapterBuildContext] = {}
+    scans = [0]
+    runtime = _git_runtime(tmp_path, adapters, contexts, inventory_factory=_scan_counting_inventory(scans))
+    adapter = adapters[LanguageFamily.PYTHON]
+    real_load = adapter.snapshot_open_and_probe_document
+    loads = 0
+
+    def own_a_superseded_snapshot_first(**kwargs: Any) -> Future[Any]:
+        nonlocal loads
+        loads += 1
+        if loads == 1:
+            # Models an operation portion that contributed content from an
+            # older snapshot of this same path before the current load.  The
+            # file itself never changes, so only witness retention can see it.
+            runtime._record_read_witness("main.py", superseded)
+        return real_load(**kwargs)
+
+    adapter.snapshot_open_and_probe_document = own_a_superseded_snapshot_first  # type: ignore[method-assign]
+    try:
+        before = scans[0]
+        version_before = runtime.freshness._version
+
+        result = runtime.get_symbols_overview("main.py").to_dict()
+
+        assert result["ok"] is True
+        assert loads == 2
+        assert scans[0] - before == 4
+        # Nothing on disk moved: the replay is owed entirely to the retained
+        # earlier digest disagreeing with the final guarded identity.
+        assert runtime.freshness._version == version_before
+        assert source.read_bytes() == settled
+    finally:
+        runtime.stop()
+
+
+def test_change_consumed_by_another_calls_scan_between_this_calls_scans_still_replays(tmp_path: Path) -> None:
+    """Another call's scan commits the change before this read's postflight.
+
+    This read's own postflight then observes a clean workspace, and the changed
+    file is not one this response witnessed.  Only the monotonic freshness
+    version can report that the workspace moved under the attempt.
+    """
+
+    _git_repository(tmp_path)
+    (tmp_path / "main.py").write_text("value = 1\n")
+    adapters: dict[LanguageFamily, _Adapter] = {}
+    contexts: dict[LanguageFamily, AdapterBuildContext] = {}
+    scans = [0]
+    runtime = _git_runtime(tmp_path, adapters, contexts, inventory_factory=_scan_counting_inventory(scans))
+    adapter = adapters[LanguageFamily.PYTHON]
+    real_load = adapter.snapshot_open_and_probe_document
+    loads = 0
+
+    def load_then_let_another_call_consume_a_change(**kwargs: Any) -> Future[Any]:
+        nonlocal loads
+        loads += 1
+        future = real_load(**kwargs)
+        observed = future.result(timeout=5)
+        if loads == 1:
+            # A file this read never witnesses changes, and a different call's
+            # ticketed scan commits it before this read's postflight runs.
+            (tmp_path / "other.py").write_text("elsewhere = 1\n")
+            runtime.ensure_fresh()
+        settled: Future[Any] = Future()
+        settled.set_result(observed)
+        return settled
+
+    adapter.snapshot_open_and_probe_document = load_then_let_another_call_consume_a_change  # type: ignore[method-assign]
+    try:
+        before = scans[0]
+
+        result = runtime.get_symbols_overview("main.py").to_dict()
+
+        assert result["ok"] is True
+        assert loads == 2
+        # Preflight, the other call's scan, postflight, then the replayed pair.
+        assert scans[0] - before == 5
+        assert "other.py" in runtime.inventory.paths
+    finally:
+        runtime.stop()
+
+
+def test_repeatedly_consumed_changes_fail_with_version_evidence_and_no_changed_paths(tmp_path: Path) -> None:
+    """Another call consumes the change before the postflight on both attempts.
+
+    Each postflight then observes a clean workspace and the changed file is
+    never witnessed by this response, so the failure carries no changed paths at
+    all.  The freshness versions are the only evidence that the workspace moved,
+    which is exactly why they belong in the bounded details.
+    """
+
+    _git_repository(tmp_path)
+    (tmp_path / "main.py").write_text("value = 1\n")
+    adapters: dict[LanguageFamily, _Adapter] = {}
+    contexts: dict[LanguageFamily, AdapterBuildContext] = {}
+    scans = [0]
+    runtime = _git_runtime(tmp_path, adapters, contexts, inventory_factory=_scan_counting_inventory(scans))
+    adapter = adapters[LanguageFamily.PYTHON]
+    real_load = adapter.snapshot_open_and_probe_document
+    loads = 0
+
+    def let_another_call_consume_a_change(**kwargs: Any) -> Future[Any]:
+        nonlocal loads
+        loads += 1
+        future = real_load(**kwargs)
+        observed = future.result(timeout=5)
+        (tmp_path / f"other_{loads}.py").write_text("elsewhere = 1\n")
+        runtime.ensure_fresh()
+        settled: Future[Any] = Future()
+        settled.set_result(observed)
+        return settled
+
+    adapter.snapshot_open_and_probe_document = let_another_call_consume_a_change  # type: ignore[method-assign]
+    try:
+        before = scans[0]
+
+        result = runtime.get_symbols_overview("main.py").to_dict()
+
+        assert result["ok"] is False
+        assert "data" not in result
+        assert result["error"]["code"] == "NOT_READY"
+        assert result["error"]["retry"]["retryable"] is True
+        details = result["error"]["details"]
+        assert details["reason"] == "workspace_changed_during_read"
+        assert details["attempts"] == 2
+        assert details["paths"] == []
+        assert details["postflight_freshness_version"] == details["preflight_freshness_version"] + 1
+        # Two attempts, each preflight, consumed scan, and postflight.
+        assert scans[0] - before == 6
+        assert loads == 2
+    finally:
+        runtime.stop()
+
+
+def test_write_after_final_validation_is_not_retroactive_and_the_next_call_observes_it(tmp_path: Path) -> None:
+    _git_repository(tmp_path)
+    (tmp_path / "main.py").write_text("value = 1\n")
+    adapters: dict[LanguageFamily, _Adapter] = {}
+    contexts: dict[LanguageFamily, AdapterBuildContext] = {}
+    scans = [0]
+    runtime = _git_runtime(tmp_path, adapters, contexts, inventory_factory=_scan_counting_inventory(scans))
+    try:
+        before = scans[0]
+        linearized = runtime.get_symbols_overview("main.py").to_dict()
+
+        assert linearized["ok"] is True
+        assert scans[0] - before == 2
+
+        # Strictly after the returning read's postflight crossed those bytes.
+        (tmp_path / "created.py").write_text("fresh = 1\n")
+        assert "created.py" not in runtime.inventory.paths
+
+        following = runtime.get_symbols_overview("main.py").to_dict()
+
+        assert following["ok"] is True
+        # The next call's own preflight observed the new byte identity.
+        assert "created.py" in runtime.inventory.paths
+        assert scans[0] - before == 4
     finally:
         runtime.stop()
 

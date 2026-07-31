@@ -85,6 +85,7 @@ from serena_light.tools.envelopes import (
     ErrorEnvelope,
     GenerationMetadata,
     RetryMetadata,
+    SuccessEnvelope,
     ToolEnvelope,
     WorkspaceMetadata,
     error,
@@ -190,6 +191,10 @@ _LANGUAGE_IDS: Mapping[str, str] = {
 MAX_CONTROLLED_OPENS = 32
 MAX_RESPONSE_OWNED_TARGETS = 64
 REFERENCE_COVERAGE_SAMPLE_LIMIT = 16
+# One raced read transaction is replayed exactly once before it fails retryably;
+# continuous external churn must never become an unbounded outer loop.
+MAX_FRESH_READ_ATTEMPTS = 2
+MAX_FRESH_READ_EVIDENCE_PATHS = 16
 
 
 class RuntimeErrorCode(StrEnum):
@@ -689,6 +694,21 @@ class _PendingWatchedReconcile:
     future: Future[None] | Future[Any] | None
 
 
+@dataclass(frozen=True, slots=True)
+class _FreshnessAdmission:
+    """One completed guarded scan and the evidence it left, read under its ticket.
+
+    ``version`` advances with every committed freshness change, so a change that
+    a different call's scan consumed between this call's preflight and its
+    postflight is still visible here.  ``digests`` are the guarded full-byte
+    identities the coordinator holds for the caller-named paths.
+    """
+
+    scan: FreshnessScan
+    version: int
+    digests: Mapping[str, str | None]
+
+
 class FreshnessCoordinator:
     """Run one synchronous lexical freshness pass before a workspace operation.
 
@@ -715,6 +735,10 @@ class FreshnessCoordinator:
         self._config_states: dict[str, ContentIdentity] = {}
         self._pending_reconciles: dict[LanguageFamily, _PendingWatchedReconcile] = {}
         self._last = FreshnessScan()
+        # Advances with every committed content, config, or membership change.
+        # A read compares this across its own two scans, so it observes a change
+        # even when another call's scan consumed that change first.
+        self._version = 0
         self._capture_baseline(runtime.inventory)
 
     @property
@@ -723,17 +747,25 @@ class FreshnessCoordinator:
             return self._last
 
     def ensure_fresh(self) -> FreshnessScan:
-        """Rebuild and reconcile the Git lexical inventory before one operation.
+        """Rebuild and reconcile the Git lexical inventory before one operation."""
+
+        return self.ensure_fresh_admitted().scan
+
+    def ensure_fresh_admitted(self, *, witnessed: Sequence[str] = ()) -> _FreshnessAdmission:
+        """Run one guarded scan and report the evidence it committed.
 
         A ticket is assigned at arrival and admitted in FIFO order; the guarded
         scan this call runs always begins after its own ticket was issued, so a
-        call can never accept a scan that another caller already started.
+        call can never accept a scan that another caller already started.  The
+        version and the caller-named digests are read before the ticket is
+        released, so no other call's scan can commit between this scan and the
+        evidence attributed to it.
         """
 
         if self._runtime.identity.kind is not WorkspaceKind.GIT:
             # The allowlisted read-only root is never fully walked per call; its
             # freshness is the targeted stat in ensure_path_fresh.
-            return FreshnessScan()
+            return self._admission(FreshnessScan(), witnessed)
         ticket = self._enter_admission_queue()
         try:
             scan = self._scan_git()
@@ -742,9 +774,17 @@ class FreshnessCoordinator:
             # resuming after it.
             with self._lock:
                 self._last = scan
+            return self._admission(scan, witnessed)
         finally:
             self._leave_admission_queue(ticket)
-        return scan
+
+    def _admission(self, scan: FreshnessScan, witnessed: Sequence[str]) -> _FreshnessAdmission:
+        with self._lock:
+            return _FreshnessAdmission(
+                scan,
+                self._version,
+                {path: _committed_digest(self._states.get(path)) for path in witnessed},
+            )
 
     def _enter_admission_queue(self) -> int:
         with self._admission_condition:
@@ -790,6 +830,7 @@ class FreshnessCoordinator:
                 if self._states.get(observed.path) == observed.content_identity:
                     return FreshnessScan()
                 self._states[observed.path] = observed.content_identity
+                self._version += 1
             notified, _opened, _unopened = self._apply_events(
                 (WatchedFileEvent(observed.path, FileChangeType.CHANGED),)
             )
@@ -857,6 +898,10 @@ class FreshnessCoordinator:
         with self._lock:
             self._states = {path: state.content_identity for path, state in states.items()}
             self._config_states = configs
+            # Advance with the commit itself rather than with a successful
+            # return: the installation below may fail, but this observation is
+            # already visible to every later call and must not be missed.
+            self._version += 1
         # Native config discovery happens before an LSP starts.  A running
         # adapter cannot be allowed to report readiness for a newly attributed
         # program until it has restarted against that native configuration.
@@ -1158,6 +1203,10 @@ class WorkspaceRuntime:
         self._pending_retirements: dict[LanguageFamily, _PendingAdapterRetirement] = {}
         self._shutdown_futures: dict[int, Future[AdapterSnapshot]] = {}
         self._versions: dict[str, int] = {}
+        # Byte identities of the snapshots one in-flight read attempt owns.  It
+        # is written only on the calling thread, never inside an adapter worker,
+        # so an executor thread can never observe another call's attempt.
+        self._read_witnesses = threading.local()
         self._state_lock = threading.RLock()
         self._stop_lock = threading.Lock()
         self._stopping = False
@@ -1779,7 +1828,7 @@ class WorkspaceRuntime:
                 max_answer_chars=max_answer_chars,
             )
 
-        return self._tool_envelope(operation)
+        return self._fresh_read_envelope(operation)
 
     def _warm_global_candidates(self, name_path: str | Sequence[str]) -> Mapping[LanguageFamily, _WarmGlobalSeed]:
         """Warm fixed adapters from one controlled witness within one shared budget.
@@ -2025,7 +2074,13 @@ class WorkspaceRuntime:
                     raise
                 return _uncertain_edit(authorized, commit, "transport")
 
-        return self._tool_envelope(operation)
+        def preflighted() -> ToolEnvelope:
+            # Exactly one preflight, and no postflight or replay: an edit that
+            # started or may have committed is never invoked a second time.
+            self.ensure_fresh()
+            return operation()
+
+        return self._tool_envelope(preflighted)
 
     def _edit_adapter(self, relative_path: str) -> tuple[RuntimeAdapter, AuthorizedEdit]:
         normalized = _relative_path(relative_path, allow_parent=True)
@@ -2060,8 +2115,15 @@ class WorkspaceRuntime:
         )
 
     def _tool_envelope(self, operation: Callable[[], ToolEnvelope]) -> ToolEnvelope:
+        """Map domain failures onto the public envelope vocabulary.
+
+        This owns error translation only.  Freshness belongs to
+        ``_run_fresh_read`` for reads and to one explicit preflight for edits,
+        so a typed invalid, trust, readiness, cooldown, or timeout failure keeps
+        its own authority and is never replayed to manufacture another error.
+        """
+
         try:
-            self.ensure_fresh()
             return operation()
         except WorkspaceError as caught:
             return from_workspace_error(caught)
@@ -2092,7 +2154,87 @@ class WorkspaceRuntime:
             self._route(relative_path)
             return operation()
 
-        return self._tool_envelope(authorized)
+        return self._fresh_read_envelope(authorized)
+
+    def _fresh_read_envelope(self, operation: Callable[[], ToolEnvelope]) -> ToolEnvelope:
+        return self._tool_envelope(lambda: self._run_fresh_read(operation))
+
+    def _run_fresh_read(self, operation: Callable[[], ToolEnvelope]) -> ToolEnvelope:
+        """Own one read transaction: preflight, operation, guarded postflight.
+
+        Only source-derived success is validated.  A success whose workspace
+        moved underneath it is discarded whole and replayed exactly once; a
+        second race returns retryable ``NOT_READY`` rather than stale, mixed, or
+        empty success.  The response witnesses close the case where the
+        operation observed bytes B that were restored to bytes A before the
+        postflight, which no aggregate workspace identity can see.
+        """
+
+        if self.identity.kind is not WorkspaceKind.GIT:
+            # The allowlisted read-only root keeps its existing targeted
+            # per-path freshness.  A guarded traversal able to authorize global
+            # freshness there is deliberately outside this change.
+            self.ensure_fresh()
+            return operation()
+        for attempt in range(1, MAX_FRESH_READ_ATTEMPTS + 1):
+            self._require_running()
+            admitted = self._freshness.ensure_fresh_admitted()
+            witnesses = self._begin_read_attempt()
+            try:
+                result = operation()
+            finally:
+                self._end_read_attempt()
+            if not isinstance(result, SuccessEnvelope):
+                return result
+            final = self._freshness.ensure_fresh_admitted(witnessed=tuple(witnesses))
+            changed = _fresh_read_change_evidence(admitted, final, witnesses)
+            if changed is None:
+                return result
+            if attempt == MAX_FRESH_READ_ATTEMPTS:
+                return error(
+                    ErrorCode.NOT_READY,
+                    retry=RetryMetadata(retryable=True, retry_after_seconds=0.1),
+                    details={
+                        "reason": "workspace_changed_during_read",
+                        "attempts": attempt,
+                        "paths": changed[:MAX_FRESH_READ_EVIDENCE_PATHS],
+                        # The freshness versions stay decisive when the changed
+                        # paths are empty because another call's scan consumed
+                        # the change before this attempt's postflight ran.
+                        "preflight_freshness_version": admitted.version,
+                        "postflight_freshness_version": final.version,
+                    },
+                    workspace=_workspace_metadata(self.identity),
+                )
+        raise AssertionError("bounded fresh-read replay did not terminate")
+
+    def _begin_read_attempt(self) -> dict[str, set[str]]:
+        """Start one attempt-local witness set on this calling thread."""
+
+        witnesses: dict[str, set[str]] = {}
+        self._read_witnesses.active = witnesses
+        return witnesses
+
+    def _end_read_attempt(self) -> None:
+        self._read_witnesses.active = None
+
+    def _record_read_witness(self, relative_path: str, raw_bytes: bytes) -> None:
+        """Retain the byte identity of every response-owned source snapshot.
+
+        One attempt can own more than one snapshot of the same path.  Each
+        distinct digest is retained rather than replaced, because a later
+        snapshot that agrees with the final guarded identity must not be able to
+        conceal an earlier, differing one that a returning portion of the
+        response was derived from.  Distinct digests per path are bounded by the
+        snapshots the operation itself may own, which the response-owned target
+        bound and the per-adapter candidate bounds already limit.  Outside a
+        fresh-read attempt this records nothing.
+        """
+
+        witnesses = cast(dict[str, set[str]] | None, getattr(self._read_witnesses, "active", None))
+        if witnesses is None:
+            return
+        witnesses.setdefault(relative_path, set()).add(hashlib.sha256(raw_bytes).hexdigest())
 
     # The following narrow methods are injected-provider seams consumed by the
     # transport-neutral semantic cores above.  They deliberately do not expose
@@ -2292,7 +2434,17 @@ class WorkspaceRuntime:
                 return _semantic_locations_not_ready("semantic target generation changed")
             return _ResponseOwnedSemanticLocations(second, bound, states)
 
-        return source_adapter.submit_read(transaction).result(timeout=self._future_timeout)
+        owned = source_adapter.submit_read(transaction).result(timeout=self._future_timeout)
+        if isinstance(owned, _ResponseOwnedSemanticLocations):
+            # Bound targets are workspace paths only; read-only external targets
+            # were never snapshotted.  Recorded on the calling thread, after the
+            # adapter transaction has returned its authoritative snapshots.
+            for bound_target in owned.targets:
+                self._record_read_witness(
+                    str(bound_target.path.relative_to(self.identity.root)),
+                    bound_target.snapshot.raw_bytes,
+                )
+        return owned
 
     def _classify_semantic_response(
         self,
@@ -2745,6 +2897,9 @@ class WorkspaceRuntime:
             ),
             body_completeness=body_completeness,
         )
+        # Recorded here, on the calling thread, once the executor future has
+        # already produced the exact bytes this response owns.
+        self._record_read_witness(normalized, snapshot.raw_bytes)
         return document, target, family, adapter
 
     def _external_diagnostic_root(self) -> Path | None:
@@ -3286,6 +3441,42 @@ def _projection_error(family: LanguageFamily, projection: ScopeProjection) -> Wo
         f"{family.value} configured program contains paths outside trust",
         paths=tuple(item.path for item in projection.configured_program_outside_trust),
     )
+
+
+def _committed_digest(identity: ContentIdentity | None) -> str | None:
+    """The guarded full-byte digest a completed scan committed for one path."""
+
+    return None if identity is None else identity[-1]
+
+
+def _fresh_read_change_evidence(
+    admitted: _FreshnessAdmission,
+    final: _FreshnessAdmission,
+    witnesses: Mapping[str, set[str]],
+) -> tuple[str, ...] | None:
+    """Bounded, deduplicated paths proving the workspace moved under one attempt.
+
+    ``None`` means the read is linearized at the final guarded observation.  A
+    version change reports a commit by this attempt's own postflight or by
+    another call that consumed the same change first, and is decisive even when
+    it names no path here; a witness mismatch reports bytes the response owns
+    that the final guarded identity no longer agrees with.  A path whose
+    response-owned snapshots disagree among themselves is already mismatched:
+    at most one of them can equal the final identity.  Evidence is keyed by
+    path, so a path with several disagreeing snapshots is still named once.
+    """
+
+    mismatched = tuple(
+        sorted(
+            path
+            for path, digests in witnesses.items()
+            if any(digest != final.digests.get(path) for digest in digests)
+        )
+    )
+    if final.version == admitted.version and not mismatched:
+        return None
+    scanned = (*final.scan.created, *final.scan.changed, *final.scan.deleted, *final.scan.config_changed)
+    return tuple(sorted({*scanned, *mismatched}))
 
 
 def _affected_families(membership_paths: Sequence[str], config_paths: Sequence[str]) -> frozenset[LanguageFamily]:

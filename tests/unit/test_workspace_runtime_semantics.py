@@ -708,7 +708,15 @@ def test_declaration_target_change_between_response_and_snapshot_fails_closed(tm
         runtime.stop()
 
 
-def test_declaration_self_target_keeps_the_already_open_source_snapshot(tmp_path: Path) -> None:
+def test_declaration_self_target_replays_once_and_keeps_the_already_open_source_snapshot(tmp_path: Path) -> None:
+    """A self-target reuses the open source snapshot, and a raced read replays.
+
+    The write completes before this read's final guarded validation, so the
+    pre-write snapshot must not escape.  Within each attempt the self-target
+    still resolves from the already-open source document rather than a second
+    document load.
+    """
+
     source = tmp_path / "src/main.py"
     source.parent.mkdir()
     source.write_text("target()\n")
@@ -735,9 +743,13 @@ def test_declaration_self_target_keeps_the_already_open_source_snapshot(tmp_path
         result = runtime.find_declaration("src/main.py", r"(target)\(\)", include_body=True).to_dict()
 
         assert result["ok"] is True
-        assert result["data"]["locations"][0]["body"] == "target"
-        assert adapter.document_loads == ["src/main.py"]
-        assert calls == 2
+        # The returned body belongs to the settled bytes, not to the discarded
+        # first attempt that observed "target()\n".
+        assert result["data"]["locations"][0]["body"] == source.read_text()[:6] == "# move"
+        # One source load per attempt: the self-target is never opened again.
+        assert adapter.document_loads == ["src/main.py", "src/main.py"]
+        # Two stabilization requests per attempt, across exactly two attempts.
+        assert calls == 4
     finally:
         runtime.stop()
 
@@ -1463,6 +1475,141 @@ def test_diagnostics_distinguish_not_ready_and_stale_timeout(tmp_path: Path) -> 
         assert won_race["data"]["diagnostics_generation"] == 2
     finally:
         raced_runtime.stop()
+
+
+def _count_scans(runtime: WorkspaceRuntime) -> list[int]:
+    """Count guarded scans: exactly one inventory rebuild happens per scan."""
+
+    counter = [0]
+    real_rebuild = runtime.rebuild_inventory
+
+    def counting_rebuild() -> TrustInventory:
+        counter[0] += 1
+        return real_rebuild()
+
+    runtime.rebuild_inventory = counting_rebuild  # type: ignore[method-assign]
+    return counter
+
+
+def _race_document_loads(adapter: _Adapter, race: Callable[[int], None]) -> list[int]:
+    """Complete a foreign write once each operation has captured its bytes."""
+
+    loads = [0]
+    real_load = adapter.snapshot_open_and_probe_document
+
+    def racing_load(**kwargs: Any) -> Future[Any]:
+        loads[0] += 1
+        future = real_load(**kwargs)
+        observed = future.result(timeout=5)
+        race(loads[0])
+        settled: Future[Any] = Future()
+        settled.set_result(observed)
+        return settled
+
+    adapter.snapshot_open_and_probe_document = racing_load  # type: ignore[method-assign]
+    return loads
+
+
+def _publish_clean(adapter: _Adapter) -> None:
+    def publish_while_cancelling(target: DocumentReadinessTarget) -> None:
+        adapter.diagnostics = DiagnosticsSnapshot(
+            DiagnosticsState.CLEAN,
+            target.uri,
+            target.absolute_path,
+            target.version,
+            target.document_generation,
+            2,
+            (),
+        )
+
+    adapter.cancel_diagnostics_target = publish_while_cancelling  # type: ignore[attr-defined]
+
+
+def test_raced_diagnostic_clean_replays_once_and_returns_the_settled_clean_state(tmp_path: Path) -> None:
+    (tmp_path / "main.py").write_text("x = 1\n")
+    runtime, adapter, _policy = _runtime(tmp_path, {"textDocument/documentSymbol": []})
+    _publish_clean(adapter)
+    scans = _count_scans(runtime)
+    # The fixed inventory of this fixture never gains members, so the race
+    # rewrites the tracked source that the read itself depends on.
+    loads = _race_document_loads(
+        adapter,
+        lambda attempt: (tmp_path / "main.py").write_text("x = 2\n") if attempt == 1 else None,
+    )
+    try:
+        result = runtime.get_diagnostics_for_file("main.py", timeout_seconds=0.01).to_dict()
+
+        # A diagnostic `clean` state is source-derived success and takes the
+        # same postflight and replay as navigation content.
+        assert result["ok"] is True
+        assert result["data"]["state"] == "clean"
+        assert scans[0] == 4
+        assert loads[0] == 2
+    finally:
+        runtime.stop()
+
+
+def test_diagnostic_clean_raced_twice_returns_not_ready_and_never_reports_clean(tmp_path: Path) -> None:
+    (tmp_path / "main.py").write_text("x = 1\n")
+    runtime, adapter, _policy = _runtime(tmp_path, {"textDocument/documentSymbol": []})
+    _publish_clean(adapter)
+    scans = _count_scans(runtime)
+    loads = _race_document_loads(
+        adapter,
+        lambda attempt: (tmp_path / "main.py").write_text(f"x = {attempt + 1}\n"),
+    )
+    try:
+        result = runtime.get_diagnostics_for_file("main.py", timeout_seconds=0.01).to_dict()
+
+        assert result["ok"] is False
+        assert "data" not in result
+        assert result["error"]["code"] == "NOT_READY"
+        assert result["error"]["retry"]["retryable"] is True
+        assert result["error"]["details"]["reason"] == "workspace_changed_during_read"
+        assert result["error"]["details"]["attempts"] == 2
+        assert scans[0] == 4
+        assert loads[0] == 2
+    finally:
+        runtime.stop()
+
+
+def test_typed_trust_failure_is_returned_once_without_a_postflight_or_replay(tmp_path: Path) -> None:
+    source = tmp_path / "main.py"
+    source.write_text("x = 1\n")
+    runtime, adapter, policy = _runtime(tmp_path, {"textDocument/documentSymbol": []})
+    scans = _count_scans(runtime)
+    try:
+        policy.failure = WorkspaceError(WorkspaceErrorData(WorkspaceErrorCode.OUT_OF_WORKSPACE, "blocked", path=source))
+
+        result = runtime.get_symbols_overview("main.py").to_dict()
+
+        assert result["error"]["code"] == "OUT_OF_WORKSPACE"
+        # The typed failure keeps its own authority: one preflight, no
+        # postflight, and no replay that could manufacture another error.
+        assert scans[0] == 1
+        assert adapter.document_loads == []
+    finally:
+        runtime.stop()
+
+
+def test_replace_symbol_body_takes_exactly_one_scan_and_one_dispatch(tmp_path: Path) -> None:
+    source = tmp_path / "main.py"
+    original = b"def target():\n    return 1\n"
+    source.write_bytes(original)
+    runtime, adapter, _policy = _runtime(tmp_path, {"textDocument/documentSymbol": [_symbol("target")]})
+    scans = _count_scans(runtime)
+    try:
+        result = runtime.replace_symbol_body(
+            "target", "main.py", "def target():\n    return 2", hashlib.sha256(original).hexdigest()
+        ).to_dict()
+
+        assert result["ok"] is True
+        # Edits keep exactly one preflight and stay outside the read replay
+        # boundary: no postflight scan and no second dispatch.
+        assert scans[0] == 1
+        assert adapter.edit_dispatches == 1
+    finally:
+        runtime.stop()
 
 
 def test_replace_symbol_body_uses_one_edit_dispatch_and_notifies_after_install(tmp_path: Path) -> None:
