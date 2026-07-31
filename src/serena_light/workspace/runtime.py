@@ -689,32 +689,28 @@ class _PendingWatchedReconcile:
     future: Future[None] | Future[Any] | None
 
 
-class _SharedScan:
-    """One in-flight scan whose single result every joined caller receives."""
-
-    __slots__ = ("done", "failure", "result")
-
-    def __init__(self) -> None:
-        self.done = threading.Event()
-        self.result: FreshnessScan | None = None
-        self.failure: BaseException | None = None
-
-
 class FreshnessCoordinator:
     """Run one synchronous lexical freshness pass before a workspace operation.
 
-    There is deliberately no time-based success cache: an operation either runs
-    a scan or joins one that is already running, so a stale filesystem can never
-    authorize a semantic answer.  Every scan runs on the calling thread, never
-    on the shared LSP executor, because notifications and edits are submitted to
-    that single worker and a scan waiting on it would deadlock.
+    There is deliberately no time-based success cache and no cross-call
+    coalescing: every call is assigned a monotonic arrival ticket and is
+    admitted, in FIFO order, to run its own guarded scan that begins only after
+    that ticket was issued.  A call that arrives while another scan is already
+    running waits for that scan to settle and then runs a distinct scan of its
+    own; it can never accept a scan that was already in progress at its
+    arrival.  At most one scan runs at a time.  Every scan runs on the calling
+    thread, never on the shared LSP executor, because notifications and edits
+    are submitted to that single worker and a scan waiting on it would
+    deadlock.
     """
 
     def __init__(self, runtime: WorkspaceRuntime) -> None:
         self._runtime = runtime
         self._lock = threading.Lock()
         self._path_refresh_lock = threading.Lock()
-        self._in_flight: _SharedScan | None = None
+        self._admission_condition = threading.Condition()
+        self._next_ticket = 0
+        self._serving_ticket = 0
         self._states: dict[str, ContentIdentity] = {}
         self._config_states: dict[str, ContentIdentity] = {}
         self._pending_reconciles: dict[LanguageFamily, _PendingWatchedReconcile] = {}
@@ -727,47 +723,52 @@ class FreshnessCoordinator:
             return self._last
 
     def ensure_fresh(self) -> FreshnessScan:
-        """Rebuild and reconcile the Git lexical inventory before one operation."""
+        """Rebuild and reconcile the Git lexical inventory before one operation.
+
+        A ticket is assigned at arrival and admitted in FIFO order; the guarded
+        scan this call runs always begins after its own ticket was issued, so a
+        call can never accept a scan that another caller already started.
+        """
 
         if self._runtime.identity.kind is not WorkspaceKind.GIT:
             # The allowlisted read-only root is never fully walked per call; its
             # freshness is the targeted stat in ensure_path_fresh.
             return FreshnessScan()
-        with self._lock:
-            shared = self._in_flight
-            if shared is None:
-                shared = self._in_flight = _SharedScan()
-                owned = True
-            else:
-                owned = False
-        if not owned:
-            shared.done.wait()
-            if shared.failure is not None:
-                raise shared.failure
-            assert shared.result is not None
-            return shared.result
+        ticket = self._enter_admission_queue()
         try:
             scan = self._scan_git()
-        except BaseException as caught:
-            shared.failure = caught
-            raise
-        else:
-            shared.result = scan
-            return scan
-        finally:
+            # Commit the result before handing admission to the next ticket, so
+            # a later ticket's own commit can never be overwritten by this one
+            # resuming after it.
             with self._lock:
-                self._in_flight = None
-                if shared.failure is None and shared.result is not None:
-                    self._last = shared.result
-            shared.done.set()
+                self._last = scan
+        finally:
+            self._leave_admission_queue(ticket)
+        return scan
+
+    def _enter_admission_queue(self) -> int:
+        with self._admission_condition:
+            ticket = self._next_ticket
+            self._next_ticket += 1
+            # Notify so a waiter blocked on ticket-issuance (rather than on
+            # being served) can observe the new ticket count deterministically.
+            self._admission_condition.notify_all()
+            while self._serving_ticket != ticket:
+                self._admission_condition.wait()
+            return ticket
+
+    def _leave_admission_queue(self, ticket: int) -> None:
+        with self._admission_condition:
+            self._serving_ticket = ticket + 1
+            self._admission_condition.notify_all()
 
     def ensure_path_fresh(self, relative_path: str) -> FreshnessScan:
         """Stat exactly one operand on the read-only non-Git root."""
 
         if self._runtime.identity.kind is WorkspaceKind.GIT:
             return FreshnessScan()
-        # Unlike Git scans, targeted external-root stats do not join
-        # ``_in_flight``.  Serialize their compare/commit/delivery sequence so
+        # Unlike Git scans, targeted external-root stats do not use the ticketed
+        # admission queue.  Serialize their compare/commit/delivery sequence so
         # two paths in one family cannot overwrite one pending batch.
         with self._path_refresh_lock:
             runtime = self._runtime

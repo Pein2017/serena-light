@@ -6,8 +6,8 @@
 
 ## 2. Per-Call Freshness Admission
 
-- [ ] 2.1 Add monotonic arrival tickets and a bounded FIFO scan owner to `FreshnessCoordinator`; make every content-bearing read run a guarded scan that starts after its own ticket is issued.
-- [ ] 2.2 Remove the contract that a later caller can accept an already-running scan, while preserving a single filesystem scan at a time, retained failed reconciliation batches, same-stat full-byte detection, and same-root activation refresh.
+- [x] 2.1 Add monotonic arrival tickets and a bounded FIFO scan owner to `FreshnessCoordinator`; make every content-bearing read run a guarded scan that starts after its own ticket is issued.
+- [x] 2.2 Remove the contract that a later caller can accept an already-running scan, while preserving a single filesystem scan at a time, retained failed reconciliation batches, same-stat full-byte detection, and same-root activation refresh.
 - [ ] 2.3 Preserve Git create/change/delete/config/symlink attribution; keep targeted transformers scans for path-scoped reads and add bounded full-root scans only for existing global transformers reads.
 
 ## 3. Fresh Read Boundary
@@ -20,7 +20,7 @@
 
 ## 4. Deterministic Correctness Tests
 
-- [ ] 4.1 Replace the old shared-scan unit expectation with a barrier test where call B arrives after scan A starts, waits, then runs a distinct scan begun after B's arrival.
+- [x] 4.1 Replace the old shared-scan unit expectation with a barrier test where call B arrives after scan A starts, waits, then runs a distinct scan begun after B's arrival.
 - [ ] 4.2 Cover stable file create, ordinary change, delete, rename, native-config change, ignored/tracked membership change, symlink substitution, and same-size/inode/timestamp byte rewrite between arrival, preflight, operation, and postflight.
 - [ ] 4.3 Cover one raced navigation/diagnostics read followed by successful replay and two consecutive races followed by retryable `NOT_READY`, asserting that no first-attempt body, range, reference, diagnostic, or `clean` state escapes.
 - [ ] 4.4 Cover a write after final guarded validation and prove the linearized result may return while the next call's own preflight observes the new bytes.

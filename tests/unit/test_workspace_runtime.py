@@ -1116,44 +1116,134 @@ def test_cold_global_lookup_keeps_readiness_witness_failure_as_not_ready(tmp_pat
         runtime.stop()
 
 
-def test_concurrent_freshness_callers_share_one_scan_and_no_time_cache_authorizes_reuse(
+def test_call_arriving_during_a_scan_waits_then_runs_its_own_distinct_scan(
     tmp_path: Path,
 ) -> None:
     _git_repository(tmp_path)
     (tmp_path / "main.py").write_text("value = 1\n")
     adapters: dict[LanguageFamily, _Adapter] = {}
     contexts: dict[LanguageFamily, AdapterBuildContext] = {}
-    entered = threading.Event()
-    release = threading.Event()
+    first_entered = threading.Event()
+    first_release = threading.Event()
+    second_entered = threading.Event()
+    second_release = threading.Event()
     rebuilds = 0
 
     def blocking_inventory(identity: Any) -> TrustInventory:
         nonlocal rebuilds
         rebuilds += 1
-        if rebuilds > 1:
-            entered.set()
-            assert release.wait(5)
+        # Call 1 is the constructor's baseline build; calls 2 and 3 are the
+        # ensure_fresh scans for call A and call B respectively.
+        if rebuilds == 2:
+            first_entered.set()
+            assert first_release.wait(5)
+        elif rebuilds == 3:
+            second_entered.set()
+            assert second_release.wait(5)
         return git_trust_inventory(identity.root)
 
     runtime = _git_runtime(tmp_path, adapters, contexts, inventory_factory=blocking_inventory)
     try:
-        results: list[Any] = []
-        first = threading.Thread(target=lambda: results.append(runtime.ensure_fresh()))
-        first.start()
-        assert entered.wait(5)
-        joined = threading.Thread(target=lambda: results.append(runtime.ensure_fresh()))
-        joined.start()
-        # The joined caller must not start a second rebuild while one is running.
-        assert not release.wait(0.2)
-        assert rebuilds == 2
-        release.set()
-        first.join(timeout=5)
-        joined.join(timeout=5)
+        results: dict[str, Any] = {}
+        call_a = threading.Thread(target=lambda: results.__setitem__("a", runtime.ensure_fresh()))
+        call_a.start()
+        assert first_entered.wait(5)
 
-        assert len(results) == 2
-        assert results[0] is results[1]
-        # A completed scan is never reused: the next operation rebuilds again.
-        runtime.ensure_fresh()
+        # Give A's eventual scan a distinguishable, non-empty result so a
+        # regressed or overwritten ``_last`` commit is observable below.
+        (tmp_path / "main.py").write_text("value = 2\n")
+
+        call_b = threading.Thread(target=lambda: results.__setitem__("b", runtime.ensure_fresh()))
+        call_b.start()
+        # Exact ticket-issued barrier: wait on the same condition the admission
+        # queue itself notifies on, rather than polling or guessing a duration.
+        condition = runtime.freshness._admission_condition
+        with condition:
+            ticket_issued = condition.wait_for(lambda: runtime.freshness._next_ticket >= 2, timeout=5)
+        assert ticket_issued
+        # B's ticket is issued but A's scan has not settled, so B must still be
+        # waiting rather than having accepted A's in-progress scan.
+        assert not second_entered.is_set()
+        assert rebuilds == 2
+
+        first_release.set()
+        call_a.join(timeout=5)
+        # Only after A's scan settles does B's own distinct scan begin.
+        assert second_entered.wait(5)
+        assert rebuilds == 3
+        # A's result must already be committed before B's scan is admitted:
+        # the commit-then-release ordering means B can never observe or cause
+        # a regression of ``_last`` back to a stale value.
+        assert runtime.freshness.last_scan == results["a"]
+        assert results["a"].changed == ("main.py",)
+
+        second_release.set()
+        call_b.join(timeout=5)
+
+        assert rebuilds == 3
+        assert results["a"] is not results["b"]
+        assert runtime.freshness.last_scan == results["b"]
+    finally:
+        runtime.stop()
+
+
+def test_a_failed_scan_propagates_only_to_its_own_caller_and_unblocks_the_next_ticket(
+    tmp_path: Path,
+) -> None:
+    _git_repository(tmp_path)
+    (tmp_path / "main.py").write_text("value = 1\n")
+    adapters: dict[LanguageFamily, _Adapter] = {}
+    contexts: dict[LanguageFamily, AdapterBuildContext] = {}
+    first_entered = threading.Event()
+    first_release = threading.Event()
+    rebuilds = 0
+
+    class _Boom(RuntimeError):
+        pass
+
+    def blocking_inventory(identity: Any) -> TrustInventory:
+        nonlocal rebuilds
+        rebuilds += 1
+        # Call 1 is the constructor's baseline build; call 2 is call A's scan.
+        if rebuilds == 2:
+            first_entered.set()
+            assert first_release.wait(5)
+            raise _Boom("scan failed")
+        return git_trust_inventory(identity.root)
+
+    runtime = _git_runtime(tmp_path, adapters, contexts, inventory_factory=blocking_inventory)
+    try:
+        errors: dict[str, Any] = {}
+        results: dict[str, Any] = {}
+
+        def call_a() -> None:
+            try:
+                runtime.ensure_fresh()
+            except BaseException as caught:
+                errors["a"] = caught
+
+        def call_b() -> None:
+            results["b"] = runtime.ensure_fresh()
+
+        thread_a = threading.Thread(target=call_a)
+        thread_a.start()
+        assert first_entered.wait(5)
+
+        thread_b = threading.Thread(target=call_b)
+        thread_b.start()
+        # Exact ticket-issued barrier: wait on the same condition the admission
+        # queue itself notifies on, rather than polling or guessing a duration.
+        condition = runtime.freshness._admission_condition
+        with condition:
+            ticket_issued = condition.wait_for(lambda: runtime.freshness._next_ticket >= 2, timeout=5)
+        assert ticket_issued
+
+        first_release.set()
+        thread_a.join(timeout=5)
+        thread_b.join(timeout=5)
+
+        assert isinstance(errors.get("a"), _Boom)
+        assert results["b"] == FreshnessScan()
         assert rebuilds == 3
     finally:
         runtime.stop()
