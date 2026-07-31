@@ -171,3 +171,35 @@ owning files was `127 passed`; Ruff, Ty, and diff checks passed.
 Real `git mv` behavior with live open documents remains a real-daemon
 acceptance concern, not a separate unit mechanism: the coordinator intentionally
 models it as one deletion plus one creation.
+
+## Real daemon/connector race evidence
+
+`a98a997` adds a loopback HTTP daemon exercised through the production
+`Connector`, with a spawned writer process connected only by a duplex pipe.
+Each race uses an explicit answer-produced barrier: an attempt first owns its
+document snapshot and language-server result, the foreign process completes
+and acknowledges the rewrite, and only then may read postflight continue.
+The harness therefore does not infer ordering from sleeps.
+
+Five real-boundary cases cover:
+
+- a Python symbol-body race that replays to one settled body, range, and hash;
+- a TypeScript astral-Unicode rewrite whose settled source position is mapped
+  from the final snapshot;
+- two consecutive Python races that return retryable `NOT_READY` without any
+  attempted source body in the serialized error;
+- a reference-target rewrite that returns only the settled container, snippet,
+  and range; and
+- diagnostics changing from clean to findings during the first attempt, with
+  only the final findings state published.
+
+The writer exit code and cleanup are asserted. The cases were falsified by
+temporarily suppressing the production postflight change result; all five
+failed for their intended stale-result reason before the production source was
+restored byte-for-byte. Lead verification was `19 passed` for the full
+connector-contract acceptance file, plus Ruff, Ruff format, Ty, source-diff,
+and `git diff --check` success.
+
+The requested ms-swift root was corrected from the nonexistent
+`/data/CoordExp/ms-swift` to the live Git root `/data/ms-swift`; no symlink or
+repository relocation was introduced.

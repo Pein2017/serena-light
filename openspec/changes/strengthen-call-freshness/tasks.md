@@ -30,8 +30,8 @@
 
 ## 5. Real-Daemon Acceptance and Documentation
 
-- [ ] 5.1 Run a real daemon/connector race harness with a separate writer process and explicit barriers against Python and TypeScript bodies, references, Unicode ranges, and diagnostic `clean`/findings.
-- [ ] 5.2 Run targeted fresh-client smokes in `/data/CoordExp`, `/data/CoordExp/cc-plugin-codex`, `/data/CoordExp/ms-swift`, and the conda-`ms` transformers package, including explicit cross-root `activate_workspace` and same-root reactivation; record navigation/diagnostics per-call p50/p95 latency on `/data/CoordExp` and `/data/CoordExp/ms-swift` as observation only, with no pass threshold.
+- [x] 5.1 Run a real daemon/connector race harness with a separate writer process and explicit barriers against Python and TypeScript bodies, references, Unicode ranges, and diagnostic `clean`/findings.
+- [ ] 5.2 Run targeted fresh-client smokes in `/data/CoordExp`, `/data/CoordExp/cc-plugin-codex`, `/data/ms-swift`, and the conda-`ms` transformers package, including explicit cross-root `activate_workspace` and same-root reactivation; record navigation/diagnostics per-call p50/p95 latency on `/data/CoordExp` and `/data/ms-swift` as observation only, with no pass threshold.
 - [ ] 5.3 Verify multiple Codex/Claude/CC sessions sharing one root, different roots concurrently, clean and poisoned-proxy environments, daemon rollover, lease release, and zero new orphan language-server processes.
 - [ ] 5.4 Update compatibility, README/freshness documentation, roadmap state, and acceptance evidence with the final linearization boundary and recorded environment/build identities; do not advertise watcher or delivery-time guarantees.
 - [ ] 5.5 Pass full pytest, Ruff, Ty, bootstrap, source ownership/direct-dependency/provenance/census checks, copied-source hashes, and strict OpenSpec validation; report production LOC with `maximum_production_lines=null`.
