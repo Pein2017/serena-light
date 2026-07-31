@@ -11,6 +11,10 @@ production code rather than by a test double.
 Two faults are injected deliberately and only where production owns no seam a
 test could otherwise reach: ``os.fsync`` failing on directories, and one dropped
 ``tools/call`` response at the public :class:`DaemonSession` protocol seam.
+
+The freshness races at the end of this file add a third real participant: a
+separate, non-cooperating writer process that rewrites workspace files at
+explicit barriers while one read attempt already owns its snapshot.
 """
 
 from __future__ import annotations
@@ -18,6 +22,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import multiprocessing
 import os
 import socket
 import stat
@@ -28,6 +33,8 @@ from collections.abc import AsyncIterator, Callable, Iterator, Mapping
 from concurrent.futures import Future
 from contextlib import AsyncExitStack, asynccontextmanager, contextmanager, suppress
 from dataclasses import dataclass, field
+from multiprocessing.connection import Connection
+from multiprocessing.process import BaseProcess
 from pathlib import Path, PurePosixPath
 from typing import Any, cast
 from uuid import UUID, uuid4
@@ -67,6 +74,7 @@ from serena_light.lsp.adapter import (
     RawLspProviders,
 )
 from serena_light.lsp.positions import FileSnapshot, PositionEncoding
+from serena_light.lsp.state import DiagnosticsSnapshot, DiagnosticsState
 from serena_light.runtime_files import LEGACY_BUILD_IDENTITY, BearerSecret
 from serena_light.tools.editing import NotificationResult, ReplacementNotification
 from serena_light.workspace.identity import (
@@ -97,6 +105,13 @@ _EXTENSIONS: Mapping[LanguageFamily, frozenset[str]] = {
     LanguageFamily.TYPESCRIPT: frozenset({".ts", ".tsx"}),
 }
 
+# Production refuses Python diagnostics from any server other than the pinned
+# Pyright, so the stand-in reports the engine name its family really uses.
+_ENGINE_NAMES: Mapping[LanguageFamily, str] = {
+    LanguageFamily.PYTHON: "pyright",
+    LanguageFamily.TYPESCRIPT: "typescript-language-server",
+}
+
 _SYMBOLS: tuple[Mapping[str, Any], ...] = (
     {
         "name": "target",
@@ -122,29 +137,52 @@ _WORKSPACE_TOOLS = frozenset(
 )
 
 
+def _requested_uri(params: object) -> str:
+    """The document one request names, or empty for a request that names none."""
+
+    if not isinstance(params, Mapping):
+        return ""
+    document = cast(Mapping[str, object], params).get("textDocument")
+    if not isinstance(document, Mapping):
+        return ""
+    uri = cast(Mapping[str, object], document).get("uri")
+    return uri if isinstance(uri, str) else ""
+
+
 class _Client:
     """Deterministic stand-in for one language-server client connection."""
 
     def __init__(self) -> None:
         self.before_request: Callable[[], None] | None = None
+        # Fires once a request has produced its answer, so a race scenario can
+        # act exactly when one attempt already owns that answer.
+        self.after_request: Callable[[str, str], None] | None = None
         self.requests: list[str] = []
         self.notifications: list[str] = []
         self.document_symbols: tuple[Mapping[str, Any], ...] = _SYMBOLS
+        # When set, document symbols answer the named document instead of one
+        # fixed reply, the way a server that analyzed current bytes would.
+        self.analyze: Callable[[str], tuple[Mapping[str, Any], ...]] | None = None
         self.selection_ranges: tuple[Mapping[str, Any], ...] = ()
         self.references: tuple[Mapping[str, Any], ...] = ()
 
     def request(self, method: str, params: object = None, *, timeout: float | None = None) -> object:
-        del params, timeout
+        del timeout
         self.requests.append(method)
         if self.before_request is not None:
             self.before_request()
+        uri = _requested_uri(params)
         if method == "textDocument/documentSymbol":
-            return list(self.document_symbols)
-        if method == "textDocument/selectionRange":
-            return list(self.selection_ranges)
-        if method == "textDocument/references":
-            return list(self.references)
-        return list(_SYMBOLS)
+            answer = list(self.document_symbols if self.analyze is None else self.analyze(uri))
+        elif method == "textDocument/selectionRange":
+            answer = list(self.selection_ranges)
+        elif method == "textDocument/references":
+            answer = list(self.references)
+        else:
+            answer = list(_SYMBOLS)
+        if self.after_request is not None:
+            self.after_request(method, uri)
+        return answer
 
     def notify(self, method: str, params: object = None) -> None:
         del params
@@ -162,6 +200,10 @@ class _Adapter:
         self.client = _Client()
         self.before_edit: Callable[[], None] | None = None
         self.document_generation = 0
+        # The exact text every document generation analyzed, so a publication
+        # belongs to the bytes that produced it rather than to current disk.
+        self.analyzed: dict[int, str] = {}
+        self.diagnose: Callable[[str], tuple[Mapping[str, Any], ...]] | None = None
 
     def routes(self, path: str | Path) -> bool:
         return PurePosixPath(str(path)).suffix.lower() in _EXTENSIONS[self.context.family]
@@ -179,7 +221,7 @@ class _Adapter:
             AdapterPhase.READY,
             raw,
             DerivedToolAvailability.from_raw(raw),
-            EngineMetadata("fake", "1.0", Path("/owned/server"), Path("/owned/python")),
+            EngineMetadata(_ENGINE_NAMES[self.context.family], "1.0", Path("/owned/server"), Path("/owned/python")),
             PositionEncoding.UTF16,
             AdapterGenerations(1, 2, self.document_generation, 3),
             CrashSnapshot(0, 0, None, None, None, 0.0),
@@ -197,12 +239,41 @@ class _Adapter:
         probe: DocumentReadinessProbe,
     ) -> Future[tuple[FileSnapshot, DocumentReadinessTarget]]:
         def worker() -> tuple[FileSnapshot, DocumentReadinessTarget]:
+            # Take the snapshot before the probe, as a server that opens a
+            # document and then answers about that opened text does.
+            snapshot = FileSnapshot.from_bytes(absolute_path.read_bytes())
             self.document_generation += 1
             target = DocumentReadinessTarget(uri, relative_path, absolute_path, version, self.document_generation, 0)
+            self.analyzed[target.document_generation] = snapshot.text
             assert probe.observe(self.client, target, timeout=1.0)
-            return FileSnapshot.from_bytes(absolute_path.read_bytes()), target
+            return snapshot, target
 
         return self.context.executor.submit(worker)
+
+    def diagnostics_snapshot(self, target: DocumentReadinessTarget) -> DiagnosticsSnapshot:
+        """Publish diagnostics for the text this document generation analyzed."""
+
+        analyzed = self.analyzed.get(target.document_generation)
+        if self.diagnose is None or analyzed is None:
+            return DiagnosticsSnapshot(
+                DiagnosticsState.MISSING,
+                target.uri,
+                target.absolute_path,
+                target.version,
+                target.document_generation,
+                None,
+                (),
+            )
+        diagnostics = self.diagnose(analyzed)
+        return DiagnosticsSnapshot(
+            DiagnosticsState.FINDINGS if diagnostics else DiagnosticsState.CLEAN,
+            target.uri,
+            target.absolute_path,
+            target.version,
+            target.document_generation,
+            target.document_generation,
+            diagnostics,
+        )
 
     def submit_read(self, operation: Callable[[_Client], Any]) -> Future[Any]:
         return self.context.executor.submit(lambda: operation(self.client))
@@ -216,6 +287,23 @@ class _Adapter:
             return operation(self.client)
 
         return self.context.executor.submit(worker)
+
+    def open_snapshot_document_with_client(
+        self,
+        client: _Client,
+        *,
+        absolute_path: Path,
+        relative_path: str,
+        uri: str,
+        version: int,
+        text: str,
+    ) -> DocumentReadinessTarget:
+        """Open one response-owned semantic target on the caller's own client."""
+
+        del client
+        self.document_generation += 1
+        self.analyzed[self.document_generation] = text
+        return DocumentReadinessTarget(uri, relative_path, absolute_path, version, self.document_generation, 0)
 
     def open_edit_document_with_client(
         self,
@@ -1172,3 +1260,371 @@ def test_stdio_proxy_withholds_editing_and_preserves_typed_boundary_errors(
             assert refused_payload["workspace"]["root"] == str(harness.root)
 
         asyncio.run(scenario())
+
+
+# --- Real daemon/connector freshness races driven by a separate writer process ---
+#
+# Every race below is ordered by explicit barriers: a foreign OS process
+# rewrites the exact target only after the current attempt already owns that
+# target's snapshot and symbols, and the attempt continues only once that
+# process has acknowledged the completed write.  No case depends on timing.
+
+_FOREIGN_WRITER_TIMEOUT_SECONDS = 20.0
+_DIAGNOSTIC_MARKER = "# unresolved"
+
+
+def _foreign_writer_main(connection: Connection) -> None:
+    """Rewrite requested files in a separate process until asked to stop."""
+
+    try:
+        while True:
+            command = connection.recv()
+            if command is None:
+                connection.send("stopped")
+                return
+            path, payload = cast(tuple[str, bytes], command)
+            Path(path).write_bytes(payload)
+            connection.send(hashlib.sha256(payload).hexdigest())
+    finally:
+        connection.close()
+
+
+@dataclass(slots=True)
+class _ForeignWriter:
+    """A non-cooperating writer this test process can only reach across a pipe."""
+
+    process: BaseProcess
+    connection: Connection
+    writes: list[str] = field(default_factory=list)
+
+    def write(self, path: Path, payload: bytes) -> None:
+        self.connection.send((str(path), payload))
+        assert self.connection.poll(_FOREIGN_WRITER_TIMEOUT_SECONDS), "foreign writer did not acknowledge a write"
+        assert self.connection.recv() == hashlib.sha256(payload).hexdigest()
+        self.writes.append(str(path))
+
+    def stop(self) -> None:
+        self.connection.send(None)
+        assert self.connection.poll(_FOREIGN_WRITER_TIMEOUT_SECONDS), "foreign writer did not acknowledge stop"
+        assert self.connection.recv() == "stopped"
+        self.process.join(_FOREIGN_WRITER_TIMEOUT_SECONDS)
+        assert self.process.exitcode == 0, f"foreign writer exited with {self.process.exitcode}"
+
+
+@contextmanager
+def _foreign_writer() -> Iterator[_ForeignWriter]:
+    """Start one writer process that shares no interpreter state with the daemon."""
+
+    context = multiprocessing.get_context("spawn")
+    parent, child = context.Pipe()
+    process = context.Process(
+        target=_foreign_writer_main,
+        args=(child,),
+        name="serena-light-acceptance-writer",
+    )
+    process.start()
+    child.close()
+    try:
+        yield _ForeignWriter(process, parent)
+    finally:
+        if process.is_alive():
+            process.kill()
+            process.join(_FOREIGN_WRITER_TIMEOUT_SECONDS)
+        assert not process.is_alive(), "foreign writer process was not cleaned up"
+        parent.close()
+
+
+@dataclass(slots=True)
+class _RacedWrites:
+    """Spend one queued foreign write per analyzed document, in order.
+
+    ``pending`` holds one entry per attempt that must be raced.  The write is
+    issued after that attempt's document symbols already answered, so the
+    attempt owns a complete snapshot the postflight must reject.
+    """
+
+    writer: _ForeignWriter
+    root: Path
+    pending: list[tuple[str, bytes]]
+    analyzed: list[str] = field(default_factory=list)
+
+    def after_request(self, method: str, uri: str) -> None:
+        if method != "textDocument/documentSymbol":
+            return
+        self.analyzed.append(uri)
+        if not self.pending:
+            return
+        relative_path, payload = self.pending[0]
+        if uri != (self.root / relative_path).resolve().as_uri():
+            return
+        self.pending.pop(0)
+        self.writer.write(self.root / relative_path, payload)
+
+
+def _utf16_length(text: str) -> int:
+    return len(text.encode("utf-16-le")) // 2
+
+
+def _analyzed_symbols(path: Path, *, definition: str, span_lines: int) -> tuple[Mapping[str, Any], ...]:
+    """Answer for the current bytes of ``path`` in LSP UTF-16 coordinates.
+
+    ``definition`` is the declaration prefix that introduces the symbol; the
+    name, its position, and the reported range all come from the bytes on disk
+    when the request arrives.  That is what makes an escaped first attempt
+    visible: each attempt's answer belongs to the bytes that attempt analyzed.
+    A range that starts after an astral character is only correct once
+    production maps those UTF-16 code units onto decoded code points.
+    """
+
+    lines = path.read_bytes().decode("utf-8").split("\n")
+    start_line = next(index for index, line in enumerate(lines) if definition in line)
+    declaration = lines[start_line][lines[start_line].index(definition) :]
+    name = declaration[len(definition) : declaration.index("(")]
+    start_character = _utf16_length(lines[start_line][: lines[start_line].index(definition)])
+    name_start = start_character + _utf16_length(definition)
+    end_line = start_line + span_lines - 1
+    return (
+        {
+            "name": name,
+            "kind": 12,
+            "range": {
+                "start": {"line": start_line, "character": start_character},
+                "end": {"line": end_line, "character": _utf16_length(lines[end_line])},
+            },
+            "selectionRange": {
+                "start": {"line": start_line, "character": name_start},
+                "end": {"line": start_line, "character": name_start + _utf16_length(name)},
+            },
+        },
+    )
+
+
+def _marker_diagnostics(text: str) -> tuple[Mapping[str, Any], ...]:
+    """One finding per marker line of the exact text a generation analyzed."""
+
+    return tuple(
+        {
+            "severity": 1,
+            "message": "unresolved reference",
+            "range": {
+                "start": {"line": index, "character": 0},
+                "end": {"line": index, "character": _utf16_length(line)},
+            },
+        }
+        for index, line in enumerate(text.split("\n"))
+        if _DIAGNOSTIC_MARKER in line
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class _RacedSymbol:
+    """One file-scoped symbol whose bytes move while attempt one holds them."""
+
+    id: str
+    family: LanguageFamily
+    relative_path: str
+    definition: str
+    span_lines: int
+    initial: bytes
+    settled: bytes
+    body: str
+    body_range: list[list[int]]
+
+
+_RACED_SYMBOLS = (
+    _RacedSymbol(
+        id="python_shifted_body",
+        family=LanguageFamily.PYTHON,
+        relative_path="main.py",
+        definition="def ",
+        span_lines=2,
+        initial=_SOURCE,
+        settled=b"# rewritten by a foreign writer\ndef target():\n    return 2\n",
+        body="def target():\n    return 2",
+        body_range=[[1, 0], [2, 12]],
+    ),
+    _RacedSymbol(
+        # The astral character before the symbol keeps UTF-16 and decoded
+        # code-point columns distinguishable, and the foreign write adds one
+        # more of them, so a first-attempt range cannot masquerade as settled.
+        id="typescript_astral_columns",
+        family=LanguageFamily.TYPESCRIPT,
+        relative_path="main.ts",
+        definition="export function ",
+        span_lines=1,
+        initial='const flag = "\U0001f600"; export function target() { return 1; }\n'.encode(),
+        settled='const flag = "\U0001f600\U0001f600"; export function target() { return 2; }\n'.encode(),
+        body="export function target() { return 2; }",
+        body_range=[[0, 19], [0, 57]],
+    ),
+)
+
+
+@pytest.mark.parametrize("case", _RACED_SYMBOLS, ids=lambda case: case.id)
+def test_connector_raced_symbol_body_and_range_come_from_the_settled_replay(tmp_path: Path, case: _RacedSymbol) -> None:
+    """A foreign process rewrites the exact target between snapshot and postflight."""
+
+    with _acceptance(tmp_path) as harness, _foreign_writer() as writer:
+        source = harness.root / case.relative_path
+        source.write_bytes(case.initial)
+        race = _RacedWrites(writer, harness.root, [(case.relative_path, case.settled)])
+
+        async def scenario() -> tuple[types.CallToolResult, Mapping[str, Any]]:
+            async with _connected(harness) as connector:
+                adapter = harness.adapters[case.family]
+                adapter.client.analyze = lambda uri: _analyzed_symbols(
+                    source, definition=case.definition, span_lines=case.span_lines
+                )
+                adapter.client.after_request = race.after_request
+                return await _call_content(
+                    connector,
+                    "find_symbol",
+                    relative_path=case.relative_path,
+                    name_path="target",
+                    include_body=True,
+                )
+
+        result, payload = asyncio.run(scenario())
+        writer.stop()
+
+        assert writer.writes == [str(source)]
+        assert race.pending == []
+        assert source.read_bytes() == case.settled
+        assert result.isError is False
+        assert payload["ok"] is True
+        data = cast(Mapping[str, Any], payload["data"])
+        file = cast(Mapping[str, Any], cast(list[Any], data["files"])[0])
+        selected = cast(Mapping[str, Any], cast(list[Any], file["symbols"])[0])
+        assert selected["body"] == case.body
+        assert selected["range"] == case.body_range
+        assert file["sha256"] == hashlib.sha256(case.settled).hexdigest()
+        # Exactly two attempts: the raced one and the settled replay.
+        assert harness.adapters[case.family].client.requests.count("textDocument/documentSymbol") == 2
+        assert len(race.analyzed) == 2
+
+
+def test_connector_two_raced_attempts_return_retryable_not_ready_without_source_payload(tmp_path: Path) -> None:
+    """Continuous foreign writing fails retryably instead of returning any body."""
+
+    second = b"def target():\n    return 2\n"
+    third = b"def target():\n    return 3\n"
+    with _acceptance(tmp_path) as harness, _foreign_writer() as writer:
+        source = harness.root / "main.py"
+        race = _RacedWrites(writer, harness.root, [("main.py", second), ("main.py", third)])
+
+        async def scenario() -> tuple[types.CallToolResult, Mapping[str, Any]]:
+            async with _connected(harness) as connector:
+                harness.python.client.after_request = race.after_request
+                return await _call_content(
+                    connector,
+                    "find_symbol",
+                    relative_path="main.py",
+                    name_path="target",
+                    include_body=True,
+                )
+
+        result, payload = asyncio.run(scenario())
+        writer.stop()
+
+        assert writer.writes == [str(source), str(source)]
+        assert race.pending == []
+        assert source.read_bytes() == third
+        # A retryable freshness failure is a typed envelope, not a protocol error.
+        assert result.isError is False
+        assert payload["ok"] is False
+        error_payload = cast(Mapping[str, Any], payload["error"])
+        assert error_payload["code"] == "NOT_READY"
+        assert error_payload["retry"]["retryable"] is True
+        details = cast(Mapping[str, Any], error_payload["details"])
+        assert details["reason"] == "workspace_changed_during_read"
+        assert details["attempts"] == 2
+        assert details["paths"] == ["main.py"]
+        assert "data" not in payload
+        # No attempt's source authority may survive in the failure envelope.
+        serialized = json.dumps(payload)
+        assert all(body not in serialized for body in ("return 1", "return 2", "return 3"))
+        assert harness.python.client.requests.count("textDocument/documentSymbol") == 2
+
+
+def test_connector_raced_reference_target_returns_only_settled_reference_authority(tmp_path: Path) -> None:
+    """A response-owned reference target rewritten during attempt one is replayed."""
+
+    # The referencing line keeps its position so both attempts can map the same
+    # reference; only the container name and the line's text move.
+    initial = b"from main import target\n\n\ndef caller():\n    return target()\n"
+    settled = b"from main import target\n\n\ndef caller_renamed():\n    return target()  # rewritten\n"
+    with _acceptance(tmp_path) as harness, _foreign_writer() as writer:
+        spare = harness.root / "spare.py"
+        spare.write_bytes(initial)
+        race = _RacedWrites(writer, harness.root, [("spare.py", settled)])
+
+        async def scenario() -> tuple[types.CallToolResult, Mapping[str, Any]]:
+            async with _connected(harness) as connector:
+                main_uri = (harness.root / "main.py").resolve().as_uri()
+                harness.python.client.analyze = lambda uri: (
+                    _SYMBOLS if uri == main_uri else _analyzed_symbols(spare, definition="def ", span_lines=2)
+                )
+                harness.python.client.references = (
+                    {
+                        "uri": spare.resolve().as_uri(),
+                        "range": {
+                            "start": {"line": 4, "character": 11},
+                            "end": {"line": 4, "character": 17},
+                        },
+                    },
+                )
+                harness.python.client.after_request = race.after_request
+                return await _call_content(
+                    connector,
+                    "find_referencing_symbols",
+                    relative_path="main.py",
+                    name_path="target",
+                    max_snippet_chars=120,
+                )
+
+        result, payload = asyncio.run(scenario())
+        writer.stop()
+
+        assert writer.writes == [str(spare)]
+        assert race.pending == []
+        assert spare.read_bytes() == settled
+        assert result.isError is False
+        assert payload["ok"] is True
+        data = cast(Mapping[str, Any], payload["data"])
+        file = cast(Mapping[str, Any], cast(list[Any], data["files"])[0])
+        assert file["path"] == "spare.py"
+        reference = cast(Mapping[str, Any], cast(list[Any], file["references"])[0])
+        assert reference["range"] == [[4, 11], [4, 17]]
+        assert reference["symbol"] == "caller_renamed"
+        assert reference["snippet"] == "    return target()  # rewritten"
+        # Exactly two attempts, each opening the source and its one target.
+        assert harness.python.client.requests.count("textDocument/documentSymbol") == 4
+        assert harness.python.client.requests.count("textDocument/references") == 4
+
+
+def test_connector_raced_clean_diagnostics_replay_returns_the_settled_findings(tmp_path: Path) -> None:
+    """A clean first attempt cannot escape once its file gains a finding."""
+
+    settled = _SOURCE + f"call_missing()  {_DIAGNOSTIC_MARKER}\n".encode()
+    with _acceptance(tmp_path) as harness, _foreign_writer() as writer:
+        source = harness.root / "main.py"
+        race = _RacedWrites(writer, harness.root, [("main.py", settled)])
+
+        async def scenario() -> tuple[types.CallToolResult, Mapping[str, Any]]:
+            async with _connected(harness) as connector:
+                harness.python.diagnose = _marker_diagnostics
+                harness.python.client.after_request = race.after_request
+                return await _call_content(connector, "get_diagnostics_for_file", relative_path="main.py")
+
+        result, payload = asyncio.run(scenario())
+        writer.stop()
+
+        assert writer.writes == [str(source)]
+        assert race.pending == []
+        assert source.read_bytes() == settled
+        assert result.isError is False
+        assert payload["ok"] is True
+        data = cast(Mapping[str, Any], payload["data"])
+        assert data["state"] == "findings"
+        assert data["sha256"] == hashlib.sha256(settled).hexdigest()
+        assert harness.python.client.requests.count("textDocument/documentSymbol") == 2
