@@ -8,10 +8,11 @@ test doubles.
 
 from __future__ import annotations
 
+import math
 import subprocess
 import threading
 import time
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -413,3 +414,118 @@ def test_transformers_first_production_readiness_attempt_performance(record_prop
         "models/qwen2_vl/modeling_qwen2_vl.py",
         status=status,
     )
+
+
+@dataclass(frozen=True, slots=True)
+class _LatencyCase:
+    root: Path
+    snapshot_env: str
+    relative_path: str
+    symbol_name: str
+
+
+_LATENCY_CASES = (
+    _LatencyCase(COORDEXP, "SERENA_LIGHT_COORDEXP_SNAPSHOT", "public_data/pipeline/planner.py", "PipelinePlanner"),
+    _LatencyCase(MS_SWIFT, "SERENA_LIGHT_MS_SWIFT_SNAPSHOT", "swift/infer_engine/lmdeploy_engine.py", "LmdeployEngine"),
+)
+
+_LATENCY_REPEATS = 2
+
+
+def _percentile(samples: Sequence[float], rank: float) -> float:
+    """Standard nearest-rank empirical percentile: index ``ceil(rank/100 * n)``, clamped to ``[1, n]``."""
+
+    ordered = sorted(samples)
+    n = len(ordered)
+    index = min(n, max(1, math.ceil((rank / 100.0) * n)))
+    return ordered[index - 1]
+
+
+def _assert_scoped_symbol_present(result: Mapping[str, Any], case: _LatencyCase) -> None:
+    data = _dict(result["data"])
+    symbol = _dict(data["symbol"])
+    assert data["relative_path"] == case.relative_path, data
+    assert symbol["name"] == case.symbol_name, symbol
+
+
+def _assert_global_symbol_present(result: Mapping[str, Any], case: _LatencyCase) -> None:
+    data = _dict(result["data"])
+    symbols = [_dict(item) for item in _list(data["symbols"])]
+    assert any(item["name"] == case.symbol_name and item["relative_path"] == case.relative_path for item in symbols), (
+        symbols
+    )
+
+
+@pytest.mark.performance_external
+@pytest.mark.timeout(300)
+@pytest.mark.parametrize(
+    "case",
+    [
+        pytest.param(
+            case,
+            marks=pytest.mark.external_repo(root=str(case.root), snapshot_env=case.snapshot_env),
+            id=case.root.name,
+        )
+        for case in _LATENCY_CASES
+    ],
+)
+def test_navigation_and_diagnostics_per_call_latency_is_observation_only(
+    case: _LatencyCase, record_property: Any
+) -> None:
+    """Record per-call p50/p95 wall-clock latency; there is no pass threshold.
+
+    Correctness of every response remains mandatory: each call must still
+    resolve through the production ``WorkspaceRuntime`` boundary with
+    ``ok is True``.
+    """
+
+    with _real_runtime(case.root) as (runtime, process):
+        calls: tuple[
+            tuple[
+                str,
+                Callable[[], Mapping[str, Any]],
+                Callable[[Mapping[str, Any], _LatencyCase], None] | None,
+            ],
+            ...,
+        ] = (
+            (
+                "find_symbol_global",
+                lambda: _dict(runtime.find_symbol(case.symbol_name).to_dict()),
+                _assert_global_symbol_present,
+            ),
+            (
+                "find_symbol_scoped",
+                lambda: _dict(runtime.find_symbol(case.symbol_name, relative_path=case.relative_path).to_dict()),
+                _assert_scoped_symbol_present,
+            ),
+            (
+                "get_symbols_overview",
+                lambda: _dict(runtime.get_symbols_overview(case.relative_path).to_dict()),
+                None,
+            ),
+            (
+                "get_diagnostics_for_file",
+                lambda: _dict(runtime.get_diagnostics_for_file(case.relative_path, timeout_seconds=15.0).to_dict()),
+                None,
+            ),
+        )
+        samples: dict[str, list[float]] = {name: [] for name, _call, _check in calls}
+        for _repeat in range(_LATENCY_REPEATS):
+            for name, call, check in calls:
+                started = time.monotonic()
+                result = call()
+                elapsed_seconds = time.monotonic() - started
+                assert result["ok"] is True, {"case": case.root.name, "call": name, "result": result}
+                if check is not None:
+                    check(result, case)
+                samples[name].append(elapsed_seconds)
+        status = _adapter_status(runtime, LanguageFamily.PYTHON)
+
+    assert process.cleanup_ok, (
+        f"real {case.root.name} latency acceptance left owned descendants: {process.cleanup_live}"
+    )
+    _assert_current_global_generation(status)
+    record_property(f"{case.root.name}_peak_tree_rss_bytes", process.peak_tree_rss_bytes)
+    for name, latencies in samples.items():
+        record_property(f"{case.root.name}_{name}_p50_latency_seconds", _percentile(latencies, 50))
+        record_property(f"{case.root.name}_{name}_p95_latency_seconds", _percentile(latencies, 95))
