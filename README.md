@@ -227,10 +227,11 @@ nearest-rank p50/p95, no pass threshold:
 | `/data/ms-swift` | diagnostics | 0.47 | 0.47 |
 
 These numbers motivate the later `improve-warm-runtime-reuse` warm-pool work
-but are not themselves a failure or a gate. The documentation is updated, but
-the remaining full gate suite and independent correctness/runtime review are
-not yet complete, so this candidate stays **HOLD / in progress**, not PASS —
-do not treat it as archived or as a new v1-style acceptance.
+but are not themselves a failure or a gate. Documentation and the full
+pytest/Ruff/Ty/bootstrap/provenance gates now pass; the independent
+correctness/runtime review remains open, so this candidate stays **HOLD / in
+progress**, not PASS — do not treat it as archived or as a new v1-style
+acceptance.
 
 A pre-existing environment also has 14 flat-layout legacy daemons that
 predate the current build-slot scheme, with no active connections. Current

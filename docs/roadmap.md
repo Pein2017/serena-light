@@ -239,10 +239,10 @@ scoped 10.96/11.60s, overview 11.57/11.74s, diagnostics 11.00/11.04s;
 (shared-daemon acceptance) is only partially complete: the process-level
 shared-client lifecycle portion is done, but the host-client matrix is not
 yet closed — a planned fresh Codex/Sol lane must still join the two existing
-CC/Claude receipts. Task 5.4 documentation is updated; tasks 5.5 (full gate
-suite), 5.6 (design-review stop conditions), and 5.7 (independent
-correctness/runtime review) remain open, so the change stays **HOLD / in
-progress**, not PASS.
+CC/Claude receipts. Task 5.4 documentation and task 5.5 full gates pass; task
+5.6 requires none of its prohibited mechanisms and does not trigger a design
+reset. Task 5.7 independent correctness/runtime review remains open, so the
+change stays **HOLD / in progress**, not PASS.
 `add-lexical-discovery` and `improve-warm-runtime-reuse` have not started
 implementation. See
 [`openspec/changes/strengthen-call-freshness`](../openspec/changes/strengthen-call-freshness)

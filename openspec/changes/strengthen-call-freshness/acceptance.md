@@ -290,3 +290,47 @@ The generic multi-client, multi-root, proxy, rollover, release, and zero-new-
 orphan portions of task 5.3 now have real process evidence. The task remains
 open until a fresh Codex lane joins the completed CC/Claude receipts during the
 planned independent review.
+
+## Documentation and complete gate evidence
+
+`24ae46c` updates README, roadmap, client registration, and the compatibility
+inventory for candidate build
+`1a940728c705c5b1b2f460ec1950884727c91d4ddcebfb98a025171c88cff5cd`.
+The public schema remains `3`, the dependency lock digest remains
+`eff6ebdf252faff7f77cb3a2f3894d17b9a0dfc89b46bd193fafdaa9e9ab4941`,
+and canonical Serena remains unchanged. The agent-facing text states the FIFO
+admission and final guarded byte-observation boundary, explicitly denies a
+background-watcher or response-delivery-time guarantee, records the Git versus
+non-Git validation split, and keeps editing outside replay. The live ms-swift
+path is `/data/ms-swift`.
+
+Final pre-review gates on the documented candidate passed:
+
+- default full suite: `828 passed, 33 skipped` in 204.89 seconds; every skip
+  was an explicit external-snapshot or performance gate;
+- four-snapshot full suite: `858 passed, 3 skipped` in 401.01 seconds; only the
+  three explicit performance observations were skipped, and the two new
+  latency cases had already passed separately;
+- observation-only latency cases with strengthened semantic assertions:
+  `2 passed, 6 deselected` in 158.78 seconds;
+- Ruff on `src`, `tests`, and `scripts`: pass;
+- Ty on the repository: pass;
+- locked service-runtime bootstrap check: pass with CPython 3.12.12, Node
+  22.22.0, Pyright 1.1.403, TypeScript 5.9.3, and
+  typescript-language-server 5.1.3 under the service-owned runtime;
+- source ownership, direct dependency, forbidden import, census/manifest, and
+  copied-source provenance: pass, including all 9 copied hashes against Serena
+  commit `9a9d07e83d8c1cba3458992707f440c624446c6d`;
+- production LOC: 18,569, informational only with
+  `maximum_production_lines=null`;
+- strict OpenSpec validation and compatibility JSON/public-contract tests:
+  pass.
+
+The suite emits one pre-existing Starlette/httpx deprecation warning; it does
+not affect correctness or the public contract.
+
+No correctness result required an authoritative background watcher, persistent
+content index, cooperative external-writer lock, filesystem snapshot, edit
+replay, public generation metadata, or Serena agent/mode/project-server
+subsystem. Task 5.6 therefore passes without invoking its design-review stop;
+lexical discovery and warm-runtime reuse remain later independent changes.

@@ -210,10 +210,10 @@ warm-pool work but are not themselves a failure or a registration gate. The
 shared-daemon acceptance above is only partially complete: its process-level
 shared-client lifecycle portion is done, but the host-client matrix is not
 yet closed until a planned fresh Codex/Sol lane joins the two existing
-CC/Claude receipts. The documentation is updated, but the full
-pytest/Ruff/Ty/provenance gate run and independent correctness/runtime review
-are not yet complete, so do not register this candidate as an accepted release
-path.
+CC/Claude receipts. Documentation and the full
+pytest/Ruff/Ty/bootstrap/provenance gates now pass; independent
+correctness/runtime review remains open, so do not register this candidate as
+an accepted release path.
 
 A pre-existing environment separately has 14 flat-layout legacy daemons that
 predate the current build-slot registration scheme, with no active

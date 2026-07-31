@@ -54,11 +54,11 @@
       "real_daemon_connector_race_harness",
       "real_shared_daemon_three_client_two_root_acceptance",
       "fresh_cc_sonnet_and_opus_serena_light_only_four_root_receipts",
-      "fresh_client_latency_observation_smokes"
+      "fresh_client_latency_observation_smokes",
+      "full_gate_suite"
     ],
     "evidence_open": [
       "fresh_codex_sol_shared_daemon_host_matrix",
-      "full_gate_suite",
       "independent_correctness_and_runtime_review"
     ],
     "latency_observation": {
@@ -703,7 +703,7 @@
       "shared_daemon_host_client_matrix": "pending_fresh_codex_sol_lane",
       "fresh_client_smokes": "complete",
       "latency_observation": "complete_no_threshold",
-      "full_gate_suite": "pending",
+      "full_gate_suite": "pass",
       "final_dual_audit": "pending",
       "archived_change": null,
       "release_pass": false
