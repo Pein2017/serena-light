@@ -104,19 +104,40 @@ honest targeted read set, so it performs a bounded full-root no-symlink guarded
 scan in both positions. The existing global functionality is retained; it is
 not allowed to claim freshness from a no-op or one candidate path.
 
-### 3. Apply final validation only to source-derived success
+### 3. Apply final validation to every source-derived result
 
 Invalid input and trust failures occur before expensive work. Adapter failure,
 cooldown, timeout, or readiness errors retain their existing typed authority
-and are not replayed merely to manufacture a different error. Any successful
-navigation or diagnostic value—including a diagnostic `clean` state—must pass
-postflight. Later lexical tools will use the same owner rather than inventing a
-parallel contract.
+and are not replayed merely to manufacture a different error. An invalid
+locator is intentionally classified from the caller's request after one
+preflight: it makes no claim about current source bytes even though the source
+may change concurrently. Any successful navigation or diagnostic
+value—including a diagnostic `clean` state—and any failure whose authority
+states what the source contains, such as a missing or ambiguous symbol, an
+unavailable source-owned range, or source bytes that disappear while an
+operation acquires its snapshot, must pass postflight. Later lexical tools will
+use the same owner rather than inventing a parallel contract.
 
 Edits remain outside `run_fresh_read`. They keep one preflight plus the existing
 workspace lock, lexical authorization, expected hash, atomic replace, and
 commit-state handling. An edit that started or may have committed is never
 replayed by this change.
+
+### 3a. Remove TypeScript semantic test-order dependence without adding a subsystem
+
+The replacement real TypeScript root exposed a pre-existing cold-start defect:
+the locked language server could resolve an imported symbol only to its local
+alias, and could return a one-file reference subset, until an unrelated overview
+had opened the owner document. Serena Light now uses `typeDefinition` only as a
+bounded internal hint to open a trusted workspace owner before cold definition
+or reference dispatch. The hint is ignored when absent, malformed, external, or
+untrusted. Public answers still come from the existing pair of matching
+`definition` or `references` responses and remain inside the same freshness
+transaction. A trusted preparation owner remains an internal byte witness even
+when it is not one of the public authoritative targets, because opening it can
+affect the answer; it is never appended to or rendered as a public location.
+This is a narrow adapter preparation step, not an import parser,
+background index, watcher, new capability surface, or general LSP tunnel.
 
 ### 4. Define the guarantee at the final guarded byte observation
 

@@ -15,12 +15,10 @@ been accepted and archived: `fix-position-and-coverage-contract`
 registered in parallel under `serena-light`; canonical `serena` is unchanged.
 Guarded editing (`replace_symbol_body`) is restored after reacceptance.
 
-The active implementation owner today is `strengthen-call-freshness`
-(Phase E below), currently in progress at candidate build
-`1a940728c705c5b1b2f460ec1950884727c91d4ddcebfb98a025171c88cff5cd` and not
-yet PASS. `add-lexical-discovery` and `improve-warm-runtime-reuse` are the
-next two strictly ordered changes in that same phase and remain
-planning-only until each predecessor is accepted, synced, and archived.
+`strengthen-call-freshness` (Phase E below) is accepted and archived at build
+`7d8dde45a8d91e2aeaaadc61e28e99771272cbdd81bc9c374584db82d7bf6d80`.
+`add-lexical-discovery` and `improve-warm-runtime-reuse` are the next two
+strictly ordered changes in that phase and remain planning-only.
 
 ## Phase A: contain and repair v1
 
@@ -47,7 +45,7 @@ archived. See [the final acceptance record](../openspec/changes/archive/2026-07-
 ## Phase B: reaccept and release v1
 
 Run fresh Codex, Claude Code, and CC Agent acceptance across `/data/CoordExp`,
-`/data/CoordExp/cc-plugin-codex`, `/data/ms-swift`, and the pinned transformers
+`/data/CoordExp/external/codexUI`, `/data/ms-swift`, and the pinned transformers
 package while retaining the model clients' required external-network proxy.
 Run clean and poisoned environments directly through the real stdio connector
 to test the localhost boundary. Restore `replace_symbol_body` only after its
@@ -189,10 +187,11 @@ predecessor is accepted, synced, and archived.
 
 1. `strengthen-call-freshness` gives every content-bearing read its own FIFO
    per-call freshness admission ticket instead of letting a later caller
-   accept an already-running scan. Git-tracked source and native config bytes
-   get a guarded preflight, the operation with retained response-owned byte
-   witnesses, and a real postflight; a changed postflight replays the
-   complete read once, and a second race returns typed retryable `NOT_READY`
+   accept an already-running scan. Every call gets a guarded preflight;
+   source-derived successes and failures additionally retain response-owned
+   byte witnesses and run a real postflight, while invalid/trust/adapter-owned
+   conditions keep one preflight. A changed postflight replays the complete
+   read once, and a second race returns typed retryable `NOT_READY`
    with reason `workspace_changed_during_read`. The explicitly trusted
    non-Git conda `ms` transformers root keeps targeted stat-plus-byte
    pre/post validation for scoped/indexed reads and adds a bounded
@@ -212,40 +211,42 @@ predecessor is accepted, synced, and archived.
 
 Gate: each change independently passes its own deterministic tests, real
 daemon/connector acceptance across `/data/CoordExp`,
-`/data/CoordExp/cc-plugin-codex`, `/data/ms-swift`, and the read-only conda
+`/data/CoordExp/external/codexUI`, `/data/ms-swift`, and the read-only conda
 `ms` transformers package, strict OpenSpec/provenance gates, and independent
 correctness/runtime review before it syncs and archives; only then may the
 next change in the sequence begin implementation.
 
-**Progress as of 2026-07-31:** `strengthen-call-freshness` implementation is
-in progress at candidate build
-`1a940728c705c5b1b2f460ec1950884727c91d4ddcebfb98a025171c88cff5cd`. The
+**Progress as of 2026-08-01:** `strengthen-call-freshness` is accepted and
+archived at build
+`7d8dde45a8d91e2aeaaadc61e28e99771272cbdd81bc9c374584db82d7bf6d80`. The
 deterministic race-test suite and a real daemon/connector race harness
 (production `Connector` against a spawned writer process over loopback) both
 pass. A real shared-daemon acceptance run proved three simultaneous clients
 across two roots, same-root reactivation, a partial release, a
-poisoned-proxy environment, and zero newly created test-owned LSP orphans;
-fresh CC Sonnet and Opus clients used Serena Light exclusively and shared
-this daemon build across all four live roots, releasing cleanly. Task 5.2
-(targeted fresh-client smokes) is now complete: both parametrized
-latency-smoke cases pass after strengthened semantic assertions (`2 passed
-in 158.78s`; the prior full Python real-acceptance suite passed `8 in
-331s`). Recorded per-call latency is observation-only (2 samples per call,
-nearest-rank p50/p95, no threshold): `/data/CoordExp` global 12.53/33.95s,
-scoped 10.96/11.60s, overview 11.57/11.74s, diagnostics 11.00/11.04s;
-`/data/ms-swift` global 1.49/15.21s, scoped 0.46/0.87s, overview
-0.47/0.55s, diagnostics 0.47/0.47s. These numbers motivate the later
-`improve-warm-runtime-reuse` warm-pool work but are not a failure. Task 5.3
-(shared-daemon acceptance) is only partially complete: the process-level
-shared-client lifecycle portion is done, but the host-client matrix is not
-yet closed — a planned fresh Codex/Sol lane must still join the two existing
-CC/Claude receipts. Task 5.4 documentation and task 5.5 full gates pass; task
-5.6 requires none of its prohibited mechanisms and does not trigger a design
-reset. Task 5.7 independent correctness/runtime review remains open, so the
-change stays **HOLD / in progress**, not PASS.
+poisoned-proxy environment, and zero newly created test-owned LSP orphans.
+Prior CC Sonnet/Opus host receipts are retained only as superseded-build
+evidence after the TypeScript authority root moved to
+`/data/CoordExp/external/codexUI`. Fresh Sol-xhigh and Opus-max sessions on the
+final build each passed all four roots, same-root reactivation, cold TypeScript
+declaration, cross-library resolution, and immediate zero-holder release. The
+four-snapshot suite passes 875 tests with only
+the 3 explicit performance cases skipped in 439.52 seconds; those 3
+observation-only cases pass separately in 190.37 seconds, for 878 passing cases
+in total. This
+includes cold first-call TypeScript declaration/reference coverage.
+Recorded per-call latency is observation-only (2 samples per call, sample
+minimum/maximum, no threshold or percentile interpretation):
+`/data/CoordExp` global 11.32/33.27s,
+scoped 10.87/11.22s, overview 10.74/11.31s, diagnostics 10.29/10.93s;
+`/data/ms-swift` global 1.44/13.16s, scoped 0.45/0.89s, overview
+0.57/0.95s, diagnostics 0.85/0.90s. These numbers motivate the later
+`improve-warm-runtime-reuse` warm-pool work but are not a failure. Tasks
+5.2--5.5 pass; task 5.6 required no design reset; Sol-xhigh and Opus-max both
+passed the final independent review after all findings were dispositioned.
+The change is **PASS**, synced, and archived.
 `add-lexical-discovery` and `improve-warm-runtime-reuse` have not started
 implementation. See
-[`openspec/changes/strengthen-call-freshness`](../openspec/changes/strengthen-call-freshness)
+[`openspec/changes/archive/2026-08-01-strengthen-call-freshness`](../openspec/changes/archive/2026-08-01-strengthen-call-freshness)
 for the owning tasks and acceptance evidence.
 
 ## Phase F: agent-facing position queries

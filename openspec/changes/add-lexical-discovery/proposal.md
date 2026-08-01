@@ -69,6 +69,6 @@ that shell `cd` alone cannot rebind a session: agents continue to call
 Admission requires archived acceptance of `strengthen-call-freshness`, pinned
 ripgrep version/checksum and dependency ownership evidence, deterministic unit
 and fault tests, strict OpenSpec/provenance gates, and targeted real-daemon
-smokes in `/data/CoordExp`, `/data/CoordExp/cc-plugin-codex`,
-`/data/CoordExp/ms-swift`, and the conda-`ms` transformers package with an
+smokes in `/data/CoordExp`, `/data/CoordExp/external/codexUI`,
+`/data/ms-swift`, and the conda-`ms` transformers package with an
 explicit read-only scope. Production LOC remains informational.

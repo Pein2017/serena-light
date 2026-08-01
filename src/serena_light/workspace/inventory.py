@@ -241,6 +241,28 @@ def transformers_trust_inventory(root: Path) -> TrustInventory:
     return _inventory_from_candidates(resolved_root, _bounded_candidates(resolved_root), kind="bounded_no_symlink")
 
 
+def observe_file_digest(path: Path) -> str | None:
+    """Digest one exact absolute file through the guarded stable observation.
+
+    This is the same two-pass ``O_NOFOLLOW`` descriptor walk a trust inventory
+    uses, applied to one named absolute path and to nothing else: no directory
+    is enumerated and no link is traversed.  The walk is anchored at the
+    filesystem root and every component of the path is opened by descriptor, so
+    an ancestor that is substituted by a link after the path was canonicalized
+    cannot redirect the observation.  ``None`` means no byte identity exists to
+    attribute—the path is missing, is not a regular file, is reached through a
+    link, or did not hold still across two complete byte passes—so a caller must
+    fail closed rather than accept an unwitnessed observation.
+    """
+
+    if not path.is_absolute():
+        return None
+    relative = path.parts[1:]
+    if not relative:
+        return None
+    return _observe_candidate(Path(path.parts[0]), "/".join(relative))[2]
+
+
 def _inventory_from_candidates(root: Path, candidates: Iterable[str], *, kind: str) -> TrustInventory:
     accepted: set[str] = set()
     rejected: set[RejectedPath] = set()

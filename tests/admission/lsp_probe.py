@@ -113,13 +113,13 @@ def profiles() -> dict[str, Profile]:
             Path("swift/pipelines/base.py"),
             ms_python,
         ),
-        "cc-plugin-codex": Profile(
-            "cc-plugin-codex",
+        "codexui": Profile(
+            "codexui",
             "typescript",
-            Path("/data/CoordExp/cc-plugin-codex"),
-            "createAgentStore",
-            Path("runtime/agent-store.mjs"),
-            representative=Path("runtime/args.mjs"),
+            Path("/data/CoordExp/external/codexUI"),
+            "normalizeCodexApiError",
+            Path("src/api/codexErrors.ts"),
+            representative=Path("src/api/codexRpcClient.ts"),
         ),
     }
 

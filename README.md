@@ -154,19 +154,19 @@ for exact old-to-new field mappings and representative compact payloads for
 all five navigation tools. Both final audits passed and the compatibility
 inventory records release acceptance without changing canonical Serena.
 
-## Current active work: call-freshness strengthening
+## Accepted call-freshness strengthening
 
-The active implementation owner is OpenSpec change `strengthen-call-freshness`.
+The accepted implementation is archived at
+`openspec/changes/archive/2026-08-01-strengthen-call-freshness`.
 `add-lexical-discovery` and then `improve-warm-runtime-reuse` are strictly
-later and remain planning-only until each predecessor is accepted, synced,
-and archived; see
+later and remain planning-only; see
 [the roadmap](docs/roadmap.md#phase-e-strengthen-call-freshness-then-lexical-discovery-then-warm-runtime-reuse).
-The candidate production build identity is
-`1a940728c705c5b1b2f460ec1950884727c91d4ddcebfb98a025171c88cff5cd`; the
+The accepted production build identity is
+`7d8dde45a8d91e2aeaaadc61e28e99771272cbdd81bc9c374584db82d7bf6d80`; the
 public compact success schema stays at version `3` and the locked dependency
 digest `eff6ebdf252faff7f77cb3a2f3894d17b9a0dfc89b46bd193fafdaa9e9ab4941`
 is unchanged, so this rollover is a source-only build-slot change, not a
-schema or dependency change. Production LOC is 18,569 and remains
+schema or dependency change. Production LOC is 18,868 and remains
 informational only (`maximum_production_lines=null`); Serena provenance
 commit `9a9d07e83d8c1cba3458992707f440c624446c6d` is unchanged.
 
@@ -174,11 +174,13 @@ commit `9a9d07e83d8c1cba3458992707f440c624446c6d` is unchanged.
 call gets its own FIFO per-call freshness admission ticket: a later call may
 wait for an older in-flight scan to finish, but it always runs its own
 validation rather than accepting that older scan as its admission evidence.
-For Git-tracked source and native language-server config bytes, a call runs a
-guarded preflight, then the operation itself while retaining response-owned
-byte witnesses, then a real postflight. A postflight that observes a change
-discards that attempt and replays the complete read exactly once; a second
-race on replay returns a typed retryable `NOT_READY` with reason
+For Git-tracked source and native language-server config bytes, every call runs
+a guarded preflight. A source-derived success or failure then retains
+response-owned byte witnesses and runs a real postflight; invalid locators,
+trust failures, and adapter-owned cold/cooldown/busy/timeout conditions remain
+typed after their single preflight. A changed postflight discards that attempt
+and replays the complete read exactly once; a second race on replay returns a
+typed retryable `NOT_READY` with reason
 `workspace_changed_during_read` instead of stale or mixed success. The
 guarantee is anchored at the call's own final guarded byte observation, not
 at response-delivery time — there is **no background watcher**; a write that
@@ -192,46 +194,46 @@ prove membership there. Editing stays outside this replay boundary:
 and `UNCERTAIN` handling unchanged. Canonical `serena` remains unchanged.
 
 The four live roots for this work are `/data/CoordExp`,
-`/data/CoordExp/cc-plugin-codex`, `/data/ms-swift` (**not**
+`/data/CoordExp/external/codexUI`, `/data/ms-swift` (**not**
 `/data/CoordExp/ms-swift`), and
 `/root/miniconda3/envs/ms/lib/python3.12/site-packages/transformers`.
 
-**Evidence is candidate-only.** The deterministic race-test suite and a real
+**Acceptance evidence.** The deterministic race-test suite and a real
 daemon/connector race harness (a spawned writer process against the
 production `Connector` over loopback) both pass. A real shared-daemon
 acceptance run additionally proved three simultaneous clients across two
 roots, same-root reactivation, a partial release, a poisoned-proxy
-environment, and zero newly created test-owned LSP process orphans; fresh CC
-Sonnet and Opus clients used Serena Light exclusively and shared daemon build
-`1a940728...`, covering all four roots above and releasing cleanly. Targeted
-fresh-client smokes (task 5.2) are now complete: both parametrized
-latency-smoke cases pass after strengthened semantic assertions (`2 passed
-in 158.78s`; the prior full Python real-acceptance suite passed `8 in
-331s`). Task 5.3 (shared-daemon acceptance) is only partially complete: the
-process-level shared-client lifecycle portion above is done, but the
-host-client matrix is not yet closed — a planned fresh Codex/Sol lane must
-still join the two existing CC/Claude receipts before 5.3 itself can be
-marked complete. Recorded navigation/
+environment, and zero newly created test-owned LSP process orphans. The prior
+CC Sonnet/Opus host receipts on pre-audit builds remain useful historical
+evidence. The accepted four-snapshot suite passes `875 tests`
+with only the 3 explicit performance cases skipped in 439.52 seconds; those 3
+observation-only cases pass separately in 190.37 seconds, for 878 passing cases
+in total. This includes isolated cold first-call
+TypeScript declaration/reference coverage against
+`/data/CoordExp/external/codexUI`. Fresh Sol-xhigh and Opus-max sessions on the
+final build independently passed all four roots, same-root reactivation, cold
+TypeScript declaration, cross-library resolution, and immediate zero-holder
+release. Both final reviews passed after their findings were dispositioned. Recorded navigation/
 diagnostics per-call latency is observation-only — 2 samples per call,
-nearest-rank p50/p95, no pass threshold:
+reported only as the sample minimum/maximum with no pass threshold or
+statistical percentile interpretation:
 
-| Root | Call | p50 (s) | p95 (s) |
+| Root | Call | minimum (s) | maximum (s) |
 |---|---|---|---|
-| `/data/CoordExp` | global | 12.53 | 33.95 |
-| `/data/CoordExp` | scoped | 10.96 | 11.60 |
-| `/data/CoordExp` | overview | 11.57 | 11.74 |
-| `/data/CoordExp` | diagnostics | 11.00 | 11.04 |
-| `/data/ms-swift` | global | 1.49 | 15.21 |
-| `/data/ms-swift` | scoped | 0.46 | 0.87 |
-| `/data/ms-swift` | overview | 0.47 | 0.55 |
-| `/data/ms-swift` | diagnostics | 0.47 | 0.47 |
+| `/data/CoordExp` | global | 11.32 | 33.27 |
+| `/data/CoordExp` | scoped | 10.87 | 11.22 |
+| `/data/CoordExp` | overview | 10.74 | 11.31 |
+| `/data/CoordExp` | diagnostics | 10.29 | 10.93 |
+| `/data/ms-swift` | global | 1.44 | 13.16 |
+| `/data/ms-swift` | scoped | 0.45 | 0.89 |
+| `/data/ms-swift` | overview | 0.57 | 0.95 |
+| `/data/ms-swift` | diagnostics | 0.85 | 0.90 |
 
 These numbers motivate the later `improve-warm-runtime-reuse` warm-pool work
-but are not themselves a failure or a gate. Documentation and the full
-pytest/Ruff/Ty/bootstrap/provenance gates now pass; the independent
-correctness/runtime review remains open, so this candidate stays **HOLD / in
-progress**, not PASS — do not treat it as archived or as a new v1-style
-acceptance.
+but are not themselves a failure or a gate. The full
+pytest/Ruff/Ty/bootstrap/provenance and strict OpenSpec gates pass on this
+build. The change is synced, archived, and **PASS**; canonical Serena remains
+unchanged.
 
 A pre-existing environment also has 14 flat-layout legacy daemons that
 predate the current build-slot scheme, with no active connections. Current

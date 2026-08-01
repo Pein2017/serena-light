@@ -26,6 +26,10 @@ from typing import Any
 from serena_light.bootstrap import repository_root, runtime_paths
 
 SUPPORTED_TYPESCRIPT = {".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".mts", ".cts"}
+# Pinned real JS/TS acceptance root: a Git root whose own ``tsconfig.json``
+# selects a strict subset of its Git-trusted JS/TS inventory.
+EXTERNAL_TYPESCRIPT_ROOT = Path("/data/CoordExp/external/codexUI")
+EXTERNAL_TYPESCRIPT_ENTRY = Path("src/api/codexErrors.ts")
 SCHEMA_VERSION = 3
 NATIVE_CONFIG_NAMES = {"tsconfig.json", "jsconfig.json"}
 SCOPE_INCOMPATIBLE = "SCOPE_INCOMPATIBLE"
@@ -353,29 +357,28 @@ def run_probe() -> dict[str, Any]:
         subprocess.run(["git", "add", "."], cwd=root, check=True)
         (root / "tracked-deleted.ts").unlink()
         fixture_result = _probe_root(root, root / "src" / "main.ts", locked, "ignored-subtree fixture")
-    cc_root = Path("/data/CoordExp/cc-plugin-codex")
     actual_result = _probe_root(
-        cc_root,
-        cc_root / "runtime" / "agent-runtime.mjs",
+        EXTERNAL_TYPESCRIPT_ROOT,
+        EXTERNAL_TYPESCRIPT_ROOT / EXTERNAL_TYPESCRIPT_ENTRY,
         locked,
-        "cc-plugin-codex actual root",
+        "codexUI actual root",
     )
     omitted_mjs = next(
         (path for path in actual_result["trusted_not_in_configured_program"] if Path(path).suffix.lower() == ".mjs"),
         None,
     )
     if omitted_mjs is None:
-        raise RuntimeError("cc-plugin-codex has no Git-trusted MJS path omitted by its native config")
+        raise RuntimeError(f"{EXTERNAL_TYPESCRIPT_ROOT} has no Git-trusted MJS path omitted by its native config")
     actual_result["path_scoped_omission_probe"] = _probe_path_scoped_omission(
-        cc_root,
-        cc_root / "runtime" / "agent-runtime.mjs",
+        EXTERNAL_TYPESCRIPT_ROOT,
+        EXTERNAL_TYPESCRIPT_ROOT / EXTERNAL_TYPESCRIPT_ENTRY,
         omitted_mjs,
         locked,
     )
     actual_result["cleanup_ok"] = (
         actual_result["cleanup_ok"] and actual_result["path_scoped_omission_probe"]["cleanup_ok"]
     )
-    checks = {"ignored_subtree_fixture": fixture_result, "cc_plugin_codex": actual_result}
+    checks = {"ignored_subtree_fixture": fixture_result, "external_typescript_root": actual_result}
     fixture_detection_ok = (
         fixture_result["selected_config_path"] == "tsconfig.json"
         and fixture_result["project_kind"] == "configured"

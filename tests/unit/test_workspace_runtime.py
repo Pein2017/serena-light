@@ -30,6 +30,7 @@ from serena_light.lsp.adapter import (
 from serena_light.lsp.client import LspProtocolError, LspResponseError, LspTransportClosed
 from serena_light.lsp.executor import BoundedLspExecutor
 from serena_light.lsp.positions import FileSnapshot, PositionEncoding
+from serena_light.tools.envelopes import ErrorCode, ErrorEnvelope, SuccessEnvelope
 from serena_light.tools.navigation import DocumentSymbolInput
 from serena_light.workspace.identity import WorkspaceIdentity, WorkspaceKind
 from serena_light.workspace.inventory import (
@@ -45,6 +46,8 @@ from serena_light.workspace.runtime import (
     RuntimeErrorCode,
     WorkspaceRuntime,
     WorkspaceRuntimeError,
+    _ReadAttemptWitnesses,
+    _result_is_source_derived,
 )
 from serena_light.workspace.scope import (
     FileChangeType,
@@ -1367,6 +1370,65 @@ def test_read_raced_twice_returns_retryable_not_ready_without_any_source_payload
         runtime.stop()
 
 
+@pytest.mark.parametrize(("races", "expect_success"), [(1, True), (2, False)])
+def test_source_snapshot_exception_still_runs_postflight_and_bounded_replay(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    races: int,
+    expect_success: bool,
+) -> None:
+    """A source disappearing after preflight is a raced result, not invalid input."""
+
+    _git_repository(tmp_path)
+    source = tmp_path / "main.py"
+    source.write_text("value = 1\n")
+    adapters: dict[LanguageFamily, _Adapter] = {}
+    contexts: dict[LanguageFamily, AdapterBuildContext] = {}
+    scans = [0]
+    loads = 0
+    runtime = _git_runtime(
+        tmp_path,
+        adapters,
+        contexts,
+        inventory_factory=_scan_counting_inventory(scans),
+    )
+    load_document = runtime._load_document
+
+    def racing_load(relative_path: str, **kwargs: Any) -> Any:
+        nonlocal loads
+        loads += 1
+        if loads <= races:
+            source.unlink()
+            try:
+                raise FileNotFoundError(2, "source disappeared during acquisition", str(source))
+            finally:
+                source.write_text(f"value = {loads + 1}\n")
+        return load_document(relative_path, **kwargs)
+
+    monkeypatch.setattr(runtime, "_load_document", racing_load)
+    try:
+        before = scans[0]
+
+        result = runtime.get_symbols_overview("main.py").to_dict()
+
+        assert loads == 2
+        assert scans[0] - before == 4
+        if expect_success:
+            assert result["ok"] is True
+            assert result["data"]
+        else:
+            assert result["ok"] is False
+            assert "data" not in result
+            assert result["error"]["code"] == "NOT_READY"
+            assert result["error"]["retry"]["retryable"] is True
+            details = result["error"]["details"]
+            assert details["reason"] == "workspace_changed_during_read"
+            assert details["attempts"] == 2
+            assert details["paths"] == ["main.py"]
+    finally:
+        runtime.stop()
+
+
 def test_git_read_raced_once_replays_and_returns_the_settled_body(tmp_path: Path) -> None:
     """The Git-workspace boundary must not let a first-attempt body escape.
 
@@ -1414,6 +1476,203 @@ def test_git_read_raced_once_replays_and_returns_the_settled_body(tmp_path: Path
         assert symbol["range"]["end"]["byte_offset"] == len(settled_bytes) > len(first_attempt_bytes)
         assert result["data"]["sha256"] == hashlib.sha256(settled_bytes.encode()).hexdigest()
         assert scans[0] - before == 4
+        assert operations == 2
+    finally:
+        runtime.stop()
+
+
+def test_only_source_derived_results_are_validated_against_a_second_scan() -> None:
+    """The exact boundary between a source statement and an adapter-condition one."""
+
+    witnessed = _ReadAttemptWitnesses({"main.py": {"digest"}}, {})
+    unwitnessed = _ReadAttemptWitnesses({}, {})
+
+    assert _result_is_source_derived(SuccessEnvelope({"symbol": "answer"}), unwitnessed) is True
+    # A global miss or ambiguity answers what the workspace holds even when no
+    # exact document snapshot was retained.
+    assert _result_is_source_derived(ErrorEnvelope(ErrorCode.SYMBOL_NOT_FOUND), unwitnessed) is True
+    assert _result_is_source_derived(ErrorEnvelope(ErrorCode.AMBIGUOUS_SYMBOL), unwitnessed) is True
+    # A budget failure that measures the selected content is source-derived by
+    # construction; an ordinary invalid bound measures nothing.
+    assert (
+        _result_is_source_derived(
+            ErrorEnvelope(ErrorCode.INVALID_INPUT, details={"field": "max_answer_chars", "minimum_required": 512}),
+            unwitnessed,
+        )
+        is True
+    )
+    assert (
+        _result_is_source_derived(ErrorEnvelope(ErrorCode.INVALID_INPUT, details={"field": "regex"}), witnessed)
+        is False
+    )
+    # Content-derived reasons need owned bytes; adapter-condition failures never
+    # become source-derived, however much source the attempt happened to load.
+    incomplete = ErrorEnvelope(ErrorCode.UNSUPPORTED, details={"reason": "incomplete_assignment_range"})
+    assert _result_is_source_derived(incomplete, witnessed) is True
+    assert _result_is_source_derived(incomplete, unwitnessed) is False
+    assert _result_is_source_derived(ErrorEnvelope(ErrorCode.COOLDOWN), witnessed) is False
+    assert (
+        _result_is_source_derived(
+            ErrorEnvelope(ErrorCode.UNSUPPORTED, details={"operation": "find_referencing_symbols"}), witnessed
+        )
+        is False
+    )
+    # A non-string reason is simply not one of these reasons.
+    assert (
+        _result_is_source_derived(ErrorEnvelope(ErrorCode.NOT_READY, details={"reason": ["moved"]}), witnessed) is False
+    )
+
+
+def test_symbol_not_found_raced_by_another_thread_replays_and_returns_the_settled_symbol(tmp_path: Path) -> None:
+    """A not-found answer is as source-derived as a body and must not escape a race.
+
+    The write is performed by a separate thread that the read's own snapshot
+    barrier releases, so the concurrent writer is real rather than simulated on
+    the reading thread.  The first attempt owns pre-write bytes and answers
+    ``SYMBOL_NOT_FOUND``; the postflight sees the write, discards that answer
+    whole, and the replay returns the symbol the settled source defines.
+    """
+
+    _git_repository(tmp_path)
+    source = tmp_path / "main.py"
+    source.write_text("placeholder = 1\n")
+    settled_bytes = "answer = 1\n"
+    adapters: dict[LanguageFamily, _Adapter] = {}
+    contexts: dict[LanguageFamily, AdapterBuildContext] = {}
+    scans = [0]
+    operations = 0
+    write_now = threading.Event()
+    write_done = threading.Event()
+
+    def writer() -> None:
+        assert write_now.wait(5)
+        source.write_text(settled_bytes)
+        write_done.set()
+
+    def race_first_operation_only() -> None:
+        # The snapshot bytes are already owned when this runs, so releasing the
+        # writer here places the whole write between them and the postflight.
+        nonlocal operations
+        operations += 1
+        if operations == 1:
+            write_now.set()
+            assert write_done.wait(5)
+            return
+        adapters[LanguageFamily.PYTHON].client.symbols = (_document_symbol_covering_first_line("answer"),)
+
+    runtime = _git_runtime(
+        tmp_path,
+        adapters,
+        contexts,
+        inventory_factory=_scan_counting_inventory(scans),
+        on_snapshot=race_first_operation_only,
+        symbols=(),
+    )
+    writer_thread = threading.Thread(target=writer)
+    writer_thread.start()
+    try:
+        before = scans[0]
+
+        result = runtime.find_symbol("answer", relative_path="main.py", include_body=True).to_dict()
+
+        assert result["ok"] is True
+        assert result["data"]["symbol"]["body"] == settled_bytes
+        assert result["data"]["sha256"] == hashlib.sha256(settled_bytes.encode()).hexdigest()
+        assert scans[0] - before == 4
+        assert operations == 2
+    finally:
+        writer_thread.join(timeout=5)
+        runtime.stop()
+
+
+def test_ambiguous_candidates_raced_once_settle_and_raced_twice_carry_no_candidates(tmp_path: Path) -> None:
+    """Candidate evidence is source-derived and never crosses a concurrent write.
+
+    An ambiguous answer names the ranges the response owned, so a single race
+    must replay to the settled candidate set and a repeated race must return
+    retryable ``NOT_READY`` carrying neither attempt's candidates.  The final
+    unraced call proves the suppression came from the race rather than from the
+    ambiguity disappearing.
+    """
+
+    _git_repository(tmp_path)
+    source = tmp_path / "main.py"
+    ambiguous_bytes = "class A:\n    def answer(self): pass\nclass B:\n    def answer(self): pass\n"
+    settled_bytes = "class A:\n    def answer(self): pass\n"
+    source.write_text(ambiguous_bytes)
+    ambiguous = (_class_with_method("A", 0), _class_with_method("B", 2))
+    settled = (_class_with_method("A", 0),)
+    adapters: dict[LanguageFamily, _Adapter] = {}
+    contexts: dict[LanguageFamily, AdapterBuildContext] = {}
+    scans = [0]
+    operations = 0
+    races = True
+
+    def race_while_enabled() -> None:
+        # The probe of this same attempt has not run yet, so the ambiguous
+        # symbols stay in place for the attempt whose bytes are already owned.
+        nonlocal operations
+        operations += 1
+        if races:
+            (tmp_path / f"created_{operations}.py").write_text("fresh = 1\n")
+
+    runtime = _git_runtime(
+        tmp_path,
+        adapters,
+        contexts,
+        inventory_factory=_scan_counting_inventory(scans),
+        on_snapshot=race_while_enabled,
+        symbols=ambiguous,
+    )
+    adapter = adapters[LanguageFamily.PYTHON]
+    try:
+        races = False
+        baseline = runtime.find_symbol("answer", relative_path="main.py").to_dict()
+
+        # Without a race the same source and the same response are ambiguous,
+        # and the candidates name both response-owned ranges.
+        assert baseline["error"]["code"] == "AMBIGUOUS_SYMBOL"
+        assert [item["name_path"] for item in baseline["error"]["details"]["candidates"]] == [
+            "A/answer",
+            "B/answer",
+        ]
+        assert operations == 1
+
+        operations = 0
+
+        def race_first_operation_then_settle() -> None:
+            nonlocal operations
+            operations += 1
+            if operations == 1:
+                source.write_text(settled_bytes)
+                return
+            # Only the second attempt's probe sees the settled response, so the
+            # first attempt really did answer AMBIGUOUS_SYMBOL.
+            adapter.client.symbols = settled
+
+        adapter.on_snapshot = race_first_operation_then_settle
+        once = runtime.find_symbol("answer", relative_path="main.py").to_dict()
+
+        assert once["ok"] is True
+        assert once["data"]["symbol"]["name_path"] == "A/answer"
+        assert once["data"]["sha256"] == hashlib.sha256(settled_bytes.encode()).hexdigest()
+        assert operations == 2
+
+        operations = 0
+        races = True
+        adapter.on_snapshot = race_while_enabled
+        adapter.client.symbols = ambiguous
+        source.write_text(ambiguous_bytes)
+        twice = runtime.find_symbol("answer", relative_path="main.py").to_dict()
+
+        assert twice["ok"] is False
+        assert "data" not in twice
+        assert twice["error"]["code"] == "NOT_READY"
+        assert twice["error"]["retry"]["retryable"] is True
+        details = twice["error"]["details"]
+        assert details["reason"] == "workspace_changed_during_read"
+        # Neither attempt's candidate evidence survives the second race.
+        assert "candidates" not in details
         assert operations == 2
     finally:
         runtime.stop()
@@ -2582,6 +2841,33 @@ def _document_symbol_covering_first_line(name: str) -> dict[str, Any]:
     }
 
 
+def _class_with_method(name: str, line: int) -> dict[str, Any]:
+    """One ``class <name>:`` holding one ``answer`` method, starting at ``line``.
+
+    Two of these give one document two symbols whose name paths differ but whose
+    final segment is shared, which is exactly what a suffix query resolves
+    ambiguously.
+    """
+
+    return {
+        "name": name,
+        "kind": 5,
+        "range": {"start": {"line": line, "character": 0}, "end": {"line": line + 2, "character": 0}},
+        "selectionRange": {"start": {"line": line, "character": 6}, "end": {"line": line, "character": 6 + len(name)}},
+        "children": [
+            {
+                "name": "answer",
+                "kind": 6,
+                "range": {"start": {"line": line + 1, "character": 0}, "end": {"line": line + 2, "character": 0}},
+                "selectionRange": {
+                    "start": {"line": line + 1, "character": 8},
+                    "end": {"line": line + 1, "character": 14},
+                },
+            }
+        ],
+    }
+
+
 def _workspace_symbol(name: str, path: Path) -> dict[str, Any]:
     """One workspace-symbol candidate that also serves as this file's document symbol."""
 
@@ -2893,6 +3179,67 @@ def test_non_git_global_read_raced_twice_returns_retryable_not_ready_without_pay
         assert details["paths"] == ["z_created_2.py"]
         # Exactly one replay, then a typed retryable failure rather than churn.
         assert operations == 2
+        assert walks[0] - walked_before == 4
+    finally:
+        runtime.stop()
+
+
+def test_global_symbol_not_found_without_a_byte_witness_is_still_validated_and_replayed(tmp_path: Path) -> None:
+    """A global miss owns no snapshot, yet still answers what the workspace holds.
+
+    No candidate matches, so no document is opened and the attempt retains no
+    byte witness at all.  The answer is nevertheless a statement about the root's
+    membership, so it takes its own postflight and is discarded when the root
+    moves underneath it—otherwise a file created during the read could be
+    reported as absent.
+    """
+
+    (tmp_path / "a_main.py").write_text("Target = 1\n")
+    adapters: dict[LanguageFamily, _Adapter] = {}
+    contexts: dict[LanguageFamily, AdapterBuildContext] = {}
+    walks = [0]
+    runtime = _non_git_runtime(
+        tmp_path,
+        adapters,
+        contexts,
+        walks=walks,
+        symbols=(_workspace_symbol("Target", tmp_path / "a_main.py"),),
+    )
+    adapter = adapters[LanguageFamily.PYTHON]
+    try:
+        # One warmed call first, so the miss below never opens a witness document.
+        assert runtime.find_symbol("Target").to_dict()["ok"] is True
+        opens = list(adapter.open_versions)
+        walked_before = walks[0]
+
+        missing = runtime.find_symbol("Missing").to_dict()
+
+        assert missing["error"]["code"] == "SYMBOL_NOT_FOUND"
+        assert adapter.open_versions == opens
+        assert walks[0] - walked_before == 2
+
+        queries = 0
+        real_request = adapter.client.request
+
+        def race_every_global_query(method: str, params: object = None, **kwargs: Any) -> object:
+            nonlocal queries
+            if method == "workspace/symbol":
+                queries += 1
+                (tmp_path / f"z_created_{queries}.py").write_text("fresh = 1\n")
+            return real_request(method, params, **kwargs)
+
+        adapter.client.request = race_every_global_query  # type: ignore[method-assign]
+        walked_before = walks[0]
+
+        raced = runtime.find_symbol("Missing").to_dict()
+
+        assert raced["ok"] is False
+        assert "data" not in raced
+        assert raced["error"]["code"] == "NOT_READY"
+        assert raced["error"]["details"]["reason"] == "workspace_changed_during_read"
+        assert raced["error"]["details"]["paths"] == ["z_created_2.py"]
+        # One replay of the whole transaction, then a typed retryable failure.
+        assert queries == 2
         assert walks[0] - walked_before == 4
     finally:
         runtime.stop()

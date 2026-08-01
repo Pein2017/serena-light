@@ -36,14 +36,20 @@ from serena_light.workspace.scope import (
     ScopeProjection,
 )
 
-ROOT = Path("/data/CoordExp/cc-plugin-codex")
+ROOT = Path("/data/CoordExp/external/codexUI")
 MS_SWIFT = Path("/data/ms-swift")
+# ``tsconfig.json`` selects ``src/**/*.ts`` plus ``vite.config.ts``.  These two
+# are inside that configured program and import across the file boundary; the
+# ``.mjs`` script is Git-trusted but outside it.
+DECLARATION_OWNER = "src/api/codexErrors.ts"
+DECLARATION_CONSUMER = "src/api/codexRpcClient.ts"
+OMITTED_MJS = "scripts/generate-pwa-icons.mjs"
 
 pytestmark = [
     pytest.mark.timeout(90),
     pytest.mark.external_repo(
         root=str(ROOT),
-        snapshot_env="SERENA_LIGHT_CC_PLUGIN_CODEX_SNAPSHOT",
+        snapshot_env="SERENA_LIGHT_CODEXUI_SNAPSHOT",
     ),
 ]
 
@@ -123,7 +129,7 @@ def real_lsp(config: TypeScriptAdapterConfig) -> Iterator[tuple[SyncLspClient, M
         assert isinstance(initialize_result, Mapping)
         client.notify("initialized", {})
         client.notify("workspace/didChangeConfiguration", {"settings": {}})
-        for relative in ("runtime/cli.mjs", "runtime/args.mjs"):
+        for relative in (DECLARATION_CONSUMER, DECLARATION_OWNER, OMITTED_MJS):
             path = ROOT / relative
             client.notify(
                 "textDocument/didOpen",
@@ -150,22 +156,25 @@ def real_lsp(config: TypeScriptAdapterConfig) -> Iterator[tuple[SyncLspClient, M
             )
 
 
-def test_real_runtime_mjs_overview_and_capability_facts(
+def test_real_mjs_overview_and_capability_facts(
     config: TypeScriptAdapterConfig,
     real_lsp: tuple[SyncLspClient, Mapping[str, Any]],
 ) -> None:
+    """A ``.mjs`` path outside the configured program still yields symbols."""
+
     client, initialize_result = real_lsp
-    cli = ROOT / "runtime/cli.mjs"
+    script = ROOT / OMITTED_MJS
     raw_symbols = client.request(
         "textDocument/documentSymbol",
-        {"textDocument": {"uri": _path_uri(cli)}},
+        {"textDocument": {"uri": _path_uri(script)}},
         timeout=15.0,
     )
     assert isinstance(raw_symbols, list)
-    symbols = normalize_document_symbols(raw_symbols, document_uri=_path_uri(cli))
+    symbols = normalize_document_symbols(raw_symbols, document_uri=_path_uri(script))
     names = {symbol.name for root in symbols for symbol in root.iter_depth_first()}
 
-    assert {"main", "parse", "spawnAgent", "followupTask"} <= names
+    assert config.language_id(script) == "javascript"
+    assert {"rootDir", "iconsDir", "jobs", "browser"} <= names
     facts = config.capability_facts(initialize_result)
     assert facts.raw_providers["definitionProvider"] is True
     assert facts.raw_providers["declarationProvider"] is False
@@ -175,14 +184,14 @@ def test_real_runtime_mjs_overview_and_capability_facts(
     assert facts.position_encoding == "utf-16"
 
 
-def test_real_cli_parse_args_definition_references_and_implementation(
+def test_real_cross_file_definition_references_and_implementation(
     real_lsp: tuple[SyncLspClient, Mapping[str, Any]],
 ) -> None:
     client, _initialize_result = real_lsp
-    cli = ROOT / "runtime/cli.mjs"
-    source = cli.read_text(encoding="utf-8")
-    position = _position_of(source, "parseArgs", after="function parse(", inside=2)
-    text_document = {"uri": _path_uri(cli)}
+    consumer = ROOT / DECLARATION_CONSUMER
+    source = consumer.read_text(encoding="utf-8")
+    position = _position_of(source, "extractErrorMessage(payload", after="const response", inside=2)
+    text_document = {"uri": _path_uri(consumer)}
 
     definitions = client.request(
         "textDocument/definition",
@@ -201,15 +210,15 @@ def test_real_cli_parse_args_definition_references_and_implementation(
     )
 
     assert isinstance(definitions, list) and len(definitions) == 1
-    assert _uri_path(definitions[0]) == ROOT / "runtime/args.mjs"
+    assert _uri_path(definitions[0]) == ROOT / DECLARATION_OWNER
     assert isinstance(references, list)
     assert {_uri_path(location) for location in references} == {
-        ROOT / "runtime/cli.mjs",
-        ROOT / "runtime/args.mjs",
+        ROOT / DECLARATION_CONSUMER,
+        ROOT / DECLARATION_OWNER,
     }
     assert len(references) >= 3
     assert isinstance(implementations, list) and len(implementations) == 1
-    assert _uri_path(implementations[0]) == ROOT / "runtime/args.mjs"
+    assert _uri_path(implementations[0]) == ROOT / DECLARATION_OWNER
 
 
 def test_real_status_scope_facts_and_omitted_engine_owned_inferred_path(
@@ -220,7 +229,7 @@ def test_real_status_scope_facts_and_omitted_engine_owned_inferred_path(
         config,
         ROOT,
         trust_inventory_paths=inventory.paths,
-        entry_path="runtime/agent-runtime.mjs",
+        entry_path=DECLARATION_OWNER,
     )
     projection = attributed.require_compatible()
     status = attributed.status_facts()
@@ -253,7 +262,7 @@ def test_real_status_scope_facts_and_omitted_engine_owned_inferred_path(
     inferred = probe_inferred_path_support(
         config,
         ROOT,
-        configured_entry_path="runtime/agent-runtime.mjs",
+        configured_entry_path=DECLARATION_OWNER,
         candidate_path=omitted.path,
     )
     assert inferred.path == omitted.path
@@ -310,7 +319,7 @@ def test_real_publish_diagnostics_never_names_a_document_version(config: TypeScr
         client.request("initialize", config.initialize_params(ROOT), timeout=15.0)
         client.notify("initialized", {})
         client.notify("workspace/didChangeConfiguration", {"settings": {}})
-        path = ROOT / "runtime/args.mjs"
+        path = ROOT / DECLARATION_OWNER
         uri = _path_uri(path)
         client.notify(
             "textDocument/didOpen",

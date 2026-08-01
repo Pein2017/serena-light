@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import threading
 import time
 from collections.abc import Callable, Mapping, Sequence
@@ -22,6 +23,7 @@ from serena_light.lsp.adapter import (
     GlobalReadinessWitness,
     RawLspProviders,
 )
+from serena_light.lsp.client import LspResponseError
 from serena_light.lsp.normalize import Location
 from serena_light.lsp.positions import FileSnapshot, PositionEncoding
 from serena_light.lsp.state import DiagnosticsSnapshot, DiagnosticsState
@@ -379,7 +381,10 @@ def test_declaration_uses_fixed_adapter_and_definition_request(tmp_path: Path) -
         runtime.stop()
 
 
-def test_typescript_declaration_uses_definition_when_declaration_provider_is_absent(tmp_path: Path) -> None:
+@pytest.mark.parametrize("type_definition_error_code", [-32601, -32801])
+def test_typescript_declaration_uses_definition_when_declaration_provider_is_absent(
+    tmp_path: Path, type_definition_error_code: int
+) -> None:
     source = tmp_path / "src/main.ts"
     source.parent.mkdir()
     source.write_text("target();\n")
@@ -402,10 +407,14 @@ def test_typescript_declaration_uses_definition_when_declaration_provider_is_abs
             }
         ]
 
+    def unavailable_type_definition() -> object:
+        raise LspResponseError(type_definition_error_code, "type definition is unavailable")
+
     runtime, adapter, _policy = _runtime(
         tmp_path,
         {
             "textDocument/documentSymbol": document_symbols,
+            "textDocument/typeDefinition": unavailable_type_definition,
             "textDocument/definition": {
                 "uri": target.as_uri(),
                 "range": {"start": {"line": 1, "character": 6}, "end": {"line": 1, "character": 12}},
@@ -421,6 +430,7 @@ def test_typescript_declaration_uses_definition_when_declaration_provider_is_abs
         assert result["ok"] is True
         assert [method for method, _ in adapter.client.requests] == [
             "textDocument/documentSymbol",
+            "textDocument/typeDefinition",
             "textDocument/definition",
             "textDocument/documentSymbol",
             "textDocument/definition",
@@ -431,6 +441,104 @@ def test_typescript_declaration_uses_definition_when_declaration_provider_is_abs
         assert location["range"]["start"] == {"line": 1, "column": 6, "text_offset": 12, "byte_offset": 15}
         assert location["name_path"] == "target"
         assert location["info"] == {"detail": "const target: number"}
+    finally:
+        runtime.stop()
+
+
+def test_typescript_cold_declaration_opens_type_definition_owner_before_authoritative_definition(
+    tmp_path: Path,
+) -> None:
+    """A first declaration call must not depend on a prior overview opening its owner."""
+
+    source = tmp_path / "src/main.ts"
+    source.parent.mkdir()
+    source.write_text("target();\n")
+    target = tmp_path / "src/target.ts"
+    target.write_text("export function target() {}\n")
+    current_adapter: _Adapter | None = None
+    definition_observed_owner_open: list[bool] = []
+
+    target_location = {
+        "uri": target.as_uri(),
+        "range": {"start": {"line": 0, "character": 16}, "end": {"line": 0, "character": 22}},
+    }
+
+    def definition() -> Mapping[str, object]:
+        assert current_adapter is not None
+        owner_open = "src/target.ts" in current_adapter.document_loads
+        definition_observed_owner_open.append(owner_open)
+        if owner_open:
+            return target_location
+        return {
+            "uri": source.as_uri(),
+            "range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 6}},
+        }
+
+    runtime, adapter, _policy = _runtime(
+        tmp_path,
+        {
+            "textDocument/documentSymbol": [_symbol("target")],
+            "textDocument/typeDefinition": target_location,
+            "textDocument/definition": definition,
+        },
+        raw_providers=RawLspProviders(definition=True, declaration=False, document_symbols=True),
+    )
+    current_adapter = adapter
+    try:
+        result = runtime.find_declaration("src/main.ts", r"(target)\(\)").to_dict()
+
+        assert result["ok"] is True
+        assert result["data"]["locations"][0]["relative_path"] == "src/target.ts"
+        assert definition_observed_owner_open == [True, True]
+        assert [method for method, _ in adapter.client.requests] == [
+            "textDocument/documentSymbol",
+            "textDocument/typeDefinition",
+            "textDocument/definition",
+            "textDocument/definition",
+        ]
+    finally:
+        runtime.stop()
+
+
+def test_typescript_preparation_owner_remains_a_freshness_witness_when_not_public_target(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "src/main.ts"
+    source.parent.mkdir()
+    source.write_text("target();\n")
+    target = tmp_path / "src/target.ts"
+    target.write_text("export function target() {}\n")
+    source_location = {
+        "uri": source.as_uri(),
+        "range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 6}},
+    }
+    target_location = {
+        "uri": target.as_uri(),
+        "range": {"start": {"line": 0, "character": 16}, "end": {"line": 0, "character": 22}},
+    }
+    runtime, _adapter, _policy = _runtime(
+        tmp_path,
+        {
+            "textDocument/documentSymbol": [_symbol("target")],
+            "textDocument/typeDefinition": target_location,
+            "textDocument/definition": source_location,
+        },
+        raw_providers=RawLspProviders(definition=True, declaration=False, document_symbols=True),
+    )
+    witnessed_paths: list[str] = []
+    record_witness = runtime._record_read_witness
+
+    def capture_witness(relative_path: str, raw_bytes: bytes) -> None:
+        witnessed_paths.append(relative_path)
+        record_witness(relative_path, raw_bytes)
+
+    monkeypatch.setattr(runtime, "_record_read_witness", capture_witness)
+    try:
+        result = runtime.find_declaration("src/main.ts", r"(target)\(\)").to_dict()
+
+        assert result["ok"] is True
+        assert result["data"]["locations"][0]["relative_path"] == "src/main.ts"
+        assert "src/target.ts" in witnessed_paths
     finally:
         runtime.stop()
 
@@ -669,7 +777,16 @@ def test_implementation_include_info_retains_response_owned_symbol_detail_in_com
         runtime.stop()
 
 
-def test_declaration_target_change_between_response_and_snapshot_fails_closed(tmp_path: Path) -> None:
+def test_declaration_target_change_between_response_and_snapshot_fails_closed_then_replays(tmp_path: Path) -> None:
+    """The transaction fails closed and the raced read replays to the settled result.
+
+    The mid-transaction write moves the target's range, so the two semantic
+    responses disagree and the transaction returns a typed failure rather than a
+    merged answer.  That failure was derived from response-owned source, so the
+    read's postflight sees the same write, discards the attempt whole, and
+    replays once; the second transaction observes stable bytes and returns them.
+    """
+
     source = tmp_path / "src/main.py"
     source.parent.mkdir()
     source.write_text("target()\n")
@@ -700,10 +817,13 @@ def test_declaration_target_change_between_response_and_snapshot_fails_closed(tm
     try:
         result = runtime.find_declaration("src/main.py", r"(target)\(\)", include_body=True).to_dict()
 
-        assert result["error"]["code"] == "NOT_READY"
-        assert result["error"]["retry"]["retryable"] is True
-        assert result["error"]["details"]["reason"] == "semantic target locations changed"
-        assert calls == 2
+        assert result["ok"] is True
+        location = result["data"]["locations"][0]
+        # The settled bytes, not the pre-write line the first attempt reported.
+        assert location["range"]["start"]["line"] == 1
+        assert location["sha256"] == hashlib.sha256(target.read_bytes()).hexdigest()
+        # Two complete transactions, each issuing its own pair of requests.
+        assert calls == 4
     finally:
         runtime.stop()
 
@@ -793,7 +913,9 @@ def test_declaration_generation_transition_during_authoritative_response_fails_c
         runtime.stop()
 
 
-def test_implementation_target_change_between_response_and_snapshot_fails_closed(tmp_path: Path) -> None:
+def test_implementation_target_change_between_response_and_snapshot_fails_closed_then_replays(
+    tmp_path: Path,
+) -> None:
     source = tmp_path / "src/main.ts"
     source.parent.mkdir()
     source.write_text("interface Runner {}\n")
@@ -825,10 +947,9 @@ def test_implementation_target_change_between_response_and_snapshot_fails_closed
     try:
         result = runtime.find_implementations("Runner", "src/main.ts", include_info=True).to_dict()
 
-        assert result["error"]["code"] == "NOT_READY"
-        assert result["error"]["retry"]["retryable"] is True
-        assert result["error"]["details"]["reason"] == "semantic target locations changed"
-        assert calls == 2
+        assert result["ok"] is True
+        assert result["data"]["locations"][0]["range"]["start"]["line"] == 1
+        assert calls == 4
     finally:
         runtime.stop()
 
@@ -2165,7 +2286,7 @@ def test_declaration_target_cap_allows_exactly_the_boundary_count(tmp_path: Path
         runtime.stop()
 
 
-def test_reference_target_change_between_response_and_snapshot_fails_closed(tmp_path: Path) -> None:
+def test_reference_target_change_between_response_and_snapshot_fails_closed_then_replays(tmp_path: Path) -> None:
     source = tmp_path / "src/source.py"
     source.parent.mkdir()
     source.write_text("target()\n")
@@ -2201,10 +2322,9 @@ def test_reference_target_change_between_response_and_snapshot_fails_closed(tmp_
     try:
         result = runtime.find_referencing_symbols("src/source.py", "target").to_dict()
 
-        assert result["error"]["code"] == "NOT_READY"
-        assert result["error"]["retry"]["retryable"] is True
-        assert result["error"]["details"]["reason"] == "semantic target locations changed"
-        assert calls == 2
+        assert result["ok"] is True
+        assert result["data"]["references"][0]["location"]["start"]["line"] == 1
+        assert calls == 4
     finally:
         runtime.stop()
 
@@ -2248,6 +2368,156 @@ def test_external_reference_without_server_snapshot_binding_renders_raw_only(tmp
             }
         ]
         assert adapter.document_loads == ["src/source.py"]
+    finally:
+        runtime.stop()
+
+
+def test_external_target_written_during_the_authoritative_response_replays_and_settles(tmp_path: Path) -> None:
+    """A trusted external target is byte-witnessed across the second request.
+
+    The write lands while the authoritative response is being produced, so the
+    identity observed just before that request and the identity observed after
+    it disagree.  Nothing inside the workspace moved, so only this external
+    witness can report the race: the read discards the attempt and the replay
+    returns a raw range that the settled external bytes support.
+    """
+
+    source = tmp_path / "src/main.py"
+    source.parent.mkdir()
+    source.write_text("target()\n")
+    external = tmp_path.parent / f"{tmp_path.name}-external-race" / "pkg.py"
+    external.parent.mkdir(parents=True, exist_ok=True)
+    external.write_text("def target(): pass\n")
+    settled_bytes = "# settled\ndef target(): pass\n"
+    calls = 0
+
+    def definition() -> Mapping[str, object]:
+        nonlocal calls
+        calls += 1
+        # The second request of the first transaction is answered while the
+        # external file is rewritten.  Each response describes the bytes that
+        # were current when it was produced, so the first transaction's range is
+        # the pre-write one and the replay's range is the settled one.
+        if calls == 2:
+            external.write_text(settled_bytes)
+        line = 0 if calls <= 2 else 1
+        return {
+            "uri": external.as_uri(),
+            "range": {"start": {"line": line, "character": 4}, "end": {"line": line, "character": 10}},
+        }
+
+    runtime, adapter, policy = _runtime(
+        tmp_path,
+        {"textDocument/documentSymbol": [_symbol("target")], "textDocument/definition": definition},
+    )
+    policy.read_only_external_paths.add(external.resolve())
+    try:
+        result = runtime.find_declaration("src/main.py", r"(target)\(\)").to_dict()
+
+        assert result["ok"] is True
+        location = result["data"]["locations"][0]
+        assert location["read_only_external"] is True
+        # The settled range, which the settled external bytes support; the
+        # pre-write range the first transaction owned never escapes.
+        assert location["raw_lsp_range"]["start"] == {"line": 1, "character": 4}
+        # Two complete transactions: the first owned superseded external bytes.
+        assert calls == 4
+        assert external.read_text() == settled_bytes
+        # The external target is witnessed, never opened in the server.
+        assert adapter.document_loads == ["src/main.py", "src/main.py"]
+    finally:
+        runtime.stop()
+
+
+def test_external_target_written_in_both_attempts_returns_not_ready_without_a_raw_location(tmp_path: Path) -> None:
+    """A repeatedly rewritten external target never yields a stale raw range."""
+
+    source = tmp_path / "src/main.py"
+    source.parent.mkdir()
+    source.write_text("target()\n")
+    external = tmp_path.parent / f"{tmp_path.name}-external-churn" / "pkg.py"
+    external.parent.mkdir(parents=True, exist_ok=True)
+    external.write_text("def target(): pass\n")
+    calls = 0
+
+    def definition() -> Mapping[str, object]:
+        nonlocal calls
+        calls += 1
+        if calls % 2 == 0:
+            external.write_text(f"# rewrite {calls}\ndef target(): pass\n")
+        return {
+            "uri": external.as_uri(),
+            "range": {"start": {"line": 0, "character": 4}, "end": {"line": 0, "character": 10}},
+        }
+
+    runtime, _adapter, policy = _runtime(
+        tmp_path,
+        {"textDocument/documentSymbol": [_symbol("target")], "textDocument/definition": definition},
+    )
+    policy.read_only_external_paths.add(external.resolve())
+    try:
+        result = runtime.find_declaration("src/main.py", r"(target)\(\)").to_dict()
+
+        assert result["ok"] is False
+        assert "data" not in result
+        assert result["error"]["code"] == "NOT_READY"
+        assert result["error"]["retry"]["retryable"] is True
+        details = result["error"]["details"]
+        assert details["reason"] == "workspace_changed_during_read"
+        assert details["attempts"] == 2
+        # The unstable external path is named as the evidence, and no location,
+        # raw range, or absolute target path is rendered anywhere.
+        assert details["paths"] == [str(external.resolve())]
+        assert "raw_lsp_range" not in json.dumps(result)
+        assert calls == 4
+    finally:
+        runtime.stop()
+
+
+def test_external_target_deleted_before_the_witness_fails_typed_without_a_raw_range(tmp_path: Path) -> None:
+    """No byte identity, no raw range: an unwitnessable external target fails typed."""
+
+    source = tmp_path / "src/main.py"
+    source.parent.mkdir()
+    source.write_text("target()\n")
+    external = tmp_path.parent / f"{tmp_path.name}-external-gone" / "pkg.py"
+    external.parent.mkdir(parents=True, exist_ok=True)
+    external.write_text("def target(): pass\n")
+    calls = 0
+
+    def definition() -> Mapping[str, object]:
+        nonlocal calls
+        calls += 1
+        # The exact target stops being a regular file while the authoritative
+        # response is produced, so no byte identity exists for the range that
+        # response reports.
+        if calls == 2:
+            external.unlink()
+            external.mkdir()
+        return {
+            "uri": external.as_uri(),
+            "range": {"start": {"line": 0, "character": 4}, "end": {"line": 0, "character": 10}},
+        }
+
+    runtime, _adapter, policy = _runtime(
+        tmp_path,
+        {"textDocument/documentSymbol": [_symbol("target")], "textDocument/definition": definition},
+    )
+    policy.read_only_external_paths.add(external.resolve())
+    try:
+        result = runtime.find_declaration("src/main.py", r"(target)\(\)").to_dict()
+
+        assert result["ok"] is False
+        assert result["error"]["code"] == "NOT_READY"
+        assert result["error"]["retry"]["retryable"] is True
+        assert result["error"]["details"] == {
+            "reason": "external target bytes unavailable",
+            "paths": [str(external)],
+        }
+        assert "raw_lsp_range" not in json.dumps(result)
+        # Typed on the first transaction: an unwitnessable target is not churn
+        # to replay, it is missing evidence.
+        assert calls == 2
     finally:
         runtime.stop()
 
@@ -2305,7 +2575,8 @@ def test_reference_cold_cooldown_and_capability_failures_are_not_empty_success(t
         assert runtime.find_referencing_symbols("source.py", "target").to_dict()["error"]["code"] == "NOT_READY"
         # A typed readiness failure keeps its own authority: one preflight per
         # call, no postflight, and no replay that could manufacture another
-        # result.
+        # result.  The operand document was loaded before the adapter's phase
+        # was discovered, but the answer reports that phase, not the source.
         assert scans[0] == 1
         adapter.phase = AdapterPhase.COOLDOWN
         assert runtime.find_referencing_symbols("source.py", "target").to_dict()["error"]["code"] == "COOLDOWN"

@@ -4,11 +4,28 @@ from pathlib import Path
 
 import pytest
 
+from tests.admission.lsp_probe import profiles as lsp_profiles
+
 SCRIPT = Path(__file__).parents[2] / "scripts" / "render_admission_report.py"
 SPEC = importlib.util.spec_from_file_location("render_admission_report", SCRIPT)
 assert SPEC is not None and SPEC.loader is not None
 admission_report = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(admission_report)
+
+
+def test_codexui_probe_profile_matches_the_rendered_admission_contract() -> None:
+    profile = lsp_profiles()["codexui"]
+
+    assert profile.root == Path("/data/CoordExp/external/codexUI")
+    assert profile.language == "typescript"
+    assert profile.symbol == "normalizeCodexApiError"
+    assert profile.expected_relative_path == Path("src/api/codexErrors.ts")
+    assert admission_report.PROFILE_CONTRACTS["codexui"] == (
+        str(profile.root),
+        profile.language,
+        profile.symbol,
+        str(profile.expected_relative_path),
+    )
 
 
 def _documents() -> tuple[dict, dict, dict, dict]:
@@ -167,7 +184,7 @@ def _documents() -> tuple[dict, dict, dict, dict]:
         "overlay_generated": False,
         "checks": {
             "ignored_subtree_fixture": fixture_scope_check,
-            "cc_plugin_codex": actual_scope_check,
+            "external_typescript_root": actual_scope_check,
         },
     }
     runtime = "/data/CoordExp/.codex/runtime/serena-light/deps/" + "a" * 64
@@ -228,7 +245,7 @@ def test_render_is_deterministic_and_includes_required_evidence() -> None:
             "unknown position",
         ),
         (
-            lambda docs: docs[1]["checks"]["cc_plugin_codex"].update(
+            lambda docs: docs[1]["checks"]["external_typescript_root"].update(
                 {
                     "tsserver_program": ["runtime/main.mjs", "ignored.ts"],
                     "configured_program_outside_trust": ["ignored.ts"],

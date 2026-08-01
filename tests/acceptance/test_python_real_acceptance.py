@@ -8,7 +8,6 @@ test doubles.
 
 from __future__ import annotations
 
-import math
 import subprocess
 import threading
 import time
@@ -432,15 +431,6 @@ _LATENCY_CASES = (
 _LATENCY_REPEATS = 2
 
 
-def _percentile(samples: Sequence[float], rank: float) -> float:
-    """Standard nearest-rank empirical percentile: index ``ceil(rank/100 * n)``, clamped to ``[1, n]``."""
-
-    ordered = sorted(samples)
-    n = len(ordered)
-    index = min(n, max(1, math.ceil((rank / 100.0) * n)))
-    return ordered[index - 1]
-
-
 def _assert_scoped_symbol_present(result: Mapping[str, Any], case: _LatencyCase) -> None:
     data = _dict(result["data"])
     symbol = _dict(data["symbol"])
@@ -472,7 +462,7 @@ def _assert_global_symbol_present(result: Mapping[str, Any], case: _LatencyCase)
 def test_navigation_and_diagnostics_per_call_latency_is_observation_only(
     case: _LatencyCase, record_property: Any
 ) -> None:
-    """Record per-call p50/p95 wall-clock latency; there is no pass threshold.
+    """Record two-sample minimum/maximum wall-clock latency; there is no pass threshold.
 
     Correctness of every response remains mandatory: each call must still
     resolve through the production ``WorkspaceRuntime`` boundary with
@@ -527,5 +517,5 @@ def test_navigation_and_diagnostics_per_call_latency_is_observation_only(
     _assert_current_global_generation(status)
     record_property(f"{case.root.name}_peak_tree_rss_bytes", process.peak_tree_rss_bytes)
     for name, latencies in samples.items():
-        record_property(f"{case.root.name}_{name}_p50_latency_seconds", _percentile(latencies, 50))
-        record_property(f"{case.root.name}_{name}_p95_latency_seconds", _percentile(latencies, 95))
+        record_property(f"{case.root.name}_{name}_minimum_latency_seconds", min(latencies))
+        record_property(f"{case.root.name}_{name}_maximum_latency_seconds", max(latencies))

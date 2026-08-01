@@ -37,15 +37,15 @@
     "raw_position_fallback": "a reference, declaration, or implementation record backed by an exact response-owned snapshot uses compact range; only an authorized read-only external target lacking that snapshot may carry raw_range plus a position_basis naming the raw LSP coordinate system; a workspace target that cannot be mapped exactly fails retryably with typed NOT_READY rather than degrading to raw coordinates"
   },
   "freshness_contract": {
-    "status": "candidate_hold",
-    "owning_change": "openspec/changes/strengthen-call-freshness",
+    "status": "pass",
+    "owning_change": "openspec/changes/archive/2026-08-01-strengthen-call-freshness",
     "sequence_after_accept": [
       "add-lexical-discovery",
       "improve-warm-runtime-reuse"
     ],
-    "candidate_build_identity": "1a940728c705c5b1b2f460ec1950884727c91d4ddcebfb98a025171c88cff5cd",
+    "candidate_build_identity": "7d8dde45a8d91e2aeaaadc61e28e99771272cbdd81bc9c374584db82d7bf6d80",
     "admission": "every content-bearing read gets its own FIFO arrival ticket and runs its own guarded scan started after that ticket; a later caller may wait for an older in-flight scan to finish but never accepts it as its own admission evidence",
-    "git_sources_and_native_config": "guarded preflight, then the operation while retaining response-owned byte witnesses, then a real postflight; a changed postflight discards and replays the complete read once; a second race returns typed retryable NOT_READY with reason workspace_changed_during_read",
+    "git_sources_and_native_config": "every call receives a guarded preflight; source-derived successes and failures retain response-owned byte witnesses and receive a real postflight, while invalid, trust, and adapter-owned conditions remain typed after one preflight; a changed postflight discards and replays the complete read once; a second race returns typed retryable NOT_READY with reason workspace_changed_during_read",
     "guarantee_boundary": "anchored at the call's own final guarded byte observation, not at response-delivery time; there is no background watcher, so a write landing after that observation is only ever picked up by the next call's own admission",
     "non_git_transformers_root": "scoped/indexed reads use targeted stat-plus-byte pre/post validation; global, directory, and not-yet-indexed reads use a bounded no-symlink full-root pre/post scan because a targeted stat cannot prove membership",
     "editing": "replace_symbol_body and all editing stay outside read replay; the existing non-replayable commit-point contract and UNCERTAIN handling are unchanged",
@@ -53,38 +53,37 @@
       "deterministic_race_suite",
       "real_daemon_connector_race_harness",
       "real_shared_daemon_three_client_two_root_acceptance",
-      "fresh_cc_sonnet_and_opus_serena_light_only_four_root_receipts",
-      "fresh_client_latency_observation_smokes",
+      "five_run_four_profile_readiness_and_scope_admission",
+      "final_build_sol_xhigh_four_root_receipt",
+      "final_build_opus_max_four_root_receipt",
+      "independent_sol_xhigh_and_opus_max_pass",
       "full_gate_suite"
     ],
-    "evidence_open": [
-      "fresh_codex_sol_shared_daemon_host_matrix",
-      "independent_correctness_and_runtime_review"
-    ],
+    "evidence_open": [],
     "latency_observation": {
       "status": "observation_only_no_threshold",
       "purpose": "motivates later improve-warm-runtime-reuse warm-pool work; not a failure or gate",
-      "sample_method": "2 samples per call, nearest-rank p50/p95",
-      "test_result": "2 passed in 158.78s (strengthened semantic assertions); prior full Python real-acceptance suite: 8 passed in 331s",
+      "sample_method": "2 samples per call; the underlying nearest-rank formula sorts before ranking and reduces at n=2 to the sample minimum and sample maximum, so this is a two-sample minimum/maximum observation, not a statistical percentile, and must not be used for downstream sizing or regression inference; which of the two calls ran first is not recorded",
+      "test_result": "3 opt-in performance cases passed in 190.37s on the archived final tree; navigation/diagnostics values below use two samples per call",
       "seconds": {
         "coordexp": {
-          "global": {"p50": 12.53, "p95": 33.95},
-          "scoped": {"p50": 10.96, "p95": 11.60},
-          "overview": {"p50": 11.57, "p95": 11.74},
-          "diagnostics": {"p50": 11.00, "p95": 11.04}
+          "global": {"minimum": 11.32, "maximum": 33.27},
+          "scoped": {"minimum": 10.87, "maximum": 11.22},
+          "overview": {"minimum": 10.74, "maximum": 11.31},
+          "diagnostics": {"minimum": 10.29, "maximum": 10.93}
         },
         "ms_swift": {
-          "global": {"p50": 1.49, "p95": 15.21},
-          "scoped": {"p50": 0.46, "p95": 0.87},
-          "overview": {"p50": 0.47, "p95": 0.55},
-          "diagnostics": {"p50": 0.47, "p95": 0.47}
+          "global": {"minimum": 1.44, "maximum": 13.16},
+          "scoped": {"minimum": 0.45, "maximum": 0.89},
+          "overview": {"minimum": 0.57, "maximum": 0.95},
+          "diagnostics": {"minimum": 0.85, "maximum": 0.90}
         }
       }
     },
     "shared_daemon_acceptance_status": {
-      "status": "partial",
+      "status": "pass",
       "process_level_shared_client_lifecycle": "complete",
-      "host_client_matrix": "not yet closed: a planned fresh Codex/Sol lane must still join the two existing CC/Claude receipts"
+      "host_client_matrix": "complete: fresh Sol-xhigh and Opus-max receipts pass all four roots and zero-holder release"
     }
   },
   "migration_examples": {
@@ -676,10 +675,10 @@
   },
   "acceptance": {
     "historical_fresh_session_accepted": true,
-    "current_candidate_fresh_session_accepted": true,
+    "compact_candidate_fresh_session_accepted": true,
     "canonical_switch_approved": false,
     "edit_reacceptance_pending": false,
-    "dual_audit_hold": true,
+    "dual_audit_hold": false,
     "compact_success_schema": {
       "status": "pass",
       "full_suite_evidence": "complete",
@@ -692,21 +691,21 @@
       "release_pass": true
     },
     "strengthen_call_freshness": {
-      "status": "candidate_hold",
-      "build_identity": "1a940728c705c5b1b2f460ec1950884727c91d4ddcebfb98a025171c88cff5cd",
+      "status": "pass",
+      "build_identity": "7d8dde45a8d91e2aeaaadc61e28e99771272cbdd81bc9c374584db82d7bf6d80",
       "public_tool_schema_version": 3,
       "dependency_digest": "eff6ebdf252faff7f77cb3a2f3894d17b9a0dfc89b46bd193fafdaa9e9ab4941",
       "deterministic_suite": "pass",
       "real_daemon_connector_race_harness": "pass",
-      "real_shared_daemon_acceptance": "partial",
+      "real_shared_daemon_acceptance": "pass",
       "shared_daemon_process_level_lifecycle": "complete",
-      "shared_daemon_host_client_matrix": "pending_fresh_codex_sol_lane",
-      "fresh_client_smokes": "complete",
+      "shared_daemon_host_client_matrix": "complete",
+      "fresh_client_smokes": "complete_sol_xhigh_and_opus_max",
       "latency_observation": "complete_no_threshold",
       "full_gate_suite": "pass",
-      "final_dual_audit": "pending",
-      "archived_change": null,
-      "release_pass": false
+      "final_dual_audit": "pass",
+      "archived_change": "openspec/changes/archive/2026-08-01-strengthen-call-freshness",
+      "release_pass": true
     }
   }
 }

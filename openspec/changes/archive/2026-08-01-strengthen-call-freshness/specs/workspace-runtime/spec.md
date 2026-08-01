@@ -11,15 +11,28 @@ files served through configured, inferred, or transient engine projects.
 Every content-bearing semantic-navigation or diagnostics read SHALL receive a
 unique synchronous freshness preflight whose guarded scan begins after that
 call arrives; a later call MUST NOT accept a scan that was already in progress
-when it arrived. Before returning source-derived success, the system SHALL run a
-second guarded freshness scan. It SHALL also compare the byte identity of every
-internal response-owned source snapshot that contributed content, a range, or
-diagnostic authority with the final guarded identity for that workspace or
-trusted-external path. If the relevant workspace identity, generation, or
+when it arrived. Before returning any source-derived result, the system SHALL
+run a second guarded freshness scan. A result is source-derived when it is a
+success, or when it is a failure that states what the source contains—a symbol
+that was not found, an ambiguous candidate set, an unresolvable body or range, a
+target snapshot or external byte witness that could not be established, source
+bytes that disappear or change identity while an operation acquires its exact
+snapshot, or a response-owned target set that overran its bound. It SHALL also compare the byte
+identity of every internal response-owned source snapshot that contributed
+content, a range, candidate evidence, or diagnostic authority with the final
+guarded identity for that workspace path, and SHALL compare, for every trusted
+read-only external target it renders, guarded byte identities observed both
+immediately before and after the authoritative response with a final guarded
+identity for that exact path. If the relevant workspace identity, generation, or
 response witness changes, it SHALL discard the entire result and replay the
 complete read transaction at most once. A second raced attempt SHALL return retryable
 `NOT_READY` with reason `workspace_changed_during_read` and MUST NOT return
-stale, mixed-snapshot, or empty success. Heartbeats, lease control, and bounded
+stale, mixed-snapshot, or empty success, nor either attempt's source-derived
+payload, candidates, or raw locations. A trusted read-only external target whose
+exact bytes cannot be observed SHALL fail typed rather than render an
+unwitnessed raw range. A failure whose authority is the adapter's own
+condition—cold, cooling, unsupported, busy, or timed out—SHALL keep its single
+preflight and MUST NOT be replayed. Heartbeats, lease control, and bounded
 runtime status are not content-bearing reads. Editing SHALL remain outside this
 read replay boundary and MUST NOT be automatically replayed.
 
@@ -55,7 +68,7 @@ read replay boundary and MUST NOT be automatically replayed.
 - **WHEN** a trusted file outside the configured program changes without changing native program membership
 - **THEN** its path-scoped document generation is invalidated without falsely invalidating or expanding configured-program global readiness
 
-#### Scenario: Later call arrives during another freshness scan
+#### Scenario: Concurrent calls observe external change
 - **WHEN** semantic call B arrives after call A's freshness scan has begun
 - **THEN** B waits for A's scan to settle, runs its own guarded scan that begins after B arrived, and cannot use A's scan as its admission evidence
 
@@ -84,13 +97,39 @@ read replay boundary and MUST NOT be automatically replayed.
 - **THEN** the B response witness disagrees with the final A byte identity, so
   the result is discarded and the complete read transaction replays once
 
+#### Scenario: Source-derived failure is raced
+- **WHEN** a read answers that a symbol is missing, that a candidate set is
+  ambiguous, or that a body or range cannot be resolved, and a relevant source
+  write completes before that answer's final guarded validation
+- **THEN** the failure is discarded whole and the complete read transaction
+  replays once; a second race returns retryable `NOT_READY` with reason
+  `workspace_changed_during_read` and neither attempt's candidate, range, or
+  body evidence
+
+#### Scenario: Source snapshot acquisition races with replacement
+- **WHEN** a trusted source is deleted or replaced after preflight but before
+  the operation can acquire its exact snapshot
+- **THEN** that source-derived failure still runs guarded postflight and the
+  complete read replays once; if snapshot acquisition races again, the call
+  returns retryable `NOT_READY` without stale or partial source payload
+
+#### Scenario: Trusted external target is rewritten during the authoritative response
+- **WHEN** a read renders a raw LSP range for a trusted read-only external
+  target and another process rewrites that exact file between the guarded byte
+  identity observed before the authoritative response and the one observed
+  after it
+- **THEN** the read replays once and returns only a raw range that its final
+  guarded external identity still supports; a second race returns retryable
+  `NOT_READY` naming that external path and no raw location, and a target whose
+  exact bytes cannot be observed at all fails typed instead
+
 #### Scenario: Workspace changes during both read attempts
 - **WHEN** relevant workspace identity changes before final validation on both
   the original read and its one allowed replay
 - **THEN** the call returns retryable `NOT_READY` with reason
   `workspace_changed_during_read` and no stale or partial success payload
 
-#### Scenario: A foreign write occurs after final validation
+#### Scenario: A foreign write occurs after the final verified byte
 - **WHEN** a non-cooperating external writer changes a file only after the
   returning read's second matching guarded postflight has crossed that byte
 - **THEN** the already-linearized read is not retroactively invalidated, and the

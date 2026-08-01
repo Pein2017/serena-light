@@ -103,6 +103,18 @@ def _descendants(identity: _ProcessIdentity) -> tuple[_ProcessIdentity, ...]:
     return tuple(descendants)
 
 
+def _snapshot_identities() -> frozenset[_ProcessIdentity]:
+    """A system-wide PID+create-time snapshot; used only as a before/after diff base."""
+
+    identities: set[_ProcessIdentity] = set()
+    for process in psutil.process_iter():
+        try:
+            identities.add(_ProcessIdentity(process.pid, process.create_time()))
+        except psutil.Error:
+            continue
+    return frozenset(identities)
+
+
 def _service_connector_executable() -> Path:
     paths = runtime_paths(REPOSITORY_ROOT)
     executable = paths["python"].parent / "serena-light"
@@ -346,7 +358,8 @@ def test_real_shared_daemon_serves_concurrent_roots_and_survives_partial_release
         clients = [shared_a, shared_b, other_c]
         daemon: _ProcessIdentity | None = None
         descendants: tuple[_ProcessIdentity, ...] = ()
-        baseline_pids = {process.pid for process in psutil.process_iter()}
+        baseline_identities = _snapshot_identities()
+        baseline_pids = {identity.pid for identity in baseline_identities}
         try:
             status_a = await shared_a.start()
             metadata, daemon = _read_owned_daemon(build_root)
@@ -402,6 +415,12 @@ def test_real_shared_daemon_serves_concurrent_roots_and_survives_partial_release
             _assert_bound_to(await other_c.status(), build_identity=build_identity, workspace=shared_root)
 
             # 5) Only a zero-holder daemon retires, taking its language servers with it.
+            # Refresh after every activation/query has completed so the owned
+            # set includes descendants started after the earlier midpoint
+            # snapshot.  Scope the assertion to this exact daemon instead of a
+            # host-wide locked-runtime signature: other Serena Light sessions
+            # legitimately share the same pinned executables.
+            descendants = tuple({*descendants, *_descendants(daemon)})
             await other_c.aclose()
             clients.remove(other_c)
             assert _active_holders(build_root, metadata) == 0

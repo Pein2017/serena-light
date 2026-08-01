@@ -4,9 +4,7 @@
 
 Define shared-daemon workspace identity, trust and program scope, synchronous
 freshness, lifecycle, build isolation, proxy boundaries, and process ownership.
-
 ## Requirements
-
 ### Requirement: Per-client connector uses one shared localhost daemon
 The system SHALL expose a stdio MCP connector for each client process and SHALL
 proxy requests to one authenticated Streamable HTTP daemon bound only to the
@@ -222,6 +220,34 @@ SHALL cover only the current native configured-program and adapter index
 generations. Path-scoped readiness SHALL be tracked independently for trusted
 files served through configured, inferred, or transient engine projects.
 
+Every content-bearing semantic-navigation or diagnostics read SHALL receive a
+unique synchronous freshness preflight whose guarded scan begins after that
+call arrives; a later call MUST NOT accept a scan that was already in progress
+when it arrived. Before returning any source-derived result, the system SHALL
+run a second guarded freshness scan. A result is source-derived when it is a
+success, or when it is a failure that states what the source contains—a symbol
+that was not found, an ambiguous candidate set, an unresolvable body or range, a
+target snapshot or external byte witness that could not be established, source
+bytes that disappear or change identity while an operation acquires its exact
+snapshot, or a response-owned target set that overran its bound. It SHALL also compare the byte
+identity of every internal response-owned source snapshot that contributed
+content, a range, candidate evidence, or diagnostic authority with the final
+guarded identity for that workspace path, and SHALL compare, for every trusted
+read-only external target it renders, guarded byte identities observed both
+immediately before and after the authoritative response with a final guarded
+identity for that exact path. If the relevant workspace identity, generation, or
+response witness changes, it SHALL discard the entire result and replay the
+complete read transaction at most once. A second raced attempt SHALL return retryable
+`NOT_READY` with reason `workspace_changed_during_read` and MUST NOT return
+stale, mixed-snapshot, or empty success, nor either attempt's source-derived
+payload, candidates, or raw locations. A trusted read-only external target whose
+exact bytes cannot be observed SHALL fail typed rather than render an
+unwitnessed raw range. A failure whose authority is the adapter's own
+condition—cold, cooling, unsupported, busy, or timed out—SHALL keep its single
+preflight and MUST NOT be replayed. Heartbeats, lease control, and bounded
+runtime status are not content-bearing reads. Editing SHALL remain outside this
+read replay boundary and MUST NOT be automatically replayed.
+
 #### Scenario: Python-only workspace is activated
 - **WHEN** only Python operations are requested
 - **THEN** Pyright starts and the TypeScript language server remains stopped
@@ -243,11 +269,11 @@ files served through configured, inferred, or transient engine projects.
 - **THEN** the adapter sends a full-text `didChange` from the observed snapshot, or `didClose` if that snapshot cannot be represented, before a current-generation semantic success is authorized
 
 #### Scenario: Watcher reconciliation cannot settle
-- **WHEN** watcher delivery, open-document reconciliation, executor admission, or its retained future fails or times out
+- **WHEN** watched-file delivery, open-document reconciliation, executor admission, or its retained future fails or times out
 - **THEN** the operation returns retryable `BUSY` or `NOT_READY`, retains the exact event batch for retry, and an unchanged later scan cannot authorize success until that batch settles
 
 #### Scenario: One language-family delivery fails before another family
-- **WHEN** one freshness scan changes multiple language families and an earlier family's watcher delivery fails
+- **WHEN** one freshness scan changes multiple language families and an earlier family's watched-file delivery fails
 - **THEN** every affected family has already advanced its generation, all later-family deliveries are admitted or explicitly retained before the failure is returned, and no family can serve a stale current-generation success
 
 #### Scenario: Omitted trusted file changes
@@ -255,9 +281,8 @@ files served through configured, inferred, or transient engine projects.
 - **THEN** its path-scoped document generation is invalidated without falsely invalidating or expanding configured-program global readiness
 
 #### Scenario: Concurrent calls observe external change
-- **WHEN** multiple semantic calls arrive after one external filesystem change
-- **THEN** they share one synchronous in-flight freshness scan and none may
-  return success using a stale time-cache entry
+- **WHEN** semantic call B arrives after call A's freshness scan has begun
+- **THEN** B waits for A's scan to settle, runs its own guarded scan that begins after B arrived, and cannot use A's scan as its admission evidence
 
 #### Scenario: Source bytes change without a stat-identity change
 - **WHEN** a trusted tracked or untracked source is rewritten in place with the
@@ -269,13 +294,63 @@ files served through configured, inferred, or transient engine projects.
 - **WHEN** two guarded full-file byte passes disagree, or the file, its lexical
   entry, or an ancestor directory changes across either pass
 - **THEN** the scan returns retryable `NOT_READY` before committing inventory,
-  state, generations, or watcher events; a later preflight observes afresh
+  state, generations, or watched-file events; a later preflight observes afresh
+
+#### Scenario: Foreign write completes during a read
+- **WHEN** another process completes a relevant workspace write after a read's
+  preflight and before its final guarded validation
+- **THEN** the system discards the source-derived result, reconciles the change,
+  and replays the complete read transaction once
+
+#### Scenario: Foreign write is reverted before postflight
+- **WHEN** an operation captures response-owned bytes B after preflight, another
+  process restores bytes A before postflight, and the aggregate preflight and
+  postflight workspace identities both describe A
+- **THEN** the B response witness disagrees with the final A byte identity, so
+  the result is discarded and the complete read transaction replays once
+
+#### Scenario: Source-derived failure is raced
+- **WHEN** a read answers that a symbol is missing, that a candidate set is
+  ambiguous, or that a body or range cannot be resolved, and a relevant source
+  write completes before that answer's final guarded validation
+- **THEN** the failure is discarded whole and the complete read transaction
+  replays once; a second race returns retryable `NOT_READY` with reason
+  `workspace_changed_during_read` and neither attempt's candidate, range, or
+  body evidence
+
+#### Scenario: Source snapshot acquisition races with replacement
+- **WHEN** a trusted source is deleted or replaced after preflight but before
+  the operation can acquire its exact snapshot
+- **THEN** that source-derived failure still runs guarded postflight and the
+  complete read replays once; if snapshot acquisition races again, the call
+  returns retryable `NOT_READY` without stale or partial source payload
+
+#### Scenario: Trusted external target is rewritten during the authoritative response
+- **WHEN** a read renders a raw LSP range for a trusted read-only external
+  target and another process rewrites that exact file between the guarded byte
+  identity observed before the authoritative response and the one observed
+  after it
+- **THEN** the read replays once and returns only a raw range that its final
+  guarded external identity still supports; a second race returns retryable
+  `NOT_READY` naming that external path and no raw location, and a target whose
+  exact bytes cannot be observed at all fails typed instead
+
+#### Scenario: Workspace changes during both read attempts
+- **WHEN** relevant workspace identity changes before final validation on both
+  the original read and its one allowed replay
+- **THEN** the call returns retryable `NOT_READY` with reason
+  `workspace_changed_during_read` and no stale or partial success payload
 
 #### Scenario: A foreign write occurs after the final verified byte
 - **WHEN** a non-cooperating external writer changes a file only after the
-  second matching guarded pass has crossed that byte
-- **THEN** the already-linearized operation is not retroactively invalidated,
-  and the next synchronous preflight must observe the new byte identity
+  returning read's second matching guarded postflight has crossed that byte
+- **THEN** the already-linearized read is not retroactively invalidated, and the
+  next call's own synchronous preflight must observe the new byte identity
+
+#### Scenario: Read replay cannot replay an edit
+- **WHEN** `replace_symbol_body` starts, commits, times out, loses its response,
+  or returns `UNCERTAIN`
+- **THEN** the freshness read-replay mechanism never invokes that edit again
 
 #### Scenario: Stable config deletion or source symlink rejection is observed
 - **WHEN** a native config is stably absent or a formerly trusted source is
@@ -285,7 +360,19 @@ files served through configured, inferred, or transient engine projects.
 
 #### Scenario: Same root is activated again
 - **WHEN** a bound session activates another path in the same Git root
-- **THEN** the runtime performs an immediate refresh before returning reuse
+- **THEN** the runtime performs an immediate per-call refresh before returning reuse
+
+#### Scenario: Targeted transformers path is read repeatedly
+- **WHEN** repeated content-bearing calls query explicitly selected files in the
+  trusted non-Git transformers workspace
+- **THEN** each call validates its requested path before and after the read
+  without performing a full-package filesystem walk
+
+#### Scenario: Global transformers query is requested
+- **WHEN** a content-bearing semantic query claims global coverage in the exact
+  trusted non-Git transformers workspace without an explicit target path
+- **THEN** the call performs a bounded full-root no-symlink guarded preflight and
+  postflight and cannot use targeted-path freshness to authorize global success
 
 #### Scenario: Native-config adapter stop times out
 - **WHEN** a changed native config requires adapter restart but the exact old adapter stop does not reach its bounded terminal state

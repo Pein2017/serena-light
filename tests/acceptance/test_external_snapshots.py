@@ -10,11 +10,10 @@ from typing import ClassVar, cast
 
 import pytest
 
-from scripts import external_snapshot
 from scripts.external_snapshot import (
-    CC_PLUGIN_CODEX_TYPESCRIPT_AUTHORITY_PROFILE,
-    _node_platform_architecture,
+    NODE_DEPENDENCY_AUTHORITY_PROFILE,
     snapshot_identity,
+    snapshot_profile_for_environment,
 )
 
 
@@ -83,8 +82,9 @@ def test_snapshot_teardown_reuses_the_profile_selected_during_setup(
     tmp_path: Path,
 ) -> None:
     acceptance_conftest = _acceptance_conftest()
-    environment_name = "SERENA_LIGHT_CC_PLUGIN_CODEX_SNAPSHOT"
-    profile = "cc-plugin-codex-typescript-authority-v1"
+    environment_name = "SERENA_LIGHT_CODEXUI_SNAPSHOT"
+    profile = snapshot_profile_for_environment(environment_name)
+    assert profile == NODE_DEPENDENCY_AUTHORITY_PROFILE
     observed = "git:head:authority-bound"
     gate = acceptance_conftest._SnapshotGate(tmp_path, environment_name, profile, observed)
 
@@ -151,68 +151,68 @@ def test_non_git_transformers_snapshot_binds_source_content_and_package_metadata
     assert snapshot_identity(root) == second
 
 
-def test_cc_plugin_platform_selection_uses_the_locked_service_node(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    """The authority profile cannot select a user's Node through PATH or ~/.nvm."""
+def _node_root_with_ignored_install(root: Path) -> Path:
+    """Build a Git root whose dependency install is entirely Git-ignored."""
 
-    locked_node = tmp_path / "service-runtime" / "node" / "bin" / "node"
-    locked_node.parent.mkdir(parents=True)
-    locked_node.touch()
-    captured: list[tuple[list[str], dict[str, object]]] = []
+    _git(root, "init", "--quiet")
+    _git(root, "config", "user.email", "acceptance@example.invalid")
+    _git(root, "config", "user.name", "Acceptance")
+    (root / ".gitignore").write_text("node_modules/\npackage-lock.json\n", encoding="utf-8")
+    (root / "package.json").write_text(
+        '{"name":"fixture","devDependencies":{"typescript":"5.9.3"}}\n',
+        encoding="utf-8",
+    )
+    _git(root, "add", ".gitignore", "package.json")
+    _git(root, "commit", "--quiet", "-m", "initial")
 
-    def run(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
-        captured.append((command, kwargs))
-        return subprocess.CompletedProcess(command, 0, stdout="linux-x64", stderr="")
-
-    monkeypatch.setattr(external_snapshot, "runtime_paths", lambda root: {"node": locked_node})
-    monkeypatch.setattr(external_snapshot.subprocess, "run", run)
-
-    assert _node_platform_architecture(tmp_path) == "linux-x64"
-    assert captured == [
-        (
-            [str(locked_node), "--eval", "process.stdout.write(`${process.platform}-${process.arch}`)"],
-            {"cwd": tmp_path, "check": False, "capture_output": True, "text": True},
-        )
-    ]
-    assert all(command[0] != "node" for command, _ in captured)
-    assert all("/root/.nvm" not in str(command) for command, _ in captured)
-
-
-def test_cc_plugin_typescript_profile_binds_the_ignored_native_tsc_executable(tmp_path: Path) -> None:
-    _git(tmp_path, "init", "--quiet")
-    _git(tmp_path, "config", "user.email", "acceptance@example.invalid")
-    _git(tmp_path, "config", "user.name", "Acceptance")
-    (tmp_path / ".gitignore").write_text("node_modules/\n", encoding="utf-8")
-    (tmp_path / "package.json").write_text('{"scripts":{"typecheck":"tsc -p tsconfig.json"}}\n', encoding="utf-8")
-    (tmp_path / "package-lock.json").write_text('{"lockfileVersion":3}\n', encoding="utf-8")
-    _git(tmp_path, "add", ".gitignore", "package.json", "package-lock.json")
-    _git(tmp_path, "commit", "--quiet", "-m", "initial")
-
-    node_modules = tmp_path / "node_modules"
+    (root / "package-lock.json").write_text('{"lockfileVersion":3}\n', encoding="utf-8")
+    node_modules = root / "node_modules"
     typescript = node_modules / "typescript"
+    vue_tsc = node_modules / "vue-tsc"
     (typescript / "bin").mkdir(parents=True)
     (typescript / "lib").mkdir()
+    (vue_tsc / "bin").mkdir(parents=True)
     (node_modules / ".package-lock.json").write_text('{"packages":{}}\n', encoding="utf-8")
-    (typescript / "package.json").write_text('{"name":"typescript","version":"7.0.2"}\n', encoding="utf-8")
-    (typescript / "bin/tsc").write_text('#!/usr/bin/env node\nimport "../lib/tsc.js";\n', encoding="utf-8")
-    (typescript / "lib/tsc.js").write_text('import getExePath from "#getExePath";\n', encoding="utf-8")
-    (typescript / "lib/getExePath.js").write_text("export default function getExePath() {}\n", encoding="utf-8")
+    (typescript / "package.json").write_text('{"name":"typescript","version":"5.9.3"}\n', encoding="utf-8")
+    (typescript / "bin/tsc").write_text("#!/usr/bin/env node\nrequire('../lib/tsc.js');\n", encoding="utf-8")
+    (typescript / "lib/tsc.js").write_text("module.exports = require('./_tsc.js');\n", encoding="utf-8")
+    (vue_tsc / "package.json").write_text('{"name":"vue-tsc","version":"3.1.8"}\n', encoding="utf-8")
+    (vue_tsc / "bin/vue-tsc.js").write_text("import '../index.js'\n", encoding="utf-8")
     bin_directory = node_modules / ".bin"
     bin_directory.mkdir()
     (bin_directory / "tsc").symlink_to("../typescript/bin/tsc")
-    platform_package = node_modules / "@typescript" / f"typescript-{_node_platform_architecture(tmp_path)}"
-    (platform_package / "lib").mkdir(parents=True)
-    (platform_package / "package.json").write_text(
-        '{"name":"@typescript/typescript-platform","version":"7.0.2"}\n', encoding="utf-8"
-    )
-    native_tsc = platform_package / "lib/tsc"
-    native_tsc.write_bytes(b"native tsc version one")
+    return typescript
 
-    first = snapshot_identity(tmp_path, profile=CC_PLUGIN_CODEX_TYPESCRIPT_AUTHORITY_PROFILE)
-    native_tsc.write_bytes(b"native tsc version two")
-    second = snapshot_identity(tmp_path, profile=CC_PLUGIN_CODEX_TYPESCRIPT_AUTHORITY_PROFILE)
+
+def test_node_dependency_profile_binds_the_ignored_install_the_git_digest_cannot_see(tmp_path: Path) -> None:
+    typescript = _node_root_with_ignored_install(tmp_path)
+
+    first = snapshot_identity(tmp_path, profile=NODE_DEPENDENCY_AUTHORITY_PROFILE)
+    # A reinstall that changes only Git-ignored files is invisible to the
+    # default profile but must move the dependency-authority identity.
+    assert snapshot_identity(tmp_path) == snapshot_identity(tmp_path)
+    default_before = snapshot_identity(tmp_path)
+
+    (tmp_path / "package-lock.json").write_text('{"lockfileVersion":4}\n', encoding="utf-8")
+    second = snapshot_identity(tmp_path, profile=NODE_DEPENDENCY_AUTHORITY_PROFILE)
     assert second != first
-    (typescript / "bin/tsc").write_text('#!/usr/bin/env node\nimport "../lib/changed.js";\n', encoding="utf-8")
-    assert snapshot_identity(tmp_path, profile=CC_PLUGIN_CODEX_TYPESCRIPT_AUTHORITY_PROFILE) != second
+
+    (typescript / "package.json").write_text('{"name":"typescript","version":"5.9.4"}\n', encoding="utf-8")
+    third = snapshot_identity(tmp_path, profile=NODE_DEPENDENCY_AUTHORITY_PROFILE)
+    assert third != second
+
+    (typescript / "bin/tsc").write_text("#!/usr/bin/env node\nrequire('../lib/changed.js');\n", encoding="utf-8")
+    fourth = snapshot_identity(tmp_path, profile=NODE_DEPENDENCY_AUTHORITY_PROFILE)
+    assert fourth != third
+
+    (tmp_path / "node_modules/vue-tsc/bin/vue-tsc.js").write_text("import '../changed.js'\n", encoding="utf-8")
+    assert snapshot_identity(tmp_path, profile=NODE_DEPENDENCY_AUTHORITY_PROFILE) != fourth
+    assert snapshot_identity(tmp_path) == default_before
+
+
+def test_node_dependency_profile_fails_closed_on_a_missing_install(tmp_path: Path) -> None:
+    typescript = _node_root_with_ignored_install(tmp_path)
+    (typescript / "package.json").unlink()
+
+    with pytest.raises(RuntimeError, match="required snapshot authority path is missing"):
+        snapshot_identity(tmp_path, profile=NODE_DEPENDENCY_AUTHORITY_PROFILE)

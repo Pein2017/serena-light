@@ -1201,6 +1201,134 @@ def test_connector_content_preserves_external_references_as_raw_read_only_target
         asyncio.run(scenario())
 
 
+@dataclass(slots=True)
+class _RacedExternalWrites:
+    """Rewrite one trusted external target while an authoritative response runs.
+
+    Every second reference response is the authoritative one of its transaction,
+    and the guarded external digest that brackets it from below was already
+    taken when this write lands.  ``pending`` holds one payload per attempt that
+    must be raced.
+    """
+
+    writer: _ForeignWriter
+    path: Path
+    harness: _Harness
+    pending: list[bytes]
+    responses: int = 0
+
+    def after_request(self, method: str, uri: str) -> None:
+        del uri
+        if method != "textDocument/references":
+            return
+        self.responses += 1
+        if self.responses % 2 != 0 or not self.pending:
+            return
+        payload = self.pending.pop(0)
+        self.writer.write(self.path, payload)
+        # A server answers for the bytes it currently sees, so every later
+        # response describes the rewritten file rather than the raced one.
+        self.harness.python.client.references = _external_reference(self.path, line=payload.count(b"\n") - 1)
+
+
+def _external_reference(external: Path, *, line: int = 0) -> tuple[Mapping[str, Any], ...]:
+    return (
+        {
+            "uri": external.as_uri(),
+            "range": {"start": {"line": line, "character": 4}, "end": {"line": line, "character": 10}},
+        },
+    )
+
+
+def test_connector_raced_external_target_replays_to_the_settled_raw_location(tmp_path: Path) -> None:
+    """An external raw range is only returned for bytes the read still witnesses.
+
+    Another process rewrites the trusted external file while the authoritative
+    reference response is produced.  Nothing inside the workspace moves, so only
+    the external byte witness can report that race; the read replays once and
+    returns the raw location its settled witness supports.
+    """
+
+    settled = b"# rewritten by another process\ndef target(): pass\n"
+    with _acceptance(tmp_path) as harness, _foreign_writer() as writer:
+        external = tmp_path / "ms" / "lib" / "python3.12" / "site-packages" / "external_pkg.py"
+        external.write_bytes(b"def target(): pass\n")
+        race = _RacedExternalWrites(writer, external, harness, [settled])
+
+        async def scenario() -> tuple[types.CallToolResult, Mapping[str, Any]]:
+            async with _connected(harness) as connector:
+                harness.python.client.references = _external_reference(external)
+                harness.python.client.after_request = race.after_request
+                return await _call_content(
+                    connector,
+                    "find_referencing_symbols",
+                    relative_path="main.py",
+                    name_path="target",
+                )
+
+        result, payload = asyncio.run(scenario())
+        writer.stop()
+
+        assert writer.writes == [str(external)]
+        assert race.pending == []
+        assert external.read_bytes() == settled
+        assert result.isError is False
+        assert payload["ok"] is True
+        data = cast(Mapping[str, Any], payload["data"])
+        file = cast(Mapping[str, Any], cast(list[Any], data["files"])[0])
+        assert file["path"] == str(external.resolve())
+        assert file["read_only"] is True
+        # The settled bytes moved the definition to line 1, and only that
+        # settled raw range is returned.
+        assert cast(list[Any], file["references"])[0]["raw_range"] == [[1, 4], [1, 10]]
+        # Exactly two transactions: the raced one and the settled replay.
+        assert harness.python.client.requests.count("textDocument/references") == 4
+
+
+def test_connector_repeatedly_raced_external_target_returns_not_ready_without_a_raw_location(
+    tmp_path: Path,
+) -> None:
+    """Continuous external rewriting fails retryably instead of returning a range."""
+
+    second = b"# second\ndef target(): pass\n"
+    third = b"# third\ndef target(): pass\n"
+    with _acceptance(tmp_path) as harness, _foreign_writer() as writer:
+        external = tmp_path / "ms" / "lib" / "python3.12" / "site-packages" / "external_pkg.py"
+        external.write_bytes(b"def target(): pass\n")
+        race = _RacedExternalWrites(writer, external, harness, [second, third])
+
+        async def scenario() -> tuple[types.CallToolResult, Mapping[str, Any]]:
+            async with _connected(harness) as connector:
+                harness.python.client.references = _external_reference(external)
+                harness.python.client.after_request = race.after_request
+                return await _call_content(
+                    connector,
+                    "find_referencing_symbols",
+                    relative_path="main.py",
+                    name_path="target",
+                )
+
+        result, payload = asyncio.run(scenario())
+        writer.stop()
+
+        assert writer.writes == [str(external), str(external)]
+        assert race.pending == []
+        assert external.read_bytes() == third
+        assert result.isError is False
+        assert payload["ok"] is False
+        assert "data" not in payload
+        error_payload = cast(Mapping[str, Any], payload["error"])
+        assert error_payload["code"] == "NOT_READY"
+        assert error_payload["retry"]["retryable"] is True
+        details = cast(Mapping[str, Any], error_payload["details"])
+        assert details["reason"] == "workspace_changed_during_read"
+        assert details["attempts"] == 2
+        assert details["paths"] == [str(external.resolve())]
+        # No attempt's raw external location may survive in the failure envelope.
+        assert "raw_range" not in json.dumps(payload)
+        assert harness.python.client.requests.count("textDocument/references") == 4
+
+
 def test_stdio_proxy_withholds_editing_and_preserves_typed_boundary_errors(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -125,6 +125,7 @@ from serena_light.workspace.inventory import (
     TargetedPathState,
     TrustInventory,
     git_trust_inventory,
+    observe_file_digest,
     transformers_trust_inventory,
 )
 from serena_light.workspace.scope import (
@@ -195,6 +196,25 @@ REFERENCE_COVERAGE_SAMPLE_LIMIT = 16
 # continuous external churn must never become an unbounded outer loop.
 MAX_FRESH_READ_ATTEMPTS = 2
 MAX_FRESH_READ_EVIDENCE_PATHS = 16
+# Failure reasons whose evidence is the content of response-owned bytes rather
+# than the adapter's own condition.  A read that returns one of these has made a
+# statement about the source and must be validated exactly like a success.
+SOURCE_DERIVED_ERROR_REASONS = frozenset(
+    {
+        "incomplete_assignment_range",
+        "candidate_snapshot_range_mismatch",
+        "verified_target_snapshot_unavailable",
+        "verified target snapshot unavailable",
+        "semantic target locations changed",
+        "semantic target set exceeds snapshot bound",
+        "external target bytes unavailable",
+        "workspace_reference_snapshot_unavailable",
+        "workspace_reference_snapshot_range_mismatch",
+        "workspace_reference_document_invalid",
+        "workspace_reference_uri_mismatch",
+    }
+)
+SOURCE_SNAPSHOT_UNAVAILABLE_REASON = "source_snapshot_unavailable"
 
 
 class RuntimeErrorCode(StrEnum):
@@ -392,11 +412,23 @@ class _ResponseAdapterState:
 
 @dataclass(frozen=True, slots=True)
 class _ResponseOwnedSemanticLocations:
-    """Second semantic response plus the exact snapshots it observed."""
+    """Second semantic response plus the exact snapshots it observed.
+
+    ``preparation_targets`` are trusted workspace documents opened only to make
+    a cold TypeScript query deterministic.  They never enter the public target
+    set, but their bytes influence the response and therefore remain freshness
+    witnesses.  ``external_digests`` are the guarded byte identities of the read-only
+    external targets, observed inside the adapter transaction immediately
+    before the authoritative second request.  They are retained so a write that
+    lands while that request is in flight cannot be concealed by a later
+    agreeing observation on the calling thread.
+    """
 
     locations: tuple[_ClassifiedSemanticLocation, ...]
     targets: tuple[_BoundSemanticTarget, ...]
+    preparation_targets: tuple[_BoundSemanticTarget, ...]
     adapter_states: tuple[_ResponseAdapterState, ...]
+    external_digests: tuple[tuple[Path, str], ...]
 
 
 class _WorkspaceLanguageAdapter(LanguageAdapter):
@@ -707,6 +739,27 @@ class _FreshnessAdmission:
     scan: FreshnessScan
     version: int
     digests: Mapping[str, str | None]
+
+
+@dataclass(frozen=True, slots=True)
+class _ReadAttemptWitnesses:
+    """Byte identities one in-flight read attempt's response owns.
+
+    ``source`` holds workspace-relative paths, which the guarded scan observes
+    and commits.  ``external`` holds absolute paths on a trusted read-only
+    external root, which no workspace scan covers and which are therefore
+    revalidated by observing exactly those files again.  These witnesses let
+    range/body/target failures prove source ownership.  Workspace-wide missing
+    or ambiguity answers and measured answer-size failures are source-derived by
+    construction even when they do not retain one exact document witness.
+    """
+
+    source: dict[str, set[str]]
+    external: dict[Path, set[str]]
+
+    @property
+    def owns_source(self) -> bool:
+        return bool(self.source or self.external)
 
 
 class FreshnessCoordinator:
@@ -2242,12 +2295,22 @@ class WorkspaceRuntime:
     def _run_fresh_read(self, operation: Callable[[], ToolEnvelope], *, scope: tuple[str, ...] | None) -> ToolEnvelope:
         """Own one read transaction: preflight, operation, guarded postflight.
 
-        Only source-derived success is validated.  A success whose workspace
-        moved underneath it is discarded whole and replayed exactly once; a
-        second race returns retryable ``NOT_READY`` rather than stale, mixed, or
-        empty success.  The response witnesses close the case where the
-        operation observed bytes B that were restored to bytes A before the
-        postflight, which no aggregate workspace identity can see.
+        Every source-derived result is validated, whether it succeeded or
+        failed: a symbol that was not found, a candidate set that was ambiguous,
+        and a range or body that could not be resolved are all derived from the
+        same response-owned bytes as a success, so a concurrent source write
+        must not be able to leak out through the error.  A result whose
+        workspace moved underneath it is discarded whole and replayed exactly
+        once; a second race returns retryable ``NOT_READY`` rather than stale,
+        mixed, or empty success and rather than either attempt's source-derived
+        payload or candidates.  A failure whose contract deliberately does not
+        make a source-content claim—an invalid locator, an untrusted operand, an
+        unsupported capability, or an adapter condition such as cold, cooling,
+        or timeout—keeps the authority of its single preflight, as
+        ``_result_is_source_derived`` decides.  The response witnesses close
+        the case where the operation observed bytes B that were restored to
+        bytes A before the postflight, which no aggregate workspace identity can
+        see.
 
         ``scope`` names the paths a targeted transaction validates, or is
         ``None`` for a whole-root transaction.  A targeted postflight also
@@ -2260,15 +2323,37 @@ class WorkspaceRuntime:
             self._require_running()
             admitted = self._admit_fresh_read(scope)
             witnesses = self._begin_read_attempt()
+            source_failure_paths: tuple[str, ...] = ()
             try:
-                result = operation()
+                try:
+                    result = operation()
+                except TimeoutError:
+                    raise
+                except OSError as caught:
+                    source_path = _source_exception_path(caught, self.identity.root)
+                    if source_path is None:
+                        raise
+                    source_failure_paths = (source_path,)
+                    result = error(
+                        ErrorCode.NOT_READY,
+                        retry=RetryMetadata(retryable=True, retry_after_seconds=0.1),
+                        details={
+                            "reason": SOURCE_SNAPSHOT_UNAVAILABLE_REASON,
+                            "paths": source_failure_paths,
+                        },
+                        workspace=_workspace_metadata(self.identity),
+                    )
             finally:
                 self._end_read_attempt()
-            if not isinstance(result, SuccessEnvelope):
+            if not _result_is_source_derived(result, witnesses):
                 return result
-            final_scope = None if scope is None else tuple(sorted({*scope, *witnesses}))
-            final = self._admit_fresh_read(final_scope, witnessed=tuple(witnesses))
-            changed = _fresh_read_change_evidence(admitted, final, witnesses)
+            final_scope = (
+                None
+                if scope is None
+                else tuple(sorted({*scope, *witnesses.source, *source_failure_paths}))
+            )
+            final = self._admit_fresh_read(final_scope, witnessed=tuple(witnesses.source))
+            changed = _fresh_read_change_evidence(admitted, final, witnesses.source, witnesses.external)
             if changed is None:
                 return result
             if attempt == MAX_FRESH_READ_ATTEMPTS:
@@ -2289,10 +2374,10 @@ class WorkspaceRuntime:
                 )
         raise AssertionError("bounded fresh-read replay did not terminate")
 
-    def _begin_read_attempt(self) -> dict[str, set[str]]:
+    def _begin_read_attempt(self) -> _ReadAttemptWitnesses:
         """Start one attempt-local witness set on this calling thread."""
 
-        witnesses: dict[str, set[str]] = {}
+        witnesses = _ReadAttemptWitnesses({}, {})
         self._read_witnesses.active = witnesses
         return witnesses
 
@@ -2312,10 +2397,26 @@ class WorkspaceRuntime:
         fresh-read attempt this records nothing.
         """
 
-        witnesses = cast(dict[str, set[str]] | None, getattr(self._read_witnesses, "active", None))
+        witnesses = self._active_read_witnesses()
         if witnesses is None:
             return
-        witnesses.setdefault(relative_path, set()).add(hashlib.sha256(raw_bytes).hexdigest())
+        witnesses.source.setdefault(relative_path, set()).add(hashlib.sha256(raw_bytes).hexdigest())
+
+    def _record_external_read_witness(self, path: Path, digest: str) -> None:
+        """Retain one guarded byte identity of a trusted read-only external target.
+
+        The external path is absolute because it lies outside the workspace
+        root; it is revalidated by observing exactly this file again, never by a
+        workspace scan and never by opening it in the language server.
+        """
+
+        witnesses = self._active_read_witnesses()
+        if witnesses is None:
+            return
+        witnesses.external.setdefault(path, set()).add(digest)
+
+    def _active_read_witnesses(self) -> _ReadAttemptWitnesses | None:
+        return cast(_ReadAttemptWitnesses | None, getattr(self._read_witnesses, "active", None))
 
     # The following narrow methods are injected-provider seams consumed by the
     # transport-neutral semantic cores above.  They deliberately do not expose
@@ -2469,8 +2570,21 @@ class WorkspaceRuntime:
                 return _semantic_locations_not_ready("semantic source adapter identity changed")
             if source_document is not None and not _semantic_document_is_current(source_adapter, source_document):
                 return _semantic_locations_not_ready("semantic source adapter identity changed")
+            prepared_targets = self._prepare_typescript_semantic_owner_with_client(
+                source_adapter,
+                client,
+                method,
+                params,
+                source_document=source_document,
+                deadline=deadline,
+            )
+            if isinstance(prepared_targets, ErrorEnvelope):
+                return prepared_targets
+            prepared_identity = _adapter_response_identity(source_adapter.snapshot())
+            if _adapter_replay_identity_from_response(prepared_identity) != expected_replay_identity:
+                return _semantic_locations_not_ready("semantic source adapter identity changed")
             first_raw = client.request(method, params, timeout=_remaining_semantic_timeout(deadline))
-            if _adapter_response_identity(source_adapter.snapshot()) != expected_identity:
+            if _adapter_response_identity(source_adapter.snapshot()) != prepared_identity:
                 return _semantic_locations_not_ready("semantic source adapter identity changed")
             first = self._classify_semantic_response(first_raw)
             if isinstance(first, ErrorEnvelope):
@@ -2499,6 +2613,14 @@ class WorkspaceRuntime:
             states = (_response_adapter_state(source_adapter),)
             if not self._response_adapter_states_are_current(states):
                 return _semantic_locations_not_ready("semantic target generation changed")
+            # External targets are never opened in the server, so the only
+            # evidence about them is their bytes.  This observation brackets the
+            # authoritative request from below: a write that lands while it is
+            # in flight leaves this identity disagreeing with the one taken
+            # after it, and disagreement is a race the read must replay.
+            dispatch_digests = _guarded_external_digests(_external_target_paths(first))
+            if isinstance(dispatch_digests, ErrorEnvelope):
+                return dispatch_digests
             second_raw = client.request(method, params, timeout=_remaining_semantic_timeout(deadline))
             if not self._response_adapter_states_are_current(states):
                 return _semantic_locations_not_ready("semantic target generation changed")
@@ -2513,19 +2635,109 @@ class WorkspaceRuntime:
                 return _semantic_locations_not_ready("semantic target locations changed")
             if not self._response_adapter_states_are_current(states):
                 return _semantic_locations_not_ready("semantic target generation changed")
-            return _ResponseOwnedSemanticLocations(second, bound, states)
+            return _ResponseOwnedSemanticLocations(second, bound, prepared_targets, states, dispatch_digests)
 
         owned = source_adapter.submit_read(transaction).result(timeout=self._future_timeout)
         if isinstance(owned, _ResponseOwnedSemanticLocations):
             # Bound targets are workspace paths only; read-only external targets
-            # were never snapshotted.  Recorded on the calling thread, after the
-            # adapter transaction has returned its authoritative snapshots.
-            for bound_target in owned.targets:
+            # are never opened in the server and are witnessed by their bytes
+            # alone.  Both are recorded on the calling thread, after the adapter
+            # transaction has returned its authoritative second response.
+            for bound_target in (*owned.preparation_targets, *owned.targets):
                 self._record_read_witness(
                     str(bound_target.path.relative_to(self.identity.root)),
                     bound_target.snapshot.raw_bytes,
                 )
+            unwitnessed = self._witness_external_targets(owned)
+            if unwitnessed is not None:
+                return unwitnessed
         return owned
+
+    def _prepare_typescript_semantic_owner_with_client(
+        self,
+        source_adapter: RuntimeAdapter,
+        client: AdapterClient,
+        method: str,
+        params: Mapping[str, object],
+        *,
+        source_document: DocumentSymbolInput | None,
+        deadline: float,
+    ) -> tuple[_BoundSemanticTarget, ...] | ErrorEnvelope:
+        """Open a TypeScript semantic owner before the authoritative query.
+
+        The locked TypeScript language server can resolve a cold imported name
+        only to its local import alias until the target document is open.  Test
+        order previously hid that behavior: an unrelated overview happened to
+        open the owner first.  ``typeDefinition`` can identify the owner without
+        parsing imports, so use it only as a bounded preparation hint for cold
+        definition/reference queries.  The public result still comes from two
+        matching authoritative definition/reference responses.
+
+        Unavailable, malformed, untrusted, or external hints are ignored because
+        this internal hint is not a public capability contract.  Once it names a
+        trusted workspace target, however, opening that target is required; an
+        unstable target therefore fails typed instead of allowing a known-local
+        alias/partial-reference result to escape.
+        """
+
+        if (
+            source_document is None
+            or method not in {"textDocument/definition", "textDocument/references"}
+            or source_adapter.snapshot().name != LanguageFamily.TYPESCRIPT.value
+        ):
+            return ()
+        try:
+            raw = client.request(
+                "textDocument/typeDefinition",
+                params,
+                timeout=_remaining_semantic_timeout(deadline),
+            )
+        except LspResponseError:
+            # This is an optional warm-up hint, not the authoritative public
+            # operation.  Any ordinary response error leaves the definition or
+            # references request to establish its own typed outcome.
+            return ()
+        classified = self._classify_semantic_response(raw)
+        if isinstance(classified, ErrorEnvelope):
+            return ()
+        workspace_targets = tuple(
+            item
+            for item in classified
+            if item.semantic.kind is LocationKind.WORKSPACE and item.adapter is source_adapter
+        )
+        if not workspace_targets:
+            return ()
+        return self._bind_semantic_targets_with_client(
+            source_adapter,
+            client,
+            workspace_targets,
+            capture_reference_documents=False,
+            capture_target_symbols=False,
+            source_document=source_document,
+            deadline=deadline,
+        )
+
+    def _witness_external_targets(self, owned: _ResponseOwnedSemanticLocations) -> ErrorEnvelope | None:
+        """Own the exact bytes of every trusted external target this response names.
+
+        A read-only external target is rendered as the server's raw LSP range,
+        so the range is only meaningful while the file it was computed over is
+        unchanged.  The identity observed before the authoritative request and
+        the identity observed here, after it, are both retained: a later
+        agreeing observation must not conceal an earlier differing one, exactly
+        as for a workspace snapshot.  Both observations use the guarded stable
+        digest a trust inventory uses, over exactly these bounded, deduplicated
+        paths—no external tree is walked and no document is opened.  A path that
+        is missing, linked, or unstable yields no identity at all, which leaves
+        the raw range unwitnessed and fails typed rather than returning it.
+        """
+
+        observed = _guarded_external_digests(_external_target_paths(owned.locations))
+        if isinstance(observed, ErrorEnvelope):
+            return observed
+        for path, digest in (*owned.external_digests, *observed):
+            self._record_external_read_witness(path, digest)
+        return None
 
     def _classify_semantic_response(
         self,
@@ -3534,6 +3746,7 @@ def _fresh_read_change_evidence(
     admitted: _FreshnessAdmission,
     final: _FreshnessAdmission,
     witnesses: Mapping[str, set[str]],
+    external_witnesses: Mapping[Path, set[str]],
 ) -> tuple[str, ...] | None:
     """Bounded, deduplicated paths proving the workspace moved under one attempt.
 
@@ -3554,10 +3767,113 @@ def _fresh_read_change_evidence(
             if any(digest != final.digests.get(path) for digest in digests)
         )
     )
-    if final.version == admitted.version and not mismatched:
+    external_mismatched = _external_witness_mismatches(external_witnesses)
+    if final.version == admitted.version and not mismatched and not external_mismatched:
         return None
     scanned = (*final.scan.created, *final.scan.changed, *final.scan.deleted, *final.scan.config_changed)
-    return tuple(sorted({*scanned, *mismatched}))
+    return tuple(sorted({*scanned, *mismatched, *external_mismatched}))
+
+
+def _result_is_source_derived(result: ToolEnvelope, witnesses: _ReadAttemptWitnesses) -> bool:
+    """Whether this result states something about response-owned source bytes.
+
+    A success always does.  A missing or ambiguous symbol always does too, even
+    when no exact byte witness was retained—a global query that matched nothing
+    is still an answer about what the workspace contains.  A measured
+    ``minimum_required`` is also source-derived by construction.  Other failures
+    require witnessed bytes and a reason that reports what those bytes contain:
+    an unresolvable assignment range, a candidate whose snapshot no longer maps,
+    a target snapshot or external byte witness that could not be established, a
+    location set that moved, or a response-owned target set that overran its
+    bound and names the paths it sampled.  A failure that reports the adapter's own
+    condition—cold, cooling, unsupported, busy, timed out, identity or
+    generation moved—keeps the authority of its single preflight, because no
+    concurrent source write can make it wrong.
+    """
+
+    if isinstance(result, SuccessEnvelope):
+        return True
+    if result.code in {ErrorCode.SYMBOL_NOT_FOUND, ErrorCode.AMBIGUOUS_SYMBOL}:
+        return True
+    # A budget failure that states a minimum is measuring selected content, so
+    # it is source-derived by construction even when no exact document snapshot
+    # was retained.  An ordinary invalid bound carries no such measurement.
+    if "minimum_required" in result.details:
+        return True
+    if result.details.get("reason") == SOURCE_SNAPSHOT_UNAVAILABLE_REASON:
+        return True
+    if not witnesses.owns_source:
+        return False
+    reason = result.details.get("reason")
+    # Details are JSON-shaped, so a reason is not guaranteed to be a hashable
+    # string; an unrecognized shape is simply not one of these reasons.
+    return isinstance(reason, str) and reason in SOURCE_DERIVED_ERROR_REASONS
+
+
+def _source_exception_path(caught: OSError, root: Path) -> str | None:
+    """Return one lexical in-workspace operand named by a source-read failure.
+
+    The exception boundary must not relabel transport or executable failures as
+    source races.  File-system exceptions produced while acquiring an operand
+    carry ``filename`` (or ``filename2``); only a path lexically below the
+    already-resolved workspace root enters the fresh-read postflight.  No
+    ``resolve`` call is allowed here because the path may be missing or racing.
+    """
+
+    for raw_path in (caught.filename, caught.filename2):
+        if not isinstance(raw_path, str | bytes):
+            continue
+        candidate = Path(raw_path)
+        if not candidate.is_absolute():
+            candidate = root / candidate
+        candidate = candidate.absolute()
+        try:
+            relative = candidate.relative_to(root)
+        except ValueError:
+            continue
+        normalized = relative.as_posix()
+        if normalized and normalized != "." and ".." not in PurePosixPath(normalized).parts:
+            return normalized
+    return None
+
+
+def _external_target_paths(locations: Sequence[_ClassifiedSemanticLocation]) -> tuple[Path, ...]:
+    """The deduplicated trusted external paths one response names."""
+
+    return tuple(
+        sorted({item.semantic.path for item in locations if item.semantic.kind is LocationKind.READ_ONLY_EXTERNAL})
+    )
+
+
+def _guarded_external_digests(paths: Sequence[Path]) -> tuple[tuple[Path, str], ...] | ErrorEnvelope:
+    """One guarded stable byte identity per named external path, or a typed failure."""
+
+    observed: list[tuple[Path, str]] = []
+    for path in paths:
+        digest = observe_file_digest(path)
+        if digest is None:
+            return _semantic_locations_not_ready("external target bytes unavailable", paths=(str(path),))
+        observed.append((path, digest))
+    return tuple(observed)
+
+
+def _external_witness_mismatches(witnesses: Mapping[Path, set[str]]) -> tuple[str, ...]:
+    """Trusted external paths whose response-owned bytes no longer hold.
+
+    A read-only external root is outside every workspace freshness scan and its
+    targets are never opened in the language server, so the only final evidence
+    that a response-owned external byte identity still holds is one guarded
+    stable observation of exactly those bounded paths.  A path that is deleted,
+    replaced by a link, or unstable yields no identity at all and is therefore
+    reported as changed, which replays once and then fails retryably.
+    """
+
+    mismatched: list[str] = []
+    for path, digests in witnesses.items():
+        current = observe_file_digest(path)
+        if current is None or any(digest != current for digest in digests):
+            mismatched.append(str(path))
+    return tuple(sorted(mismatched))
 
 
 def _affected_families(membership_paths: Sequence[str], config_paths: Sequence[str]) -> frozenset[LanguageFamily]:

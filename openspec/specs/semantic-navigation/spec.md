@@ -5,9 +5,7 @@
 Define the agent-facing semantic query tools, compact typed success envelopes,
 rich typed errors, exact position semantics, capability gates, and cross-root
 read-only navigation behavior.
-
 ## Requirements
-
 ### Requirement: Navigation tools return stable typed JSON
 The system SHALL expose `get_symbols_overview`, `find_symbol`,
 `find_referencing_symbols`, `find_declaration`, and `find_implementations` with
@@ -143,7 +141,7 @@ filters, and every node actually removed by filtering SHALL increment
 budgeting SHALL also contribute to the same `omitted` total.
 
 #### Scenario: MJS file overview is requested
-- **WHEN** the client requests an overview of `cc-plugin-codex/runtime/args.mjs`
+- **WHEN** the client requests an overview of `external/codexUI/scripts/generate-pwa-icons.mjs`
 - **THEN** the TypeScript adapter returns the file's functions and requested descendants as compact name/kind/children nodes without scanning unrelated files
 
 #### Scenario: Default overview is requested
@@ -420,3 +418,31 @@ also be reported but SHALL not replace the deterministic character gate.
 #### Scenario: A smaller response loses semantic evidence
 - **WHEN** a payload meets its character ratio only by dropping a result within the same public limits, truncating body text, changing range semantics, or omitting reference coverage
 - **THEN** acceptance fails regardless of the measured token reduction
+
+### Requirement: Cold TypeScript semantic reads are independent of prior tool order
+
+For a trusted TypeScript file in the configured program, the system SHALL NOT
+require an earlier overview, diagnostics, global-symbol, or unrelated semantic
+call in order to resolve a cross-file declaration or complete reference set.
+The system MAY use a bounded internal LSP preparation request to open a trusted
+workspace owner, but the public declaration/reference result SHALL still come
+from the declared authoritative LSP operation, pass the same two-response
+stability check, and retain response-owned freshness witnesses. This internal
+preparation SHALL retain the exact trusted owner bytes as an internal freshness
+witness even when that owner is not a public result target, and SHALL NOT parse
+imports, open an untrusted or read-only-external hint, add a watcher, or alter
+the public tool schema.
+
+#### Scenario: Declaration is the first semantic call after adapter start
+
+- **WHEN** a configured-program TypeScript file imports a symbol from another
+  trusted workspace file and `find_declaration` is the first semantic call
+- **THEN** the tool returns the owner declaration rather than the local import
+  alias without requiring the client to warm the owner through another tool
+
+#### Scenario: References are the first semantic call after adapter start
+
+- **WHEN** `find_referencing_symbols` is the first semantic call for a
+  configured-program TypeScript symbol with references in other trusted files
+- **THEN** the tool returns the complete current cross-file reference set rather
+  than a cold-project subset

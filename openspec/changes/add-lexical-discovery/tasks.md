@@ -40,7 +40,7 @@
 
 - [ ] 6.1 Add deterministic unit/fault tests for literal and Rust regex behavior, unsupported PCRE features, NUL/CR/LF patterns, Unicode/non-BMP/CRLF lines, binary/invalid UTF-8 match and context exclusion, long-match clipping, context 0..2, exact omitted counts across batch boundaries, queue saturation, deadline-without-partial-success, and cleanup races.
 - [ ] 6.2 Add black-box MCP tests proving complete actual `CallToolResult.content[0].text` budgets, structured-content equality, stable ordering/omission, typed trust/readiness failures, and no semantic-reference contamination.
-- [ ] 6.3 Run real-daemon `find_paths` and `search_text` scenarios over source/tests/config/docs and dynamic-import spellings in `/data/CoordExp`, `/data/CoordExp/cc-plugin-codex`, and `/data/CoordExp/ms-swift`.
+- [ ] 6.3 Run real-daemon `find_paths` and `search_text` scenarios over source/tests/config/docs and dynamic-import spellings in `/data/CoordExp`, `/data/CoordExp/external/codexUI`, and `/data/ms-swift`.
 - [ ] 6.4 Activate the conda-`ms` transformers package, require an explicit read-only lexical scope, verify targeted freshness and no enclosing site-packages scan/edit authorization, then release it cleanly.
 - [ ] 6.5 Run fresh Codex, Claude Code, and CC Agent clients in clean and poisoned-proxy/PATH/config environments; verify instructions, explicit cross-root activation, multi-agent same-root reuse, timeout cleanup, and zero orphan ripgrep/LSP processes.
 - [ ] 6.6 Pass full pytest, Ruff, Ty, bootstrap, direct-dependency/source-ownership/provenance/census/copied-hash gates and strict OpenSpec; report production LOC only as information.

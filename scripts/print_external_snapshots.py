@@ -7,17 +7,17 @@ import shlex
 from pathlib import Path
 
 from external_snapshot import (
-    CC_PLUGIN_CODEX_TYPESCRIPT_AUTHORITY_PROFILE,
     DEFAULT_SNAPSHOT_PROFILE,
+    NODE_DEPENDENCY_AUTHORITY_PROFILE,
     snapshot_identity,
 )
 
 
 def main() -> None:
     profiles = {
-        "SERENA_LIGHT_CC_PLUGIN_CODEX_SNAPSHOT": (
-            Path("/data/CoordExp/cc-plugin-codex"),
-            CC_PLUGIN_CODEX_TYPESCRIPT_AUTHORITY_PROFILE,
+        "SERENA_LIGHT_CODEXUI_SNAPSHOT": (
+            Path("/data/CoordExp/external/codexUI"),
+            NODE_DEPENDENCY_AUTHORITY_PROFILE,
         ),
         "SERENA_LIGHT_COORDEXP_SNAPSHOT": (Path("/data/CoordExp"), DEFAULT_SNAPSHOT_PROFILE),
         "SERENA_LIGHT_MS_SWIFT_SNAPSHOT": (Path("/data/ms-swift"), DEFAULT_SNAPSHOT_PROFILE),

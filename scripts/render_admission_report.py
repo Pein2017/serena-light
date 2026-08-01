@@ -16,7 +16,7 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Any, cast
 
-REQUIRED_PROFILES = ("transformers", "coordexp", "ms-swift", "cc-plugin-codex")
+REQUIRED_PROFILES = ("transformers", "coordexp", "ms-swift", "codexui")
 PROFILE_CONTRACTS = {
     "transformers": (
         "/root/miniconda3/envs/ms/lib/python3.12/site-packages/transformers",
@@ -26,11 +26,11 @@ PROFILE_CONTRACTS = {
     ),
     "coordexp": ("/data/CoordExp", "python", "PipelinePlanner", "public_data/pipeline/planner.py"),
     "ms-swift": ("/data/ms-swift", "python", "SwiftPipeline", "swift/pipelines/base.py"),
-    "cc-plugin-codex": (
-        "/data/CoordExp/cc-plugin-codex",
+    "codexui": (
+        "/data/CoordExp/external/codexUI",
         "typescript",
-        "createAgentStore",
-        "runtime/agent-store.mjs",
+        "normalizeCodexApiError",
+        "src/api/codexErrors.ts",
     ),
 }
 KNOWN_POSITION_ENCODINGS = frozenset({"utf-8", "utf-16", "utf-32"})
@@ -143,7 +143,7 @@ def _validate_ts_scope(scope: dict[str, Any]) -> None:
     if scope.get("overlay_generated") is not False:
         raise AdmissionError("TypeScript scope generated an overlay")
     checks = scope.get("checks")
-    if not isinstance(checks, dict) or set(checks) != {"ignored_subtree_fixture", "cc_plugin_codex"}:
+    if not isinstance(checks, dict) or set(checks) != {"ignored_subtree_fixture", "external_typescript_root"}:
         raise AdmissionError("TypeScript scope must contain both schema-v3 checks")
     for name, raw_check in checks.items():
         if not isinstance(raw_check, dict):
@@ -208,7 +208,7 @@ def _validate_ts_scope(scope: dict[str, Any]) -> None:
             raise AdmissionError(f"TypeScript scope check {name} did not clean up tsserver")
 
     fixture = checks["ignored_subtree_fixture"]
-    actual = checks["cc_plugin_codex"]
+    actual = checks["external_typescript_root"]
     if fixture.get("configured_program_outside_trust") != ["ignored-generated/hidden.ts"]:
         raise AdmissionError("TypeScript scope fixture did not detect its ignored source")
     if fixture.get("scope_compatible") is not False:

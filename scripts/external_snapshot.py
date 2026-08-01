@@ -11,10 +11,8 @@ from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
-from serena_light.bootstrap import repository_root, runtime_paths
-
 DEFAULT_SNAPSHOT_PROFILE = "default"
-CC_PLUGIN_CODEX_TYPESCRIPT_AUTHORITY_PROFILE = "cc-plugin-codex-typescript-authority-v1"
+NODE_DEPENDENCY_AUTHORITY_PROFILE = "external-node-dependency-authority-v1"
 
 
 def snapshot_identity(root: Path, *, profile: str = DEFAULT_SNAPSHOT_PROFILE) -> str:
@@ -32,13 +30,13 @@ def snapshot_identity(root: Path, *, profile: str = DEFAULT_SNAPSHOT_PROFILE) ->
 def snapshot_profile_for_environment(environment_name: str) -> str:
     """Return the declared authority profile for an external acceptance environment."""
 
-    if environment_name == "SERENA_LIGHT_CC_PLUGIN_CODEX_SNAPSHOT":
-        return CC_PLUGIN_CODEX_TYPESCRIPT_AUTHORITY_PROFILE
+    if environment_name == "SERENA_LIGHT_CODEXUI_SNAPSHOT":
+        return NODE_DEPENDENCY_AUTHORITY_PROFILE
     return DEFAULT_SNAPSHOT_PROFILE
 
 
 def _validate_profile(profile: str) -> None:
-    if profile not in {DEFAULT_SNAPSHOT_PROFILE, CC_PLUGIN_CODEX_TYPESCRIPT_AUTHORITY_PROFILE}:
+    if profile not in {DEFAULT_SNAPSHOT_PROFILE, NODE_DEPENDENCY_AUTHORITY_PROFILE}:
         raise ValueError(f"unknown external snapshot profile: {profile!r}")
 
 
@@ -71,49 +69,34 @@ def _git_snapshot_identity(root: Path, *, profile: str) -> str:
     _update_record(digest, b"tracked-binary-diff", tracked_diff)
     for relative_bytes in sorted(item for item in untracked if item):
         _update_path_content(digest, root, relative_bytes)
-    for relative_path in _profile_authority_paths(root, profile):
+    for relative_path in _profile_authority_paths(profile):
         _update_authority_path_content(digest, root, relative_path)
     return f"git:{head}:{digest.hexdigest()}"
 
 
-def _profile_authority_paths(root: Path, profile: str) -> tuple[Path, ...]:
+def _profile_authority_paths(profile: str) -> tuple[Path, ...]:
+    """Name the ignored install state that decides a Node root's semantic answers.
+
+    ``node_modules`` is Git-ignored, so HEAD plus the working-tree diff cannot
+    see a reinstall.  The lockfiles pin the resolved dependency set and the
+    TypeScript and ``vue-tsc`` launchers pin the root-native compiler path the
+    acceptance lane executes; both are small and finite, unlike the installed
+    tree itself.
+    """
+
     if profile == DEFAULT_SNAPSHOT_PROFILE:
         return ()
-    assert profile == CC_PLUGIN_CODEX_TYPESCRIPT_AUTHORITY_PROFILE
-    platform_package = f"@typescript/typescript-{_node_platform_architecture(root)}"
+    assert profile == NODE_DEPENDENCY_AUTHORITY_PROFILE
     return (
-        Path("package.json"),
         Path("package-lock.json"),
         Path("node_modules/.package-lock.json"),
         Path("node_modules/.bin/tsc"),
         Path("node_modules/typescript/package.json"),
         Path("node_modules/typescript/bin/tsc"),
         Path("node_modules/typescript/lib/tsc.js"),
-        Path("node_modules/typescript/lib/getExePath.js"),
-        Path("node_modules") / platform_package / "package.json",
-        Path("node_modules") / platform_package / "lib/tsc",
+        Path("node_modules/vue-tsc/package.json"),
+        Path("node_modules/vue-tsc/bin/vue-tsc.js"),
     )
-
-
-def _node_platform_architecture(root: Path) -> str:
-    """Read the platform from Serena Light's locked Node, never an ambient engine."""
-
-    locked_node = runtime_paths(repository_root())["node"]
-    result = subprocess.run(
-        [str(locked_node), "--eval", "process.stdout.write(`${process.platform}-${process.arch}`)"],
-        cwd=root,
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-    if result.returncode != 0:
-        raise RuntimeError(
-            f"could not determine Node platform architecture for {root}: {result.stderr.strip()}"
-        )
-    platform_architecture = result.stdout.strip()
-    if not platform_architecture or "/" in platform_architecture or "\\" in platform_architecture:
-        raise RuntimeError(f"invalid Node platform architecture: {platform_architecture!r}")
-    return platform_architecture
 
 
 def _source_tree_snapshot_identity(root: Path) -> str:

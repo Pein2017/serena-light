@@ -56,10 +56,12 @@ success through replay.
 Semantic references, declarations, and implementations already have a bounded
 target-stabilization owner in
 `WorkspaceRuntime._stabilize_semantic_locations`: it issues exactly two
-adapter requests, binds response-owned targets, and rejects changed adapter or
-target identities. The new outer filesystem transaction must remain bounded to
-two complete attempts and must not turn this inner two-request stabilization or
-adapter-process retry into an unbounded nested loop.
+authoritative adapter requests, binds response-owned targets, and rejects
+changed adapter or target identities. A cold TypeScript definition/reference
+may first issue one optional bounded `typeDefinition` preparation hint. The new
+outer filesystem transaction must remain bounded to two complete attempts and
+must not turn this inner stabilization or adapter-process retry into an
+unbounded nested loop.
 
 Before `a668f87`, the allowlisted read-only transformers root received one
 targeted stat from `WorkspaceRuntime._route`, but it had no matching
@@ -115,8 +117,9 @@ The retry census after `a668f87` found three independent finite owners rather
 than one nested retry loop:
 
 - the outer fresh-read transaction runs at most two complete attempts;
-- semantic target stabilization issues exactly two native requests per outer
-  attempt;
+- semantic target stabilization issues exactly two authoritative native
+  requests per outer attempt, plus at most one optional TypeScript preparation
+  hint;
 - the adapter runtime executes read-only work at most twice after transport or
   process loss, while edit work executes once.
 
@@ -174,14 +177,21 @@ models it as one deletion plus one creation.
 
 ## Real daemon/connector race evidence
 
-`a98a997` adds a loopback HTTP daemon exercised through the production
-`Connector`, with a spawned writer process connected only by a duplex pipe.
-Each race uses an explicit answer-produced barrier: an attempt first owns its
-document snapshot and language-server result, the foreign process completes
-and acknowledges the rewrite, and only then may read postflight continue.
-The harness therefore does not infer ordering from sleeps.
+`a98a997` adds a real `uvicorn` loopback HTTP daemon (`create_daemon_app`)
+exercised through the production `Connector`, `DaemonSession` protocol,
+`WorkspaceDaemonService`, and `WorkspaceRuntime` operating on a real Git
+workspace root, plus a spawned writer process connected only by a duplex
+pipe. Only the language server itself is a deterministic fake: adapter/LSP
+replies are scripted, not real Pyright or tsserver processes. Every
+freshness, ordering, and publication decision asserted here is still made by
+production code against that fake, not by a test double standing in for the
+production boundary. Each race uses an explicit answer-produced barrier: an
+attempt first owns its document snapshot and fake-adapter result, the foreign
+process completes and acknowledges the rewrite, and only then may read
+postflight continue. The harness therefore does not infer ordering from
+sleeps.
 
-Five real-boundary cases cover:
+Five real connector/runtime-boundary cases cover:
 
 - a Python symbol-body race that replays to one settled body, range, and hash;
 - a TypeScript astral-Unicode rewrite whose settled source position is mapped
@@ -216,12 +226,19 @@ SERENA_LIGHT_TRANSFORMERS_SNAPSHOT=transformers:4.57.1:4880a9c5bf65f2bb124b7739c
 ```
 
 `900ea93` adds observation-only navigation and diagnostics timing on the live
-`/data/CoordExp` and `/data/ms-swift` Git roots. Each operation has two samples,
-uses a nearest-rank empirical p50/p95, asserts the expected symbol and path for
+`/data/CoordExp` and `/data/ms-swift` Git roots. Each operation has exactly two
+samples; the underlying test code labels them via the standard nearest-rank
+formula (index `ceil(rank/100 * n)`), which sorts the two values before
+ranking and for `n=2` reduces exactly to the sample minimum (its "p50") and
+sample maximum (its "p95"). This is a two-sample nearest-rank minimum/maximum
+observation, not a statistical percentile: it carries no distributional
+meaning, must not be used for downstream sizing or regression inference, and
+which of the two calls ran first is not recorded. The table below reuses that
+same minimum/maximum framing, asserts only the expected symbol and path for
 global and scoped lookup, and has no latency pass threshold. The recorded
 seconds were:
 
-| root | operation | p50 | p95 |
+| root | operation | minimum | maximum |
 |---|---|---:|---:|
 | `/data/CoordExp` | global symbol | 12.53 | 33.95 |
 | `/data/CoordExp` | scoped symbol | 10.96 | 11.60 |
@@ -240,7 +257,9 @@ strengthened the symbol assertions, caught and corrected a test-only scoped
 envelope path mistake, and independently reran both timing cases: `2 passed`
 in 158.78 seconds. Ruff and Ty passed.
 
-Fresh Serena Light-only CC/Claude sessions selected current production build
+### Superseded host-client evidence
+
+Fresh Serena Light-only CC/Claude sessions selected the then-current production build
 `1a940728c705c5b1b2f460ec1950884727c91d4ddcebfb98a025171c88cff5cd`
 and shared daemon `cfb31059-c2d5-48b1-8e5d-afb0e020aa0b`. The Sonnet session
 queried `PipelinePlanner` and current diagnostics in `/data/CoordExp`, switched
@@ -254,11 +273,13 @@ reported explicitly rather than silently degraded. Both sessions released
 their bindings with `runtime_stop_pending=false` and observed no stale result.
 
 The fixed-snapshot TypeScript real acceptance separately passed `6 tests` in
-10.87 seconds, covering `/data/CoordExp/cc-plugin-codex`. These results close
-the four-root, cross-root, same-root-reactivation, navigation, diagnostics, and
-observation-only latency portions of task 5.2.
+10.87 seconds, covering `/data/CoordExp/cc-plugin-codex`. The implementation
+and TypeScript authority root subsequently changed, so these receipts remain
+historical evidence only: they do not close task 5.2 or the final-build host
+matrix. Current acceptance uses `/data/CoordExp/external/codexUI` and must not
+inspect or depend on the retired acceptance root.
 
-## Shared-client and lifecycle evidence in progress
+## Shared-client and lifecycle evidence
 
 `1eda55d` adds a real locked-service connector test with three independent
 stdio clients, two temporary Git roots, and one isolated build slot. It proves
@@ -281,20 +302,19 @@ kill.
 A read-only process census also identified 14 pre-build-slot flat-layout
 legacy daemons that predate current lifecycle ownership, have no established
 connections, and cannot be discovered by current connectors. They are an
-explicit pre-existing baseline, not newly created task-5.3 orphans. Current
-older-build daemon `92b2618e...` and current-build daemon `1a940728...` have
-real holders and remain untouched. Any manual cleanup of the legacy set needs
+explicit pre-existing baseline, not newly created task-5.3 orphans. At the
+time of that census, build-slot daemons `92b2618e...` and `1a940728...` had
+real holders and remained untouched. Any manual cleanup of the legacy set needs
 separate authorization and a fresh exact PID+create-time/connection check.
 
 The generic multi-client, multi-root, proxy, rollover, release, and zero-new-
-orphan portions of task 5.3 now have real process evidence. The task remains
-open until a fresh Codex lane joins the completed CC/Claude receipts during the
-planned independent review.
+orphan portions of task 5.3 have real process evidence. The final-build
+Sol-xhigh and Opus-max receipts recorded below close the four-root host matrix;
+the superseded pre-audit CC/Claude receipt remains historical context only.
 
 ## Documentation and complete gate evidence
 
-`24ae46c` updates README, roadmap, client registration, and the compatibility
-inventory for candidate build
+The earlier documentation pass at `24ae46c` described candidate build
 `1a940728c705c5b1b2f460ec1950884727c91d4ddcebfb98a025171c88cff5cd`.
 The public schema remains `3`, the dependency lock digest remains
 `eff6ebdf252faff7f77cb3a2f3894d17b9a0dfc89b46bd193fafdaa9e9ab4941`,
@@ -304,7 +324,7 @@ background-watcher or response-delivery-time guarantee, records the Git versus
 non-Git validation split, and keeps editing outside replay. The live ms-swift
 path is `/data/ms-swift`.
 
-Final pre-review gates on the documented candidate passed:
+Those superseded-candidate pre-review gates passed:
 
 - default full suite: `828 passed, 33 skipped` in 204.89 seconds; every skip
   was an explicit external-snapshot or performance gate;
@@ -328,6 +348,91 @@ Final pre-review gates on the documented candidate passed:
 
 The suite emits one pre-existing Starlette/httpx deprecation warning; it does
 not affect correctness or the public contract.
+
+## Current candidate gate evidence
+
+The active source-only rollover is
+`7d8dde45a8d91e2aeaaadc61e28e99771272cbdd81bc9c374584db82d7bf6d80`.
+It replaces the retired TypeScript acceptance root with the pinned snapshot of
+`/data/CoordExp/external/codexUI` and removes cold first-call test-order
+dependence for TypeScript declaration/reference queries. The internal bounded
+`textDocument/typeDefinition` owner hint may only open a trusted workspace
+owner; the two authoritative definition/reference responses still own the
+public result, and malformed, unsupported, external, or untrusted hints cannot
+enter it.
+
+Current pre-review gates pass:
+
+- four-snapshot full suite: `875 passed, 3 skipped` with `7 warnings` in
+  439.52 seconds; the only skips were the three explicit opt-in performance
+  cases, which passed separately as `3 passed, 875 deselected` with `4
+  warnings` in 190.37 seconds, for 878 passing cases in total;
+- five-run readiness/admission probe: `20/20` pass across `coordexp`,
+  `codexui`, `ms-swift`, and `transformers`; every run reports stable inventory
+  and `cleanup_ok=true`, and the rendered Section-1 report is `PASS`;
+- explicit TypeScript scope probe: overall `PASS`; the codexUI native program
+  remains inside lexical trust, while the ignored/symlink fixture is rejected
+  with the expected typed `SCOPE_INCOMPATIBLE` evidence and cleans up;
+- Ruff on `src`, `tests`, and `scripts`: pass;
+- Ty on the repository: pass;
+- locked service-runtime bootstrap materialize/check: pass with service-owned
+  CPython 3.12.12, Node 22.22.0, Pyright 1.1.403, TypeScript 5.9.3, and
+  typescript-language-server 5.1.3;
+- source ownership, direct dependency, forbidden import, census/manifest, and
+  copied-source provenance: pass, including all 9 copied hashes against Serena
+  commit `9a9d07e83d8c1cba3458992707f440c624446c6d`;
+- production LOC: 18,868, informational only with
+  `maximum_production_lines=null`;
+- strict OpenSpec validation and compatibility JSON/public-contract tests:
+  pass.
+
+The warnings are the existing Starlette/httpx deprecation and pytest xUnit2
+`record_property` notices.
+
+### Superseded pre-audit CC host receipt
+
+A fresh CC Agent running Sonnet-high selected pre-audit build
+`442987ed9cc4520743d4a79c880a6a19231d86a8628ae482108277ce00af38a1`
+and daemon `f38fc80c-1d1e-497c-9f0e-7fb6a3bcb66b`. One lease activated
+`/data/CoordExp`, `/data/CoordExp/external/codexUI`, `/data/ms-swift`, and the
+read-only conda-`ms` transformers root; both CoordExp and transformers
+same-root reactivations returned identical current symbols. The cold codexUI
+declaration resolved `normalizeCodexApiError` to `src/api/codexErrors.ts` and
+reported 11 references. The ms-swift declaration resolved
+`GenerationConfig` into the read-only transformers package. Final immediate
+release reported zero holders, `runtime_stopped=true`, and
+`runtime_stop_pending=false`. No file was edited, canonical Serena was not
+called, and `/data/CoordExp/cc-plugin-codex` was not inspected.
+
+The receipt predates the final audit repairs and therefore does not close the
+current build.
+
+### Final-build dual-audit and host receipts
+
+Fresh, independent Sol-xhigh and Opus-max sessions both selected build
+`7d8dde45a8d91e2aeaaadc61e28e99771272cbdd81bc9c374584db82d7bf6d80`
+before querying. Each used Serena Light only, activated `/data/CoordExp`,
+`/data/CoordExp/external/codexUI`, `/data/ms-swift`, and the read-only conda-`ms`
+transformers root, repeated same-root activation, resolved the cold first-call
+TypeScript declaration from `src/api/codexGateway.ts` into
+`src/api/codexErrors.ts`, resolved an ms-swift import into transformers, and
+ended with `active_holders=0`, `runtime_stopped=true`, and
+`runtime_stop_pending=false`.
+
+Sol-xhigh closed the prior source-`OSError` postflight/replay blocker and the
+optional TypeScript hint error, then returned **PASS** with no P0/P1/P2. It
+recorded one deferred P3: `_source_exception_path` accepts a bytes-valued
+`OSError.filename` although `Path(bytes)` is invalid; supported production
+operands are strings/`Path`, so this branch does not affect the accepted build.
+Opus-max independently verified both runtime repairs, the full recorded
+evidence, exact process ownership, corrected minimum/maximum labels, and both
+OpenSpec replacement deltas, and returned runtime **PASS** with no P0/P1. Its
+archive-gate concern was closed by retaining all stable scenario names and by
+the final sync/archive execution. The agent-facing wording and cold-TypeScript
+request census were corrected before archive.
+
+The final verdict is **PASS**. Canonical Serena remains unchanged; no reviewer
+edited a source library or inspected `/data/CoordExp/cc-plugin-codex` content.
 
 No correctness result required an authoritative background watcher, persistent
 content index, cooperative external-writer lock, filesystem snapshot, edit

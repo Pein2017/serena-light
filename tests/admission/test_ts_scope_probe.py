@@ -3,13 +3,18 @@ from typing import Any
 
 import pytest
 
-from tests.admission.ts_scope_probe import SCHEMA_VERSION, SCOPE_INCOMPATIBLE, run_probe
+from tests.admission.ts_scope_probe import (
+    EXTERNAL_TYPESCRIPT_ROOT,
+    SCHEMA_VERSION,
+    SCOPE_INCOMPATIBLE,
+    run_probe,
+)
 
 pytestmark = [
     pytest.mark.timeout(90),
     pytest.mark.external_repo(
-        root="/data/CoordExp/cc-plugin-codex",
-        snapshot_env="SERENA_LIGHT_CC_PLUGIN_CODEX_SNAPSHOT",
+        root=str(EXTERNAL_TYPESCRIPT_ROOT),
+        snapshot_env="SERENA_LIGHT_CODEXUI_SNAPSHOT",
     ),
 ]
 
@@ -40,14 +45,17 @@ def test_program_is_attributed_to_the_native_config(report: dict[str, Any]) -> N
             evidence = check["path_set_evidence"][name]
             assert evidence == {"count": len(check[name]), "sha256": _digest(check[name])}
 
-    actual = report["checks"]["cc_plugin_codex"]
+    actual = report["checks"]["external_typescript_root"]
     assert actual["tsserver_program"]
-    assert all(path.startswith("runtime/") and path.endswith(".mjs") for path in actual["tsserver_program"])
+    # ``tsconfig.json`` selects TypeScript sources only, and the program never
+    # reaches into the Git-ignored install.
+    assert all(path.endswith(".ts") for path in actual["tsserver_program"])
+    assert not any(path.startswith("node_modules/") for path in actual["tsserver_program"])
     assert all(path.endswith(".ts") for path in report["checks"]["ignored_subtree_fixture"]["tsserver_program"])
 
 
 def test_real_root_allows_native_config_omissions(report: dict[str, Any]) -> None:
-    actual = report["checks"]["cc_plugin_codex"]
+    actual = report["checks"]["external_typescript_root"]
     assert actual["configured_program_outside_trust"] == []
     assert actual["scope_compatible"] is True
     assert actual["error"] is None
@@ -98,7 +106,7 @@ def test_deleted_and_symlink_paths_never_enter_accepted_sets(report: dict[str, A
 def test_omitted_mjs_is_served_by_engine_owned_inferred_project_without_scope_expansion(
     report: dict[str, Any],
 ) -> None:
-    actual = report["checks"]["cc_plugin_codex"]
+    actual = report["checks"]["external_typescript_root"]
     proof = actual["path_scoped_omission_probe"]
     assert proof["path"].endswith(".mjs")
     assert proof["path"] in actual["trusted_not_in_configured_program"]

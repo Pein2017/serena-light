@@ -8,9 +8,13 @@ The connector executable used by live Codex/Claude configurations is the
 service-owned, build-identity-scoped path
 `/data/CoordExp/.codex/runtime/serena-light/deps/eff6ebdf252faff7f77cb3a2f3894d17b9a0dfc89b46bd193fafdaa9e9ab4941/python/bin/serena-light`
 with no arguments — **not** the repository `.venv`. The dependency-digest
-segment (`eff6ebdf...`) and the current repair-candidate build identity
-(`4b0a5e2e4460afbfde1456045d3fc381833c7c1dc41959d36742dbb094371f77`) are tied
-to a versioned daemon slot. A source/schema-only rollover reuses the dependency
+segment (`eff6ebdf...`) and each build identity installed under it are tied
+to a versioned daemon slot. The build identity
+`4b0a5e2e4460afbfde1456045d3fc381833c7c1dc41959d36742dbb094371f77` is
+historical: it names the archived 2026-07-30 position/coverage acceptance and
+has been superseded by later source-only rollovers, so read the identity in
+effect from `get_runtime_status` rather than treating it as current. A
+source/schema-only rollover reuses the dependency
 directory but gets a new build slot; a lock change also installs a new digest
 directory. Old build slots coexist until their holders and grace expire, so
 re-check the registration path after a dependency-lock change rather than
@@ -152,13 +156,13 @@ handle for a read-only external target lacking an exact response-owned
 snapshot. This accepted rollover leaves canonical Serena unchanged; known
 nonblocking error-budget limitations are recorded in that inventory.
 
-## Call-freshness strengthening rollover (in progress)
+## Call-freshness strengthening rollover (accepted)
 
-OpenSpec change `strengthen-call-freshness` is the current active
-implementation owner; `add-lexical-discovery` and then
-`improve-warm-runtime-reuse` remain strictly later and planning-only until
-each predecessor is accepted, synced, and archived. Candidate build
-`1a940728c705c5b1b2f460ec1950884727c91d4ddcebfb98a025171c88cff5cd` keeps the
+The implementation is archived at
+`openspec/changes/archive/2026-08-01-strengthen-call-freshness`;
+`add-lexical-discovery` and then `improve-warm-runtime-reuse` remain later and
+planning-only. Accepted build
+`7d8dde45a8d91e2aeaaadc61e28e99771272cbdd81bc9c374584db82d7bf6d80` keeps the
 same public tool schema (`3`) and the same dependency digest (`eff6ebdf...`)
 as the archived compact-success-schema build above. This is a source-only
 build-identity rollover: it does **not** change the registration command or
@@ -173,11 +177,12 @@ identity in effect by calling `get_runtime_status` after restart, rather
 than assuming any particular build is current without checking.
 
 Every content-bearing read now admits under its own FIFO per-call freshness
-ticket rather than accepting an already-running scan. Git-backed source and
-native config bytes are validated with a guarded preflight, then the
-operation itself while retaining response-owned byte witnesses, then a real
-postflight, all before the result reaches a client. A change observed at
-postflight discards that attempt and replays the complete read once; a
+ticket rather than accepting an already-running scan. Every call receives a
+guarded preflight. A source-derived success or failure then retains
+response-owned byte witnesses and receives a real postflight before it reaches
+a client; invalid locators, trust failures, and adapter-owned
+cold/cooldown/busy/timeout conditions remain typed after one preflight. A
+change observed at postflight discards that attempt and replays the complete read once; a
 second race returns a typed retryable `NOT_READY` with reason
 `workspace_changed_during_read` — a well-behaved client should retry such a
 call rather than treat it as a hard failure. This guarantee is anchored at
@@ -189,31 +194,32 @@ transformers root keeps targeted stat-plus-byte pre/post validation for
 scoped/indexed reads and adds a bounded no-symlink full-root pre/post scan
 for global, directory, or not-yet-indexed reads on that root.
 
-Current evidence is candidate-only, not PASS. The deterministic race-test
+Acceptance evidence is PASS. The deterministic race-test
 suite and a real daemon/connector race harness both pass. A real
 shared-daemon acceptance run proved three simultaneous clients across two
 roots, same-root reactivation, a partial release, a poisoned-proxy
-environment, and zero newly created test-owned LSP process orphans; fresh CC
-Sonnet and Opus clients used Serena Light exclusively and shared this daemon
-build across all four live roots (`/data/CoordExp`,
-`/data/CoordExp/cc-plugin-codex`, `/data/ms-swift`, and the read-only conda
-`ms` transformers package), releasing cleanly. Targeted fresh-client
-latency smokes are now complete: both parametrized latency-smoke cases pass
-after strengthened semantic assertions (`2 passed in 158.78s`; the prior
-full Python real-acceptance suite passed `8 in 331s`). Recorded per-call
+environment, and zero newly created test-owned LSP process orphans. Prior CC
+Sonnet/Opus host receipts remain superseded-build evidence and do not close
+the current host matrix after the TypeScript authority root moved to
+`/data/CoordExp/external/codexUI`. The current four-snapshot suite passes 875
+tests with only the 3 explicit performance cases skipped in 439.52 seconds;
+those 3 observation-only cases pass separately in 190.37 seconds, for 878
+passing cases in total. This includes isolated cold first-call TypeScript
+declaration/reference coverage. Recorded per-call
 navigation/diagnostics latency is observation-only (2 samples per call,
-nearest-rank p50/p95, no threshold): `/data/CoordExp` global 12.53/33.95s,
-scoped 10.96/11.60s, overview 11.57/11.74s, diagnostics 11.00/11.04s;
-`/data/ms-swift` global 1.49/15.21s, scoped 0.46/0.87s, overview 0.47/0.55s,
-diagnostics 0.47/0.47s — these motivate the later `improve-warm-runtime-reuse`
+sample minimum/maximum, no threshold or percentile interpretation):
+`/data/CoordExp` global 11.32/33.27s,
+scoped 10.87/11.22s, overview 10.74/11.31s, diagnostics 10.29/10.93s;
+`/data/ms-swift` global 1.44/13.16s, scoped 0.45/0.89s, overview 0.57/0.95s,
+diagnostics 0.85/0.90s — these motivate the later `improve-warm-runtime-reuse`
 warm-pool work but are not themselves a failure or a registration gate. The
-shared-daemon acceptance above is only partially complete: its process-level
-shared-client lifecycle portion is done, but the host-client matrix is not
-yet closed until a planned fresh Codex/Sol lane joins the two existing
-CC/Claude receipts. Documentation and the full
-pytest/Ruff/Ty/bootstrap/provenance gates now pass; independent
-correctness/runtime review remains open, so do not register this candidate as
-an accepted release path.
+shared-daemon acceptance is complete: its process-level shared-client lifecycle
+passes, and fresh Sol-xhigh and Opus-max sessions on the final build each pass
+all four roots, same-root reactivation, cold TypeScript declaration,
+cross-library resolution, and immediate zero-holder release. The full
+pytest/Ruff/Ty/bootstrap/provenance and strict OpenSpec gates pass, both final
+reviews pass, and this registration path is accepted. Canonical Serena remains
+unchanged.
 
 A pre-existing environment separately has 14 flat-layout legacy daemons that
 predate the current build-slot registration scheme, with no active
@@ -302,8 +308,11 @@ with `--strict-mcp-config`, `--tools ''`, and an explicit read-only
 not change canonical Serena and remained on final independent dual-audit hold
 at that predecessor build.
 
-The latest independently dual-audited correctness candidate is
-`4b0a5e2e4460afbfde1456045d3fc381833c7c1dc41959d36742dbb094371f77`.
+The independently dual-audited correctness candidate of the archived 2026-07-30
+position/coverage acceptance was
+`4b0a5e2e4460afbfde1456045d3fc381833c7c1dc41959d36742dbb094371f77`; later
+source-only rollovers have superseded it, so the receipts below are historical
+evidence for that build rather than a statement about the current one.
 Its predecessor `ecc4689b781c2de8c4bf03788a4dc17388c28e402220b99519294f31010dc358`
 had a Sol-xhigh PASS but an Opus-max runtime HOLD.
 The `481c45e...` audits proved that owner-before-`didChange` is sufficient only
@@ -319,11 +328,11 @@ showed that a first barrier timeout lost the obligation on exact retry. The
 same-connection barrier and drained LRU/watched close state before reopen, but
 its watcher-created temporary lifecycle could record a close marker while the
 URI remained locally open, and cached diagnostics reuse did not drain markers.
-The current candidate skips that temporary lifecycle for an owned URI and
+That `4b0a5e2e...` candidate skips that temporary lifecycle for an owned URI and
 drains before retaining any cached diagnostics owner. The
 `b3b9952e...`, `481c45e...`, `22c80421...`, and `e26ccf65...` fresh-client
-receipts remain predecessor evidence and are not relabelled as the current
-build. Exact-current Codex, hooks-isolated native Claude Code 2.1.220, and CC
+receipts remain predecessor evidence and are not relabelled as a later
+build. Exact-build Codex, hooks-isolated native Claude Code 2.1.220, and CC
 Agent acceptance now pass the hash edit/restore and four-root semantic matrix
 as predecessor evidence. Exact build `4b0a5e2e...` also passes the 747-test
 fixed-snapshot suite and fresh Codex, native Claude Code, and CC Agent

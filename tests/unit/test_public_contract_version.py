@@ -25,10 +25,12 @@ def test_compatibility_revision_matches_public_tool_schema_and_build_identity() 
     )
 
 
-def test_compact_candidate_passes_fresh_clients_and_remains_on_dual_audit_hold() -> None:
+def test_compact_and_freshness_candidates_have_final_acceptance() -> None:
     compatibility = json.loads((REPOSITORY_ROOT / "docs" / "compatibility.json").read_text())
     acceptance = compatibility["acceptance"]
 
-    assert acceptance["current_candidate_fresh_session_accepted"] is True
+    assert acceptance["compact_candidate_fresh_session_accepted"] is True
     assert acceptance["edit_reacceptance_pending"] is False
-    assert acceptance["dual_audit_hold"] is True
+    assert acceptance["dual_audit_hold"] is False
+    assert acceptance["strengthen_call_freshness"]["status"] == "pass"
+    assert acceptance["strengthen_call_freshness"]["release_pass"] is True
