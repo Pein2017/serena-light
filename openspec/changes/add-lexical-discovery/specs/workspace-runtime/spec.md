@@ -100,18 +100,18 @@ public `initial_instructions` tool.
 - **THEN** all routing guidance is already available without invoking an extra
   public tool or hook
 
-### Requirement: Lexical tools roll over as public schema 4
+### Requirement: Lexical tools roll over as public schema 5
 The daemon and connector SHALL advertise exactly `find_paths` and `search_text`
 as new read-only tools, SHALL include their schemas and initialize instructions
 version in public tool/schema identity, and SHALL report public schema version
-`4`. A connector SHALL attach only to a daemon with the identical build and
+`5`. A connector SHALL attach only to a daemon with the identical build and
 public schema identity.
 
-#### Scenario: Schema-3 daemon is still leased
-- **WHEN** schema-4 source and dependencies are installed while an older
-  schema-3 daemon retains holders
-- **THEN** new connectors start or attach to the schema-4 build slot without
-  killing the leased schema-3 daemon
+#### Scenario: Schema-4 daemon is still leased
+- **WHEN** schema-5 source and dependencies are installed while an older
+  schema-4 daemon retains holders
+- **THEN** new connectors start or attach to the schema-5 build slot without
+  killing the leased schema-4 daemon
 
 #### Scenario: Connector read-only routing is checked
 - **WHEN** either lexical tool crosses the connector boundary

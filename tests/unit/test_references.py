@@ -161,7 +161,7 @@ def test_reference_at_module_scope_returns_typed_file_container() -> None:
 
     reference = value["data"]["references"][0]
     assert reference["container"] == {"kind": "file", "name_path": "<file>"}
-    assert reference["snippet"] == "target()"
+    assert "snippet" not in reference
 
 
 def test_external_reference_is_preserved_as_read_only_without_expanding_workspace() -> None:
@@ -260,8 +260,6 @@ def test_malformed_workspace_symbol_tree_retains_snapshot_coordinate_mapping() -
                 "end": {"line": 0, "column": 6, "text_offset": 6, "byte_offset": 6},
             },
             "container": {"kind": "file", "name_path": "<file>"},
-            "snippet": "target()",
-            "snippet_truncated": False,
         }
     ]
 

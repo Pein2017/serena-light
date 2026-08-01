@@ -8,7 +8,8 @@ from pathlib import Path
 from typing import Protocol
 
 BUILD_IDENTITY_ALGORITHM_VERSION = 3
-PUBLIC_TOOL_SCHEMA_VERSION = "3"
+# Bump for the compact interaction contract and initialize instructions.
+PUBLIC_TOOL_SCHEMA_VERSION = "4"
 RUNTIME_SOURCE_SUFFIXES = frozenset({".mjs", ".py"})
 # The dependency slot is content-addressed by resolved lock state, not by
 # unrelated project metadata or developer-tool configuration.  Both lockfiles

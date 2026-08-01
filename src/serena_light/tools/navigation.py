@@ -122,7 +122,7 @@ class DocumentNavigationService:
         self,
         relative_path: str,
         *,
-        max_depth: int = 1,
+        max_depth: int = 0,
         max_answer_chars: int = 12_000,
     ) -> ToolEnvelope:
         """Return a bounded view of one document-symbol tree."""
@@ -262,7 +262,7 @@ class DocumentNavigationService:
 def get_symbols_overview(
     document: DocumentNavigation,
     *,
-    max_depth: int = 1,
+    max_depth: int = 0,
     max_answer_chars: int = 12_000,
 ) -> ToolEnvelope:
     """Render a bounded overview from ``document``'s single normalized tree."""

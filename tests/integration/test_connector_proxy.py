@@ -21,6 +21,7 @@ from serena_light.connector import (
     McpDaemonSession,
     build_proxy_server,
 )
+from serena_light.instructions import AGENT_INSTRUCTIONS
 from serena_light.runtime_files import BearerSecret
 
 
@@ -143,7 +144,8 @@ def test_real_in_process_mcp_server_proxies_tools_and_preserves_structured_resul
                     name="in-process-stdio-proxy",
                 )
                 async with ClientSession(downstream_client_receive, downstream_client_send) as downstream_client:
-                    await downstream_client.initialize()
+                    initialized = await downstream_client.initialize()
+                    assert initialized.instructions == AGENT_INSTRUCTIONS
                     listed = await downstream_client.list_tools()
                     assert [item.name for item in listed.tools] == ["activate_workspace", "echo"]
                     echoed = await downstream_client.call_tool("echo", {"value": "through-proxy"})

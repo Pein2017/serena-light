@@ -35,7 +35,7 @@ old Serena `--project-from-cwd` behavior but implemented as connector
 behavior — do **not** pass `--project-from-cwd`, `--context`, or old Serena
 dashboard/logging arguments. A later shell `cd` is not observed. To use a
 nested Git root or switch to a different root entirely, call
-`activate_workspace` with an absolute path explicitly.
+`activate_workspace` with an absolute directory path explicitly.
 
 ## Codex
 
@@ -230,6 +230,40 @@ legacy flat artifact is fail-closed, and any manual cleanup requires
 separately authorized PID-plus-create-time (or connection) revalidation
 outside this rollover. A live build-slot holder, including one created by
 this rollover, still retires normally through the existing lease/grace path.
+
+## Current schema-4 interaction migration
+
+The archived sections above describe their own schema-3 acceptance evidence.
+The current public tool schema is 4, so a fresh connector resolves a distinct
+schema-4 build slot while a leased schema-3 slot drains normally. Do not stop a
+daemon by name to force this migration: restart or reconnect only the client
+being updated, then verify its tool list and `get_runtime_status`.
+
+The exact MCP initialize text is owned by
+`serena_light.instructions.AGENT_INSTRUCTIONS` and is published byte-for-byte
+by both the outer stdio `Server` and inner daemon `FastMCP`; the canonical text
+is recorded in [the compatibility inventory](compatibility.json). Its operating
+rules are consequential for client behavior: startup cwd binds once, shell `cd`
+does not rebind, cross-root work requires absolute `activate_workspace`, symbol
+overview starts at depth 0, reference snippets need a positive opt-in, and
+diagnostics are explicit after a meaningful edit group. Runtime status is for
+debug/build/readiness questions, not a routine preflight.
+
+Navigation and diagnostics success now expose only canonical
+`{"ok":true,"data":{"workspace":"<absolute root>","files":[...],"omitted":<int>}}`
+payloads. Overview depth/kind selection and default descendant
+variable/constant suppression are selection semantics, not `omitted` data loss.
+References exclude the declaration and use exactly `{"complete":true}` for
+complete coverage; incomplete coverage carries only `complete=false`, the
+uncovered total, a bounded path/reason sample, and its omitted count. Diagnostics
+are file-grouped compact findings, with `authority="advisory"` only once for a
+TypeScript file group. Engine, adapter, generation, configured-program digest,
+URI, text-offset, and byte-offset details remain in runtime status or typed
+operational errors rather than successful results.
+
+Schema 4 does not enable lexical discovery, diagnostics hooks/automatic
+injection, or RTK. Continue to use host shell/file tools for lexical file and
+text work; do not configure a hook or a second instructions tool.
 
 ## Stop, rollback, and limits
 

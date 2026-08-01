@@ -25,8 +25,16 @@ path/hash, text offset, or byte offset. Public ranges SHALL use
 `[[start_line,start_column],[end_line,end_column]]`, with 0-based decoded-text
 lines and 0-based Unicode code-point columns from the exact verified snapshot.
 Known symbol kinds SHALL be stable lowercase strings and unknown numeric kinds
-SHALL be `unknown:<integer>`. Error envelopes SHALL retain their existing rich
-typed metadata.
+SHALL be `unknown:<integer>`.
+
+Deterministic `INVALID_INPUT`, `INVALID_PATH`, and `SYMBOL_NOT_FOUND` errors
+SHALL contain `ok=false`, a typed code and concise message, the bound workspace
+when available, and only bounded details required to correct the query; they
+MUST NOT repeat adapter phase, runtime generations, configured-program detail,
+or engine identity. `AMBIGUOUS_SYMBOL` SHALL retain a bounded deterministic
+candidate set. Operational `NOT_READY`, `BUSY`, `COOLDOWN`, `TIMED_OUT`,
+`SCOPE_INCOMPATIBLE`, and `UNCERTAIN` failures SHALL retain the rich adapter,
+generation, phase, retry, and diagnostic metadata required to recover.
 
 A reference, declaration, or implementation record backed by an exact
 response-owned snapshot SHALL use compact `range`. A read-only external target
@@ -43,9 +51,13 @@ owner.
 - **WHEN** a supported semantic query completes
 - **THEN** the response has `ok=true`, compact `data.workspace`, `data.files`, and `data.omitted`, with no repeated operational metadata
 
-#### Scenario: Navigation cannot run
-- **WHEN** a request is invalid, untrusted, out of workspace, unsupported, not ready, busy, timed out, or in cooldown
-- **THEN** the response has `ok=false` and the existing stable rich error code and diagnostic metadata rather than a successful empty payload
+#### Scenario: Deterministic query fails
+- **WHEN** a query has invalid input/path or a current ready snapshot contains no matching symbol
+- **THEN** the response keeps the typed correction evidence without adapter, engine, configuration, or generation repetition
+
+#### Scenario: Navigation cannot run operationally
+- **WHEN** a request is unsupported, not ready, busy, timed out, uncertain, in cooldown, or incompatible with configured scope
+- **THEN** the response has `ok=false` and the existing rich error code, phase, retry, and authority metadata rather than a successful empty payload
 
 #### Scenario: UTF-16 adapter reports a range after an astral character
 - **WHEN** a semantic result follows a non-BMP character in a UTF-8 file with CRLF line endings and an optional BOM
@@ -79,31 +91,34 @@ owner.
 Every navigation tool that accepts `max_answer_chars` SHALL default it to
 12,000 and accept values from 512 through 50,000 inclusive. `find_declaration`
 SHALL expose the same input. The bound SHALL apply to the length of the complete
-canonical JSON string placed in the actual MCP `CallToolResult.content[0].text`
-after every field, file group, and `omitted` count is present. The same JSON
-value SHALL be available in `structuredContent`.
+canonical minified JSON string placed in the actual MCP
+`CallToolResult.content[0].text` after every field, file group, coverage object,
+and `omitted` count is present. The same JSON value SHALL be available in
+`structuredContent`.
 
 Before grouping, the system SHALL deduplicate and deterministically order atomic
 results. It SHALL apply `max_matches` where present, then remove trailing whole
 records or overview subtrees and reserialize until the success text fits. It
-MUST NOT cut a path, name, range, body, info, snippet, or JSON token. `omitted`
-SHALL equal the number of atomic results removed by all public limits, including
-overview depth and kind filters, plus any upstream semantic bound reported to
-the presentation layer. If at least one semantic match exists but the first
-eligible record in stable order cannot fit, the tool SHALL return a bounded
-`INVALID_INPUT` error containing `field=max_answer_chars` and
-`minimum_required_chars`, together with the workspace, adapter, and generation
-authority available from the original semantic result, rather than an empty
-success. For a multi-adapter global result, the available authority SHALL be a
-bounded deterministic list of adapter/generation pairs in error details rather
-than a fabricated single top-level adapter. Candidate-bearing semantic errors
-SHALL bound their evidence using the caller's public answer budget even when a
-larger private internal limit is used to avoid prematurely pruning compact
-success.
+MUST NOT cut a path, name, range, body, info, snippet, message, or JSON token.
+`omitted` SHALL equal the number of atomic results removed by public match or
+answer limits plus any upstream semantic bound reported to the presentation
+layer. Caller-selected overview depth, explicit kind filters, and default
+descendant-noise filtering MUST NOT contribute to `omitted`.
+
+If at least one semantic match exists but the first eligible record in stable
+order cannot fit, the tool SHALL return a bounded `INVALID_INPUT` error
+containing `field=max_answer_chars` and `minimum_required_chars`, together with
+the workspace and only the minimum original semantic authority needed to make
+that measurement, rather than an empty success. For a multi-adapter global
+result, the available authority SHALL be a bounded deterministic list of
+adapter/generation pairs in error details rather than a fabricated single
+top-level adapter. Candidate-bearing semantic errors SHALL bound their evidence
+using the caller's public answer budget even when a larger private internal
+limit is used to avoid prematurely pruning compact success.
 
 #### Scenario: FastMCP would expand an inner bounded value
 - **WHEN** the complete result would fit an internal compact fragment but the final MCP text would exceed `max_answer_chars`
-- **THEN** whole trailing results are omitted until the connector-observed `content[0].text` fits and `structuredContent` represents the same value
+- **THEN** the connector-visible `content[0].text` is the canonical minified JSON, fits the bound after whole-result pruning, and `structuredContent` represents the same value
 
 #### Scenario: Exact body is larger than the answer bound
 - **WHEN** one exact requested symbol body is the first eligible stable record and its complete success cannot fit
@@ -127,34 +142,47 @@ success.
 
 ### Requirement: Symbol overviews are document-scoped
 `get_symbols_overview` SHALL use the owning adapter's document-symbol tree for
-one authorized source file and SHALL support a bounded descendant depth. Its
-single file group SHALL contain `symbols`; each overview node SHALL contain only
-`name`, lowercase `kind`, and `children` when non-empty. It MUST NOT return node
-ranges, selection ranges, detail, name paths, hashes, adapter/generation data,
-or boolean child flags. Optional `include_kinds` and `exclude_kinds` SHALL accept
-stable lowercase kind strings and SHALL narrow the result without changing the
-default complete set of symbol kinds. Filtering SHALL be post-order: a
+one authorized source file, SHALL default `max_depth` to 0, and SHALL support an
+explicit bounded descendant depth. Its single file group SHALL contain
+`symbols`; each overview node SHALL contain only `name`, lowercase `kind`, and
+`children` when non-empty. It MUST NOT return node ranges, selection ranges,
+detail, name paths, hashes, adapter/generation data, or boolean child flags.
+
+At depth 0 the default SHALL retain every supported root symbol kind. At an
+explicit depth greater than 0, descendant `variable` and `constant` nodes SHALL
+be suppressed unless `include_kinds` explicitly requests those kinds. Optional
+`include_kinds` and `exclude_kinds` SHALL accept stable lowercase kind strings
+and SHALL otherwise narrow the result. Filtering SHALL be post-order: a
 non-matching ancestor MAY remain only when required to retain a matching
-descendant's structural path, `exclude_kinds` SHALL win for a node named in both
-filters, and every node actually removed by filtering SHALL increment
-`omitted`. Descendants removed by `max_depth` and nodes removed by final answer
-budgeting SHALL also contribute to the same `omitted` total.
+descendant's structural path, and `exclude_kinds` SHALL win for a node named in
+both filters. Nodes outside selected depth, nodes removed by explicit/default
+kind selection, and structural ancestors removed as a consequence MUST NOT
+increment `omitted`; nodes or subtrees removed by the final answer budget and
+any upstream semantic cap SHALL increment it.
 
 #### Scenario: MJS file overview is requested
 - **WHEN** the client requests an overview of `external/codexUI/scripts/generate-pwa-icons.mjs`
 - **THEN** the TypeScript adapter returns the file's functions and requested descendants as compact name/kind/children nodes without scanning unrelated files
 
 #### Scenario: Default overview is requested
-- **WHEN** neither kind filter is supplied
-- **THEN** no supported symbol kind is silently hidden
+- **WHEN** neither depth nor kind filter is supplied
+- **THEN** every root symbol is returned, no descendants are returned, and `omitted` does not claim that caller-unrequested descendants were truncated
+
+#### Scenario: Caller requests structural descendants
+- **WHEN** `max_depth` is greater than 0 and no kind filter is supplied
+- **THEN** structural descendants remain visible while descendant variables/constants are omitted as default selection rather than truncation
+
+#### Scenario: Caller explicitly requests descendant variables
+- **WHEN** `include_kinds` contains `variable` or `constant` with sufficient `max_depth`
+- **THEN** matching descendants remain reachable through the minimum ancestor path and explicit/default filtering does not inflate `omitted`
 
 #### Scenario: Kind filter matches only nested descendants
 - **WHEN** a requested kind occurs below an ancestor whose kind does not match the filter
-- **THEN** the matching descendant remains reachable through the minimum ancestor path and every unrelated removed node contributes to `omitted`
+- **THEN** the matching descendant remains reachable through the minimum ancestor path and unrelated filtered nodes do not contribute to `omitted`
 
 #### Scenario: Result exceeds the answer limit
 - **WHEN** the final serialized overview exceeds `max_answer_chars`
-- **THEN** trailing nodes or complete remaining subtrees are removed in stable preorder, orphan children and childless nonmatching structural ancestors are never produced, and `omitted` counts every removed node
+- **THEN** trailing nodes or complete remaining subtrees are removed in stable preorder, orphan children and childless nonmatching structural ancestors are never produced, and `omitted` counts exactly the budget-removed nodes plus any upstream semantic cap
 
 ### Requirement: Path-scoped symbol lookup preserves name paths
 `find_symbol` SHALL match Serena-style symbol name paths within an explicitly
@@ -249,36 +277,52 @@ SHALL both contribute to the single `data.omitted` count.
 - **THEN** global lookup for that adapter is disabled with `UNSUPPORTED` rather than using an O(files) fallback
 
 ### Requirement: Reference results identify containing symbols
-`find_referencing_symbols` SHALL request references from the owning adapter and
-map each reference to a containing symbol and bounded code snippet when one can
-be determined. Language-specific recovery logic SHALL remain inside the
-adapter. Each file group SHALL contain `references`; each record SHALL contain
-compact `range` (or `raw_range` plus `position_basis` for an external target
-lacking an exact response-owned snapshot), optional containing `symbol`, and
-optional `snippet`, while path and trusted-external/read-only identity appear
-once on the file group.
+`find_referencing_symbols` SHALL request references from the owning adapter with
+declaration inclusion disabled and SHALL map each remaining reference to a
+containing symbol when one can be determined. Language-specific recovery logic
+SHALL remain inside the adapter. Each file group SHALL contain `references`;
+each record SHALL contain compact `range` (or `raw_range` plus
+`position_basis` for an external target lacking an exact response-owned
+snapshot), optional containing `symbol`, and optional `snippet`, while path and
+trusted-external/read-only identity appear once on the file group. Snippets
+SHALL remain absent by default and SHALL appear only when the caller gives the
+existing `max_snippet_chars` a value greater than zero.
 
 A successful result SHALL retain one bounded `data.coverage` object from the
-same freshness and configured-program generation used for dispatch. The object
-SHALL include `adapter`, `language`, `scope_kind`, `configured_program_files`,
-`configured_program_digest`, `trusted_language_files`,
-`trusted_language_digest`, `uncovered_files`, and a deterministically sorted
-`uncovered_sample` with `total`, `items`, `digest`, and `omitted`. The digest
-SHALL identify the full sorted uncovered-path set, not only the returned sample.
-The service MUST NOT supplement semantic references with lexical matches or
-claim that trusted files outside the configured program were searched.
+same freshness and configured-program generation used for dispatch. If the
+configured program covers the entire trusted supported-language inventory, the
+object SHALL contain exactly `complete=true`. Otherwise it SHALL contain
+`complete=false`, `uncovered_files` as the total uncovered count, a
+deterministically sorted bounded `sample` of uncovered paths and reasons, and
+`omitted` as the number not shown. Full configured-program/trust counts,
+digests, and projection evidence SHALL remain available in runtime status and
+rich scope errors. The service MUST NOT supplement semantic references with
+lexical matches or claim that trusted files outside the configured program were
+searched.
 
 #### Scenario: Reference occurs inside a function
-- **WHEN** a reference location falls inside a document symbol
-- **THEN** one compact reference record includes the containing symbol, compact range, and bounded snippet while file identity and coverage are not repeated
+- **WHEN** a non-declaration reference location falls inside a document symbol
+- **THEN** one compact reference record includes the containing symbol and compact range, while file identity and coverage are not repeated
+
+#### Scenario: Caller opts into a snippet
+- **WHEN** `max_snippet_chars` is greater than zero and a bounded snippet can be mapped to the exact snapshot
+- **THEN** the compact reference record includes that snippet without repeating path or runtime authority
 
 #### Scenario: Reference has no containing symbol
-- **WHEN** a valid reference occurs at module scope or cannot be mapped safely
+- **WHEN** a valid non-declaration reference occurs at module scope or cannot be mapped safely
 - **THEN** the record uses the typed file-level container rather than being discarded
+
+#### Scenario: Declaration is returned by the language server
+- **WHEN** the underlying server would include the queried declaration in a reference response
+- **THEN** Serena Light excludes it and leaves declaration retrieval to `find_declaration`
+
+#### Scenario: Configured program covers every trusted language file
+- **WHEN** a semantic reference query completes with full configured-program coverage
+- **THEN** the single coverage object is exactly `{"complete":true}`
 
 #### Scenario: Configured program excludes trusted tests
 - **WHEN** a semantic reference query completes with no references and the native project excludes trusted supported-language test files
-- **THEN** `files=[]`, `omitted=0`, and the single coverage object reports the excluded files as uncovered without implying repository-wide absence
+- **THEN** `files=[]`, `omitted=0`, and the single incomplete coverage object reports the total, bounded sample, and omitted count without implying repository-wide absence
 
 #### Scenario: Reference adapter is not semantically ready
 - **WHEN** the owning adapter is cold, incompatible, timed out, in cooldown, or lacks reference capability
@@ -286,7 +330,7 @@ claim that trusted files outside the configured program were searched.
 
 #### Scenario: Coverage sample exceeds its bound
 - **WHEN** the trusted supported-language inventory contains more uncovered paths than the fixed coverage sample limit
-- **THEN** coverage retains the deterministic prefix, accurate total/omitted counts, and full-set digest without repeating them per reference
+- **THEN** coverage retains the deterministic prefix and accurate total/omitted counts without repeating full projection digests or counts
 
 ### Requirement: Definition and implementation tools preserve Serena semantics
 The system SHALL expose the stable Serena-compatible `find_declaration` name as

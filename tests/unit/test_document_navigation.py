@@ -64,12 +64,13 @@ def _mutable_raw() -> list[dict[str, Any]]:
     return cast(list[dict[str, Any]], deepcopy(raw))
 
 
-def test_python_overview_uses_one_normalized_tree_depth_and_utf16_crlf_positions() -> None:
+def test_python_overview_defaults_to_root_depth_and_uses_one_normalized_tree() -> None:
     document = DocumentNavigation.from_input(_document())
 
-    value = get_symbols_overview(document, max_depth=0).to_dict()
+    value = get_symbols_overview(document).to_dict()
 
     assert value["ok"] is True
+    assert value["data"]["max_depth"] == 0
     assert value["data"]["depth_truncated"] is True
     symbol = value["data"]["symbols"][0]
     assert symbol["name_path"] == "Café"

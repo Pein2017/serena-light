@@ -20,6 +20,11 @@ Guarded editing (`replace_symbol_body`) is restored after reacceptance.
 `add-lexical-discovery` and `improve-warm-runtime-reuse` are the next two
 strictly ordered changes in that phase and remain planning-only.
 
+The active `tighten-agent-interaction` revision advances the public schema to
+4 for compact overview/reference/diagnostics presentation and source-owned MCP
+initialize guidance. It does not start `add-lexical-discovery`, introduce a
+diagnostics hook, or add RTK; those remain outside this revision's scope.
+
 ## Phase A: contain and repair v1
 
 1. Contain guarded editing and isolate loopback traffic from ambient proxies.
@@ -202,7 +207,7 @@ predecessor is accepted, synced, and archived.
 2. `add-lexical-discovery` adds bounded `find_paths` and `search_text` tools
    over a full-file trust catalog, using a pinned Serena-Light-owned ripgrep
    executable and the strengthened freshness contract from step 1. It bumps
-   the public tool schema from 3 to 4.
+   the public tool schema from 4 to 5.
 3. `improve-warm-runtime-reuse` replaces the fixed ten-minute zero-holder
    grace with a bounded, LRU-evicted warm pool (at most three zero-holder
    workspaces, 30 minutes, 1.5 GiB soft RSS cap) and finite opportunistic
@@ -248,6 +253,14 @@ The change is **PASS**, synced, and archived.
 implementation. See
 [`openspec/changes/archive/2026-08-01-strengthen-call-freshness`](../openspec/changes/archive/2026-08-01-strengthen-call-freshness)
 for the owning tasks and acceptance evidence.
+
+Before lexical work begins, the active schema-4 interaction revision must keep
+the routing boundary intact: initialize guidance sends lexical file/text work
+to host shell/file tools, overview begins at depth 0, references exclude the
+declaration and keep snippets opt-in, and diagnostics stay explicit. It adds no
+lexical tools, diagnostics hooks, or RTK integration. The deferred lexical
+change is therefore re-based as the next public schema rollover (5), not a
+second owner of schema 4.
 
 ## Phase F: agent-facing position queries
 

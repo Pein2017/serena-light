@@ -1,5 +1,5 @@
 {
-  "schema_version": 3,
+  "schema_version": 4,
   "scope": "parallel serena-light registration; not canonical-serena replacement",
   "semantic_contract": {
     "coordinates": {
@@ -12,27 +12,66 @@
     "assignment_bodies": "Python module-executed variables/constants and TypeScript/JavaScript top-level variable bindings return a unique complete assignment statement when include_body=true; TypeScript/JavaScript includes an existing terminal semicolon and requires the exact selected snapshot text to equal the semantic candidate name; body lookup and guarded editing share the same fail-closed recovery",
     "semantic_replay": "at most 64 unique workspace plus external target URIs; exact runtime token, complete capability identity, encoding, generations, and canonical location multiset must remain stable; deterministic overflow is non-retryable UNSUPPORTED",
     "diagnostics_publication": "versioned engines install ownership before didChange and require integer publication version evidence; unversioned engines disown old tracking, send didClose, await a bounded same-connection response barrier, and only then install a new owner before exact-full-text didOpen or cached diagnostics reuse; watcher-created temporary opens never close a URI already owned open, and close publications plus barrier or notification failures cannot satisfy or leave the new generation",
+    "overview": {
+      "default_max_depth": 0,
+      "depth_zero": "retains every root symbol kind and no requested descendants",
+      "explicit_descendants": "at positive depth, descendant variable and constant nodes are suppressed unless include_kinds explicitly names those kinds; post-order ancestor paths remain and exclude_kinds wins",
+      "omitted": "counts only upstream semantic caps and public result or answer-budget removals, never selected depth, kind filtering, descendant-noise suppression, or removed structural ancestors"
+    },
     "reference_coverage": {
       "scope": "owning adapter configured semantic program",
-      "fields": [
-        "adapter",
-        "language",
-        "scope_kind",
-        "configured_program_files",
-        "configured_program_digest",
-        "trusted_language_files",
-        "trusted_language_digest",
+      "complete": {
+        "exact_shape": {
+          "complete": true
+        }
+      },
+      "incomplete_fields": [
+        "complete",
         "uncovered_files",
-        "uncovered_sample"
-      ],
-      "uncovered_sample_fields": [
-        "total",
-        "items",
-        "digest",
+        "sample",
         "omitted"
       ],
-      "lexical_fallback": false
+      "sample_item_fields": [
+        "path",
+        "reason"
+      ],
+      "lexical_fallback": false,
+      "declaration_included": false
     },
+    "diagnostics_success": {
+      "shape": "the same compact data.workspace/files/omitted envelope as navigation, with one diagnostics array per file",
+      "finding_fields": [
+        "severity",
+        "range",
+        "message",
+        "symbol",
+        "source",
+        "code"
+      ],
+      "typescript_authority": "authority=advisory appears once on the TypeScript file group; Python omits it",
+      "excluded_success_metadata": [
+        "adapter",
+        "engine",
+        "interpreter",
+        "generations",
+        "uri",
+        "text_offset",
+        "byte_offset"
+      ]
+    },
+    "initialize_guidance": {
+      "source": "serena_light.instructions.AGENT_INSTRUCTIONS",
+      "delivery": [
+        "outer stdio Server",
+        "inner daemon FastMCP"
+      ],
+      "text": "Serena Light provides current semantic navigation and diagnostics for Python and JavaScript/TypeScript. It auto-binds the startup cwd; shell cd does not rebind. When switching repositories, call activate_workspace with an absolute directory path. Prefer file or directory query scope when known. Symbol overview starts at depth 0; reference snippets are opt-in. Call diagnostics explicitly after a meaningful edit group. Use runtime status only for debugging, build, or readiness questions. Use host shell/file tools for lexical file enumeration and text search."
+    },
+    "agent_surface_exclusions": [
+      "lexical discovery tools",
+      "diagnostics hooks or automatic diagnostics injection",
+      "RTK integration"
+    ],
     "external_identity": "a trusted external file's identity is its own authoritative absolute path plus an optional read_only=true marker on its compact file group; no second non-forgeable external identifier or alternate trust owner is introduced",
     "raw_position_fallback": "a reference, declaration, or implementation record backed by an exact response-owned snapshot uses compact range; only an authorized read-only external target lacking that snapshot may carry raw_range plus a position_basis naming the raw LSP coordinate system; a workspace target that cannot be mapped exactly fails retryably with typed NOT_READY rather than degrading to raw coordinates"
   },
@@ -135,7 +174,7 @@
           "omitted": 19
         }
       },
-      "parameters": "max_answer_chars 512..50000 default 12000; include_kinds/exclude_kinds use stable lowercase kind names; filtering retains only the minimum ancestor path for matching descendants and counts every removed node in omitted"
+      "parameters": "max_depth defaults to 0 and max_answer_chars defaults to 12000 (512..50000); include_kinds/exclude_kinds use stable lowercase kind names. At positive depth, descendant variable/constant nodes require explicit inclusion; filtering retains the minimum ancestor path, exclude_kinds wins, and caller-selected depth/kinds do not contribute to omitted."
     },
     "find_symbol": {
       "old": "single-symbol or global adapters/symbols envelopes with repeated path, adapter, generations, configured-program and rich range offsets",
@@ -230,27 +269,20 @@
             }
           ],
           "coverage": {
-            "adapter": "pyright",
-            "language": "python",
-            "scope_kind": "configured",
-            "configured_program_files": 3,
-            "configured_program_digest": "e13a863e18ee03d7707c6b94137ff4369f9353ee43c09f43968ca8c754c462f3",
-            "trusted_language_files": 4,
-            "trusted_language_digest": "5a591c959e4224d774e6517575375ca200ee58a04bcbb1e46d9091cc3ef2cdaf",
+            "complete": false,
             "uncovered_files": 1,
-            "uncovered_sample": {
-              "total": 1,
-              "items": [
-                "python_uncovered.py"
-              ],
-              "digest": "09bd6575f15f55b7607b91ae60d8a9e76a0e5c9633e007f32f0c65c8bbaff8f6",
-              "omitted": 0
-            }
+            "sample": [
+              {
+                "path": "python_uncovered.py",
+                "reason": "excluded_by_native_config"
+              }
+            ],
+            "omitted": 0
           },
           "omitted": 0
         }
       },
-      "parameters": "max_snippet_chars default 0 omits snippets; positive values request them; max_answer_chars 512..50000 default 12000"
+      "parameters": "references exclude the declaration; max_snippet_chars default 0 omits snippets and positive values request them; coverage is exactly {complete:true} when complete, otherwise a bounded path/reason sample; max_answer_chars 512..50000 default 12000"
     },
     "find_declaration": {
       "old": "data.locations contains absolute/relative path, capability matrix, location kind and rich or raw LSP ranges",
@@ -340,6 +372,38 @@
       },
       "parameters": "max_answer_chars 512..50000 default 12000; integer include_kinds/exclude_kinds filter verified response-owned target kinds within the replay transaction, and include_info adds bounded semantic detail without raw LSP blobs"
     }
+  },
+  "diagnostics_success": {
+    "old": "verbose file/symbol diagnostics repeat adapter, engine, interpreter, generation, URI, and offset evidence",
+    "new_shape": {
+      "ok": true,
+      "data": {
+        "workspace": "<absolute root>",
+        "files": [
+          {
+            "path": "<relative path>",
+            "diagnostics": [
+              {
+                "severity": "error|warning|information|hint",
+                "range": [
+                  [
+                    0,
+                    0
+                  ],
+                  [
+                    0,
+                    1
+                  ]
+                ],
+                "message": "<diagnostic message>"
+              }
+            ]
+          }
+        ],
+        "omitted": 0
+      }
+    },
+    "notes": "symbol, source, and code are optional finding fields; a TypeScript file group may include authority=advisory once; a clean requested file has diagnostics=[]."
   },
   "classification_values": [
     "supported",
@@ -594,7 +658,7 @@
     {
       "name": "client MCP tool metadata",
       "classification": "supported",
-      "reason": "tool schemas and typed envelopes are the client-facing contract"
+      "reason": "byte-identical MCP initialize instructions, tool schemas, and typed envelopes are the client-facing contract"
     }
   ],
   "excluded_serena_tools": [
@@ -667,11 +731,10 @@
     }
   ],
   "known_limitations": {
-    "rich_error_text_budget": "candidate-bearing semantic error evidence is bounded using the caller's public answer budget, but rich error envelopes remain on FastMCP's ordinary renderer and their client-visible pretty text is not itself hard-capped by max_answer_chars; compact success is hard-capped",
-    "declaration_ambiguity_candidates": "declaration and implementation source-symbol ambiguity candidates are bounded by the symbols in one authorized file but do not yet receive the caller's public answer budget",
+    "operational_error_text_budget": "deterministic correction errors and ambiguity evidence are bounded using the caller's public answer budget; rich operational recovery envelopes remain on FastMCP's ordinary renderer and are not themselves hard-capped by max_answer_chars",
     "external_include_info": "when a read-only external target lacks a response-owned snapshot, requesting body or info fails closed with a typed unsupported result rather than returning unverified detail",
     "get_symbols_overview_directory_scope": "get_symbols_overview requires a single file relative_path and does not enumerate a directory such as \".\"; this is a tool-use limitation of the current navigation surface, not a freshness failure, and directory enumeration is planned for the later add-lexical-discovery change",
-    "pre_build_slot_legacy_daemons": "the current environment retains pre-build-slot flat-layout legacy daemons with no active connections; current connectors cannot discover or reuse them, this change only claims zero newly created orphans, and any manual cleanup of that legacy set requires separately authorized PID-plus-create-time revalidation outside normal build-slot retirement"
+    "pre_build_slot_legacy_daemons": "the host may retain live pre-build-slot flat-layout legacy daemons and current build daemons held by other clients; current connectors cannot discover or reuse legacy entries, isolated tests prove build-slot retirement, and this change makes no host-wide no-orphan claim or manual cleanup attempt"
   },
   "acceptance": {
     "historical_fresh_session_accepted": true,
@@ -705,6 +768,19 @@
       "full_gate_suite": "pass",
       "final_dual_audit": "pass",
       "archived_change": "openspec/changes/archive/2026-08-01-strengthen-call-freshness",
+      "release_pass": true
+    },
+    "tighten_agent_interaction": {
+      "status": "pass",
+      "build_identity": "a92919af0add2dc6dbc40aa2f5cefd5dfa8db808ab58cb794d82ee615a571374",
+      "public_tool_schema_version": 4,
+      "dependency_digest": "eff6ebdf252faff7f77cb3a2f3894d17b9a0dfc89b46bd193fafdaa9e9ab4941",
+      "initialize_instructions": "pass_outer_inner_byte_identical",
+      "compact_success_and_error_budget": "pass",
+      "fresh_client_smokes": "complete_sol_xhigh_and_opus_max",
+      "full_gate_suite": "872_passed_35_external_snapshot_skipped",
+      "final_dual_audit": "pass",
+      "archived_change": "openspec/changes/archive/2026-08-01-tighten-agent-interaction",
       "release_pass": true
     }
   }

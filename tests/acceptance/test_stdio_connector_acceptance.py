@@ -28,6 +28,7 @@ from mcp.client.stdio import StdioServerParameters, stdio_client
 from serena_light import cli
 from serena_light.bootstrap import inspect_runtime, runtime_paths
 from serena_light.build_identity import compute_build_identity
+from serena_light.instructions import AGENT_INSTRUCTIONS
 from serena_light.runtime_files import (
     BearerSecret,
     DiscoveryMetadata,
@@ -258,6 +259,7 @@ async def _run_fresh_stdio_client(
     ) as client:
         initialized = await client.initialize()
         assert initialized.serverInfo.name == "serena-light"
+        assert initialized.instructions == AGENT_INSTRUCTIONS
 
         listed = await client.list_tools()
         tool_names = {tool.name for tool in listed.tools}
@@ -429,10 +431,20 @@ async def _run_compact_navigation_stdio_client(
             for file in scoped_files
         )
         coverage = cast(Mapping[str, object], references["coverage"])
-        assert coverage["uncovered_files"] == 1
-        uncovered_sample = cast(Mapping[str, object], coverage["uncovered_sample"])
-        assert uncovered_sample["items"] == ["python_uncovered.py"]
-        assert len(cast(list[Mapping[str, object]], references["files"])) == 2
+        assert coverage == {
+            "complete": False,
+            "uncovered_files": 1,
+            "sample": [
+                {
+                    "path": "python_uncovered.py",
+                    "reason": "excluded_by_native_config",
+                }
+            ],
+            "omitted": 0,
+        }
+        reference_files = cast(list[Mapping[str, object]], references["files"])
+        assert [file["path"] for file in reference_files] == [f"{prefix}python_usage.py"]
+        assert all(file["path"] != f"{prefix}python_symbols.py" for file in reference_files)
         assert cast(list[Mapping[str, object]], declaration["files"])[0]["targets"]
         assert cast(list[Mapping[str, object]], implementation["files"])[0]["targets"]
         external_file = cast(list[Mapping[str, object]], external["files"])[0]
@@ -441,6 +453,116 @@ async def _run_compact_navigation_stdio_client(
         assert external_target["position_basis"] == "lsp_zero_based_line_utf16_code_unit_character"
         assert "raw_range" in external_target and "range" not in external_target
         assert empty["files"] == [] and empty["omitted"] == 0
+
+        bounded_errors = (
+            await client.call_tool(
+                "find_symbol",
+                {
+                    "relative_path": f"{prefix}python_symbols.py",
+                    "name_path": "missing" * 200,
+                    "max_answer_chars": 512,
+                },
+            ),
+            await client.call_tool(
+                "find_symbol",
+                {
+                    "relative_path": ("missing/" * 200) + "module.py",
+                    "name_path": "missing",
+                    "max_answer_chars": 512,
+                },
+            ),
+            await client.call_tool(
+                "find_declaration",
+                {
+                    "relative_path": f"{prefix}python_symbols.py",
+                    "regex": r"(\w)" + "(?:)" * 300,
+                    "max_answer_chars": 512,
+                },
+            ),
+            await client.call_tool(
+                "get_diagnostics_for_symbol",
+                {
+                    "relative_path": f"{prefix}python_symbols.py",
+                    "name_path": "missing" * 200,
+                    "max_answer_chars": 512,
+                },
+            ),
+        )
+        for result in bounded_errors:
+            assert result.isError is not True
+            assert len(result.content) == 1
+            block = result.content[0]
+            assert isinstance(block, types.TextContent)
+            assert len(block.text) <= 512
+            assert result.structuredContent is not None
+            assert block.text == json.dumps(
+                result.structuredContent,
+                ensure_ascii=False,
+                allow_nan=False,
+                separators=(",", ":"),
+            )
+            failure = cast(Mapping[str, object], result.structuredContent)
+            assert failure["ok"] is False
+            assert "adapter" not in failure and "generations" not in failure
+        assert _mapping(_mapping(bounded_errors[0].structuredContent)["error"])["code"] == (
+            "SYMBOL_NOT_FOUND"
+        )
+        assert _mapping(_mapping(bounded_errors[1].structuredContent)["error"])["code"] in {
+            "INVALID_INPUT",
+            "INVALID_PATH",
+        }
+        declaration_error = _mapping(_mapping(bounded_errors[2].structuredContent)["error"])
+        assert declaration_error["code"] == "AMBIGUOUS_SYMBOL"
+        occurrence_count = _mapping(declaration_error["details"])["occurrence_count"]
+        assert isinstance(occurrence_count, int) and occurrence_count > 1
+        diagnostic_error = _mapping(_mapping(bounded_errors[3].structuredContent)["error"])
+        assert diagnostic_error["code"] == "SYMBOL_NOT_FOUND"
+        diagnostic_details = _mapping(diagnostic_error["details"])
+        assert "engine" not in diagnostic_details and "name_path" not in diagnostic_details
+
+        invalid_budget_cases = (
+            (
+                "get_symbols_overview",
+                {"relative_path": f"{prefix}python_symbols.py", "max_answer_chars": 10},
+            ),
+            (
+                "find_symbol",
+                {"name_path": "ANSWER", "max_answer_chars": 60_000},
+            ),
+            (
+                "find_referencing_symbols",
+                {
+                    "relative_path": f"{prefix}python_symbols.py",
+                    "name_path": "ANSWER",
+                    "max_answer_chars": 100,
+                },
+            ),
+            (
+                "find_declaration",
+                {
+                    "relative_path": f"{prefix}python_usage.py",
+                    "regex": r"import (ANSWER), Calculator",
+                    "max_answer_chars": 100,
+                },
+            ),
+            (
+                "find_implementations",
+                {
+                    "relative_path": f"{prefix}typescript_symbols.ts",
+                    "name_path": "Runner",
+                    "max_answer_chars": 100,
+                },
+            ),
+        )
+        for tool, arguments in invalid_budget_cases:
+            result = await client.call_tool(tool, arguments)
+            assert result.isError is not True
+            assert result.structuredContent is not None
+            failure = cast(Mapping[str, object], result.structuredContent)
+            assert failure["ok"] is False
+            error_value = _mapping(failure["error"])
+            assert error_value["code"] == "INVALID_INPUT"
+            assert _mapping(error_value["details"])["field"] == "max_answer_chars"
 
         released = _data(await client.call_tool("release_workspace", {"immediate": True}))
         assert released["bound"] is False

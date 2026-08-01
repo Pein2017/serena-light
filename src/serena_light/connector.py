@@ -23,6 +23,7 @@ from mcp.server import Server
 from mcp.server.stdio import stdio_server
 
 from serena_light import __version__
+from serena_light.instructions import AGENT_INSTRUCTIONS
 from serena_light.runtime_files import (
     LEGACY_BUILD_IDENTITY,
     RUNTIME_ROOT,
@@ -707,7 +708,7 @@ class Connector:
 def build_proxy_server(connector: Connector, *, name: str = CONNECTOR_NAME, version: str = CONNECTOR_VERSION) -> Server:
     """Build the stdio-facing MCP server with dynamic remote tool discovery."""
 
-    server = Server(name, version=version)
+    server = Server(name, version=version, instructions=AGENT_INSTRUCTIONS)
 
     @server.list_tools()
     async def list_tools() -> types.ListToolsResult:

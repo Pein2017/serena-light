@@ -57,7 +57,7 @@ This change affects trust inventory construction, freshness projections,
 daemon and connector tool registration, MCP initialization, dependency locks,
 build identity, runtime status, lifecycle cleanup, compatibility metadata, and
 real-repository acceptance. The connector read-only allowlist gains exactly
-`find_paths` and `search_text`; public schema advances from version 3 to 4, so
+`find_paths` and `search_text`; public schema advances from version 4 to 5, so
 fresh clients must reconnect to the matching build slot.
 
 The feature does not add a language, dynamic-import parser, semantic/lexical
@@ -66,9 +66,10 @@ hook, UI, memory, broad logging, or edit operation. It does not change the rule
 that shell `cd` alone cannot rebind a session: agents continue to call
 `activate_workspace("/absolute/path")` when switching repositories.
 
-Admission requires archived acceptance of `strengthen-call-freshness`, pinned
-ripgrep version/checksum and dependency ownership evidence, deterministic unit
-and fault tests, strict OpenSpec/provenance gates, and targeted real-daemon
-smokes in `/data/CoordExp`, `/data/CoordExp/external/codexUI`,
+Admission requires archived acceptance of both `strengthen-call-freshness` and
+`tighten-agent-interaction`, pinned ripgrep version/checksum and dependency
+ownership evidence, deterministic unit and fault tests, strict
+OpenSpec/provenance gates, and targeted real-daemon smokes in `/data/CoordExp`,
+`/data/CoordExp/external/codexUI`,
 `/data/ms-swift`, and the conda-`ms` transformers package with an
 explicit read-only scope. Production LOC remains informational.

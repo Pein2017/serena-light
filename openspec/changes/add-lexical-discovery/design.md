@@ -11,8 +11,9 @@ admit ignored data, hidden-path drift, or symlink escapes.
 The service already owns per-session workspace binding, request-driven guarded
 freshness, compact final MCP budgeting, typed failures, versioned build slots,
 and a fixed read-only transformers exception. This design adds the smallest
-lexical layer that composes with those owners. It assumes
-`strengthen-call-freshness` has been accepted and archived first.
+lexical layer that composes with those owners. It assumes both
+`strengthen-call-freshness` and `tighten-agent-interaction` have been accepted
+and archived first.
 
 ## Goals / Non-Goals
 
@@ -169,12 +170,12 @@ the client-visible initialize exchange.
 No hook or `initial_instructions` function is added. Tool descriptions remain
 the local parameter-level guidance.
 
-### 7. Treat the tool surface as public schema 4
+### 7. Treat the tool surface as public schema 5
 
 Add both tools to the daemon and connector read-only allowlists, compatibility
-metadata, public schema digest, and build identity. A schema-3 connector cannot
-silently attach to the schema-4 daemon. Existing versioned rollover starts a new
-slot and lets leased schema-3 daemons retire normally.
+metadata, public schema digest, and build identity. A schema-4 connector cannot
+silently attach to the schema-5 daemon. Existing versioned rollover starts a new
+slot and lets leased schema-4 daemons retire normally.
 
 ## Risks / Trade-offs
 
@@ -203,14 +204,15 @@ slot and lets leased schema-3 daemons retire normally.
    path/version without modifying ambient tools.
 3. Add the full-file catalog, compact DTO/renderer, isolated executor, and two
    read-only tools with deterministic unit/fault tests.
-4. Attach the shared instructions to both MCP initialize boundaries and advance
-   compatibility/public schema to 4.
+4. Revise the shared source-owned instructions for the new lexical routing,
+   attach them to both MCP initialize boundaries, and advance compatibility/public
+   schema to 5.
 5. Start a new build slot and run fresh Codex, Claude Code, and CC Agent clients
    plus the four named real-root smokes in clean and poisoned-proxy environments.
 6. Sync and archive before warm-runtime work begins.
 
-Rollback removes the schema-4 client registration/build and reconnects clients
-to the prior schema-3 build. It does not alter workspace files or canonical
+Rollback removes the schema-5 client registration/build and reconnects clients
+to the prior schema-4 build. It does not alter workspace files or canonical
 Serena.
 
 ## Open Questions

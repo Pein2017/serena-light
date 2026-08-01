@@ -1127,26 +1127,7 @@ def test_connector_content_attaches_one_coverage_object_to_reference_successes(t
             assert empty_data["omitted"] == 0
             coverage = cast(Mapping[str, Any], non_empty_data["coverage"])
             assert empty_data["coverage"] == coverage
-            assert set(coverage) == {
-                "adapter",
-                "language",
-                "scope_kind",
-                "configured_program_files",
-                "configured_program_digest",
-                "trusted_language_files",
-                "trusted_language_digest",
-                "uncovered_files",
-                "uncovered_sample",
-            }
-            assert coverage["adapter"] == "pyright"
-            assert coverage["language"] == "python"
-            assert isinstance(coverage["configured_program_files"], int)
-            assert isinstance(coverage["trusted_language_files"], int)
-            sample = cast(Mapping[str, Any], coverage["uncovered_sample"])
-            assert set(sample) == {"total", "items", "digest", "omitted"}
-            assert sample["total"] == coverage["uncovered_files"]
-            assert isinstance(sample["items"], list)
-            assert sample["omitted"] == sample["total"] - len(sample["items"])
+            assert coverage == {"complete": True}
             assert all("coverage" not in reference for file in non_empty_files for reference in file["references"])
 
         asyncio.run(scenario())
@@ -1193,10 +1174,7 @@ def test_connector_content_preserves_external_references_as_raw_read_only_target
                     "symbol": "<file>",
                 }
             ]
-            coverage = cast(Mapping[str, Any], data["coverage"])
-            assert coverage["adapter"] == "pyright"
-            assert coverage["language"] == "python"
-            assert coverage["scope_kind"] == "workspace_default"
+            assert data["coverage"] == {"complete": True}
 
         asyncio.run(scenario())
 
@@ -1753,6 +1731,13 @@ def test_connector_raced_clean_diagnostics_replay_returns_the_settled_findings(t
         assert result.isError is False
         assert payload["ok"] is True
         data = cast(Mapping[str, Any], payload["data"])
-        assert data["state"] == "findings"
-        assert data["sha256"] == hashlib.sha256(settled).hexdigest()
+        assert data["workspace"] == str(harness.root)
+        files = cast(list[Mapping[str, Any]], data["files"])
+        assert len(files) == 1 and files[0]["path"] == "main.py"
+        findings = cast(list[Mapping[str, Any]], files[0]["diagnostics"])
+        assert len(findings) == 1
+        assert findings[0]["message"] == "unresolved reference"
+        assert findings[0]["severity"] == "error"
+        assert cast(list[list[int]], findings[0]["range"])[0][0] == _SOURCE.count(b"\n")
+        assert data["omitted"] == 0
         assert harness.python.client.requests.count("textDocument/documentSymbol") == 2

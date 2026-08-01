@@ -131,7 +131,8 @@ def test_cold_first_reference_call_returns_the_complete_cross_file_set() -> None
         references = _success(runtime.find_referencing_symbols(IN_PROGRAM_FILE, "resolveCodexCommand"))
         assert int(references["reference_count"]) >= 3
         reference_paths = {_mapping(item)["path"] for item in _sequence(references["references"])}
-        assert {IN_PROGRAM_FILE, IN_PROGRAM_CONSUMER, "src/server/codexAppServerBridge.ts"} <= reference_paths
+        assert {IN_PROGRAM_CONSUMER, "src/server/codexAppServerBridge.ts"} <= reference_paths
+        assert IN_PROGRAM_FILE not in reference_paths
     finally:
         _stop_and_assert_no_lsp_leaks(runtime, before)
 
@@ -271,7 +272,8 @@ def _assert_definition_references_and_implementation(
     references = _success(acceptance.runtime.find_referencing_symbols(IN_PROGRAM_FILE, "resolveCodexCommand"))
     assert int(references["reference_count"]) >= 3
     reference_paths = {_mapping(item)["path"] for item in _sequence(references["references"])}
-    assert {IN_PROGRAM_FILE, IN_PROGRAM_CONSUMER, "src/server/codexAppServerBridge.ts"} <= reference_paths
+    assert {IN_PROGRAM_CONSUMER, "src/server/codexAppServerBridge.ts"} <= reference_paths
+    assert IN_PROGRAM_FILE not in reference_paths
 
     implementation = _success(
         acceptance.runtime.find_implementations(

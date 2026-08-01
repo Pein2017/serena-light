@@ -2101,6 +2101,29 @@ def _configured_python_projection(trusted: tuple[str, ...], program: tuple[str, 
     )
 
 
+def test_reference_dispatch_excludes_the_declaration(tmp_path: Path) -> None:
+    source = tmp_path / "src/source.py"
+    source.parent.mkdir()
+    source.write_text("target()\n")
+    runtime, adapter, _policy = _runtime(
+        tmp_path,
+        {"textDocument/documentSymbol": [_symbol("target")], "textDocument/references": []},
+    )
+    try:
+        result = runtime.find_referencing_symbols("src/source.py", "target").to_dict()
+
+        assert result["ok"] is True
+        requests = [
+            params for method, params in adapter.client.requests if method == "textDocument/references"
+        ]
+        assert requests
+        for params in requests:
+            assert isinstance(params, Mapping)
+            assert cast(Mapping[str, object], params)["context"] == {"includeDeclaration": False}
+    finally:
+        runtime.stop()
+
+
 def test_references_report_native_exclusions_with_one_bounded_coverage_object(tmp_path: Path) -> None:
     source = tmp_path / "src/source.py"
     source.parent.mkdir()

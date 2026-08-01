@@ -414,16 +414,21 @@ def canonical_json(value: Mapping[str, Any] | CompactNavigationSuccess) -> str:
     return json.dumps(payload, ensure_ascii=False, allow_nan=False, separators=(",", ":"))
 
 
+def render_payload(payload: Mapping[str, Any]) -> types.CallToolResult:
+    """Build one explicit MCP result from a complete client-visible JSON value."""
+
+    value = dict(payload)
+    return types.CallToolResult(
+        content=[types.TextContent(type="text", text=canonical_json(value))],
+        structuredContent=value,
+        isError=False,
+    )
+
+
 def render_success(value: CompactNavigationSuccess) -> types.CallToolResult:
     """Build one explicit MCP result whose text and structured value agree."""
 
-    payload = value.to_dict()
-    text = canonical_json(payload)
-    return types.CallToolResult(
-        content=[types.TextContent(type="text", text=text)],
-        structuredContent=payload,
-        isError=False,
-    )
+    return render_payload(value.to_dict())
 
 
 def render_bounded_records(
@@ -548,11 +553,7 @@ def minimum_required_chars_result(
         generations=generations,
     )
     payload = envelope.to_dict()
-    return types.CallToolResult(
-        content=[types.TextContent(type="text", text=envelope.to_json())],
-        structuredContent=payload,
-        isError=False,
-    )
+    return render_payload(payload)
 
 
 def _validate_kind_filter(value: Sequence[str] | None, field: str) -> tuple[str, ...]:

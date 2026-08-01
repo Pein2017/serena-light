@@ -218,7 +218,7 @@ class ReferenceNavigationService:
         self,
         request: ReferenceRequest,
         *,
-        max_snippet_chars: int = 240,
+        max_snippet_chars: int = 0,
         max_answer_chars: int = 12_000,
     ) -> ToolEnvelope:
         """Return deterministic containing-symbol reference results.
@@ -228,7 +228,7 @@ class ReferenceNavigationService:
         container when a valid location has no safely usable symbol mapping.
         """
 
-        if not _valid_request(request) or max_snippet_chars <= 0 or max_answer_chars <= 0:
+        if not _valid_request(request) or max_snippet_chars < 0 or max_answer_chars <= 0:
             return error(
                 ErrorCode.INVALID_INPUT,
                 details={"field": "relative_path, position, max_snippet_chars, or max_answer_chars"},
@@ -279,7 +279,7 @@ def find_referencing_symbols(
     documents: ReferenceDocumentProvider,
     coverage: ReferenceCoverage,
     *,
-    max_snippet_chars: int = 240,
+    max_snippet_chars: int = 0,
     max_answer_chars: int = 12_000,
 ) -> ToolEnvelope:
     """Functional form for callers that already dispatched the LSP request."""
@@ -425,7 +425,7 @@ def _reference_data(target: ReferenceTarget, document: _DocumentTree, max_snippe
         "location": location_data,
         "container": _container_data(container),
     }
-    snippet = _snippet(document, location, max_snippet_chars) if mapped else None
+    snippet = _snippet(document, location, max_snippet_chars) if mapped and max_snippet_chars > 0 else None
     if snippet is not None:
         data["snippet"] = snippet[0]
         data["snippet_truncated"] = snippet[1]

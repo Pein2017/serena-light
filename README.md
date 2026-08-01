@@ -250,6 +250,36 @@ requires a single file `relative_path` and does not enumerate a directory
 such as `"."`; directory enumeration is planned for the later
 `add-lexical-discovery` change.
 
+## Current schema-4 agent interaction contract
+
+The current public tool schema is version 4. This interaction revision changes
+presentation and guidance only: it preserves the existing semantic, freshness,
+and lifecycle owners and does not claim fresh acceptance measurements. A
+schema-3 client stays isolated on its own build slot until its holders drain;
+fresh clients resolve the schema-4 build identity.
+
+Both the outer stdio connector and inner daemon publish this exact source-owned
+initialize guidance from `serena_light.instructions.AGENT_INSTRUCTIONS`:
+
+> Serena Light provides current semantic navigation and diagnostics for Python and JavaScript/TypeScript. It auto-binds the startup cwd; shell cd does not rebind. When switching repositories, call activate_workspace with an absolute directory path. Prefer file or directory query scope when known. Symbol overview starts at depth 0; reference snippets are opt-in. Call diagnostics explicitly after a meaningful edit group. Use runtime status only for debugging, build, or readiness questions. Use host shell/file tools for lexical file enumeration and text search.
+
+Successful navigation and diagnostics use compact canonical JSON with one
+absolute `data.workspace`, deterministic `data.files`, and one `data.omitted`.
+`get_symbols_overview` defaults to depth 0, retaining every root kind; at an
+explicit positive depth, descendant variables/constants require explicit
+`include_kinds` selection. Its `omitted` count covers only upstream semantic
+caps and public match/answer-budget pruning, never caller-selected depth or
+kind filtering. References exclude the declaration, omit snippets until a
+positive `max_snippet_chars` request, and report coverage as exactly
+`{"complete":true}` when complete or an incomplete total plus bounded
+path/reason sample. Diagnostics group compact findings by file; TypeScript
+adds `authority="advisory"` once per file, while engine, adapter, generation,
+URI, and offset internals stay out of successful payloads.
+
+This schema does not add lexical-discovery tools, diagnostics hooks or automatic
+diagnostic injection, or RTK integration. Host shell/file tools continue to own
+lexical enumeration and text search; diagnostics stay explicit and on demand.
+
 ## Local checks
 
 ```bash

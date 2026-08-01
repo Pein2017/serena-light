@@ -16,6 +16,7 @@ from uuid import uuid4
 from starlette.testclient import TestClient
 
 from serena_light.daemon.server import DaemonService, LeaseExpiredError, create_daemon_app
+from serena_light.instructions import AGENT_INSTRUCTIONS
 from serena_light.runtime_files import BearerSecret
 
 
@@ -75,6 +76,8 @@ def _initialize(client: TestClient, authorization: str, request_id: int) -> str:
         },
     )
     assert response.status_code == 200, response.text
+    payload = response.json()
+    assert payload["result"]["instructions"] == AGENT_INSTRUCTIONS
     return response.headers["mcp-session-id"]
 
 

@@ -1,6 +1,6 @@
 ## 1. Prerequisite and Dependency Admission
 
-- [ ] 1.1 Verify `strengthen-call-freshness` is accepted, synced, and archived; record the schema-3 source/build/lock baseline and stop if its per-call preflight/postflight owner is not the stable production path.
+- [ ] 1.1 Verify `strengthen-call-freshness` and the schema-4 interaction revision are accepted, synced, and archived; record the schema-4 source/build/lock baseline and stop if the per-call preflight/postflight owner is not the stable production path.
 - [ ] 1.2 Select the Linux ripgrep release asset and record exact version, platform, SHA-256, license, provenance URL, lock format, and bootstrap failure behavior in a repository-owned lock manifest.
 - [ ] 1.3 Add the ripgrep manifest to dependency-lock digest/build identity and bootstrap the verified executable atomically to `deps/<lock_digest>/bin/rg`, with download proxy allowed only during bootstrap and no ambient runtime resolution.
 - [ ] 1.4 Add checksum mismatch, interrupted install, wrong platform, executable version, clean environment, poisoned `PATH`, user config, and poisoned loopback-proxy tests before exposing a tool.
@@ -31,9 +31,9 @@
 ## 5. Tool, Instructions, Status, and Schema Integration
 
 - [ ] 5.1 Register exactly `find_paths` and `search_text` in daemon schemas and connector `READ_ONLY_TOOLS`, preserving typed envelopes and forbidding editing/process replay paths.
-- [ ] 5.2 Define one concise initialize-instructions constant and attach it to both the inner daemon `FastMCP` and client-visible stdio proxy `Server`; add protocol tests proving byte-equivalent guidance and no hook/public instructions tool.
+- [ ] 5.2 Revise the single concise source-owned initialize-instructions constant for lexical routing and attach it to both the inner daemon `FastMCP` and client-visible stdio proxy `Server`; add protocol tests proving byte-equivalent guidance and no hook/public instructions tool.
 - [ ] 5.3 Extend bounded runtime status with full-file catalog count/digest, lexical executor queue/running state, and pinned ripgrep path/version without patterns, source, raw argv, secrets, or complete catalog listings.
-- [ ] 5.4 Advance compatibility/public tool schema to version 4, include tool/instructions identity in build identity, and verify schema-3 and schema-4 daemon slots coexist without cross-attachment or forced lease termination.
+- [ ] 5.4 Advance compatibility/public tool schema to version 5, include tool/instructions identity in build identity, and verify schema-4 and schema-5 daemon slots coexist without cross-attachment or forced lease termination.
 - [ ] 5.5 Update direct dependency ownership, runtime manifests, source census/provenance, README/tool guidance, compatibility, client registration, and roadmap without changing canonical Serena.
 
 ## 6. Tests and Real-Repository Acceptance

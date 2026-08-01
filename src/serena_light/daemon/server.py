@@ -34,6 +34,7 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 from serena_light import __version__
 from serena_light.build_identity import validate_build_identity
 from serena_light.daemon.leases import LeaseExpiredError as LifecycleLeaseExpiredError
+from serena_light.instructions import AGENT_INSTRUCTIONS
 from serena_light.processes import terminate_process_tree_with_kill_fallback
 from serena_light.runtime_files import (
     LEGACY_BUILD_IDENTITY,
@@ -51,7 +52,9 @@ from serena_light.tools.compact import (
 )
 from serena_light.tools.compact_adapter import NAVIGATION_OPERATIONS, compact_navigation_result
 from serena_light.tools.declarations import _MAX_SYMBOL_KIND, _MIN_SYMBOL_KIND
+from serena_light.tools.diagnostics_adapter import compact_diagnostics_result
 from serena_light.tools.envelopes import ErrorCode, RetryMetadata, error
+from serena_light.tools.presentation import render_error_result
 
 LOOPBACK_HOST = "127.0.0.1"
 HEALTH_PATH = "/health"
@@ -61,6 +64,9 @@ STARTUP_LOCK_NAME = "startup.lock"
 DEFAULT_STARTUP_TIMEOUT_SECONDS = 10.0
 DEFAULT_HEALTH_POLL_SECONDS = 0.05
 _INTERNAL_NAVIGATION_MAX_ANSWER_CHARS = 2_147_483_647
+_DIAGNOSTIC_OPERATIONS = frozenset(
+    {"get_diagnostics_for_file", "get_diagnostics_for_symbol"}
+)
 
 
 class DaemonConfigurationError(ValueError):
@@ -212,6 +218,7 @@ def create_daemon_app(
     )
     mcp = FastMCP(
         name="serena-light",
+        instructions=AGENT_INSTRUCTIONS,
         host=host,
         streamable_http_path=MCP_PATH,
         json_response=True,
@@ -290,11 +297,16 @@ def create_daemon_app(
     async def activate_workspace(
         absolute_path: Annotated[
             str,
-            Field(description="Absolute path inside the Git workspace or allowlisted read-only source root."),
+            Field(
+                description=(
+                    "Absolute directory path inside the Git workspace or at the allowlisted "
+                    "read-only source root."
+                )
+            ),
         ],
         context: Context,
     ) -> dict[str, object]:
-        """Bind this lease to the physical workspace containing an absolute path."""
+        """Bind this lease to the physical workspace containing an absolute directory path."""
 
         try:
             lease_id = lease_id_from_context(context)
@@ -320,8 +332,30 @@ def create_daemon_app(
         if operation in NAVIGATION_OPERATIONS:
             invalid = _validate_navigation_request(operation, public_kwargs)
             if invalid is not None:
-                return invalid
+                try:
+                    error_budget = validate_max_answer_chars(
+                        public_kwargs.get("max_answer_chars", 12_000)
+                    )
+                except (TypeError, ValueError):
+                    error_budget = 12_000
+                return render_error_result(
+                    invalid,
+                    max_answer_chars=error_budget,
+                )
             kwargs = _internal_navigation_kwargs(operation, public_kwargs)
+        elif operation in _DIAGNOSTIC_OPERATIONS:
+            try:
+                validate_max_answer_chars(public_kwargs.get("max_answer_chars", 12_000))
+            except ValueError:
+                return render_error_result(
+                    error(
+                        ErrorCode.INVALID_INPUT,
+                        details={"field": "max_answer_chars"},
+                    ).to_dict(),
+                    max_answer_chars=12_000,
+                )
+            kwargs = dict(public_kwargs)
+            kwargs["max_answer_chars"] = _INTERNAL_NAVIGATION_MAX_ANSWER_CHARS
         try:
             if operation in {"release_workspace", "get_runtime_status"}:
                 callback = cast(Callable[..., Any], getattr(service, operation))
@@ -350,12 +384,33 @@ def create_daemon_app(
                         and cast(int, public_kwargs.get("max_snippet_chars", 0)) > 0
                     ),
                 )
+            if operation in _DIAGNOSTIC_OPERATIONS and result.get("ok") is True:
+                return compact_diagnostics_result(
+                    result,
+                    max_answer_chars=cast(int, public_kwargs.get("max_answer_chars", 12_000)),
+                )
+            if operation in NAVIGATION_OPERATIONS | _DIAGNOSTIC_OPERATIONS and result.get("ok") is False:
+                return render_error_result(
+                    result,
+                    max_answer_chars=cast(int, public_kwargs.get("max_answer_chars", 12_000)),
+                )
             return result
         except (LeaseExpiredError, LifecycleLeaseExpiredError):
             return _lease_expired()
 
     @mcp.tool(name="release_workspace", structured_output=True)
-    async def release_workspace(context: Context, immediate: StrictBool = False) -> dict[str, object]:
+    async def release_workspace(
+        context: Context,
+        immediate: Annotated[
+            StrictBool,
+            Field(
+                description=(
+                    "When true, skip this lease's warm grace after unbinding; "
+                    "the shared workspace remains live while another lease still holds it."
+                )
+            ),
+        ] = False,
+    ) -> dict[str, object]:
         """Unbind this lease from its workspace while retaining the live lease."""
 
         try:
@@ -383,23 +438,39 @@ def create_daemon_app(
 
     @mcp.tool(name="get_symbols_overview", structured_output=True)
     async def get_symbols_overview(
-        relative_path: str,
+        relative_path: Annotated[
+            str,
+            Field(description="Normalized workspace-relative Python or JavaScript/TypeScript source file."),
+        ],
         context: Context,
-        max_depth: int = 1,
+        max_depth: Annotated[
+            int,
+            Field(
+                description=(
+                    "Descendant depth: default 0 returns root symbols; use a positive value "
+                    "for structural children."
+                )
+            ),
+        ] = 0,
         max_answer_chars: Annotated[
             int,
             Field(description="Final compact MCP text limit: 512 through 50000 characters; default 12000."),
         ] = 12_000,
         include_kinds: Annotated[
             list[str] | None,
-            Field(description="Optional stable lowercase LSP kind names to retain; omitted means all kinds."),
+            Field(
+                description=(
+                    "Optional lowercase LSP kinds to retain. Explicit variable/constant "
+                    "selection includes otherwise suppressed noisy descendants."
+                )
+            ),
         ] = None,
         exclude_kinds: Annotated[
             list[str] | None,
             Field(description="Optional stable lowercase LSP kind names to remove after include filtering."),
         ] = None,
     ) -> dict[str, object]:
-        """Return a compact symbol tree; optional filters use lowercase LSP kind names."""
+        """Return a compact depth-0 symbol tree; request depth or lowercase kinds only when needed."""
 
         return cast(
             dict[str, object],
@@ -416,9 +487,25 @@ def create_daemon_app(
 
     @mcp.tool(name="find_symbol", structured_output=True)
     async def find_symbol(
-        name_path: str,
+        name_path: Annotated[
+            str,
+            Field(
+                description=(
+                    "Serena name path: a simple name or slash-delimited suffix such as "
+                    "Class/method; prefix / for an exact full name path."
+                )
+            ),
+        ],
         context: Context,
-        relative_path: str | None = None,
+        relative_path: Annotated[
+            str | None,
+            Field(
+                description=(
+                    "Optional normalized workspace-relative file or directory; omit for "
+                    "workspace-global semantic search."
+                )
+            ),
+        ] = None,
         substring_matching: bool = False,
         include_body: bool = False,
         include_info: bool = False,
@@ -431,7 +518,7 @@ def create_daemon_app(
             Field(description="Maximum semantic matches after filtering and deduplication: 1 through 100; default 20."),
         ] = DEFAULT_MAX_MATCHES,
     ) -> dict[str, object]:
-        """Find at most 1-100 compact symbols; body requests are complete or fail typed."""
+        """Find compact Serena name paths; scope to a known file or directory when possible."""
 
         return cast(
             dict[str, object],
@@ -487,8 +574,14 @@ def create_daemon_app(
 
     @mcp.tool(name="find_implementations", structured_output=True)
     async def find_implementations(
-        name_path: str,
-        relative_path: str,
+        name_path: Annotated[
+            str,
+            Field(description="Serena slash-delimited name path of the source symbol."),
+        ],
+        relative_path: Annotated[
+            str,
+            Field(description="Normalized workspace-relative source file containing the symbol."),
+        ],
         context: Context,
         include_info: bool = False,
         include_kinds: list[int] | None = None,
@@ -516,8 +609,14 @@ def create_daemon_app(
 
     @mcp.tool(name="find_referencing_symbols", structured_output=True)
     async def find_referencing_symbols(
-        name_path: str,
-        relative_path: str,
+        name_path: Annotated[
+            str,
+            Field(description="Serena slash-delimited name path of the referenced symbol."),
+        ],
+        relative_path: Annotated[
+            str,
+            Field(description="Normalized workspace-relative source file containing the symbol."),
+        ],
         context: Context,
         max_snippet_chars: Annotated[
             int,
@@ -544,13 +643,25 @@ def create_daemon_app(
 
     @mcp.tool(name="get_diagnostics_for_file", structured_output=True)
     async def get_diagnostics_for_file(
-        relative_path: str,
+        relative_path: Annotated[
+            str,
+            Field(description="Normalized workspace-relative Python or JavaScript/TypeScript source file."),
+        ],
         context: Context,
-        timeout_seconds: float = 1.0,
-        maximum_severity: int = 2,
-        max_answer_chars: int = 12_000,
+        timeout_seconds: Annotated[
+            float,
+            Field(description="Seconds to wait for diagnostics from the current document generation."),
+        ] = 1.0,
+        maximum_severity: Annotated[
+            int,
+            Field(description="Include severities up to this number: 1=Error, 2=Warning, 3=Information, 4=Hint."),
+        ] = 2,
+        max_answer_chars: Annotated[
+            int,
+            Field(description="Final compact MCP text limit: 512 through 50000 characters; default 12000."),
+        ] = 12_000,
     ) -> dict[str, object]:
-        """Return current-generation diagnostics with 0-based decoded-text ranges."""
+        """Explicitly inspect current file diagnostics; severity 1=Error through 4=Hint."""
 
         return cast(
             dict[str, object],
@@ -566,14 +677,29 @@ def create_daemon_app(
 
     @mcp.tool(name="get_diagnostics_for_symbol", structured_output=True)
     async def get_diagnostics_for_symbol(
-        relative_path: str,
-        name_path: str,
+        relative_path: Annotated[
+            str,
+            Field(description="Normalized workspace-relative Python or JavaScript/TypeScript source file."),
+        ],
+        name_path: Annotated[
+            str,
+            Field(description="Serena slash-delimited name path used for exact symbol-range filtering."),
+        ],
         context: Context,
-        timeout_seconds: float = 1.0,
-        maximum_severity: int = 2,
-        max_answer_chars: int = 12_000,
+        timeout_seconds: Annotated[
+            float,
+            Field(description="Seconds to wait for diagnostics from the current document generation."),
+        ] = 1.0,
+        maximum_severity: Annotated[
+            int,
+            Field(description="Include severities up to this number: 1=Error, 2=Warning, 3=Information, 4=Hint."),
+        ] = 2,
+        max_answer_chars: Annotated[
+            int,
+            Field(description="Final compact MCP text limit: 512 through 50000 characters; default 12000."),
+        ] = 12_000,
     ) -> dict[str, object]:
-        """Return current-generation symbol diagnostics with 0-based decoded-text ranges."""
+        """Explicitly inspect current symbol diagnostics; severity 1=Error through 4=Hint."""
 
         return cast(
             dict[str, object],
@@ -901,8 +1027,6 @@ def _internal_navigation_kwargs(
         internal["max_answer_chars"] = _INTERNAL_NAVIGATION_MAX_ANSWER_CHARS
     if operation == "find_symbol":
         internal["_error_max_answer_chars"] = arguments.get("max_answer_chars", 12_000)
-    if operation == "find_referencing_symbols" and internal.get("max_snippet_chars") == 0:
-        internal["max_snippet_chars"] = 1
     return internal
 
 

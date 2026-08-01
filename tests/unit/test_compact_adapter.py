@@ -155,11 +155,11 @@ def test_overview_filters_before_compact_tree_rendering() -> None:
                 ],
             }
         ],
-        "omitted": 1,
+        "omitted": 0,
     }
 
 
-def test_overview_filters_retain_ancestor_paths_and_count_only_removed_nodes() -> None:
+def test_overview_filters_retain_ancestor_paths_without_counting_selection() -> None:
     data = {
         "relative_path": "src/tree.py",
         "symbols": [
@@ -201,7 +201,7 @@ def test_overview_filters_retain_ancestor_paths_and_count_only_removed_nodes() -
                 ],
             }
         ],
-        "omitted": 3,
+        "omitted": 0,
     }
     assert excluded["data"]["omitted"] == 0
     assert excluded["data"]["files"][0]["symbols"][0]["kind"] == "class"
@@ -214,7 +214,70 @@ def test_overview_filters_retain_ancestor_paths_and_count_only_removed_nodes() -
             include_kinds=["method"],
         )
     )
-    assert filtered_empty["data"] == {"workspace": "/repo", "files": [], "omitted": 1}
+    assert filtered_empty["data"] == {"workspace": "/repo", "files": [], "omitted": 0}
+
+
+def test_overview_root_kinds_survive_depth_zero_and_descendant_noise_is_explicit() -> None:
+    data = {
+        "relative_path": "src/tree.py",
+        "max_depth": 1,
+        "symbols": [
+            {"name": "root_value", "kind": 13, "children": []},
+            {"name": "root_constant", "kind": 14, "children": []},
+            {
+                "name": "Runner",
+                "kind": 5,
+                "children": [
+                    {"name": "method", "kind": 6, "children": []},
+                    {"name": "local", "kind": 13, "children": []},
+                    {"name": "LIMIT", "kind": 14, "children": []},
+                ],
+            },
+        ],
+    }
+
+    default = _payload(compact_navigation_result("get_symbols_overview", _envelope(data)))
+    requested = _payload(
+        compact_navigation_result(
+            "get_symbols_overview",
+            _envelope(data),
+            include_kinds=["class", "method", "variable", "constant"],
+        )
+    )
+    roots_only = _payload(
+        compact_navigation_result(
+            "get_symbols_overview",
+            _envelope(
+                {
+                    **data,
+                    "max_depth": 0,
+                    "symbols": [
+                        {"name": "root_value", "kind": 13, "children": []},
+                        {"name": "root_constant", "kind": 14, "children": []},
+                        {"name": "Runner", "kind": 5, "children": []},
+                    ],
+                }
+            ),
+        )
+    )
+
+    default_symbols = default["data"]["files"][0]["symbols"]
+    assert [symbol["kind"] for symbol in default_symbols] == ["variable", "constant", "class"]
+    assert [symbol["kind"] for symbol in default_symbols[-1]["children"]] == ["method"]
+    assert default["data"]["omitted"] == 0
+
+    requested_symbols = requested["data"]["files"][0]["symbols"]
+    assert [symbol["kind"] for symbol in requested_symbols[-1]["children"]] == [
+        "method",
+        "variable",
+        "constant",
+    ]
+    assert requested["data"]["omitted"] == 0
+
+    root_symbols = roots_only["data"]["files"][0]["symbols"]
+    assert [symbol["kind"] for symbol in root_symbols] == ["variable", "constant", "class"]
+    assert "children" not in root_symbols[-1]
+    assert roots_only["data"]["omitted"] == 0
 
 
 def test_overview_combines_depth_envelope_and_budget_omissions() -> None:
@@ -243,7 +306,7 @@ def test_overview_combines_depth_envelope_and_budget_omissions() -> None:
     )
     payload = _payload(result)
 
-    assert payload["data"]["omitted"] == 7
+    assert payload["data"]["omitted"] == 5
     children = payload["data"]["files"][0]["symbols"][0]["children"]
     assert [child["name"] for child in children] == ["first" + suffix]
 
@@ -405,8 +468,19 @@ def test_multi_adapter_minimum_budget_error_preserves_all_item_authorities() -> 
     ]
 
 
-def test_references_group_by_file_and_retain_coverage_once() -> None:
-    coverage = {"adapter": "pyright", "language": "python", "scope_kind": "configured_program"}
+def test_references_group_by_file_and_collapse_complete_coverage() -> None:
+    coverage = {
+        "adapter": "pyright",
+        "language": "python",
+        "scope_kind": "configured",
+        "configured_program_files": 2,
+        "configured_program_digest": "configured-digest",
+        "trusted_language_files": 2,
+        "trusted_language_digest": "trusted-digest",
+        "uncovered_files": 0,
+        "uncovered_digest": "uncovered-digest",
+        "uncovered_sample": {"total": 0, "items": [], "digest": "uncovered-digest", "omitted": 0},
+    }
     result = compact_navigation_result(
         "find_referencing_symbols",
         _envelope(
@@ -428,7 +502,7 @@ def test_references_group_by_file_and_retain_coverage_once() -> None:
     )
     payload = _payload(result)
 
-    assert payload["data"]["coverage"] == coverage
+    assert payload["data"]["coverage"] == {"complete": True}
     assert payload["data"]["files"] == [
         {
             "path": "src/main.py",
@@ -436,6 +510,41 @@ def test_references_group_by_file_and_retain_coverage_once() -> None:
         }
     ]
     assert cast(types.TextContent, result.content[0]).text.count('"coverage"') == 1
+
+
+def test_incomplete_reference_coverage_has_stable_bounded_path_reason_evidence() -> None:
+    items = [f"tests/excluded_{index:02d}.py" for index in reversed(range(18))]
+    coverage = {
+        "adapter": "pyright",
+        "language": "python",
+        "scope_kind": "configured",
+        "configured_program_files": 1,
+        "configured_program_digest": "configured-digest",
+        "trusted_language_files": 19,
+        "trusted_language_digest": "trusted-digest",
+        "uncovered_files": 18,
+        "uncovered_digest": "uncovered-digest",
+        "uncovered_sample": {"total": 18, "items": items, "digest": "uncovered-digest", "omitted": 0},
+    }
+
+    payload = _payload(
+        compact_navigation_result(
+            "find_referencing_symbols",
+            _envelope({"references": [], "coverage": coverage}),
+        )
+    )
+
+    compact_coverage = payload["data"]["coverage"]
+    assert compact_coverage == {
+        "complete": False,
+        "uncovered_files": 18,
+        "sample": [
+            {"path": f"tests/excluded_{index:02d}.py", "reason": "excluded_by_native_config"}
+            for index in range(16)
+        ],
+        "omitted": 2,
+    }
+    assert "digest" not in json.dumps(compact_coverage)
 
 
 def test_verified_body_target_hash_and_raw_external_target_are_lossless() -> None:
@@ -562,7 +671,18 @@ def test_all_range_bearing_navigation_tools_preserve_repaired_unicode_coordinate
                         "container": {"kind": "file", "name_path": "<file>"},
                     }
                 ],
-                "coverage": {"adapter": "pyright", "language": "python"},
+                "coverage": {
+                    "adapter": "pyright",
+                    "language": "python",
+                    "scope_kind": "configured",
+                    "configured_program_files": 1,
+                    "configured_program_digest": "configured-digest",
+                    "trusted_language_files": 1,
+                    "trusted_language_digest": "trusted-digest",
+                    "uncovered_files": 0,
+                    "uncovered_digest": "uncovered-digest",
+                    "uncovered_sample": {"total": 0, "items": [], "digest": "uncovered-digest", "omitted": 0},
+                },
             },
             "references",
         ),

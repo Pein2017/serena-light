@@ -1837,7 +1837,7 @@ class WorkspaceRuntime:
         self,
         relative_path: str,
         *,
-        max_depth: int = 1,
+        max_depth: int = 0,
         max_answer_chars: int = 12_000,
     ) -> ToolEnvelope:
         """Render the existing one-document overview core through this runtime."""
@@ -2067,7 +2067,7 @@ class WorkspaceRuntime:
         relative_path: str,
         name_path: str,
         *,
-        max_snippet_chars: int = 240,
+        max_snippet_chars: int = 0,
         max_answer_chars: int = 12_000,
     ) -> ToolEnvelope:
         """Resolve one local symbol, then delegate presentation to the reference core."""
@@ -2465,7 +2465,7 @@ class WorkspaceRuntime:
             "position": {"line": position.line, "character": position.character},
         }
         if method == "textDocument/references":
-            params["context"] = {"includeDeclaration": True}
+            params["context"] = {"includeDeclaration": False}
         return self._stabilize_semantic_locations(
             adapter,
             method,
@@ -2979,7 +2979,7 @@ class WorkspaceRuntime:
                         "uri": (self.identity.root / request.relative_path).resolve(strict=True).as_uri()
                     },
                     "position": {"line": request.position.line, "character": request.position.character},
-                    "context": {"includeDeclaration": True},
+                    "context": {"includeDeclaration": False},
                 },
                 capture_reference_documents=True,
                 source_document=source_document,

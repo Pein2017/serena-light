@@ -27,6 +27,7 @@ from serena_light.tools.compact import (
     ordered_records,
     render_bounded_overview,
     render_bounded_records,
+    render_payload,
     validate_max_answer_chars,
     validate_max_matches,
     validate_overview_kind_filters,
@@ -49,6 +50,12 @@ NAVIGATION_OPERATIONS = frozenset(
     }
 )
 _MAX_ERROR_AUTHORITIES = 2
+_DEFAULT_SUPPRESSED_DESCENDANT_KINDS = frozenset({"variable", "constant"})
+_REFERENCE_COVERAGE_SAMPLE_LIMIT = 16
+_UNCOVERED_REASON_BY_SCOPE = {
+    "configured": "excluded_by_native_config",
+    "workspace_default": "omitted_by_engine_workspace_program",
+}
 
 
 def compact_navigation_result(
@@ -93,12 +100,17 @@ def compact_navigation_result(
         data = _mapping(envelope.get("data"), "data")
         if operation == "get_symbols_overview":
             included, excluded = validate_overview_kind_filters(include_kinds, exclude_kinds)
-            files, filter_omitted = _overview_files(data, frozenset(included), frozenset(excluded))
+            files = _overview_files(
+                data,
+                frozenset(included),
+                frozenset(excluded),
+                _nonnegative_integer(data.get("max_depth", 0), "max_depth"),
+            )
             return render_bounded_overview(
                 workspace,
                 files,
                 max_answer_chars=budget,
-                omitted=_overview_internal_omitted(data, envelope) + filter_omitted,
+                omitted=_internal_omitted(envelope),
                 error_workspace=authority_workspace,
                 error_adapter=authority_adapter,
                 error_generations=authority_generations,
@@ -115,8 +127,7 @@ def compact_navigation_result(
             records = ordered[:match_limit]
         elif operation == "find_referencing_symbols":
             records = _reference_records(data, include_snippets=include_snippets)
-            raw_coverage = data.get("coverage")
-            coverage = _mapping(raw_coverage, "coverage") if raw_coverage is not None else None
+            coverage = _compact_reference_coverage(_mapping(data.get("coverage"), "coverage"))
         else:
             records = _target_records(data)
         return render_bounded_records(
@@ -144,26 +155,34 @@ def _overview_files(
     data: Mapping[str, object],
     included: frozenset[str],
     excluded: frozenset[str],
-) -> tuple[tuple[CompactFile, ...], int]:
+    max_depth: int,
+) -> tuple[CompactFile, ...]:
     path = _string(data.get("relative_path"), "relative_path")
     raw_symbols = _sequence(data.get("symbols"), "symbols")
     symbols: list[CompactOverviewSymbol] = []
-    omitted = 0
     for raw in raw_symbols:
-        rendered, removed = _overview_symbol(_mapping(raw, "symbol"), included, excluded)
-        omitted += removed
+        rendered = _overview_symbol(
+            _mapping(raw, "symbol"),
+            included,
+            excluded,
+            max_depth=max_depth,
+            is_root=True,
+        )
         if rendered is not None:
             symbols.append(rendered)
     if not symbols:
-        return (), omitted
-    return (CompactFile(path, "symbols", tuple(symbols)),), omitted
+        return ()
+    return (CompactFile(path, "symbols", tuple(symbols)),)
 
 
 def _overview_symbol(
     raw: Mapping[str, object],
     included: frozenset[str],
     excluded: frozenset[str],
-) -> tuple[CompactOverviewSymbol | None, int]:
+    *,
+    max_depth: int,
+    is_root: bool,
+) -> CompactOverviewSymbol | None:
     """Filter post-order so retained descendants keep their ancestor path."""
 
     name = _string(raw.get("name"), "symbol.name")
@@ -173,16 +192,30 @@ def _overview_symbol(
     rendered_kind = symbol_kind(kind)
     raw_children = raw.get("children", ())
     children: list[CompactOverviewSymbol] = []
-    omitted = 0
     for child in _sequence(raw_children, "symbol.children"):
-        rendered, removed = _overview_symbol(_mapping(child, "symbol.child"), included, excluded)
-        omitted += removed
+        rendered = _overview_symbol(
+            _mapping(child, "symbol.child"),
+            included,
+            excluded,
+            max_depth=max_depth,
+            is_root=False,
+        )
         if rendered is not None:
             children.append(rendered)
-    matches = (not included or rendered_kind in included) and rendered_kind not in excluded
+    suppressed_descendant_noise = (
+        max_depth > 0
+        and not is_root
+        and rendered_kind in _DEFAULT_SUPPRESSED_DESCENDANT_KINDS
+        and rendered_kind not in included
+    )
+    matches = (
+        not suppressed_descendant_noise
+        and (not included or rendered_kind in included)
+        and rendered_kind not in excluded
+    )
     if matches or children:
-        return CompactOverviewSymbol(name, kind, tuple(children), intrinsic_match=matches), omitted
-    return None, omitted + 1
+        return CompactOverviewSymbol(name, kind, tuple(children), intrinsic_match=matches)
+    return None
 
 
 def _symbol_records(
@@ -275,6 +308,53 @@ def _reference_records(data: Mapping[str, object], *, include_snippets: bool) ->
             )
         )
     return tuple(records)
+
+
+def _compact_reference_coverage(raw: Mapping[str, object]) -> Mapping[str, Any]:
+    """Keep only the coverage fact that changes how a reference answer reads."""
+
+    uncovered_files = _nonnegative_integer(raw.get("uncovered_files"), "coverage.uncovered_files")
+    if uncovered_files == 0:
+        return {"complete": True}
+
+    sample = _mapping(raw.get("uncovered_sample"), "coverage.uncovered_sample")
+    if _nonnegative_integer(sample.get("total"), "coverage.uncovered_sample.total") != uncovered_files:
+        raise ValueError("coverage sample total must equal uncovered_files")
+    reason = _uncovered_reason(raw)
+    evidence: list[dict[str, str]] = []
+    for value in _sequence(sample.get("items"), "coverage.uncovered_sample.items"):
+        if isinstance(value, str):
+            path = _string(value, "coverage.uncovered_sample.path")
+            item_reason = reason
+        else:
+            item = _mapping(value, "coverage.uncovered_sample.item")
+            path = _string(item.get("path"), "coverage.uncovered_sample.item.path")
+            item_reason = _string(item.get("reason"), "coverage.uncovered_sample.item.reason")
+        evidence.append({"path": path, "reason": item_reason})
+    if len(evidence) > uncovered_files:
+        raise ValueError("coverage sample cannot exceed uncovered_files")
+    if not evidence:
+        raise ValueError("incomplete coverage requires evidence")
+    sample_omitted = _nonnegative_integer(sample.get("omitted"), "coverage.uncovered_sample.omitted")
+    if sample_omitted != uncovered_files - len(evidence):
+        raise ValueError("coverage sample omitted count is inconsistent")
+    if len({(item["path"], item["reason"]) for item in evidence}) != len(evidence):
+        raise ValueError("coverage sample must not repeat evidence")
+    retained = sorted(evidence, key=lambda item: (item["path"], item["reason"]))[:_REFERENCE_COVERAGE_SAMPLE_LIMIT]
+    return {
+        "complete": False,
+        "uncovered_files": uncovered_files,
+        "sample": retained,
+        "omitted": uncovered_files - len(retained),
+    }
+
+
+def _uncovered_reason(raw: Mapping[str, object]) -> str:
+    scope_kind = _string(raw.get("scope_kind"), "coverage.scope_kind")
+    try:
+        return _UNCOVERED_REASON_BY_SCOPE[scope_kind]
+    except KeyError as exc:
+        raise ValueError("coverage.scope_kind is unsupported") from exc
 
 
 def _target_records(data: Mapping[str, object]) -> tuple[LocatedCompactRecord, ...]:
@@ -408,15 +488,6 @@ def _internal_omitted(envelope: Mapping[str, object]) -> int:
     return omitted
 
 
-def _overview_internal_omitted(data: Mapping[str, object], envelope: Mapping[str, object]) -> int:
-    """Combine upstream depth and envelope truncation before final pruning."""
-
-    depth_omitted = _integer(data.get("depth_omitted_count", 0), "depth_omitted_count")
-    if depth_omitted < 0:
-        raise ValueError("depth_omitted_count must be non-negative")
-    return depth_omitted + _internal_omitted(envelope)
-
-
 def _compact_info(value: object) -> str | None:
     if isinstance(value, str):
         return value
@@ -460,6 +531,13 @@ def _integer(value: object, field: str) -> int:
     return value
 
 
+def _nonnegative_integer(value: object, field: str) -> int:
+    parsed = _integer(value, field)
+    if parsed < 0:
+        raise ValueError(f"{field} must be non-negative")
+    return parsed
+
+
 def _optional_integer(value: object) -> int | None:
     return None if value is None else _integer(value, "optional integer")
 
@@ -499,12 +577,7 @@ def _malformed_result(
         adapter=adapter,
         generations=generations,
     )
-    payload = envelope.to_dict()
-    return types.CallToolResult(
-        content=[types.TextContent(type="text", text=envelope.to_json())],
-        structuredContent=payload,
-        isError=False,
-    )
+    return render_payload(envelope.to_dict())
 
 
 __all__ = ("NAVIGATION_OPERATIONS", "compact_navigation_result")
