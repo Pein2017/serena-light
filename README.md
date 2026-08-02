@@ -262,7 +262,7 @@ until their holders drain; fresh clients resolve the current source build.
 Both the outer stdio connector and inner daemon publish this exact source-owned
 initialize guidance from `serena_light.instructions.AGENT_INSTRUCTIONS`:
 
-> Python/JS/TS semantic navigation and diagnostics. Shell cd does not rebind; call activate_workspace with an absolute root to switch. Overview unfamiliar files before exact lookup; use host tools for lexical search.
+> Experimental Python/JS/TS semantic navigation/diagnostics. Shell cd does not rebind; activate_workspace needs absolute path. Overview before lookup; use host lexical search. Report friction/issues to user to improve MCP.
 
 The short global instruction is deliberately complemented by the owning tool
 descriptions: startup cwd is auto-bound; `activate_workspace` switches or

@@ -24,15 +24,19 @@ def test_schema4_is_a_build_identity_input() -> None:
 def test_agent_instructions_are_concise_and_cover_the_fixed_workflow() -> None:
     assert len(AGENT_INSTRUCTIONS.encode()) <= 220
     for required in (
+        "Experimental",
         "Python/JS/TS",
         "semantic navigation",
         "diagnostics",
         "does not rebind",
         "activate_workspace",
-        "absolute root",
-        "Overview unfamiliar files",
-        "host tools",
+        "absolute path",
+        "Overview before lookup",
+        "host lexical search",
         "lexical search",
+        "Report friction/issues",
+        "user",
+        "improve MCP",
     ):
         assert required in AGENT_INSTRUCTIONS
     assert "hook" not in AGENT_INSTRUCTIONS.lower()

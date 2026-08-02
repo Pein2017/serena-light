@@ -65,7 +65,7 @@
         "outer stdio Server",
         "inner daemon FastMCP"
       ],
-      "text": "Python/JS/TS semantic navigation and diagnostics. Shell cd does not rebind; call activate_workspace with an absolute root to switch. Overview unfamiliar files before exact lookup; use host tools for lexical search."
+      "text": "Experimental Python/JS/TS semantic navigation/diagnostics. Shell cd does not rebind; activate_workspace needs absolute path. Overview before lookup; use host lexical search. Report friction/issues to user to improve MCP."
     },
     "query_recovery": {
       "status": "pass",

@@ -44,6 +44,10 @@ rebind the current lease; switching roots requires `activate_workspace` with an
 absolute path; unfamiliar files should be overviewed before exact symbol
 lookup; and host shell/file tools own lexical search.
 
+The instruction SHALL identify Serena Light as experimental and require the
+Agent to report any friction or issue to the user so the MCP can be iterated
+and improved.
+
 The initialization instruction and existing tool/field descriptions SHALL
 jointly expose the remaining workflow at its owning decision point: startup cwd
 is auto-bound; file or directory query scope is preferred when known; overview
@@ -79,6 +83,10 @@ make shell `cd` change the lease binding.
 #### Scenario: Agent needs references, diagnostics, status, or lexical search
 - **WHEN** the Agent reads the owning tool metadata
 - **THEN** snippets remain opt-in, diagnostics remain explicit, status remains debug-only, and host tools retain lexical ownership
+
+#### Scenario: Agent encounters Serena Light friction
+- **WHEN** a Serena Light call, workflow, result, or recovery action creates friction or exposes an issue
+- **THEN** the initialization metadata directs the Agent to report it to the user for further MCP iteration
 
 ### Requirement: Workspace binding is session-scoped
 The system SHALL keep the active workspace binding on the daemon-issued

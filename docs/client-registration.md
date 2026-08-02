@@ -48,6 +48,12 @@ bound wrong-root query paths may carry the closed `next_action` values
 not automatic calls. The change adds no hook, public tool, client registration,
 root discovery, or canonical-name switch. Verify the effective identity with
 `get_runtime_status` rather than relying on this recorded acceptance value.
+Serena Light remains experimental: Agents should report every observed
+friction point or issue to the user so the MCP can be iterated and improved.
+This instruction-only source revision selects build
+`10a465026933abb259b0d43b1df94db5efd066d0cf45d02fe0954204aae95945`;
+schema 4, the dependency digest, registration, and the 11-tool surface remain
+unchanged. Existing leased clients stay on their prior build slot until restart.
 
 ## Codex
 
