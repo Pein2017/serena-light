@@ -249,7 +249,11 @@ class DocumentNavigationService:
         try:
             loaded = self._provider.load_document_symbols(relative_path)
             if loaded.relative_path != relative_path:
-                return error(ErrorCode.INVALID_PATH, details={"path": relative_path})
+                return error(
+                    ErrorCode.INVALID_PATH,
+                    details={"path": relative_path},
+                    workspace=loaded.workspace,
+                )
             return DocumentNavigation.from_input(loaded)
         except WorkspaceError as exc:
             return from_workspace_error(exc)
@@ -322,7 +326,11 @@ def find_symbol(
     if not matches:
         return error(
             ErrorCode.SYMBOL_NOT_FOUND,
-            details={"relative_path": document.relative_path, "name_path": query_text},
+            details={
+                "relative_path": document.relative_path,
+                "name_path": query_text,
+                "next_action": "get_symbols_overview",
+            },
             workspace=document.workspace,
             adapter=document.adapter,
             generations=document.generations,

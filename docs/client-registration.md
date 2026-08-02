@@ -37,6 +37,18 @@ dashboard/logging arguments. A later shell `cd` is not observed. To use a
 nested Git root or switch to a different root entirely, call
 `activate_workspace` with an absolute directory path explicitly.
 
+The archived schema-4 `tighten-query-recovery` revision uses source build
+`78de9eaeac5c3b8522e568e364ee124aa6dca4b8bb0874eb1b63f51408c6d92c`
+with the same dependency digest and registration executable above. Its compact
+initialize instruction is source-owned and byte-identical at the outer and
+inner boundaries. Tool-local descriptions own depth, ambiguity, snippets,
+diagnostics, and debug-status guidance. Deterministic file symbol misses and
+bound wrong-root query paths may carry the closed `next_action` values
+`get_symbols_overview` and `activate_workspace_if_other_root`; these are advice,
+not automatic calls. The change adds no hook, public tool, client registration,
+root discovery, or canonical-name switch. Verify the effective identity with
+`get_runtime_status` rather than relying on this recorded acceptance value.
+
 ## Codex
 
 Add this parallel entry to `/data/CoordExp/.codex/config.toml` only when

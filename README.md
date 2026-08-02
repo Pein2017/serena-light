@@ -252,16 +252,34 @@ such as `"."`; directory enumeration is planned for the later
 
 ## Current schema-4 agent interaction contract
 
-The current public tool schema is version 4. This interaction revision changes
-presentation and guidance only: it preserves the existing semantic, freshness,
-and lifecycle owners and does not claim fresh acceptance measurements. A
-schema-3 client stays isolated on its own build slot until its holders drain;
-fresh clients resolve the schema-4 build identity.
+The current public tool schema is version 4. The archived compact-interaction
+revision owns its success presentation; the archived `tighten-query-recovery`
+revision changes only initialize/tool guidance and deterministic error
+correction evidence. It preserves the existing semantic, freshness, editing,
+and lifecycle owners. Older clients stay isolated on their own build slots
+until their holders drain; fresh clients resolve the current source build.
 
 Both the outer stdio connector and inner daemon publish this exact source-owned
 initialize guidance from `serena_light.instructions.AGENT_INSTRUCTIONS`:
 
-> Serena Light provides current semantic navigation and diagnostics for Python and JavaScript/TypeScript. It auto-binds the startup cwd; shell cd does not rebind. When switching repositories, call activate_workspace with an absolute directory path. Prefer file or directory query scope when known. Symbol overview starts at depth 0; reference snippets are opt-in. Call diagnostics explicitly after a meaningful edit group. Use runtime status only for debugging, build, or readiness questions. Use host shell/file tools for lexical file enumeration and text search.
+> Python/JS/TS semantic navigation and diagnostics. Shell cd does not rebind; call activate_workspace with an absolute root to switch. Overview unfamiliar files before exact lookup; use host tools for lexical search.
+
+The short global instruction is deliberately complemented by the owning tool
+descriptions: startup cwd is auto-bound; `activate_workspace` switches or
+returns to an absolute root; unfamiliar files start with a depth-0 overview;
+an ambiguous symbol is retried with one returned qualified name path;
+reference snippets remain opt-in; diagnostics remain explicit after a
+meaningful edit group; and runtime status is for debug/build/readiness rather
+than routine preflight.
+
+Two deterministic query failures expose one closed correction action without
+performing it. A file-scoped `SYMBOL_NOT_FOUND` may return
+`next_action=get_symbols_overview`. A bound semantic/diagnostic `INVALID_PATH`
+returns the active workspace and
+`next_action=activate_workspace_if_other_root`. Directory/global symbol misses,
+ambiguity, activation validation, and editing errors do not receive those
+actions. Serena Light never guesses a root or symbol, performs a lexical
+fallback, rebinds, or retries on the Agent's behalf.
 
 Successful navigation and diagnostics use compact canonical JSON with one
 absolute `data.workspace`, deterministic `data.files`, and one `data.omitted`.
@@ -279,6 +297,8 @@ URI, and offset internals stay out of successful payloads.
 This schema does not add lexical-discovery tools, diagnostics hooks or automatic
 diagnostic injection, or RTK integration. Host shell/file tools continue to own
 lexical enumeration and text search; diagnostics stay explicit and on demand.
+Implementation and acceptance receipts live in
+`openspec/changes/archive/2026-08-02-tighten-query-recovery/acceptance.md`.
 
 ## Local checks
 

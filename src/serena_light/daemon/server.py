@@ -306,7 +306,7 @@ def create_daemon_app(
         ],
         context: Context,
     ) -> dict[str, object]:
-        """Bind this lease to the physical workspace containing an absolute directory path."""
+        """startup cwd is auto-bound; Shell cd does not change this lease; use an absolute path to switch or return."""
 
         try:
             lease_id = lease_id_from_context(context)
@@ -426,7 +426,7 @@ def create_daemon_app(
 
     @mcp.tool(name="get_runtime_status", structured_output=True)
     async def get_runtime_status(context: Context) -> dict[str, object]:
-        """Report bounded workspace, generation, adapter, and cleanup status for this lease."""
+        """Workspace/generation/adapter/cleanup status for debug/build/readiness, not routine preflight."""
 
         result = await bound_call(context, "get_runtime_status")
         assert isinstance(result, dict)
@@ -470,7 +470,7 @@ def create_daemon_app(
             Field(description="Optional stable lowercase LSP kind names to remove after include filtering."),
         ] = None,
     ) -> dict[str, object]:
-        """Return a compact depth-0 symbol tree; request depth or lowercase kinds only when needed."""
+        """Return a compact symbol tree; start depth 0 for unfamiliar files before exact lookup."""
 
         return cast(
             dict[str, object],
@@ -518,7 +518,7 @@ def create_daemon_app(
             Field(description="Maximum semantic matches after filtering and deduplication: 1 through 100; default 20."),
         ] = DEFAULT_MAX_MATCHES,
     ) -> dict[str, object]:
-        """Find compact Serena name paths; scope to a known file or directory when possible."""
+        """Find name paths. If name unknown, overview depth 0; retry ambiguity with a returned qualified name path."""
 
         return cast(
             dict[str, object],
@@ -627,7 +627,7 @@ def create_daemon_app(
             Field(description="Final compact MCP text limit: 512 through 50000 characters; default 12000."),
         ] = 12_000,
     ) -> dict[str, object]:
-        """Find compact semantic references; set max_snippet_chars above zero to include snippets."""
+        """Find references; snippets are opt-in via max_snippet_chars."""
 
         return cast(
             dict[str, object],
@@ -661,7 +661,7 @@ def create_daemon_app(
             Field(description="Final compact MCP text limit: 512 through 50000 characters; default 12000."),
         ] = 12_000,
     ) -> dict[str, object]:
-        """Explicitly inspect current file diagnostics; severity 1=Error through 4=Hint."""
+        """Inspect file diagnostics explicitly after a meaningful edit group; severity 1=Error through 4=Hint."""
 
         return cast(
             dict[str, object],
@@ -699,7 +699,7 @@ def create_daemon_app(
             Field(description="Final compact MCP text limit: 512 through 50000 characters; default 12000."),
         ] = 12_000,
     ) -> dict[str, object]:
-        """Explicitly inspect current symbol diagnostics; severity 1=Error through 4=Hint."""
+        """Inspect symbol diagnostics explicitly after a meaningful edit group; severity 1=Error through 4=Hint."""
 
         return cast(
             dict[str, object],

@@ -2,13 +2,9 @@
 
 
 AGENT_INSTRUCTIONS = (
-    "Serena Light provides current semantic navigation and diagnostics for Python and "
-    "JavaScript/TypeScript. It auto-binds the startup cwd; shell cd does not rebind. "
-    "When switching repositories, call activate_workspace with an absolute directory path. "
-    "Prefer file or directory query scope when known. Symbol overview starts at depth 0; reference "
-    "snippets are opt-in. Call diagnostics explicitly after a meaningful edit group. "
-    "Use runtime status only for debugging, build, or readiness questions. Use host "
-    "shell/file tools for lexical file enumeration and text search."
+    "Python/JS/TS semantic navigation and diagnostics. Shell cd does not rebind; call "
+    "activate_workspace with an absolute root to switch. Overview unfamiliar files before "
+    "exact lookup; use host tools for lexical search."
 )
 
 

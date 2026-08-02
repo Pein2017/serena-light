@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+from typing import cast
 
+import pytest
 from mcp import types
 
 from serena_light.tools.envelopes import (
@@ -80,6 +82,59 @@ def test_deterministic_symbol_miss_is_bounded_and_drops_engine_authority() -> No
     assert "name_path" not in details
 
 
+def test_invalid_path_retains_active_workspace_and_closed_recovery_action_at_budget() -> None:
+    envelope = error(
+        ErrorCode.INVALID_PATH,
+        details={
+            "path": "wrong-root/" + "x" * 800,
+            "relative_path": "wrong-root/" + "x" * 800,
+            "next_action": "activate_workspace_if_other_root",
+        },
+        workspace=WorkspaceMetadata("/data/example", "git", "/data/example"),
+        adapter=AdapterMetadata("pyright", "python"),
+        generations=GenerationMetadata(1, 2, 3, 4),
+    )
+
+    result = render_error_result(envelope.to_dict(), max_answer_chars=512)
+    payload = _payload(result)
+    assert len(result.content[0].text) <= 512  # type: ignore[union-attr]
+    assert payload["workspace"] == "/data/example"
+    error_payload = payload["error"]
+    assert isinstance(error_payload, dict)
+    error_data = cast(dict[str, object], error_payload)
+    assert error_data["details"] == {
+        "next_action": "activate_workspace_if_other_root",
+    }
+
+
+def test_unknown_recovery_action_is_rejected_at_presentation_boundary() -> None:
+    envelope = error(
+        ErrorCode.INVALID_PATH,
+        details={"next_action": "guess_a_root"},
+        workspace=WorkspaceMetadata("/data/example", "git", "/data/example"),
+    )
+
+    with pytest.raises(ValueError, match="recovery action"):
+        render_error_result(envelope.to_dict())
+
+
+def test_generic_invalid_path_does_not_invent_query_recovery() -> None:
+    envelope = error(
+        ErrorCode.INVALID_PATH,
+        details={"path": "activation-target"},
+        workspace=WorkspaceMetadata("/data/example", "git", "/data/example"),
+    )
+
+    payload = _payload(render_error_result(envelope.to_dict()))
+
+    error_payload = payload["error"]
+    assert isinstance(error_payload, dict)
+    error_data = cast(dict[str, object], error_payload)
+    details = error_data["details"]
+    assert isinstance(details, dict)
+    assert "next_action" not in cast(dict[str, object], details)
+
+
 def test_operational_error_retains_rich_recovery_authority() -> None:
     envelope = error(
         ErrorCode.NOT_READY,
@@ -124,6 +179,7 @@ def test_ambiguous_candidates_are_bounded_without_runtime_authority() -> None:
     assert len(block.text) <= 512
     assert "adapter" not in payload and "generations" not in payload
     details = payload["error"]["details"]  # type: ignore[index]
+    assert "next_action" not in details
     assert details["candidates"] == [
         f"Container{index:03d}/item" for index in range(len(details["candidates"]))
     ]

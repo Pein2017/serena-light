@@ -96,6 +96,15 @@ def test_mjs_find_symbol_uses_utf16_astral_offsets_body_info_and_file_hash() -> 
     assert result["symbol"]["info"]["selection_range"]["end"]["column"] == 9
 
 
+def test_mjs_file_scoped_symbol_miss_uses_the_same_overview_recovery_action() -> None:
+    document = DocumentNavigation.from_input(_document(mjs=True))
+
+    value = find_symbol(document, "missing").to_dict()
+
+    assert value["error"]["code"] == "SYMBOL_NOT_FOUND"
+    assert value["error"]["details"]["next_action"] == "get_symbols_overview"
+
+
 def test_serena_name_path_suffix_absolute_and_last_segment_substring_matching() -> None:
     raw = _mutable_raw()
     nested_class = raw[0]
@@ -139,6 +148,7 @@ def test_serena_name_path_suffix_absolute_and_last_segment_substring_matching() 
     assert absolute["ok"] is True
     assert absolute["data"]["symbol"]["name_path"] == "Café/launch🚀"
     assert nonfinal_substring["error"]["code"] == "SYMBOL_NOT_FOUND"
+    assert nonfinal_substring["error"]["details"]["next_action"] == "get_symbols_overview"
     assert provider.calls == ["src/example.py"] * 5
 
 
@@ -214,6 +224,14 @@ def test_directory_scope_searches_only_the_explicit_inventory_selection() -> Non
     ]
     assert all("def launch🚀" in item["symbol"]["body"] for item in value["data"]["symbols"])
     assert provider.calls == ["src/a.py", "src/nested/b.py"]
+
+    missing = DocumentNavigationService(provider).find_symbol_in_documents(
+        ("src/nested/b.py", "src/a.py"),
+        "missing",
+        relative_scope="src",
+    ).to_dict()
+    assert missing["error"]["code"] == "SYMBOL_NOT_FOUND"
+    assert "next_action" not in missing["error"]["details"]
 
 
 def test_overview_and_ambiguity_are_deterministically_bounded() -> None:

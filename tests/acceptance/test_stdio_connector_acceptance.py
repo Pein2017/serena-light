@@ -260,11 +260,21 @@ async def _run_fresh_stdio_client(
         initialized = await client.initialize()
         assert initialized.serverInfo.name == "serena-light"
         assert initialized.instructions == AGENT_INSTRUCTIONS
+        assert len(initialized.instructions.encode()) <= 220
 
         listed = await client.list_tools()
         tool_names = {tool.name for tool in listed.tools}
+        assert len(listed.tools) == 11
         assert "get_runtime_status" in tool_names
         assert "replace_symbol_body" in tool_names
+        descriptions = {tool.name: (tool.description or "") for tool in listed.tools}
+        assert "startup cwd is auto-bound" in descriptions["activate_workspace"]
+        assert "Shell cd does not change this lease" in descriptions["activate_workspace"]
+        assert "depth 0" in descriptions["get_symbols_overview"]
+        assert "qualified name path" in descriptions["find_symbol"]
+        assert "snippets are opt-in" in descriptions["find_referencing_symbols"]
+        assert "meaningful edit group" in descriptions["get_diagnostics_for_file"]
+        assert "not routine preflight" in descriptions["get_runtime_status"]
 
         status = _data(await client.call_tool("get_runtime_status"))
         assert status["build_identity"] == (

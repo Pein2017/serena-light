@@ -22,21 +22,19 @@ def test_schema4_is_a_build_identity_input() -> None:
 
 
 def test_agent_instructions_are_concise_and_cover_the_fixed_workflow() -> None:
-    assert len(AGENT_INSTRUCTIONS) <= 1_000
+    assert len(AGENT_INSTRUCTIONS.encode()) <= 220
     for required in (
-        "Python",
-        "JavaScript/TypeScript",
-        "activate_workspace",
-        "absolute",
-        "directory path",
-        "depth 0",
-        "snippets",
+        "Python/JS/TS",
+        "semantic navigation",
         "diagnostics",
-        "runtime status",
-        "shell/file",
+        "does not rebind",
+        "activate_workspace",
+        "absolute root",
+        "Overview unfamiliar files",
+        "host tools",
+        "lexical search",
     ):
         assert required in AGENT_INSTRUCTIONS
-    assert "does not rebind" in AGENT_INSTRUCTIONS
     assert "hook" not in AGENT_INSTRUCTIONS.lower()
 
 

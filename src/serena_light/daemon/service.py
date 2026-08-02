@@ -30,6 +30,7 @@ from serena_light.lsp.executor import ExecutorBusyError
 from serena_light.tools.envelopes import (
     ErrorCode,
     JsonValue,
+    WorkspaceMetadata,
     error,
     from_adapter_error,
     from_executor_busy,
@@ -37,6 +38,7 @@ from serena_light.tools.envelopes import (
     from_workspace_error,
     success,
 )
+from serena_light.tools.presentation import RecoveryAction
 from serena_light.workspace.identity import WorkspaceError, WorkspaceIdentity, WorkspacePolicy
 from serena_light.workspace.registry import (
     PreparedWorkspaceActivation,
@@ -50,6 +52,17 @@ from serena_light.workspace.runtime import WorkspaceRuntimeError
 # failure elsewhere is a read that provably never wrote anything, so it must
 # not be declared with a code that could imply otherwise.
 _LSP_WRITE_OPERATIONS = frozenset({"replace_symbol_body"})
+_BOUND_QUERY_OPERATIONS = frozenset(
+    {
+        "get_symbols_overview",
+        "find_symbol",
+        "find_referencing_symbols",
+        "find_declaration",
+        "find_implementations",
+        "get_diagnostics_for_file",
+        "get_diagnostics_for_symbol",
+    }
+)
 
 
 class WorkspaceResolver[IdentityT](Protocol):
@@ -380,7 +393,35 @@ class WorkspaceDaemonService[IdentityT: Hashable, RuntimeT]:
             binding = await self.binding_for(lease_id=lease_id)
         except ValueError:
             return error(ErrorCode.INVALID_INPUT, details={"field": "active_workspace"}).to_dict()
-        return await self._runtime_result(binding.runtime, operation, kwargs)
+        result = await self._runtime_result(binding.runtime, operation, kwargs)
+        return self._enrich_bound_query_error(result, operation=operation, binding=binding)
+
+    @staticmethod
+    def _enrich_bound_query_error(
+        result: Mapping[str, object],
+        *,
+        operation: str,
+        binding: WorkspaceBinding[IdentityT, RuntimeT],
+    ) -> Mapping[str, object]:
+        """Retain active workspace authority for deterministic query path errors."""
+
+        if operation not in _BOUND_QUERY_OPERATIONS or result.get("ok") is not False:
+            return result
+        raw_error = result.get("error")
+        if not isinstance(raw_error, Mapping):
+            return result
+        error_data = cast(Mapping[str, object], raw_error)
+        if error_data.get("code") != ErrorCode.INVALID_PATH.value:
+            return result
+        workspace = _workspace_metadata_for_binding(binding)
+        enriched = dict(result)
+        raw_details = error_data.get("details")
+        details = dict(cast(Mapping[str, object], raw_details)) if isinstance(raw_details, Mapping) else {}
+        details.setdefault("next_action", RecoveryAction.ACTIVATE_WORKSPACE_IF_OTHER_ROOT.value)
+        enriched["error"] = {**dict(error_data), "details": details}
+        if workspace is not None:
+            enriched["workspace"] = workspace.to_dict()
+        return enriched
 
     async def _runtime_result(
         self, runtime: RuntimeT, operation: str, kwargs: Mapping[str, object]
@@ -562,6 +603,34 @@ def _binding_data[IdentityT, RuntimeT](binding: WorkspaceBinding[IdentityT, Runt
         "identity": identity,
         "working_subdirectory": str(binding.working_subdirectory),
     }
+
+
+def _workspace_metadata_for_binding[IdentityT, RuntimeT](
+    binding: WorkspaceBinding[IdentityT, RuntimeT],
+) -> WorkspaceMetadata | None:
+    """Recover physical workspace metadata without changing the lease binding."""
+
+    runtime_identity = getattr(binding.runtime, "identity", None)
+    root = getattr(runtime_identity, "root", None)
+    kind = getattr(runtime_identity, "kind", None)
+    working_subdirectory = getattr(runtime_identity, "working_subdirectory", binding.working_subdirectory)
+    if root is None or kind is None:
+        identity = binding.identity
+        if isinstance(identity, tuple) and len(identity) == 2:
+            kind, root = identity
+    if root is None or kind is None:
+        return None
+    kind_value = getattr(kind, "value", kind)
+    if not isinstance(kind_value, str):
+        kind_value = str(kind_value)
+    try:
+        return WorkspaceMetadata(
+            root=str(root),
+            kind=kind_value,
+            working_subdirectory=str(working_subdirectory),
+        )
+    except ValueError:
+        return None
 
 
 def _stop_fields[IdentityT, RuntimeT](

@@ -14,6 +14,7 @@ from serena_light import cli
 from serena_light.daemon.leases import LEASE_EXPIRY_SECONDS, WARM_GRACE_SECONDS, LeaseLifecycle
 from serena_light.daemon.server import LeaseExpiredError
 from serena_light.daemon.service import WorkspaceDaemonService
+from serena_light.workspace.identity import WorkspaceIdentity, WorkspaceKind
 from serena_light.workspace.registry import ResolvedWorkspace, WorkspaceRuntimeRegistry
 
 
@@ -31,6 +32,104 @@ class Runtime:
         self.freshness_count += 1
         if self.freshness_error is not None:
             raise self.freshness_error
+
+
+@dataclass(eq=False, slots=True)
+class QueryRuntime:
+    identity: WorkspaceIdentity
+    calls: list[str]
+
+    def find_symbol(self, **kwargs: object) -> Mapping[str, object]:
+        del kwargs
+        self.calls.append("find_symbol")
+        return {
+            "ok": False,
+            "error": {
+                "code": "INVALID_PATH",
+                "message": "path is invalid",
+                "details": {"path": "wrong-root/src/main.py"},
+            },
+        }
+
+    def replace_symbol_body(self, **kwargs: object) -> Mapping[str, object]:
+        del kwargs
+        self.calls.append("replace_symbol_body")
+        return {
+            "ok": False,
+            "error": {
+                "code": "INVALID_PATH",
+                "message": "path is invalid",
+                "details": {"path": "edit-target"},
+            },
+        }
+
+
+def test_bound_query_invalid_path_retains_active_workspace_and_recovery_action() -> None:
+    identity = WorkspaceIdentity(Path("/data/project"), WorkspaceKind.GIT, Path("/data/project"))
+    activation_paths: list[Path] = []
+    runtime = QueryRuntime(identity, [])
+
+    def resolve(path: Path) -> ResolvedWorkspace[tuple[WorkspaceKind, Path]]:
+        activation_paths.append(path)
+        return ResolvedWorkspace(identity.registry_key, identity.working_subdirectory)
+
+    registry = WorkspaceRuntimeRegistry[tuple[WorkspaceKind, Path], QueryRuntime, UUID](
+        lambda _key: runtime
+    )
+    service = WorkspaceDaemonService[tuple[WorkspaceKind, Path], QueryRuntime](
+        lifecycle=LeaseLifecycle[tuple[WorkspaceKind, Path], QueryRuntime](clock=lambda: 0.0),
+        registry=registry,
+        resolver=resolve,
+        runtime_stopper=lambda _runtime: None,
+    )
+
+    async def scenario() -> None:
+        grant = await service.acquire_lease(mcp_session_id="query-recovery")
+        lease_id = grant["lease_id"]
+        assert isinstance(lease_id, str)
+        await service.activate_workspace(lease_id=lease_id, absolute_path="/data/project")
+        binding_before = await service.binding_for(lease_id=lease_id)
+        assert activation_paths == [Path("/data/project")]
+
+        result = await service.semantic_operation(
+            lease_id=lease_id,
+            operation="find_symbol",
+            name_path="answer",
+            relative_path="wrong-root/src/main.py",
+        )
+
+        query_error = result["error"]
+        assert isinstance(query_error, Mapping)
+        query_error_data = cast(Mapping[str, object], query_error)
+        assert query_error_data["details"] == {
+            "path": "wrong-root/src/main.py",
+            "next_action": "activate_workspace_if_other_root",
+        }
+        assert result["workspace"] == {
+            "root": "/data/project",
+            "kind": "git",
+            "working_subdirectory": "/data/project",
+        }
+        assert runtime.calls == ["find_symbol"]
+        assert await service.binding_for(lease_id=lease_id) == binding_before
+        assert activation_paths == [Path("/data/project")]
+
+        edit_result = await service.semantic_operation(
+            lease_id=lease_id,
+            operation="replace_symbol_body",
+            name_path="answer",
+            relative_path="edit-target",
+            body="pass",
+            expected_hash="a" * 64,
+        )
+        edit_error = edit_result["error"]
+        assert isinstance(edit_error, Mapping)
+        edit_error_data = cast(Mapping[str, object], edit_error)
+        assert edit_error_data["details"] == {"path": "edit-target"}
+        assert "workspace" not in edit_result
+        assert runtime.calls == ["find_symbol", "replace_symbol_body"]
+
+    run(scenario())
 
 
 @dataclass(slots=True)

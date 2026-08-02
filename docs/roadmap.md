@@ -20,10 +20,16 @@ Guarded editing (`replace_symbol_body`) is restored after reacceptance.
 `add-lexical-discovery` and `improve-warm-runtime-reuse` are the next two
 strictly ordered changes in that phase and remain planning-only.
 
-The active `tighten-agent-interaction` revision advances the public schema to
+The archived `tighten-agent-interaction` revision advanced the public schema to
 4 for compact overview/reference/diagnostics presentation and source-owned MCP
-initialize guidance. It does not start `add-lexical-discovery`, introduce a
-diagnostics hook, or add RTK; those remain outside this revision's scope.
+initialize guidance. The archived `tighten-query-recovery` source-only revision
+keeps schema 4 and build-slot isolation while shortening repeated initialization
+metadata and adding two closed, error-only Agent recovery actions. Its final
+build `78de9eae...` passed the 880-test fixed point, static/provenance/bootstrap
+and rollover gates, plus fresh Codex/Luna-medium and Claude Code/Haiku clients.
+It does not
+start `add-lexical-discovery`, introduce diagnostics hooks, add RTK, guess a
+workspace or symbol, or change successful responses.
 
 ## Phase A: contain and repair v1
 

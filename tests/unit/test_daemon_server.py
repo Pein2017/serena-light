@@ -23,6 +23,7 @@ from serena_light.daemon.server import (
     spawn_detached_process,
     validate_health_identity,
 )
+from serena_light.instructions import AGENT_INSTRUCTIONS
 from serena_light.runtime_files import BearerSecret, DiscoveryMetadata
 
 
@@ -66,6 +67,17 @@ def _metadata(daemon_id: str) -> DiscoveryMetadata:
         protocol_version="2025-11-25",
         server_version=__version__,
     )
+
+
+def test_agent_instructions_are_the_approved_bounded_source_contract() -> None:
+    expected = (
+        "Python/JS/TS semantic navigation and diagnostics. Shell cd does not rebind; call "
+        "activate_workspace with an absolute root to switch. Overview unfamiliar files before "
+        "exact lookup; use host tools for lexical search."
+    )
+    assert expected == AGENT_INSTRUCTIONS
+    assert len(AGENT_INSTRUCTIONS.encode()) == 214
+    assert len(AGENT_INSTRUCTIONS.encode()) <= 220
 
 
 def test_bearer_rejection_precedes_every_service_callback() -> None:

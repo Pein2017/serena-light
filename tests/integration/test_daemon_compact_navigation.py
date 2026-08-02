@@ -8,6 +8,7 @@ from uuid import uuid4
 from starlette.testclient import TestClient
 
 from serena_light.daemon.server import DaemonService, create_daemon_app
+from serena_light.instructions import AGENT_INSTRUCTIONS
 from serena_light.lsp.positions import FileSnapshot, PositionEncoding
 from serena_light.runtime_files import BearerSecret
 from serena_light.tools.envelopes import WorkspaceMetadata
@@ -50,6 +51,19 @@ class _Service:
         self.semantic_calls.append((operation, dict(kwargs)))
         workspace = {"root": "/repo", "kind": "git", "working_subdirectory": "/repo"}
         if operation == "find_symbol":
+            if kwargs.get("name_path") == "invalid-path":
+                return {
+                    "ok": False,
+                    "error": {
+                        "code": "INVALID_PATH",
+                        "message": "path is invalid",
+                        "details": {
+                            "path": kwargs.get("relative_path"),
+                            "next_action": "activate_workspace_if_other_root",
+                        },
+                    },
+                    "workspace": workspace,
+                }
             if kwargs.get("name_path") == "ambiguous":
                 return _ambiguous_symbol_result(
                     max_answer_chars=cast(int, kwargs["max_answer_chars"]),
@@ -311,6 +325,9 @@ def _initialize(client: TestClient, authorization: str) -> str:
         },
     )
     assert response.status_code == 200
+    result = response.json()["result"]
+    assert result["instructions"] == AGENT_INSTRUCTIONS
+    assert len(result["instructions"].encode()) <= 220
     return response.headers["mcp-session-id"]
 
 
@@ -428,6 +445,50 @@ def test_real_fastmcp_boundary_emits_exact_compact_text_and_public_schema() -> N
         }
         assert service.semantic_calls[0][1]["max_answer_chars"] == 2_147_483_647
         assert "max_matches" not in service.semantic_calls[0][1]
+
+
+def test_real_fastmcp_boundary_preserves_bound_invalid_path_recovery_action() -> None:
+    service = _Service()
+    token = "r" * 48
+    authorization = f"Bearer {token}"
+    app = create_daemon_app(
+        service=cast(DaemonService, service),
+        bearer=BearerSecret(token),
+        daemon_id=str(uuid4()),
+    )
+
+    with TestClient(app, base_url="http://127.0.0.1:8000", client=("127.0.0.1", 50107)) as client:
+        session_id = _initialize(client, authorization)
+        result = _tool_call(
+            client,
+            authorization,
+            session_id,
+            2,
+            "find_symbol",
+            {
+                "name_path": "invalid-path",
+                "relative_path": "wrong-root/src/main.py",
+                "max_answer_chars": 512,
+            },
+            service.lease_id,
+        )
+
+    text = result["content"][0]["text"]
+    assert result.get("isError") is not True
+    assert text == json.dumps(result["structuredContent"], ensure_ascii=False, allow_nan=False, separators=(",", ":"))
+    assert len(text) <= 512
+    assert result["structuredContent"] == {
+        "ok": False,
+        "error": {
+            "code": "INVALID_PATH",
+            "message": "path is invalid",
+            "details": {
+                "path": "wrong-root/src/main.py",
+                "next_action": "activate_workspace_if_other_root",
+            },
+        },
+        "workspace": "/repo",
+    }
 
 
 def test_real_fastmcp_diagnostics_enforces_budget_only_at_final_boundary() -> None:

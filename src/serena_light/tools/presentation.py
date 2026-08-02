@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from enum import StrEnum
 from typing import Any, cast
 
 from mcp import types
@@ -28,6 +29,13 @@ _CORRECTION_ECHO_REMOVAL_ORDER = (
     "relative_path",
     "method",
 )
+
+
+class RecoveryAction(StrEnum):
+    """Closed machine-readable actions for deterministic query recovery."""
+
+    GET_SYMBOLS_OVERVIEW = "get_symbols_overview"
+    ACTIVATE_WORKSPACE_IF_OTHER_ROOT = "activate_workspace_if_other_root"
 
 
 def render_error_result(
@@ -67,6 +75,7 @@ def render_error_result(
             for key, value in cast(Mapping[Any, Any], details).items()
             if isinstance(key, str) and key not in _RUNTIME_AUTHORITY_DETAIL_FIELDS
         }
+        _validate_recovery_action(compact_details)
         if compact_details:
             compact_error["details"] = compact_details
     payload: dict[str, Any] = {"ok": False, "error": compact_error}
@@ -112,6 +121,7 @@ def _compact_ambiguity(
     if details.get("truncated") is True or existing_omitted:
         compact_details["truncated"] = True
         compact_details["omitted_count"] = existing_omitted
+    _validate_recovery_action(compact_details)
 
     payload: dict[str, Any] = {
         "ok": False,
@@ -169,13 +179,9 @@ def _bound_deterministic(payload: dict[str, Any], budget: int) -> dict[str, Any]
             if len(canonical_json(payload)) <= budget:
                 return payload
 
-    payload.pop("workspace", None)
-    if len(canonical_json(payload)) <= budget:
-        return payload
-
     if details is not None:
         remaining = sorted(
-            details,
+            (field for field in details if field != "next_action"),
             key=lambda field: (len(canonical_json(details[field])), field),
             reverse=True,
         )
@@ -185,7 +191,27 @@ def _bound_deterministic(payload: dict[str, Any], budget: int) -> dict[str, Any]
                 error_value.pop("details", None)
             if len(canonical_json(payload)) <= budget:
                 return payload
+
+    # The active root and the closed recovery action are the decision-bearing
+    # facts.  Keep them ahead of long query echoes and incidental details.
+    payload.pop("workspace", None)
+    if len(canonical_json(payload)) <= budget:
+        return payload
     raise ValueError("minimum deterministic error exceeds the public answer budget")
+
+
+def _validate_recovery_action(details: Mapping[str, Any]) -> None:
+    """Reject free-form recovery advice at the client-visible boundary."""
+
+    action = details.get("next_action")
+    if action is None:
+        return
+    if not isinstance(action, str):
+        raise ValueError("recovery action must be a string")
+    try:
+        RecoveryAction(action)
+    except ValueError as exc:
+        raise ValueError("recovery action is not recognized") from exc
 
 
 def _mapping_copy(value: Mapping[Any, Any]) -> dict[str, Any]:
@@ -209,4 +235,4 @@ def _mapping_copy(value: Mapping[Any, Any]) -> dict[str, Any]:
     return result
 
 
-__all__ = ["render_error_result"]
+__all__ = ["RecoveryAction", "render_error_result"]
