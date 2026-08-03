@@ -90,6 +90,7 @@ from serena_light.tools.envelopes import (
     WorkspaceMetadata,
     error,
     from_workspace_error,
+    scope_error_details,
 )
 from serena_light.tools.global_symbols import (
     ConfiguredProgramScope,
@@ -131,6 +132,7 @@ from serena_light.workspace.inventory import (
 from serena_light.workspace.scope import (
     FileChangeType,
     LanguageFamily,
+    ScopeError,
     ScopeGenerationTracker,
     ScopeProjection,
     WatchedFileEvent,
@@ -229,10 +231,18 @@ class RuntimeErrorCode(StrEnum):
 class WorkspaceRuntimeError(RuntimeError):
     """Transport-neutral runtime failure for a later typed envelope owner."""
 
-    def __init__(self, code: str, message: str, *, paths: tuple[str, ...] = ()) -> None:
+    def __init__(
+        self,
+        code: str,
+        message: str,
+        *,
+        paths: tuple[str, ...] = (),
+        scope_error: ScopeError | None = None,
+    ) -> None:
         super().__init__(message)
         self.code = code
         self.paths = paths
+        self.scope_error = scope_error
 
 
 class WorkspacePathPolicy(Protocol):
@@ -2244,9 +2254,12 @@ class WorkspaceRuntime:
                 if code in {ErrorCode.BUSY, ErrorCode.NOT_READY, ErrorCode.TIMED_OUT}
                 else None
             )
+            details: dict[str, object] = {"paths": caught.paths} if caught.paths else {}
+            if caught.scope_error is not None:
+                details.update(scope_error_details(caught.scope_error))
             return error(
                 code,
-                details={"paths": caught.paths} if caught.paths else {},
+                details=details,
                 retry=retry,
             )
         # TimeoutError is an OSError; it must keep its own code rather than be
@@ -3733,6 +3746,7 @@ def _projection_error(family: LanguageFamily, projection: ScopeProjection) -> Wo
         RuntimeErrorCode.SCOPE_INCOMPATIBLE,
         f"{family.value} configured program contains paths outside trust",
         paths=tuple(item.path for item in projection.configured_program_outside_trust),
+        scope_error=projection.error,
     )
 
 

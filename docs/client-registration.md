@@ -178,8 +178,8 @@ nonblocking error-budget limitations are recorded in that inventory.
 
 The implementation is archived at
 `openspec/changes/archive/2026-08-01-strengthen-call-freshness`;
-`add-lexical-discovery` and then `improve-warm-runtime-reuse` remain later and
-planning-only. Accepted build
+the unimplemented `add-lexical-discovery` and `improve-warm-runtime-reuse`
+plans were later retired. Accepted build
 `7d8dde45a8d91e2aeaaadc61e28e99771272cbdd81bc9c374584db82d7bf6d80` keeps the
 same public tool schema (`3`) and the same dependency digest (`eff6ebdf...`)
 as the archived compact-success-schema build above. This is a source-only
@@ -229,8 +229,8 @@ sample minimum/maximum, no threshold or percentile interpretation):
 `/data/CoordExp` global 11.32/33.27s,
 scoped 10.87/11.22s, overview 10.74/11.31s, diagnostics 10.29/10.93s;
 `/data/ms-swift` global 1.44/13.16s, scoped 0.45/0.89s, overview 0.57/0.95s,
-diagnostics 0.85/0.90s — these motivate the later `improve-warm-runtime-reuse`
-warm-pool work but are not themselves a failure or a registration gate. The
+diagnostics 0.85/0.90s. These historical observations do not establish a
+current warm-pool requirement and are not a failure or registration gate. The
 shared-daemon acceptance is complete: its process-level shared-client lifecycle
 passes, and fresh Sol-xhigh and Opus-max sessions on the final build each pass
 all four roots, same-root reactivation, cold TypeScript declaration,
@@ -282,6 +282,15 @@ operational errors rather than successful results.
 Schema 4 does not enable lexical discovery, diagnostics hooks/automatic
 injection, or RTK. Continue to use host shell/file tools for lexical file and
 text work; do not configure a hook or a second instructions tool.
+
+The accepted `tighten-scope-error-readiness` source-only rollover selects build
+`7deb20c2cbff6b6fac622d012ff80a923987efd80b673e14c0bcc3fa9b6e0fcf`.
+It preserves this registration command, dependency digest, schema 4, initialize
+text, and tool surface. Projection-backed `SCOPE_INCOMPATIBLE` failures now
+carry bounded language/project/config/outside-trust evidence, while a bound
+failure reports the calling lease's own `working_subdirectory`. Existing
+clients remain on their prior build slot; restart the client and verify this
+identity with `get_runtime_status` to adopt the release.
 
 ## Stop, rollback, and limits
 

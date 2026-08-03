@@ -118,6 +118,10 @@ class ScopeError:
     code: ScopeCode
     message: str
     paths: tuple[str, ...]
+    language: LanguageFamily
+    project_kind: ProjectKind
+    selected_config_path: str | None
+    configured_program_outside_trust: BoundedDifferenceStatus
 
 
 @dataclass(frozen=True, slots=True)
@@ -181,6 +185,10 @@ class ScopeProjection:
                 code=ScopeCode.SCOPE_INCOMPATIBLE,
                 message="configured program contains supported-language paths outside trust",
                 paths=tuple(difference.path for difference in outside),
+                language=attribution.language,
+                project_kind=attribution.project_kind,
+                selected_config_path=attribution.selected_config_path,
+                configured_program_outside_trust=bounded_difference_status(outside),
             )
             if outside
             else None

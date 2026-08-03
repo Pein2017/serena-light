@@ -36,6 +36,7 @@ from serena_light.tools.envelopes import (
     from_executor_busy,
     from_timeout,
     from_workspace_error,
+    scope_error_details,
     success,
 )
 from serena_light.tools.presentation import RecoveryAction
@@ -47,6 +48,16 @@ from serena_light.workspace.registry import (
     WorkspaceRuntimeRegistry,
 )
 from serena_light.workspace.runtime import WorkspaceRuntimeError
+
+
+def _runtime_error_details(exc: WorkspaceRuntimeError) -> dict[str, JsonValue]:
+    """Reuse the already-computed bounded scope evidence when present."""
+
+    details: dict[str, JsonValue] = {"paths": exc.paths} if exc.paths else {}
+    if exc.scope_error is not None:
+        details.update(scope_error_details(exc.scope_error))
+    return details
+
 
 # The only semantic operation that can install a write.  An ordinary LSP
 # failure elsewhere is a read that provably never wrote anything, so it must
@@ -63,6 +74,9 @@ _BOUND_QUERY_OPERATIONS = frozenset(
         "get_diagnostics_for_symbol",
     }
 )
+# INVALID_PATH also receives the existing closed `next_action` recovery hint;
+# SCOPE_INCOMPATIBLE only needs the caller's own lease workspace metadata.
+_BOUND_QUERY_WORKSPACE_CODES = frozenset({ErrorCode.INVALID_PATH.value, ErrorCode.SCOPE_INCOMPATIBLE.value})
 
 
 class WorkspaceResolver[IdentityT](Protocol):
@@ -376,8 +390,7 @@ class WorkspaceDaemonService[IdentityT: Hashable, RuntimeT]:
                 code = ErrorCode(exc.code)
             except ValueError:
                 code = ErrorCode.UNSUPPORTED
-            details: dict[str, JsonValue] = {"paths": exc.paths} if exc.paths else {}
-            return error(code, details=details).to_dict()
+            return error(code, details=_runtime_error_details(exc)).to_dict()
         if isinstance(exc, ExecutorBusyError):
             return from_executor_busy(exc).to_dict()
         if isinstance(exc, AdapterError):
@@ -411,14 +424,16 @@ class WorkspaceDaemonService[IdentityT: Hashable, RuntimeT]:
         if not isinstance(raw_error, Mapping):
             return result
         error_data = cast(Mapping[str, object], raw_error)
-        if error_data.get("code") != ErrorCode.INVALID_PATH.value:
+        code = error_data.get("code")
+        if code not in _BOUND_QUERY_WORKSPACE_CODES:
             return result
         workspace = _workspace_metadata_for_binding(binding)
         enriched = dict(result)
-        raw_details = error_data.get("details")
-        details = dict(cast(Mapping[str, object], raw_details)) if isinstance(raw_details, Mapping) else {}
-        details.setdefault("next_action", RecoveryAction.ACTIVATE_WORKSPACE_IF_OTHER_ROOT.value)
-        enriched["error"] = {**dict(error_data), "details": details}
+        if code == ErrorCode.INVALID_PATH.value:
+            raw_details = error_data.get("details")
+            details = dict(cast(Mapping[str, object], raw_details)) if isinstance(raw_details, Mapping) else {}
+            details.setdefault("next_action", RecoveryAction.ACTIVATE_WORKSPACE_IF_OTHER_ROOT.value)
+            enriched["error"] = {**dict(error_data), "details": details}
         if workspace is not None:
             enriched["workspace"] = workspace.to_dict()
         return enriched
@@ -462,8 +477,7 @@ class WorkspaceDaemonService[IdentityT: Hashable, RuntimeT]:
                 code = ErrorCode(exc.code)
             except ValueError:
                 code = ErrorCode.UNSUPPORTED
-            details: dict[str, JsonValue] = {"paths": exc.paths} if exc.paths else {}
-            return error(code, details=details).to_dict()
+            return error(code, details=_runtime_error_details(exc)).to_dict()
         except ExecutorBusyError as exc:
             return from_executor_busy(exc).to_dict()
         except AdapterError as exc:
@@ -491,8 +505,7 @@ class WorkspaceDaemonService[IdentityT: Hashable, RuntimeT]:
                     code = ErrorCode(exc.code)
                 except ValueError:
                     code = ErrorCode.UNSUPPORTED
-                details = {"paths": exc.paths} if exc.paths else {}
-                return error(code, details=details).to_dict()
+                return error(code, details=_runtime_error_details(exc)).to_dict()
             except ExecutorBusyError as exc:
                 return from_executor_busy(exc).to_dict()
             except AdapterError as exc:
@@ -608,12 +621,20 @@ def _binding_data[IdentityT, RuntimeT](binding: WorkspaceBinding[IdentityT, Runt
 def _workspace_metadata_for_binding[IdentityT, RuntimeT](
     binding: WorkspaceBinding[IdentityT, RuntimeT],
 ) -> WorkspaceMetadata | None:
-    """Recover physical workspace metadata without changing the lease binding."""
+    """Recover physical workspace metadata without changing the lease binding.
+
+    ``root``/``kind`` come from the shared runtime identity, since those are
+    physical-root facts common to every lease on that root. ``working_subdirectory``
+    is per-lease state: the shared, lease-agnostic runtime's own identity fixes
+    that attribute to the physical root at construction, so it can never be the
+    caller's actual activation subdirectory. The caller's own ``binding`` is the
+    one authoritative source.
+    """
 
     runtime_identity = getattr(binding.runtime, "identity", None)
     root = getattr(runtime_identity, "root", None)
     kind = getattr(runtime_identity, "kind", None)
-    working_subdirectory = getattr(runtime_identity, "working_subdirectory", binding.working_subdirectory)
+    working_subdirectory = binding.working_subdirectory
     if root is None or kind is None:
         identity = binding.identity
         if isinstance(identity, tuple) and len(identity) == 2:

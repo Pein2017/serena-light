@@ -94,7 +94,7 @@
   "freshness_contract": {
     "status": "pass",
     "owning_change": "openspec/changes/archive/2026-08-01-strengthen-call-freshness",
-    "sequence_after_accept": [
+    "retired_unimplemented_plans": [
       "add-lexical-discovery",
       "improve-warm-runtime-reuse"
     ],
@@ -117,7 +117,7 @@
     "evidence_open": [],
     "latency_observation": {
       "status": "observation_only_no_threshold",
-      "purpose": "motivates later improve-warm-runtime-reuse warm-pool work; not a failure or gate",
+      "purpose": "historical observation only; it does not establish a current warm-pool requirement or release gate",
       "sample_method": "2 samples per call; the underlying nearest-rank formula sorts before ranking and reduces at n=2 to the sample minimum and sample maximum, so this is a two-sample minimum/maximum observation, not a statistical percentile, and must not be used for downstream sizing or regression inference; which of the two calls ran first is not recorded",
       "test_result": "3 opt-in performance cases passed in 190.37s on the archived final tree; navigation/diagnostics values below use two samples per call",
       "seconds": {
@@ -749,7 +749,7 @@
   "known_limitations": {
     "operational_error_text_budget": "deterministic correction errors and ambiguity evidence are bounded using the caller's public answer budget; rich operational recovery envelopes remain on FastMCP's ordinary renderer and are not themselves hard-capped by max_answer_chars",
     "external_include_info": "when a read-only external target lacks a response-owned snapshot, requesting body or info fails closed with a typed unsupported result rather than returning unverified detail",
-    "get_symbols_overview_directory_scope": "get_symbols_overview requires a single file relative_path and does not enumerate a directory such as \".\"; this is a tool-use limitation of the current navigation surface, not a freshness failure, and directory enumeration is planned for the later add-lexical-discovery change",
+    "get_symbols_overview_directory_scope": "get_symbols_overview requires a single file relative_path and does not enumerate a directory such as \".\"; this is a tool-use limitation rather than a freshness failure, host rg/find owns lexical discovery, and no lexical MCP replacement is currently planned",
     "pre_build_slot_legacy_daemons": "the host may retain live pre-build-slot flat-layout legacy daemons and current build daemons held by other clients; current connectors cannot discover or reuse legacy entries, isolated tests prove build-slot retirement, and this change makes no host-wide no-orphan claim or manual cleanup attempt"
   },
   "acceptance": {
@@ -809,6 +809,19 @@
       "full_gate_suite": "880_passed_35_external_snapshot_skipped",
       "fresh_client_smokes": "complete_codex_luna_medium_and_cc_haiku",
       "archived_change": "openspec/changes/archive/2026-08-02-tighten-query-recovery",
+      "release_pass": true
+    },
+    "tighten_scope_error_readiness": {
+      "status": "pass",
+      "build_identity": "7deb20c2cbff6b6fac622d012ff80a923987efd80b673e14c0bcc3fa9b6e0fcf",
+      "public_tool_schema_version": 4,
+      "dependency_digest": "eff6ebdf252faff7f77cb3a2f3894d17b9a0dfc89b46bd193fafdaa9e9ab4941",
+      "scope_incompatible_projection_evidence": "pass_bounded_no_engine_identity",
+      "per_lease_working_subdirectory": "pass_two_leases_one_physical_root",
+      "blocked_family_freshness_order": "pass_preflight_before_route_failure",
+      "full_gate_suite": "885_passed_35_external_snapshot_skipped",
+      "connector_stdio_rollover_suite": "53_passed",
+      "archived_change": "openspec/changes/archive/2026-08-03-tighten-scope-error-readiness",
       "release_pass": true
     }
   }

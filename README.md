@@ -158,9 +158,10 @@ inventory records release acceptance without changing canonical Serena.
 
 The accepted implementation is archived at
 `openspec/changes/archive/2026-08-01-strengthen-call-freshness`.
-`add-lexical-discovery` and then `improve-warm-runtime-reuse` are strictly
-later and remain planning-only; see
-[the roadmap](docs/roadmap.md#phase-e-strengthen-call-freshness-then-lexical-discovery-then-warm-runtime-reuse).
+The unimplemented `add-lexical-discovery` and
+`improve-warm-runtime-reuse` plans were later retired; host `rg`/`find` remains
+the lexical owner, and future performance work requires fresh measurements and
+a new proposal. See [the roadmap](docs/roadmap.md#phase-e-strengthen-call-freshness-and-keep-lexical-discovery-host-owned).
 The accepted production build identity is
 `7d8dde45a8d91e2aeaaadc61e28e99771272cbdd81bc9c374584db82d7bf6d80`; the
 public compact success schema stays at version `3` and the locked dependency
@@ -229,8 +230,8 @@ statistical percentile interpretation:
 | `/data/ms-swift` | overview | 0.57 | 0.95 |
 | `/data/ms-swift` | diagnostics | 0.85 | 0.90 |
 
-These numbers motivate the later `improve-warm-runtime-reuse` warm-pool work
-but are not themselves a failure or a gate. The full
+These historical numbers do not establish a current warm-pool requirement and
+are not themselves a failure or a gate. The full
 pytest/Ruff/Ty/bootstrap/provenance and strict OpenSpec gates pass on this
 build. The change is synced, archived, and **PASS**; canonical Serena remains
 unchanged.
@@ -247,8 +248,8 @@ still retires normally through the existing lease/grace path.
 
 As a narrow tool-use limitation (not a freshness failure), `get_symbols_overview`
 requires a single file `relative_path` and does not enumerate a directory
-such as `"."`; directory enumeration is planned for the later
-`add-lexical-discovery` change.
+such as `"."`; host `rg`/`find` owns that lexical discovery route and no lexical
+MCP replacement is currently planned.
 
 ## Current schema-4 agent interaction contract
 
@@ -299,6 +300,27 @@ diagnostic injection, or RTK integration. Host shell/file tools continue to own
 lexical enumeration and text search; diagnostics stay explicit and on demand.
 Implementation and acceptance receipts live in
 `openspec/changes/archive/2026-08-02-tighten-query-recovery/acceptance.md`.
+
+## Accepted scope-error readiness tightening
+
+The schema-4 source-only rollover archived as
+`openspec/changes/archive/2026-08-03-tighten-scope-error-readiness` makes
+`SCOPE_INCOMPATIBLE` directly actionable without adding a readiness tool or
+expanding routine success payloads. Projection-backed failures now retain the
+language, project kind, selected native config when present, and bounded
+outside-trust path/reason evidence; engine and interpreter identity remain in
+`get_runtime_status`. A bound operational failure also reports the calling
+lease's own `working_subdirectory`, including when another lease shares the same
+physical Git root. Blocked families still run call-time freshness before
+failing prior to adapter/executor work, so another Agent's config or trust fix
+is visible on the next call.
+
+The accepted build identity is
+`7deb20c2cbff6b6fac622d012ff80a923987efd80b673e14c0bcc3fa9b6e0fcf`;
+schema 4, the dependency digest, the tool surface, initialize text, compact
+successes, and editing remain unchanged. Existing clients keep their current
+build slot until restart. See the archived
+[acceptance record](openspec/changes/archive/2026-08-03-tighten-scope-error-readiness/acceptance.md).
 
 ## Local checks
 

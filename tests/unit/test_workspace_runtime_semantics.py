@@ -2686,6 +2686,52 @@ def test_incompatible_python_does_not_block_healthy_typescript_references(tmp_pa
         runtime.stop()
 
 
+def test_scope_incompatible_payload_carries_bounded_projection_evidence_no_engine_leak(tmp_path: Path) -> None:
+    python = tmp_path / "broken.py"
+    python.write_text("target()\n")
+
+    def incompatible_python(_root: Path, values: tuple[str, ...]) -> ScopeProjection:
+        return ScopeProjection.from_attribution(
+            trust_inventory_paths=values,
+            attribution=NativeProgramAttribution(
+                LanguageFamily.PYTHON,
+                ProjectKind.CONFIGURED,
+                "pyrightconfig.json",
+                ("outside.py", "outside2.py"),
+            ),
+        )
+
+    # The incompatible family never builds an adapter, so this does not use
+    # the shared `_runtime` helper (which assumes at least one adapter exists).
+    runtime = WorkspaceRuntime(
+        (WorkspaceKind.GIT, tmp_path),
+        path_policy=_Policy(),
+        inventory=_inventory(tmp_path, ("broken.py",)),
+        attributors={LanguageFamily.PYTHON: incompatible_python},
+    )
+    try:
+        failed = runtime.find_referencing_symbols("broken.py", "target").to_dict()
+        error_data = failed["error"]
+        assert error_data["code"] == "SCOPE_INCOMPATIBLE"
+        assert error_data["retry"] is None
+        details = error_data["details"]
+        assert details["language"] == "python"
+        assert details["project_kind"] == "configured"
+        assert details["selected_config_path"] == "pyrightconfig.json"
+        outside_trust = details["configured_program_outside_trust"]
+        assert outside_trust["total"] == 2
+        assert outside_trust["omitted_count"] == 0
+        assert len(outside_trust["digest"]) == 64
+        assert {item["path"] for item in outside_trust["items"]} == {"outside.py", "outside2.py"}
+        assert {item["reason"] for item in outside_trust["items"]} == {"absent_from_trust_inventory"}
+
+        payload = json.dumps(failed)
+        for forbidden in ("engine", "interpreter", "executable"):
+            assert forbidden not in payload
+    finally:
+        runtime.stop()
+
+
 def _edit_symbols() -> list[Mapping[str, Any]]:
     return [
         {

@@ -459,6 +459,52 @@ def test_healthy_family_serves_while_other_family_is_scope_incompatible(tmp_path
         runtime.stop()
 
 
+def test_blocked_family_still_preflights_freshness_then_fails_before_any_adapter_work(tmp_path: Path) -> None:
+    """A recorded-unavailable family must not skip the call-time freshness
+    preflight, and must fail in routing before any adapter start, warm, or
+    submitted work -- with no executor-dependent wait involved.
+    """
+
+    (tmp_path / "main.py").write_text("value = 1\n")
+    adapters: dict[LanguageFamily, _Adapter] = {}
+    contexts: dict[LanguageFamily, AdapterBuildContext] = {}
+
+    def incompatible(_root: Path, paths: tuple[str, ...]) -> ScopeProjection:
+        return _projection(LanguageFamily.PYTHON, paths, (*paths, "ignored/generated.py"))
+
+    runtime = WorkspaceRuntime(
+        (WorkspaceKind.GIT, tmp_path),
+        path_policy=_PathPolicy(),
+        inventory=_inventory(tmp_path, "main.py"),
+        attributors={LanguageFamily.PYTHON: incompatible},
+        adapter_factories=_factories(adapters, contexts),
+    )
+    try:
+        preflight_calls = 0
+        original_ensure_root_fresh_admitted = runtime.freshness.ensure_root_fresh_admitted
+
+        def counting_ensure_root_fresh_admitted(*, witnessed: Sequence[str] = ()) -> Any:
+            nonlocal preflight_calls
+            preflight_calls += 1
+            return original_ensure_root_fresh_admitted(witnessed=witnessed)
+
+        runtime.freshness.ensure_root_fresh_admitted = counting_ensure_root_fresh_admitted  # type: ignore[method-assign]
+
+        result = runtime.get_symbols_overview("main.py").to_dict()
+
+        assert result["error"]["code"] == "SCOPE_INCOMPATIBLE"
+        # The preflight ran (and was not skipped by treating the recorded
+        # unavailability as an already-fresh cached result) before the family
+        # failed in routing.
+        assert preflight_calls >= 1
+        # No adapter was ever constructed for the blocked family, so no start,
+        # warm, or submitted work could have occurred.
+        assert adapters == {}
+        assert contexts == {}
+    finally:
+        runtime.stop()
+
+
 def test_family_can_recover_and_degrade_independently_after_reattribution(tmp_path: Path) -> None:
     (tmp_path / "main.py").write_text("value = 1\n")
     compatible = [False]

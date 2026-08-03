@@ -328,6 +328,28 @@ def from_workspace_error(exc: Exception) -> ErrorEnvelope:
     return error(code, details=details, workspace=workspace)
 
 
+def scope_error_details(scope_error: Any) -> dict[str, JsonValue]:
+    """Render already-owned projection evidence for a `SCOPE_INCOMPATIBLE` failure.
+
+    Reuses exactly the fields the projection already computed -- language,
+    project kind, selected native config, and the bounded outside-trust
+    difference set -- so no conversion site recomputes or reruns a probe.
+    """
+
+    from serena_light.workspace.scope import ScopeError
+
+    if not isinstance(scope_error, ScopeError):
+        raise TypeError("expected ScopeError")
+    details: dict[str, JsonValue] = {
+        "language": scope_error.language.value,
+        "project_kind": scope_error.project_kind.value,
+        "configured_program_outside_trust": scope_error.configured_program_outside_trust,
+    }
+    if scope_error.selected_config_path is not None:
+        details["selected_config_path"] = scope_error.selected_config_path
+    return details
+
+
 def from_readiness_result(
     result: Any,
     *,
@@ -366,6 +388,7 @@ def from_readiness_result(
     if result.path is not None:
         details["path"] = result.path
     if result.scope_error is not None:
+        details.update(scope_error_details(result.scope_error))
         details["paths"] = tuple(result.scope_error.paths)
     return error(
         code,

@@ -39,6 +39,15 @@ detail, selection range, text offset, or byte offset. Operational `NOT_READY`,
 `BUSY`, `COOLDOWN`, `TIMED_OUT`,
 `SCOPE_INCOMPATIBLE`, and `UNCERTAIN` failures SHALL retain the rich adapter,
 generation, phase, retry, and diagnostic metadata required to recover.
+`SCOPE_INCOMPATIBLE` SHALL always be non-retryable and, whenever it is backed
+by a scope projection, SHALL include the language family, project kind when
+known, the selected native config path when present, and bounded
+`configured_program_outside_trust` items (path, reason, total, digest,
+omitted_count) reused from that projection; it MUST NOT include an engine name,
+version, executable, or interpreter field, since `status`/`get_runtime_status`
+remains the sole owner of engine/interpreter identity. When no projection backs
+the failure, it SHALL keep its existing concise reason and bounded paths
+without fabricating those fields.
 
 A reference, declaration, or implementation record backed by an exact
 response-owned snapshot SHALL use compact `range`. A read-only external target
@@ -94,6 +103,14 @@ owner.
 #### Scenario: Semantic target set exceeds the response-owned bound
 - **WHEN** the first response contains more than 64 unique workspace and external target URIs
 - **THEN** the service returns non-retryable `UNSUPPORTED` with bounded deterministic target evidence before reading or opening any target snapshot
+
+#### Scenario: Scope-incompatible failure carries actionable projection evidence
+- **WHEN** a bound query fails `SCOPE_INCOMPATIBLE` because a native configured program contains paths outside trust
+- **THEN** the error details contain the language family, project kind, the selected native config path when present, and bounded `configured_program_outside_trust` items with path, reason, total, digest, and omitted_count, with no retry metadata and no engine or interpreter field
+
+#### Scenario: Scope-incompatible failure without a backing projection stays concise
+- **WHEN** `SCOPE_INCOMPATIBLE` is returned for a family with no trusted source paths, a failed adapter construction, or a multi-family unavailable directory/global scope
+- **THEN** the error details keep the existing concise reason and bounded paths and do not invent a language, project kind, or selected config value
 
 ### Requirement: Navigation success obeys the client-visible answer budget
 Every navigation tool that accepts `max_answer_chars` SHALL default it to

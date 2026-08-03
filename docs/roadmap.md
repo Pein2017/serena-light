@@ -34,6 +34,13 @@ and rollover gates, plus fresh Codex/Luna-medium and Claude Code/Haiku clients.
 It does not introduce lexical MCP tools, diagnostics hooks, RTK coupling,
 workspace or symbol guessing, or successful-response changes.
 
+The `tighten-scope-error-readiness` source-only revision is accepted at build
+`7deb20c2cbff6b6fac622d012ff80a923987efd80b673e14c0bcc3fa9b6e0fcf`.
+It keeps schema 4 and compact successes unchanged while carrying bounded native
+scope evidence through operational errors and sourcing each failure's
+`working_subdirectory` from the caller's own lease. It adds no readiness tool,
+automatic recovery, or lexical surface.
+
 ## Phase A: contain and repair v1
 
 1. Contain guarded editing and isolate loopback traffic from ambient proxies.
@@ -260,13 +267,11 @@ host `rg`/`find` route. `improve-warm-runtime-reuse` was subsequently retired at
 [`openspec/changes/archive/2026-08-01-strengthen-call-freshness`](../openspec/changes/archive/2026-08-01-strengthen-call-freshness)
 for the owning tasks and acceptance evidence.
 
-Before lexical work begins, the active schema-4 interaction revision must keep
-the routing boundary intact: initialize guidance sends lexical file/text work
-to host shell/file tools, overview begins at depth 0, references exclude the
-declaration and keep snippets opt-in, and diagnostics stay explicit. It adds no
-lexical tools, diagnostics hooks, or RTK integration. The deferred lexical
-change is therefore re-based as the next public schema rollover (5), not a
-second owner of schema 4.
+The schema-4 interaction contract keeps the routing boundary intact:
+initialize guidance sends lexical file/text work to host shell/file tools,
+overview begins at depth 0, references exclude the declaration and keep
+snippets opt-in, and diagnostics stay explicit. No lexical tool, diagnostics
+hook, RTK integration, or reserved schema-5 lexical rollover is planned.
 
 ## Phase F: agent-facing position queries
 

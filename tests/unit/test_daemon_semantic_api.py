@@ -29,6 +29,7 @@ from serena_light.tools.envelopes import (
 from serena_light.workspace.identity import WorkspaceError, WorkspaceErrorCode, WorkspaceErrorData
 from serena_light.workspace.registry import ResolvedWorkspace, WorkspaceRuntimeRegistry
 from serena_light.workspace.runtime import RuntimeErrorCode, WorkspaceRuntimeError
+from serena_light.workspace.scope import LanguageFamily, NativeProgramAttribution, ProjectKind, ScopeProjection
 
 
 @dataclass(eq=False)
@@ -602,6 +603,104 @@ def test_runtime_boundary_rejects_malformed_runtime_mappings() -> None:
         "retry": None,
         "details": {"tool": "operation", "reason": "malformed_runtime_result"},
     }
+
+
+def test_runtime_boundary_carries_full_scope_incompatible_evidence() -> None:
+    service, _created = _service()
+
+    projection = ScopeProjection.from_attribution(
+        trust_inventory_paths=("src/main.ts",),
+        attribution=NativeProgramAttribution(
+            language=LanguageFamily.TYPESCRIPT,
+            project_kind=ProjectKind.CONFIGURED,
+            selected_config_path="tsconfig.json",
+            configured_program_paths=("src/main.ts", "outside.ts"),
+        ),
+    )
+    assert projection.error is not None
+
+    async def call() -> Mapping[str, object]:
+        outcome = WorkspaceRuntimeError(
+            RuntimeErrorCode.SCOPE_INCOMPATIBLE,
+            "typescript configured program contains paths outside trust",
+            paths=tuple(item.path for item in projection.configured_program_outside_trust),
+            scope_error=projection.error,
+        )
+        return await service._runtime_result(cast(FakeRuntime, OutcomeRuntime(outcome)), "operation", {})
+
+    converted = asyncio.run(call())
+    error_data = _data_map(converted["error"])
+    assert error_data["code"] == "SCOPE_INCOMPATIBLE"
+    assert error_data["retry"] is None
+    details = _data_map(error_data["details"])
+    assert details["language"] == "typescript"
+    assert details["project_kind"] == "configured"
+    assert details["selected_config_path"] == "tsconfig.json"
+    outside_trust = _data_map(details["configured_program_outside_trust"])
+    assert outside_trust["total"] == 1
+    assert outside_trust["omitted_count"] == 0
+    assert len(cast(str, outside_trust["digest"])) == 64
+    assert outside_trust["items"] == [{"path": "outside.ts", "reason": "absent_from_trust_inventory"}]
+
+    payload = json.dumps(converted)
+    for forbidden in ("engine", "interpreter", "executable"):
+        assert forbidden not in payload
+
+
+def test_two_leases_on_one_physical_root_report_their_own_working_subdirectory_on_failure() -> None:
+    @dataclass(slots=True)
+    class _RichIdentity:
+        root: Path
+        kind: str
+        working_subdirectory: Path
+
+    @dataclass(eq=False)
+    class _RichRuntime:
+        identity: _RichIdentity
+
+        def status(self) -> Mapping[str, object]:
+            return {"identity": str(self.identity.root), "executor": {"queue_size": 0}}
+
+        def find_symbol(self, **kwargs: object) -> object:
+            del kwargs
+            raise WorkspaceRuntimeError(RuntimeErrorCode.SCOPE_INCOMPATIBLE, "outside trust")
+
+    created: list[_RichRuntime] = []
+
+    def factory(identity: str) -> _RichRuntime:
+        # The shared runtime's own identity fixes working_subdirectory to the
+        # physical root, exactly as the real WorkspaceRuntime does; it is
+        # never the caller's actual activation subdirectory.
+        root = Path(identity)
+        runtime = _RichRuntime(_RichIdentity(root=root, kind="git", working_subdirectory=root))
+        created.append(runtime)
+        return runtime
+
+    service = WorkspaceDaemonService[str, _RichRuntime](
+        lifecycle=LeaseLifecycle(clock=lambda: 0.0),
+        registry=WorkspaceRuntimeRegistry(factory),
+        resolver=lambda path: ResolvedWorkspace(identity=str(path.parent), working_subdirectory=path),
+        runtime_stopper=lambda _runtime: None,
+    )
+
+    async def scenario() -> None:
+        first = cast(str, (await service.acquire_lease(mcp_session_id="a"))["lease_id"])
+        second = cast(str, (await service.acquire_lease(mcp_session_id="b"))["lease_id"])
+        await service.activate_workspace(lease_id=first, absolute_path="/data/shared/first")
+        await service.activate_workspace(lease_id=second, absolute_path="/data/shared/second")
+        # Both leases share one physical runtime.
+        assert len(created) == 1
+
+        failed = await service.semantic_operation(lease_id=first, operation="find_symbol", name_path="Thing")
+        assert _data_map(failed["error"])["code"] == "SCOPE_INCOMPATIBLE"
+        assert _data_map(failed["workspace"])["working_subdirectory"] == "/data/shared/first"
+
+        first_binding = await service.binding_for(lease_id=first)
+        second_binding = await service.binding_for(lease_id=second)
+        assert str(first_binding.working_subdirectory) == "/data/shared/first"
+        assert str(second_binding.working_subdirectory) == "/data/shared/second"
+
+    asyncio.run(scenario())
 
 
 def _data_map(value: object) -> Mapping[str, object]:

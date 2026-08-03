@@ -79,6 +79,12 @@ def test_supported_program_path_outside_trust_is_scope_incompatible() -> None:
     assert projection.error is not None
     assert projection.error.code is ScopeCode.SCOPE_INCOMPATIBLE
     assert projection.error.paths == ("ignored-generated/hidden.ts",)
+    assert projection.error.language is LanguageFamily.TYPESCRIPT
+    assert projection.error.project_kind is ProjectKind.CONFIGURED
+    assert projection.error.selected_config_path == "tsconfig.json"
+    assert projection.error.configured_program_outside_trust == bounded_difference_status(
+        projection.configured_program_outside_trust
+    )
 
 
 def test_projection_difference_status_bounds_entries_but_digests_full_set() -> None:
