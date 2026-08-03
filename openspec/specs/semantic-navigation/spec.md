@@ -32,7 +32,11 @@ SHALL contain `ok=false`, a typed code and concise message, the bound workspace
 when available, and only bounded details required to correct the query; they
 MUST NOT repeat adapter phase, runtime generations, configured-program detail,
 or engine identity. `AMBIGUOUS_SYMBOL` SHALL retain a bounded deterministic
-candidate set. Operational `NOT_READY`, `BUSY`, `COOLDOWN`, `TIMED_OUT`,
+candidate set. Structured symbol candidates SHALL keep only their qualified
+name path, stable kind, compact range, and relative path when one is needed to
+identify the file; they MUST NOT repeat the unqualified name, source body,
+detail, selection range, text offset, or byte offset. Operational `NOT_READY`,
+`BUSY`, `COOLDOWN`, `TIMED_OUT`,
 `SCOPE_INCOMPATIBLE`, and `UNCERTAIN` failures SHALL retain the rich adapter,
 generation, phase, retry, and diagnostic metadata required to recover.
 
@@ -54,6 +58,10 @@ owner.
 #### Scenario: Deterministic query fails
 - **WHEN** a query has invalid input/path or a current ready snapshot contains no matching symbol
 - **THEN** the response keeps the typed correction evidence without adapter, engine, configuration, or generation repetition
+
+#### Scenario: Symbol ambiguity exposes correction candidates
+- **WHEN** more than one current symbol matches a query
+- **THEN** each structured candidate keeps its qualified name path, stable kind, and compact range without duplicate names, body, detail, selection range, or internal offsets
 
 #### Scenario: Navigation cannot run operationally
 - **WHEN** a request is unsupported, not ready, busy, timed out, uncertain, in cooldown, or incompatible with configured scope

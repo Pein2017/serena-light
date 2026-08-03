@@ -8,7 +8,13 @@ from typing import Any, cast
 
 from mcp import types
 
-from serena_light.tools.compact import canonical_json, render_payload, validate_max_answer_chars
+from serena_light.tools.compact import (
+    canonical_json,
+    compact_range,
+    render_payload,
+    symbol_kind,
+    validate_max_answer_chars,
+)
 from serena_light.tools.envelopes import ErrorCode
 
 _DETERMINISTIC_COMPACT_ERRORS = frozenset(
@@ -109,12 +115,7 @@ def _compact_ambiguity(
             compact_details[field] = details[field]
     candidates = details.get("candidates")
     if isinstance(candidates, list | tuple):
-        compact_details["candidates"] = [
-            _mapping_copy(cast(Mapping[Any, Any], candidate))
-            if isinstance(candidate, Mapping)
-            else candidate
-            for candidate in candidates
-        ]
+        compact_details["candidates"] = [_compact_ambiguity_candidate(candidate) for candidate in candidates]
     existing_omitted = details.get("omitted_count", 0)
     if isinstance(existing_omitted, bool) or not isinstance(existing_omitted, int) or existing_omitted < 0:
         raise ValueError("ambiguous candidate omitted_count must be non-negative")
@@ -133,6 +134,37 @@ def _compact_ambiguity(
         if isinstance(root, str) and root:
             payload["workspace"] = root
     return payload
+
+
+def _compact_ambiguity_candidate(candidate: object) -> object:
+    """Keep only fields that identify and disambiguate one symbol candidate."""
+
+    if not isinstance(candidate, Mapping):
+        return candidate
+    source = cast(Mapping[Any, Any], candidate)
+    compact: dict[str, Any] = {}
+    for field in ("relative_path", "name_path"):
+        value = source.get(field)
+        if isinstance(value, str) and value:
+            compact[field] = value
+    if "name_path" not in compact:
+        name = source.get("name")
+        if isinstance(name, str) and name:
+            compact["name"] = name
+    kind = source.get("kind")
+    if isinstance(kind, int) and not isinstance(kind, bool):
+        compact["kind"] = symbol_kind(kind)
+    elif isinstance(kind, str) and kind:
+        compact["kind"] = kind
+    candidate_range = source.get("range")
+    if isinstance(candidate_range, Mapping):
+        try:
+            compact["range"] = compact_range(cast(Mapping[str, object], candidate_range))
+        except (TypeError, ValueError):
+            # A malformed internal candidate is still useful correction evidence;
+            # preserve it rather than converting a typed ambiguity into transport failure.
+            return _mapping_copy(source)
+    return compact or _mapping_copy(source)
 
 
 def _bound_ambiguity(payload: dict[str, Any], budget: int) -> dict[str, Any]:

@@ -187,6 +187,41 @@ def test_ambiguous_candidates_are_bounded_without_runtime_authority() -> None:
     assert details["omitted_count"] == 80 - len(details["candidates"])
 
 
+def test_ambiguous_symbol_candidates_keep_only_correction_coordinates() -> None:
+    envelope = error(
+        ErrorCode.AMBIGUOUS_SYMBOL,
+        details={
+            "relative_path": "src/example.py",
+            "name_path": "render",
+            "candidates": [
+                {
+                    "name": "render",
+                    "name_path": "Renderer/render",
+                    "kind": 6,
+                    "range": {
+                        "start": {"line": 4, "column": 8, "text_offset": 41, "byte_offset": 44},
+                        "end": {"line": 7, "column": 9, "text_offset": 84, "byte_offset": 87},
+                    },
+                    "info": {"detail": "(self) -> str"},
+                }
+            ],
+        },
+        workspace=WorkspaceMetadata("/data/example", "git", "/data/example"),
+        adapter=AdapterMetadata("pyright", "python"),
+        generations=GenerationMetadata(1, 2, 3, 4),
+    )
+
+    payload = _payload(render_error_result(envelope.to_dict()))
+
+    assert payload["error"]["details"]["candidates"] == [  # type: ignore[index]
+        {
+            "name_path": "Renderer/render",
+            "kind": "method",
+            "range": ((4, 8), (7, 9)),
+        }
+    ]
+
+
 def test_candidate_free_ambiguity_is_bounded_without_transport_failure() -> None:
     envelope = error(
         ErrorCode.AMBIGUOUS_SYMBOL,
