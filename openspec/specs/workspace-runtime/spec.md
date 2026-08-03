@@ -42,7 +42,8 @@ characters. The instruction SHALL state that Serena Light provides Python and
 JavaScript/TypeScript semantic navigation and diagnostics; shell `cd` does not
 rebind the current lease; switching roots requires `activate_workspace` with an
 absolute path; unfamiliar files should be overviewed before exact symbol
-lookup; and host shell/file tools own lexical search.
+lookup; and host `rg`/`find` owns file and text discovery before Serena Light
+overview and symbol tools take over.
 
 The instruction SHALL identify Serena Light as experimental and require the
 Agent to report any friction or issue to the user so the MCP can be iterated

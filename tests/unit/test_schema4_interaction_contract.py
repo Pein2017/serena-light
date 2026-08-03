@@ -31,12 +31,11 @@ def test_agent_instructions_are_concise_and_cover_the_fixed_workflow() -> None:
         "does not rebind",
         "activate_workspace",
         "absolute path",
-        "Overview before lookup",
-        "host lexical search",
-        "lexical search",
+        "rg/find",
+        "files/text",
+        "overview/symbol tools",
         "Report friction/issues",
         "user",
-        "improve MCP",
     ):
         assert required in AGENT_INSTRUCTIONS
     assert "hook" not in AGENT_INSTRUCTIONS.lower()

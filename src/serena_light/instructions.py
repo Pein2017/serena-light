@@ -3,8 +3,8 @@
 
 AGENT_INSTRUCTIONS = (
     "Experimental Python/JS/TS semantic navigation/diagnostics. Shell cd does not rebind; "
-    "activate_workspace needs absolute path. Overview before lookup; use host lexical search. "
-    "Report friction/issues to user to improve MCP."
+    "activate_workspace requires absolute path. Use rg/find for files/text, then "
+    "overview/symbol tools. Report friction/issues to user."
 )
 
 

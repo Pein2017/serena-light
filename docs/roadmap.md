@@ -17,8 +17,12 @@ Guarded editing (`replace_symbol_body`) is restored after reacceptance.
 
 `strengthen-call-freshness` (Phase E below) is accepted and archived at build
 `7d8dde45a8d91e2aeaaadc61e28e99771272cbdd81bc9c374584db82d7bf6d80`.
-`add-lexical-discovery` and `improve-warm-runtime-reuse` are the next two
-strictly ordered changes in that phase and remain planning-only.
+The unimplemented `add-lexical-discovery` change was retired at 0/31 tasks:
+host `rg`/`find` remains the lexical-discovery owner and Git history preserves
+the removed planning artifacts. The unimplemented
+`improve-warm-runtime-reuse` change was likewise retired at 0/26 tasks because
+its prerequisite was removed and repeated measured cold-start friction has not
+established a need for its warm pool, RSS accounting, or prewarm scheduler.
 
 The archived `tighten-agent-interaction` revision advanced the public schema to
 4 for compact overview/reference/diagnostics presentation and source-owned MCP
@@ -27,9 +31,8 @@ keeps schema 4 and build-slot isolation while shortening repeated initialization
 metadata and adding two closed, error-only Agent recovery actions. Its final
 build `78de9eae...` passed the 880-test fixed point, static/provenance/bootstrap
 and rollover gates, plus fresh Codex/Luna-medium and Claude Code/Haiku clients.
-It does not
-start `add-lexical-discovery`, introduce diagnostics hooks, add RTK, guess a
-workspace or symbol, or change successful responses.
+It does not introduce lexical MCP tools, diagnostics hooks, RTK coupling,
+workspace or symbol guessing, or successful-response changes.
 
 ## Phase A: contain and repair v1
 
@@ -188,13 +191,15 @@ Sol-xhigh static and Opus-max runtime/evidence audits both pass with no P0/P1
 findings. Stable specs are synchronized and Phase D is archived as
 `2026-07-30-compact-success-schema`.
 
-## Phase E: strengthen call freshness, then lexical discovery, then warm runtime reuse
+## Phase E: strengthen call freshness and keep lexical discovery host-owned
 
-Phase D is archived, so implement three strictly ordered OpenSpec changes on
-top of the compact schema: first `strengthen-call-freshness`, then
-`add-lexical-discovery`, then `improve-warm-runtime-reuse`. Each later change
-remains planning-only, with no production-code changes, until its
-predecessor is accepted, synced, and archived.
+Phase D is archived. `strengthen-call-freshness` was implemented and accepted.
+The later lexical MCP proposal was retired before implementation because host
+`rg`/`find` already provides the Agent-facing file/text discovery path without
+duplicating tool schemas or daemon lifecycle. The speculative warm-runtime
+proposal was also retired before implementation. Any future performance work
+starts from new measurements and a new proposal rather than reviving its old
+lexical dependency or implementation plan.
 
 1. `strengthen-call-freshness` gives every content-bearing read its own FIFO
    per-call freshness admission ticket instead of letting a later caller
@@ -210,22 +215,15 @@ predecessor is accepted, synced, and archived.
    not-yet-indexed reads. Editing stays outside this replay boundary. This
    change adds no authoritative background watcher, persistent content
    index, or cooperative external-writer lock.
-2. `add-lexical-discovery` adds bounded `find_paths` and `search_text` tools
-   over a full-file trust catalog, using a pinned Serena-Light-owned ripgrep
-   executable and the strengthened freshness contract from step 1. It bumps
-   the public tool schema from 4 to 5.
-3. `improve-warm-runtime-reuse` replaces the fixed ten-minute zero-holder
-   grace with a bounded, LRU-evicted warm pool (at most three zero-holder
-   workspaces, 30 minutes, 1.5 GiB soft RSS cap) and finite opportunistic
-   adapter prewarm, without weakening freshness or adding public
-   configuration.
+2. Host `rg`/`find` owns unknown-file, text, configuration, documentation, and
+   dynamic-string discovery; Serena Light takes over for overview, symbol,
+   reference, implementation, and diagnostics queries. No lexical MCP tool,
+   RTK wrapper, content index, or watcher is planned.
 
-Gate: each change independently passes its own deterministic tests, real
-daemon/connector acceptance across `/data/CoordExp`,
-`/data/CoordExp/external/codexUI`, `/data/ms-swift`, and the read-only conda
-`ms` transformers package, strict OpenSpec/provenance gates, and independent
-correctness/runtime review before it syncs and archives; only then may the
-next change in the sequence begin implementation.
+Gate: the accepted freshness change retains its existing evidence. Any future
+performance proposal requires a new user decision backed by measured friction,
+a coherent standalone OpenSpec plan, proportionate acceptance, and independent
+correctness/runtime review.
 
 **Progress as of 2026-08-01:** `strengthen-call-freshness` is accepted and
 archived at build
@@ -250,13 +248,15 @@ minimum/maximum, no threshold or percentile interpretation):
 `/data/CoordExp` global 11.32/33.27s,
 scoped 10.87/11.22s, overview 10.74/11.31s, diagnostics 10.29/10.93s;
 `/data/ms-swift` global 1.44/13.16s, scoped 0.45/0.89s, overview
-0.57/0.95s, diagnostics 0.85/0.90s. These numbers motivate the later
-`improve-warm-runtime-reuse` warm-pool work but are not a failure. Tasks
+0.57/0.95s, diagnostics 0.85/0.90s. These numbers remain historical
+observations: they do not establish repeated user-facing cold-start friction
+or authorize a warm pool. Tasks
 5.2--5.5 pass; task 5.6 required no design reset; Sol-xhigh and Opus-max both
 passed the final independent review after all findings were dispositioned.
 The change is **PASS**, synced, and archived.
-`add-lexical-discovery` and `improve-warm-runtime-reuse` have not started
-implementation. See
+`add-lexical-discovery` was subsequently retired at 0/31 tasks in favor of the
+host `rg`/`find` route. `improve-warm-runtime-reuse` was subsequently retired at
+0/26 tasks because its prerequisite and measured-need case were absent. See
 [`openspec/changes/archive/2026-08-01-strengthen-call-freshness`](../openspec/changes/archive/2026-08-01-strengthen-call-freshness)
 for the owning tasks and acceptance evidence.
 
