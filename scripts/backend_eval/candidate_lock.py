@@ -12,12 +12,18 @@ directory descriptor with ``O_NOFOLLOW`` and must be a real directory or regular
 file, and every write is an atomic same-directory replacement, so no symlink or
 special file can redirect a write out of the artifact root.
 
-A resolution runs as a durable, recoverable transaction.  Before the runner starts,
-a marker records which canonical artifacts existed and the existing lock and receipt
-are *moved* (never copied or deleted) to same-directory ``.rollback`` entries, and the
-directory is fsynced.  The production identity is re-validated inside the transaction
-and the new receipt is published only after that check passes, so a run that drifts
-production can never leave a reusable freeze behind.  Any failure quarantines the
+A resolution runs as a durable, recoverable transaction.  Before the runner starts, a
+marker records which canonical artifacts existed and the existing lock and receipt are
+*moved* (never copied or deleted) to same-directory ``.rollback`` entries, each backup
+file is fsynced through a verified regular-file descriptor, and the directory is fsynced.
+The runner-produced lock is opened exactly once, so the bytes that are parsed and the
+inode that is fsynced are the same file, and that fsync happens before the receipt is
+published; the marker is cleared and the backups are dropped only after the lock file,
+the receipt file, production identity, and the directory entries are all durable.
+
+Production identity is re-validated inside the transaction and the new receipt is
+published only after that check passes, so a run that drifts production can never leave
+a reusable freeze behind.  Any failure quarantines the
 canonical nodes -- of any type, including a non-empty directory -- descriptor-relatively
 without following links, atomically renames the durable copies back, and fsyncs before
 anything is purged, so the only durable copy is never deleted first.  The marker is
@@ -229,21 +235,26 @@ def _resolve_candidate_lock(
         if result.returncode != 0:
             detail = (result.stderr or result.stdout).strip()
             raise CandidateLockError(f"candidate resolution failed ({result.returncode}): {detail}")
-        # The canonical output was moved aside before the runner, so anything present now
-        # was produced by this resolution and must be a plain regular file.
-        lock_bytes = _read_artifact(dir_fd, LOCK_FILE_NAME)
-        if lock_bytes is None:
-            raise CandidateLockError(
-                f"candidate resolution exited 0 but did not write {request.artifact_root / LOCK_FILE_NAME}"
-            )
-        if frozen_lock is not None and lock_bytes != frozen_lock:
-            raise CandidateLockError(
-                f"candidate resolution changed after the freeze recorded in {request.artifact_root / LOCK_FILE_NAME}"
-            )
-        lock = _build_lock(request, lock_bytes)
-        # Production identity is validated inside the transaction: the receipt is published
-        # only for a resolution that provably left production untouched.
-        _assert_production_identity_unchanged(before, request.repo_root, cause=None)
+        # The canonical output was moved aside before the runner, so anything present now was
+        # produced by this resolution.  It is opened exactly once: the bytes that are parsed and
+        # the inode that is fsynced are guaranteed to be the same file.
+        with _open_regular_artifact(dir_fd, LOCK_FILE_NAME) as lock_fd:
+            if lock_fd is None:
+                raise CandidateLockError(
+                    f"candidate resolution exited 0 but did not write {request.artifact_root / LOCK_FILE_NAME}"
+                )
+            lock_bytes = _read_descriptor(lock_fd, LOCK_FILE_NAME)
+            if frozen_lock is not None and lock_bytes != frozen_lock:
+                raise CandidateLockError(
+                    "candidate resolution changed after the freeze recorded in "
+                    f"{request.artifact_root / LOCK_FILE_NAME}"
+                )
+            lock = _build_lock(request, lock_bytes)
+            # Production identity is validated inside the transaction: the receipt is published
+            # only for a resolution that provably left production untouched.
+            _assert_production_identity_unchanged(before, request.repo_root, cause=None)
+            # The lock contents must be durable before anything published depends on them.
+            _fsync_file(lock_fd, LOCK_FILE_NAME)
         _write_artifact(dir_fd, RECEIPT_FILE_NAME, _receipt_bytes(command, CANONICAL_REQUIREMENTS_BYTES, lock))
     except BaseException as exc:
         _rollback_or_report(dir_fd, marker, cause=exc)
@@ -273,11 +284,18 @@ def _begin_transaction(dir_fd: int, marker: Mapping[str, bool]) -> None:
         if marker[key]:
             _purge_node(dir_fd, rollback)
             _rename_artifact(dir_fd, canonical, rollback)
+            # The backup contents -- not just the rename -- must be durable before the runner
+            # can touch the canonical names.
+            _fsync_regular_artifact(dir_fd, rollback)
     _fsync_directory(dir_fd)
 
 
 def _commit_transaction(dir_fd: int) -> None:
-    """Make the new canonical state durable, clear the marker, then drop the backups."""
+    """Clear the marker and drop the backups once the new canonical state is durable.
+
+    The caller has already fsynced the lock file, written and fsynced the receipt file, and
+    validated production identity; only the directory entries still need to be made durable.
+    """
 
     _fsync_directory(dir_fd)
     _remove_artifact(dir_fd, TRANSACTION_MARKER_NAME)
@@ -435,25 +453,60 @@ def _ensure_cache_directory(dir_fd: int) -> None:
     os.close(_open_owned_directory(dir_fd, CACHE_DIR_NAME))
 
 
-def _read_artifact(dir_fd: int, name: str) -> bytes | None:
-    """Return the artifact bytes, or ``None`` when it does not exist."""
+@contextmanager
+def _open_regular_artifact(dir_fd: int, name: str) -> Iterator[int | None]:
+    """Open ``name`` relative to ``dir_fd`` without following links.
+
+    Yields a descriptor for a verified regular file, or ``None`` when the artifact does not
+    exist.  Every read and every file fsync goes through this seam, so callers can prove they
+    acted on one specific inode.
+    """
 
     try:
         fd = os.open(name, _READ_FLAGS, dir_fd=dir_fd)
     except FileNotFoundError:
-        return None
+        yield None
+        return
     except OSError as exc:
         raise CandidateLockError(f"artifact {name!r} {_NOT_A_REGULAR_FILE}: {exc}") from exc
     try:
         mode = os.fstat(fd).st_mode
         if not stat.S_ISREG(mode):
             raise CandidateLockError(f"artifact {name!r} must be a regular file, not a {_node_kind(mode)}")
+        yield fd
+    finally:
+        os.close(fd)
+
+
+def _read_artifact(dir_fd: int, name: str) -> bytes | None:
+    """Return the artifact bytes, or ``None`` when it does not exist."""
+
+    with _open_regular_artifact(dir_fd, name) as fd:
+        return None if fd is None else _read_descriptor(fd, name)
+
+
+def _read_descriptor(fd: int, name: str) -> bytes:
+    try:
         with os.fdopen(fd, "rb", closefd=False) as handle:
             return handle.read()
     except OSError as exc:
         raise CandidateLockError(f"cannot read artifact {name!r}: {exc}") from exc
-    finally:
-        os.close(fd)
+
+
+def _fsync_file(fd: int, name: str) -> None:
+    try:
+        os.fsync(fd)
+    except OSError as exc:
+        raise CandidateLockError(f"cannot fsync artifact {name!r}: {exc}") from exc
+
+
+def _fsync_regular_artifact(dir_fd: int, name: str) -> None:
+    """Make one existing regular artifact's contents durable, refusing any other node type."""
+
+    with _open_regular_artifact(dir_fd, name) as fd:
+        if fd is None:
+            raise CandidateLockError(f"artifact {name!r} disappeared before it could be made durable")
+        _fsync_file(fd, name)
 
 
 def _node_kind(mode: int) -> str:
@@ -468,17 +521,21 @@ def _write_artifact(dir_fd: int, name: str, data: bytes) -> None:
     """Atomically replace ``name`` with ``data`` without ever following a symlink."""
 
     _reject_non_regular(dir_fd, name)
-    temporary = f".{name}.tmp"
+    temporary = _temporary_name(name)
     _remove_artifact(dir_fd, temporary)
     try:
         fd = os.open(temporary, _CREATE_FLAGS, 0o600, dir_fd=dir_fd)
         with os.fdopen(fd, "wb") as handle:
             handle.write(data)
             handle.flush()
-            os.fsync(handle.fileno())
+            _fsync_file(handle.fileno(), temporary)
         os.replace(temporary, name, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
     except OSError as exc:
         raise CandidateLockError(f"cannot write artifact {name!r}: {exc}") from exc
+
+
+def _temporary_name(name: str) -> str:
+    return f".{name}.tmp"
 
 
 def _reject_non_regular(dir_fd: int, name: str) -> None:

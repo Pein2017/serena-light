@@ -32,6 +32,7 @@ from scripts.backend_eval.candidate_lock import (
 from scripts.backend_eval.models import CandidateLock, ProductionIdentity, canonical_json, sha256_bytes
 from scripts.backend_eval.production_identity import PRODUCTION_IDENTITY_FILES, ProductionIdentityChanged
 
+_RUNNER_EVENT = "<runner>"
 _EXCLUDE_NEWER = "2026-08-11T00:00:00Z"
 _HASH_A = "1" * 64
 _HASH_B = "2" * 64
@@ -51,10 +52,13 @@ class _FakeRunner:
     stdout: str = ""
     stderr: str = ""
     write_output: bool = True
+    events: list[tuple[str, int]] | None = None
     calls: list[tuple[tuple[str, ...], Path, Mapping[str, str]]] = field(default_factory=list)
 
     def __call__(self, command: Sequence[str], *, cwd: Path, env: Mapping[str, str]) -> CommandResult:
         tokens = tuple(command)
+        if self.events is not None:
+            self.events.append((_RUNNER_EVENT, 0))
         self.calls.append((tokens, cwd, dict(env)))
         if self.write_output:
             body = self.bodies[min(len(self.calls) - 1, len(self.bodies) - 1)]
@@ -233,6 +237,33 @@ def _assert_no_reusable_freeze(request: CandidateLockRequest) -> None:
     assert not (root / LOCK_FILE_NAME).is_symlink()
     assert not (root / RECEIPT_FILE_NAME).exists()
     _assert_transaction_clean(request)
+
+
+def _record_fsyncs(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, int]]:
+    """Record every regular-file fsync as (artifact name, fsynced inode)."""
+
+    real = candidate_lock_module._fsync_file
+    events: list[tuple[str, int]] = []
+
+    def patched(fd: int, name: str) -> None:
+        events.append((name, os.fstat(fd).st_ino))
+        real(fd, name)
+
+    monkeypatch.setattr(candidate_lock_module, "_fsync_file", patched)
+    return events
+
+
+def _fail_fsync(monkeypatch: pytest.MonkeyPatch, target: str) -> None:
+    """Make the regular-file fsync of one artifact fail the way a real fsync error would."""
+
+    real = candidate_lock_module._fsync_file
+
+    def patched(fd: int, name: str) -> None:
+        if name == target:
+            raise CandidateLockError(f"cannot fsync artifact {name!r}: [Errno 5] Input/output error")
+        real(fd, name)
+
+    monkeypatch.setattr(candidate_lock_module, "_fsync_file", patched)
 
 
 def _interrupt_rename(monkeypatch: pytest.MonkeyPatch, *, source: str | None, target: str | None) -> None:
@@ -930,4 +961,123 @@ def test_recovery_quarantines_an_unexpected_canonical_node_before_restoring(
     (root / TRANSACTION_MARKER_NAME).write_bytes(canonical_json({"lock": True, "receipt": True}))
     assert compile_candidate_lock(request_, runner=_FakeRunner()) == frozen
     _assert_freeze_intact(request_, lock_bytes, receipt_bytes)
+    _assert_transaction_clean(request_)
+
+
+# --- artifact durability ------------------------------------------------------
+
+
+def test_the_resolved_lock_inode_is_fsynced_after_the_runner_and_before_publication(
+    request_: CandidateLockRequest, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    events = _record_fsyncs(monkeypatch)
+    compile_candidate_lock(request_, runner=_FakeRunner(events=events))
+    names = [name for name, _inode in events]
+    receipt_temporary = candidate_lock_module._temporary_name(RECEIPT_FILE_NAME)
+    assert names.index(_RUNNER_EVENT) < names.index(LOCK_FILE_NAME) < names.index(receipt_temporary)
+    lock_inode = (request_.artifact_root / LOCK_FILE_NAME).stat().st_ino
+    assert dict(events)[LOCK_FILE_NAME] == lock_inode
+
+
+def test_both_rollback_inodes_are_fsynced_before_the_runner_starts(
+    request_: CandidateLockRequest, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _frozen, lock_bytes, receipt_bytes = _freeze(request_)
+    root = request_.artifact_root
+    prior = {
+        LOCK_ROLLBACK_NAME: (root / LOCK_FILE_NAME).stat().st_ino,
+        RECEIPT_ROLLBACK_NAME: (root / RECEIPT_FILE_NAME).stat().st_ino,
+    }
+    events = _record_fsyncs(monkeypatch)
+    compile_candidate_lock(request_, runner=_FakeRunner(events=events), recompile=True)
+    names = [name for name, _inode in events]
+    for rollback, inode in prior.items():
+        assert names.index(rollback) < names.index(_RUNNER_EVENT)
+        assert (rollback, inode) in events
+    _assert_freeze_intact(request_, lock_bytes, receipt_bytes)
+    _assert_transaction_clean(request_)
+
+
+def test_a_failed_lock_fsync_leaves_no_reusable_freeze(
+    request_: CandidateLockRequest, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _fail_fsync(monkeypatch, LOCK_FILE_NAME)
+    with pytest.raises(CandidateLockError, match="cannot fsync"):
+        compile_candidate_lock(request_, runner=_FakeRunner())
+    _assert_no_reusable_freeze(request_)
+    monkeypatch.undo()
+    lock = compile_candidate_lock(request_, runner=_FakeRunner())
+    assert lock.digest == sha256_bytes(_LOCK_BODY.encode("utf-8"))
+
+
+def test_a_failed_lock_fsync_restores_the_prior_freeze(
+    request_: CandidateLockRequest, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    frozen, lock_bytes, receipt_bytes = _freeze(request_)
+    _fail_fsync(monkeypatch, LOCK_FILE_NAME)
+    with pytest.raises(CandidateLockError, match="cannot fsync"):
+        compile_candidate_lock(request_, runner=_FakeRunner(), recompile=True)
+    _assert_freeze_intact(request_, lock_bytes, receipt_bytes)
+    _assert_transaction_clean(request_)
+    monkeypatch.undo()
+    assert compile_candidate_lock(request_, runner=_FakeRunner()) == frozen
+
+
+def test_a_failed_rollback_fsync_keeps_the_sole_durable_copy(
+    request_: CandidateLockRequest, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    frozen, lock_bytes, receipt_bytes = _freeze(request_)
+    _fail_fsync(monkeypatch, LOCK_ROLLBACK_NAME)
+    runner = _FakeRunner()
+    with pytest.raises(CandidateLockError, match="cannot fsync"):
+        compile_candidate_lock(request_, runner=runner, recompile=True)
+    root = request_.artifact_root
+    assert runner.calls == []
+    assert (root / LOCK_ROLLBACK_NAME).read_bytes() == lock_bytes
+    assert not (root / LOCK_FILE_NAME).exists()
+    assert (root / TRANSACTION_MARKER_NAME).is_file()
+    monkeypatch.undo()
+    assert compile_candidate_lock(request_, runner=_FakeRunner()) == frozen
+    _assert_freeze_intact(request_, lock_bytes, receipt_bytes)
+    _assert_transaction_clean(request_)
+
+
+def test_a_failed_receipt_rollback_fsync_keeps_both_durable_copies(
+    request_: CandidateLockRequest, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    frozen, lock_bytes, receipt_bytes = _freeze(request_)
+    _fail_fsync(monkeypatch, RECEIPT_ROLLBACK_NAME)
+    with pytest.raises(CandidateLockError, match="cannot fsync"):
+        compile_candidate_lock(request_, runner=_FakeRunner(), recompile=True)
+    root = request_.artifact_root
+    assert (root / LOCK_ROLLBACK_NAME).read_bytes() == lock_bytes
+    assert (root / RECEIPT_ROLLBACK_NAME).read_bytes() == receipt_bytes
+    monkeypatch.undo()
+    assert compile_candidate_lock(request_, runner=_FakeRunner()) == frozen
+    _assert_freeze_intact(request_, lock_bytes, receipt_bytes)
+    _assert_transaction_clean(request_)
+
+
+def test_backups_survive_until_the_lock_is_durable(
+    request_: CandidateLockRequest, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _freeze(request_)
+    root = request_.artifact_root
+    observed: dict[str, bool] = {}
+    real = candidate_lock_module._fsync_file
+
+    def patched(fd: int, name: str) -> None:
+        if name == LOCK_FILE_NAME:
+            observed["lock_rollback_present"] = (root / LOCK_ROLLBACK_NAME).is_file()
+            observed["receipt_rollback_present"] = (root / RECEIPT_ROLLBACK_NAME).is_file()
+            observed["marker_present"] = (root / TRANSACTION_MARKER_NAME).is_file()
+        real(fd, name)
+
+    monkeypatch.setattr(candidate_lock_module, "_fsync_file", patched)
+    compile_candidate_lock(request_, runner=_FakeRunner(), recompile=True)
+    assert observed == {
+        "lock_rollback_present": True,
+        "receipt_rollback_present": True,
+        "marker_present": True,
+    }
     _assert_transaction_clean(request_)
