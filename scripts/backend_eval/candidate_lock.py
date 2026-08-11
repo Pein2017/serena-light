@@ -1,23 +1,32 @@
 """Freeze the ty and pyrefly candidate resolution exactly once, outside production.
 
-The candidate lock is compiled with one explicit ``uv pip compile`` invocation
-whose input and output live below the caller's ignored artifact root.  The
-resolution is hash-locked, binary-only, non-pre-release, and time-bounded by
-``--exclude-newer``; the parser refuses anything the freeze cannot reproduce
-(missing hashes, editable or direct-URL requirements, environment markers,
-duplicates, pre-release or local versions) and the production identity is
-asserted byte-identical around the whole operation.
+The candidate lock is compiled with one explicit ``uv pip compile`` invocation whose
+input, output, receipt, and cache live below an evaluation-owned artifact root under
+``<repo_root>/.admission-artifacts/backend-eval/``.  The resolution is hash-locked,
+binary-only, non-pre-release, and time-bounded by ``--exclude-newer``; the parser
+refuses anything the freeze cannot reproduce (missing hashes, editable or direct-URL
+requirements, environment markers, duplicates, pre-release or local versions).
 
-Subprocess execution is injected through :class:`CommandRunner`; this module has
-no other process seam.
+Every artifact path component and every artifact file is opened relative to a
+directory descriptor with ``O_NOFOLLOW`` and must be a real directory or regular
+file, and every write is an atomic same-directory replacement, so no symlink or
+special file can redirect a write out of the artifact root.  A failed resolution
+never leaves a partial artifact behind and never destroys an existing freeze, and
+the production identity is asserted byte-identical after success and after every
+failure, taking precedence over the failure it chains.
+
+Subprocess execution is injected through :class:`CommandRunner`; this module has no
+other process seam.
 """
 
 from __future__ import annotations
 
 import os
 import re
+import stat
 import subprocess
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
@@ -25,19 +34,23 @@ from typing import Protocol
 from scripts.backend_eval.models import (
     CandidateLock,
     CandidatePackage,
+    ProductionIdentity,
     ResolvedPackage,
     canonical_json,
     sha256_bytes,
 )
 from scripts.backend_eval.production_identity import (
     ProductionIdentityChanged,
+    ProductionIdentityError,
     assert_production_identity_unchanged,
     capture_production_identity,
 )
 
 __all__ = [
+    "ARTIFACT_ROOT_BASE_PARTS",
     "CACHE_DIR_NAME",
     "CANDIDATE_NAMES",
+    "CANONICAL_REQUIREMENTS_BYTES",
     "LOCK_FILE_NAME",
     "RECEIPT_FILE_NAME",
     "REQUIREMENTS_IN_NAME",
@@ -46,12 +59,15 @@ __all__ = [
     "CommandResult",
     "CommandRunner",
     "ProductionIdentityChanged",
+    "ProductionIdentityError",
     "compile_candidate_lock",
     "subprocess_runner",
 ]
 
 # Canonical sorted candidate order; the models require sorted, unique names.
 CANDIDATE_NAMES = ("pyrefly", "ty")
+CANONICAL_REQUIREMENTS_BYTES = b"".join(f"{name}\n".encode() for name in CANDIDATE_NAMES)
+ARTIFACT_ROOT_BASE_PARTS = (".admission-artifacts", "backend-eval")
 REQUIREMENTS_IN_NAME = "candidate-requirements.in"
 LOCK_FILE_NAME = "candidate-requirements.lock"
 RECEIPT_FILE_NAME = "candidate-lock-receipt.json"
@@ -63,6 +79,11 @@ _REQUIREMENT_RE = re.compile(r"^([A-Za-z0-9][A-Za-z0-9._-]*)==(\S+)$")
 _FINAL_VERSION_RE = re.compile(r"^(?:\d+!)?\d+(?:\.\d+)*(?:\.post\d+)?$")
 _HASH_RE = re.compile(r"^--hash=sha256:([0-9a-f]{64})$")
 _NAME_SEPARATOR_RE = re.compile(r"[-_.]+")
+_DIRECTORY_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+_READ_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
+_CREATE_FLAGS = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
+_NOT_A_REGULAR_FILE = "must be a regular file, not a symlink or special file"
+_NOT_A_DIRECTORY = "must be an evaluation-owned directory, not a symlink or special file"
 
 
 class CandidateLockError(RuntimeError):
@@ -81,15 +102,18 @@ class CommandRunner(Protocol):
 
 
 def subprocess_runner(command: Sequence[str], *, cwd: Path, env: Mapping[str, str]) -> CommandResult:
-    # Explicit absolute argv, never a shell string.
-    completed = subprocess.run(
-        list(command),
-        cwd=cwd,
-        env=dict(env),
-        check=False,
-        capture_output=True,
-        text=True,
-    )
+    try:
+        # Explicit absolute argv, never a shell string.
+        completed = subprocess.run(
+            list(command),
+            cwd=cwd,
+            env=dict(env),
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    except OSError as exc:
+        raise CandidateLockError(f"cannot start the candidate resolution command: {exc}") from exc
     return CommandResult(returncode=completed.returncode, stdout=completed.stdout, stderr=completed.stderr)
 
 
@@ -120,40 +144,107 @@ def compile_candidate_lock(
 ) -> CandidateLock:
     """Return the frozen candidate lock, resolving at most once per artifact root.
 
-    An existing lock is accepted without a second resolution when recompilation
-    is not requested and its canonical receipt matches this request exactly.  A
-    requested recompilation must reproduce the frozen bytes exactly.
+    An existing lock is accepted without a second resolution when recompilation is not
+    requested and its canonical receipt matches this request exactly.  A requested
+    recompilation must reproduce the frozen bytes exactly; any failure restores the
+    original lock and receipt, including when the caller is interrupted.  Production
+    identity is re-checked on success and on every failure, and drift takes precedence
+    over the failure it chains.
     """
 
     before = capture_production_identity(request.repo_root)
-    artifact_root = request.artifact_root
-    input_path = artifact_root / REQUIREMENTS_IN_NAME
-    lock_path = artifact_root / LOCK_FILE_NAME
-    receipt_path = artifact_root / RECEIPT_FILE_NAME
-    cache_dir = artifact_root / CACHE_DIR_NAME
-    command = _compile_command(request)
-    frozen_bytes = lock_path.read_bytes() if lock_path.is_file() else None
+    try:
+        lock = _freeze_candidate_lock(request, runner, recompile=recompile)
+    except BaseException as exc:
+        _assert_production_identity_unchanged(before, request.repo_root, cause=exc)
+        raise
+    _assert_production_identity_unchanged(before, request.repo_root, cause=None)
+    return lock
 
-    if frozen_bytes is not None and not recompile:
-        lock = _accept_frozen_lock(request, command, input_path, receipt_path, frozen_bytes)
-    else:
-        cache_dir.mkdir(parents=True, exist_ok=True)
-        requirements_bytes = _write_requirements_input(input_path)
-        result = runner(command, cwd=artifact_root, env=_command_env(cache_dir))
+
+def _assert_production_identity_unchanged(
+    before: ProductionIdentity, repo_root: Path, *, cause: BaseException | None
+) -> None:
+    """Re-check production identity; drift outranks and chains the failure that caused it."""
+
+    try:
+        assert_production_identity_unchanged(before, capture_production_identity(repo_root))
+    except ProductionIdentityError as identity_error:
+        if cause is None:
+            raise
+        raise identity_error from cause
+
+
+def _freeze_candidate_lock(
+    request: CandidateLockRequest, runner: CommandRunner, *, recompile: bool
+) -> CandidateLock:
+    command = _compile_command(request)
+    with _artifact_directory(request) as dir_fd:
+        frozen_lock = _read_artifact(dir_fd, LOCK_FILE_NAME)
+        frozen_receipt = _read_artifact(dir_fd, RECEIPT_FILE_NAME)
+        if frozen_lock is not None and not recompile:
+            return _accept_frozen_lock(request, command, dir_fd, frozen_lock, frozen_receipt)
+        return _resolve_candidate_lock(request, runner, command, dir_fd, frozen_lock, frozen_receipt)
+
+
+def _resolve_candidate_lock(
+    request: CandidateLockRequest,
+    runner: CommandRunner,
+    command: Sequence[str],
+    dir_fd: int,
+    frozen_lock: bytes | None,
+    frozen_receipt: bytes | None,
+) -> CandidateLock:
+    try:
+        _write_artifact(dir_fd, REQUIREMENTS_IN_NAME, CANONICAL_REQUIREMENTS_BYTES)
+        _ensure_cache_directory(dir_fd)
+        # The canonical output is removed first so a stale or partial file can never be
+        # mistaken for a fresh resolution.
+        _remove_artifact(dir_fd, LOCK_FILE_NAME)
+        result = _run(runner, command, request.artifact_root, request.artifact_root / CACHE_DIR_NAME)
         if result.returncode != 0:
             detail = (result.stderr or result.stdout).strip()
             raise CandidateLockError(f"candidate resolution failed ({result.returncode}): {detail}")
-        if not lock_path.is_file():
-            raise CandidateLockError(f"candidate resolution did not write {lock_path}")
-        lock_bytes = lock_path.read_bytes()
-        if frozen_bytes is not None and lock_bytes != frozen_bytes:
-            lock_path.write_bytes(frozen_bytes)
-            raise CandidateLockError(f"candidate resolution changed after the freeze recorded in {lock_path}")
+        lock_bytes = _read_artifact(dir_fd, LOCK_FILE_NAME)
+        if lock_bytes is None:
+            raise CandidateLockError(
+                f"candidate resolution exited 0 but did not write {request.artifact_root / LOCK_FILE_NAME}"
+            )
+        if frozen_lock is not None and lock_bytes != frozen_lock:
+            raise CandidateLockError(
+                f"candidate resolution changed after the freeze recorded in {request.artifact_root / LOCK_FILE_NAME}"
+            )
         lock = _build_lock(request, lock_bytes)
-        receipt_path.write_bytes(_receipt_bytes(command, requirements_bytes, lock))
-
-    assert_production_identity_unchanged(before, capture_production_identity(request.repo_root))
+        _write_artifact(dir_fd, RECEIPT_FILE_NAME, _receipt_bytes(command, CANONICAL_REQUIREMENTS_BYTES, lock))
+    except BaseException as exc:
+        _restore_artifacts(dir_fd, frozen_lock, frozen_receipt, cause=exc)
+        raise
     return lock
+
+
+def _restore_artifacts(
+    dir_fd: int, frozen_lock: bytes | None, frozen_receipt: bytes | None, *, cause: BaseException
+) -> None:
+    """Return the lock and receipt to their pre-resolution state, or fail loudly."""
+
+    try:
+        for name, frozen in ((LOCK_FILE_NAME, frozen_lock), (RECEIPT_FILE_NAME, frozen_receipt)):
+            # Unlink first: whatever the failed resolution left behind may be a symlink or
+            # special file, and unlink removes the entry itself rather than following it.
+            _remove_artifact(dir_fd, name)
+            if frozen is not None:
+                _write_artifact(dir_fd, name, frozen)
+    except CandidateLockError as restore_error:
+        raise CandidateLockError(
+            f"candidate resolution failed and its frozen artifacts could not be restored: {restore_error}"
+        ) from cause
+
+
+def _run(runner: CommandRunner, command: Sequence[str], artifact_root: Path, cache_dir: Path) -> CommandResult:
+    try:
+        return runner(command, cwd=artifact_root, env=_command_env(cache_dir))
+    except OSError as exc:
+        raise CandidateLockError(f"cannot start the candidate resolution command: {exc}") from exc
 
 
 # --- command and environment --------------------------------------------------
@@ -193,25 +284,115 @@ def _command_env(cache_dir: Path) -> dict[str, str]:
     return env
 
 
+# --- artifact directory and file handling -------------------------------------
+
+
+@contextmanager
+def _artifact_directory(request: CandidateLockRequest) -> Iterator[int]:
+    """Yield a descriptor for the artifact root, refusing any symlinked component.
+
+    The declared production root is opened as given; every component below it is
+    created and reopened with ``O_NOFOLLOW`` so no symlink can move the artifact
+    root, its parents, or its files outside the evaluation-owned area.
+    """
+
+    relative = request.artifact_root.relative_to(request.repo_root)
+    try:
+        dir_fd = os.open(request.repo_root, os.O_RDONLY | os.O_DIRECTORY)
+    except OSError as exc:
+        raise CandidateLockError(f"cannot open the production repository root {request.repo_root}: {exc}") from exc
+    try:
+        for part in relative.parts:
+            child = _open_owned_directory(dir_fd, part)
+            os.close(dir_fd)
+            dir_fd = child
+        yield dir_fd
+    finally:
+        os.close(dir_fd)
+
+
+def _open_owned_directory(parent_fd: int, name: str) -> int:
+    try:
+        os.mkdir(name, 0o700, dir_fd=parent_fd)
+    except FileExistsError:
+        pass
+    except OSError as exc:
+        raise CandidateLockError(f"cannot create artifact path component {name!r}: {exc}") from exc
+    try:
+        return os.open(name, _DIRECTORY_FLAGS, dir_fd=parent_fd)
+    except OSError as exc:
+        raise CandidateLockError(f"artifact path component {name!r} {_NOT_A_DIRECTORY}: {exc}") from exc
+
+
+def _ensure_cache_directory(dir_fd: int) -> None:
+    os.close(_open_owned_directory(dir_fd, CACHE_DIR_NAME))
+
+
+def _read_artifact(dir_fd: int, name: str) -> bytes | None:
+    """Return the artifact bytes, or ``None`` when it does not exist."""
+
+    try:
+        fd = os.open(name, _READ_FLAGS, dir_fd=dir_fd)
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise CandidateLockError(f"artifact {name!r} {_NOT_A_REGULAR_FILE}: {exc}") from exc
+    try:
+        with os.fdopen(fd, "rb") as handle:
+            if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
+                raise CandidateLockError(f"artifact {name!r} {_NOT_A_REGULAR_FILE}")
+            return handle.read()
+    except OSError as exc:
+        raise CandidateLockError(f"cannot read artifact {name!r}: {exc}") from exc
+
+
+def _write_artifact(dir_fd: int, name: str, data: bytes) -> None:
+    """Atomically replace ``name`` with ``data`` without ever following a symlink."""
+
+    _reject_non_regular(dir_fd, name)
+    temporary = f".{name}.tmp"
+    _remove_artifact(dir_fd, temporary)
+    try:
+        fd = os.open(temporary, _CREATE_FLAGS, 0o600, dir_fd=dir_fd)
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, name, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
+    except OSError as exc:
+        raise CandidateLockError(f"cannot write artifact {name!r}: {exc}") from exc
+
+
+def _reject_non_regular(dir_fd: int, name: str) -> None:
+    try:
+        mode = os.lstat(name, dir_fd=dir_fd).st_mode
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        raise CandidateLockError(f"cannot inspect artifact {name!r}: {exc}") from exc
+    if not stat.S_ISREG(mode):
+        raise CandidateLockError(f"artifact {name!r} {_NOT_A_REGULAR_FILE}")
+
+
+def _remove_artifact(dir_fd: int, name: str) -> None:
+    try:
+        os.unlink(name, dir_fd=dir_fd)
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        raise CandidateLockError(f"cannot remove artifact {name!r}: {exc}") from exc
+
+
 # --- artifact-root inputs and receipts ----------------------------------------
 
 
-def _write_requirements_input(path: Path) -> bytes:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text("".join(f"{name}\n" for name in CANDIDATE_NAMES), encoding="utf-8")
-    return _read_requirements_input(path)
-
-
-def _read_requirements_input(path: Path) -> bytes:
-    if not path.is_file():
-        raise CandidateLockError(f"frozen candidate lock is missing its requirements input: {path}")
-    data = path.read_bytes()
-    names = data.decode("utf-8").split()
-    if sorted(names) != list(CANDIDATE_NAMES):
+def _require_canonical_requirements_input(dir_fd: int) -> bytes:
+    data = _read_artifact(dir_fd, REQUIREMENTS_IN_NAME)
+    if data != CANONICAL_REQUIREMENTS_BYTES:
         raise CandidateLockError(
-            f"candidate requirements input must list exactly {list(CANDIDATE_NAMES)}, got {names}"
+            f"candidate requirements input must be exactly {CANONICAL_REQUIREMENTS_BYTES!r}, got {data!r}"
         )
-    return data
+    return CANONICAL_REQUIREMENTS_BYTES
 
 
 def _receipt_bytes(command: Sequence[str], requirements_bytes: bytes, lock: CandidateLock) -> bytes:
@@ -229,17 +410,21 @@ def _receipt_bytes(command: Sequence[str], requirements_bytes: bytes, lock: Cand
 def _accept_frozen_lock(
     request: CandidateLockRequest,
     command: Sequence[str],
-    input_path: Path,
-    receipt_path: Path,
-    frozen_bytes: bytes,
+    dir_fd: int,
+    frozen_lock: bytes,
+    frozen_receipt: bytes | None,
 ) -> CandidateLock:
-    requirements_bytes = _read_requirements_input(input_path)
-    if not receipt_path.is_file():
-        raise CandidateLockError(f"frozen candidate lock is missing its canonical receipt: {receipt_path}")
-    lock = _build_lock(request, frozen_bytes)
-    expected = _receipt_bytes(command, requirements_bytes, lock)
-    if receipt_path.read_bytes() != expected:
-        raise CandidateLockError(f"frozen candidate lock does not match its canonical receipt: {receipt_path}")
+    requirements_bytes = _require_canonical_requirements_input(dir_fd)
+    if frozen_receipt is None:
+        raise CandidateLockError(
+            f"frozen candidate lock is missing its canonical receipt: {request.artifact_root / RECEIPT_FILE_NAME}"
+        )
+    lock = _build_lock(request, frozen_lock)
+    if frozen_receipt != _receipt_bytes(command, requirements_bytes, lock):
+        raise CandidateLockError(
+            f"frozen candidate lock does not match its canonical receipt: "
+            f"{request.artifact_root / RECEIPT_FILE_NAME}"
+        )
     return lock
 
 
@@ -318,7 +503,7 @@ def _parse_requirement_line(line: str) -> ResolvedPackage:
     )
 
 
-def _parse_hashes(name: str, tokens: Sequence[str]) -> tuple[tuple[str, str], ...]:
+def _parse_hashes(name: str, tokens: Sequence[str]) -> tuple[str, ...]:
     digests: list[str] = []
     for token in tokens:
         match = _HASH_RE.fullmatch(token)
@@ -332,7 +517,7 @@ def _parse_hashes(name: str, tokens: Sequence[str]) -> tuple[tuple[str, str], ..
         digests.append(digest)
     if not digests:
         raise CandidateLockError(f"candidate resolution is missing artifact hashes for {name}")
-    return tuple(sorted((f"sha256:{digest}", digest) for digest in digests))
+    return tuple(sorted(digests))
 
 
 def _logical_lines(text: str) -> list[str]:
@@ -367,10 +552,15 @@ def _validate_executable(path: Path, label: str) -> None:
         raise ValueError(f"{label} must be an absolute path, not an ambient executable name")
     if not path.is_file():
         raise ValueError(f"{label} must be an existing file: {path}")
+    if not os.access(path, os.X_OK):
+        raise ValueError(f"{label} must be an executable file: {path}")
 
 
 def _validate_artifact_root(artifact_root: Path, repo_root: Path) -> None:
+    base = repo_root.joinpath(*ARTIFACT_ROOT_BASE_PARTS)
     if not artifact_root.is_absolute():
         raise ValueError("CandidateLockRequest.artifact_root must be an absolute path")
-    if artifact_root == repo_root or repo_root.is_relative_to(artifact_root):
-        raise ValueError("CandidateLockRequest.artifact_root must not contain the production repository root")
+    if ".." in artifact_root.parts:
+        raise ValueError("CandidateLockRequest.artifact_root must not contain parent references")
+    if artifact_root == base or not artifact_root.is_relative_to(base):
+        raise ValueError(f"CandidateLockRequest.artifact_root must be an evaluation-owned directory below {base}")

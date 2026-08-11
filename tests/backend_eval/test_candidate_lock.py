@@ -1,8 +1,10 @@
-"""Candidate-lock command construction, parsing, and freeze idempotency."""
+"""Candidate-lock command construction, parsing, artifact safety, and freeze idempotency."""
 
 from __future__ import annotations
 
 import os
+import re
+import shutil
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -11,7 +13,9 @@ import pytest
 
 from scripts.backend_eval import candidate_lock as candidate_lock_module
 from scripts.backend_eval.candidate_lock import (
+    ARTIFACT_ROOT_BASE_PARTS,
     CANDIDATE_NAMES,
+    CANONICAL_REQUIREMENTS_BYTES,
     LOCK_FILE_NAME,
     RECEIPT_FILE_NAME,
     REQUIREMENTS_IN_NAME,
@@ -21,15 +25,17 @@ from scripts.backend_eval.candidate_lock import (
     compile_candidate_lock,
     subprocess_runner,
 )
-from scripts.backend_eval.models import ProductionIdentity, sha256_bytes
+from scripts.backend_eval.models import CandidateLock, ProductionIdentity, sha256_bytes
+from scripts.backend_eval.production_identity import PRODUCTION_IDENTITY_FILES, ProductionIdentityChanged
 
 _EXCLUDE_NEWER = "2026-08-11T00:00:00Z"
 _HASH_A = "1" * 64
 _HASH_B = "2" * 64
 _HASH_C = "3" * 64
 
+# The pyrefly hashes are emitted out of order so the parser must canonicalize them.
 _LOCK_BODY = (
-    f"pyrefly==0.30.0 \\\n    --hash=sha256:{_HASH_A} \\\n    --hash=sha256:{_HASH_B}\n"
+    f"pyrefly==0.30.0 \\\n    --hash=sha256:{_HASH_B} \\\n    --hash=sha256:{_HASH_A}\n"
     f"ty==0.0.24 \\\n    --hash=sha256:{_HASH_C}\n"
 )
 
@@ -46,15 +52,63 @@ class _FakeRunner:
     def __call__(self, command: Sequence[str], *, cwd: Path, env: Mapping[str, str]) -> CommandResult:
         tokens = tuple(command)
         self.calls.append((tokens, cwd, dict(env)))
-        if self.returncode == 0 and self.write_output:
+        if self.write_output:
             body = self.bodies[min(len(self.calls) - 1, len(self.bodies) - 1)]
             Path(tokens[tokens.index("--output-file") + 1]).write_text(body, encoding="utf-8")
         return CommandResult(returncode=self.returncode, stdout=self.stdout, stderr=self.stderr)
 
 
+@dataclass
+class _InterruptingRunner:
+    calls: int = 0
+
+    def __call__(self, command: Sequence[str], *, cwd: Path, env: Mapping[str, str]) -> CommandResult:
+        del command, cwd, env
+        self.calls += 1
+        raise KeyboardInterrupt
+
+
+@dataclass
+class _SymlinkRunner:
+    """A runner that tries to redirect its declared output through a symlink."""
+
+    target: Path
+    calls: int = 0
+
+    def __call__(self, command: Sequence[str], *, cwd: Path, env: Mapping[str, str]) -> CommandResult:
+        del cwd, env
+        self.calls += 1
+        tokens = tuple(command)
+        Path(tokens[tokens.index("--output-file") + 1]).symlink_to(self.target)
+        return CommandResult(returncode=0, stdout="", stderr="")
+
+
+@dataclass
+class _RaisingRunner:
+    calls: int = 0
+
+    def __call__(self, command: Sequence[str], *, cwd: Path, env: Mapping[str, str]) -> CommandResult:
+        del command, cwd, env
+        self.calls += 1
+        raise PermissionError(13, "Permission denied")
+
+
+@pytest.fixture(scope="session")
+def production_root(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """A byte-identical copy of the production identity inputs, owned by the tests."""
+
+    source = Path(__file__).resolve().parents[2]
+    root = tmp_path_factory.mktemp("production-root")
+    for name in PRODUCTION_IDENTITY_FILES:
+        shutil.copy2(source / name, root / name)
+    shutil.copytree(source / "src", root / "src")
+    return root
+
+
 @pytest.fixture
-def repo_root() -> Path:
-    return Path(__file__).resolve().parents[2]
+def artifact_root(production_root: Path, request: pytest.FixtureRequest) -> Path:
+    name = re.sub(r"[^A-Za-z0-9]+", "-", request.node.name).strip("-")
+    return production_root.joinpath(*ARTIFACT_ROOT_BASE_PARTS, name)
 
 
 @pytest.fixture
@@ -70,11 +124,10 @@ def tools(tmp_path: Path) -> tuple[Path, Path]:
 
 
 @pytest.fixture
-def request_(tmp_path: Path, repo_root: Path, tools: tuple[Path, Path]) -> CandidateLockRequest:
+def request_(production_root: Path, artifact_root: Path, tools: tuple[Path, Path]) -> CandidateLockRequest:
     uv, python = tools
-    artifact_root = tmp_path / "artifacts" / "backend-eval" / "identity"
     return CandidateLockRequest(
-        repo_root=repo_root,
+        repo_root=production_root,
         artifact_root=artifact_root,
         uv=uv,
         python=python,
@@ -108,6 +161,20 @@ def _expected_command(request: CandidateLockRequest) -> tuple[str, ...]:
     )
 
 
+def _freeze(request: CandidateLockRequest) -> tuple[CandidateLock, bytes, bytes]:
+    lock = compile_candidate_lock(request, runner=_FakeRunner())
+    return (
+        lock,
+        (request.artifact_root / LOCK_FILE_NAME).read_bytes(),
+        (request.artifact_root / RECEIPT_FILE_NAME).read_bytes(),
+    )
+
+
+def _assert_freeze_intact(request: CandidateLockRequest, lock_bytes: bytes, receipt_bytes: bytes) -> None:
+    assert (request.artifact_root / LOCK_FILE_NAME).read_bytes() == lock_bytes
+    assert (request.artifact_root / RECEIPT_FILE_NAME).read_bytes() == receipt_bytes
+
+
 # --- request validation -------------------------------------------------------
 
 
@@ -123,19 +190,45 @@ def test_request_rejects_missing_executables(request_: CandidateLockRequest, tmp
         replace(request_, uv=tmp_path / "absent-uv")
 
 
+def test_request_rejects_non_executable_tools(request_: CandidateLockRequest, tools: tuple[Path, Path]) -> None:
+    uv, python = tools
+    uv.chmod(0o600)
+    with pytest.raises(ValueError, match="executable"):
+        replace(request_, uv=uv)
+    uv.chmod(0o700)
+    python.chmod(0o600)
+    with pytest.raises(ValueError, match="executable"):
+        replace(request_, python=python)
+
+
 def test_request_rejects_a_non_utc_exclude_newer(request_: CandidateLockRequest) -> None:
     for value in ("2026-08-11", "2026-08-11T00:00:00", "2026-08-11T00:00:00+02:00", ""):
         with pytest.raises(ValueError, match="exclude_newer"):
             replace(request_, exclude_newer=value)
 
 
-def test_request_rejects_an_artifact_root_containing_the_repository(
-    request_: CandidateLockRequest, repo_root: Path
+def test_request_rejects_an_unowned_artifact_root(
+    request_: CandidateLockRequest, production_root: Path, tmp_path: Path
 ) -> None:
-    with pytest.raises(ValueError, match="artifact_root"):
-        replace(request_, artifact_root=repo_root)
-    with pytest.raises(ValueError, match="artifact_root"):
-        replace(request_, artifact_root=repo_root.parent)
+    base = production_root.joinpath(*ARTIFACT_ROOT_BASE_PARTS)
+    unowned = (
+        tmp_path / "outside",
+        production_root,
+        production_root / "scratch",
+        production_root / ".admission-artifacts",
+        production_root / ".admission-artifacts" / "other",
+        base,
+        base / ".." / "escape",
+        Path(".admission-artifacts/backend-eval/relative"),
+    )
+    for candidate in unowned:
+        with pytest.raises(ValueError, match="artifact_root"):
+            replace(request_, artifact_root=candidate)
+
+
+def test_request_accepts_a_nested_evaluation_owned_root(request_: CandidateLockRequest) -> None:
+    nested = replace(request_, artifact_root=request_.artifact_root / "phase-1")
+    assert nested.artifact_root.parent == request_.artifact_root
 
 
 # --- command construction -----------------------------------------------------
@@ -150,12 +243,12 @@ def test_compile_builds_the_exact_locked_command(request_: CandidateLockRequest)
     assert cwd == request_.artifact_root
 
 
-def test_compile_writes_exactly_the_two_candidate_requirements(request_: CandidateLockRequest) -> None:
+def test_compile_writes_the_canonical_candidate_requirements(request_: CandidateLockRequest) -> None:
     compile_candidate_lock(request_, runner=_FakeRunner())
-    text = (request_.artifact_root / REQUIREMENTS_IN_NAME).read_text(encoding="utf-8")
-    assert text == "pyrefly\nty\n"
-    assert text.split() == list(CANDIDATE_NAMES)
-    assert set(text.split()) == {"ty", "pyrefly"}
+    data = (request_.artifact_root / REQUIREMENTS_IN_NAME).read_bytes()
+    assert data == CANONICAL_REQUIREMENTS_BYTES
+    assert data == b"pyrefly\nty\n"
+    assert data.decode("utf-8").split() == list(CANDIDATE_NAMES)
 
 
 def test_compile_uses_a_service_owned_cache_and_inherits_proxy_settings(
@@ -174,11 +267,17 @@ def test_compile_uses_a_service_owned_cache_and_inherits_proxy_settings(
     assert os.environ.get("UV_CACHE_DIR") != str(cache_dir)
 
 
-def test_compile_writes_only_below_the_artifact_root(request_: CandidateLockRequest, tmp_path: Path) -> None:
+def test_compile_writes_only_below_the_artifact_root(
+    request_: CandidateLockRequest, production_root: Path
+) -> None:
     compile_candidate_lock(request_, runner=_FakeRunner())
     written = {path.relative_to(request_.artifact_root).as_posix() for path in request_.artifact_root.rglob("*")}
     assert written == {REQUIREMENTS_IN_NAME, LOCK_FILE_NAME, RECEIPT_FILE_NAME, "uv-cache"}
-    assert {path.name for path in tmp_path.iterdir()} == {"artifacts", "tools"}
+    assert {path.name for path in production_root.iterdir()} == {
+        *PRODUCTION_IDENTITY_FILES,
+        "src",
+        ".admission-artifacts",
+    }
 
 
 # --- resolution parsing -------------------------------------------------------
@@ -191,15 +290,14 @@ def test_compile_returns_every_resolved_distribution_and_two_candidates(request_
     assert lock.exclude_newer == _EXCLUDE_NEWER
     assert [package.name for package in lock.resolved_packages] == ["pyrefly", "ty"]
     assert [package.requirement for package in lock.resolved_packages] == ["pyrefly==0.30.0", "ty==0.0.24"]
-    assert dict(lock.resolved_packages[0].artifact_hashes) == {
-        f"sha256:{_HASH_A}": _HASH_A,
-        f"sha256:{_HASH_B}": _HASH_B,
-    }
+    assert lock.resolved_packages[0].artifact_hashes == (_HASH_A, _HASH_B)
+    assert lock.resolved_packages[1].artifact_hashes == (_HASH_C,)
     assert [(package.name, package.executable_relpath) for package in lock.candidates] == [
         ("pyrefly", "bin/pyrefly"),
         ("ty", "bin/ty"),
     ]
     assert [package.version for package in lock.candidates] == ["0.30.0", "0.0.24"]
+    assert lock.candidates[0].artifact_hashes == (_HASH_A, _HASH_B)
 
 
 def test_compile_keeps_transitive_distributions_out_of_the_candidate_set(request_: CandidateLockRequest) -> None:
@@ -229,10 +327,7 @@ def test_compile_accepts_an_eligible_zero_zero_x_ty_release(request_: CandidateL
             f"ty==0.0.24 \\\n    --hash=sha256:{_HASH_C}\n",
             "direct",
         ),
-        (
-            f"--index-url https://example.invalid/simple\n{_LOCK_BODY}",
-            "option",
-        ),
+        (f"--index-url https://example.invalid/simple\n{_LOCK_BODY}", "option"),
         (_LOCK_BODY + f"ty==0.0.25 \\\n    --hash=sha256:{_HASH_A}\n", "duplicate"),
         (_LOCK_BODY.replace("0.0.24", "0.0.25rc1"), "pre-release"),
         (_LOCK_BODY.replace("0.30.0", "0.30.0.dev1"), "pre-release"),
@@ -257,40 +352,184 @@ def test_compile_rejects_a_duplicate_hash_for_one_distribution(request_: Candida
         compile_candidate_lock(request_, runner=_FakeRunner(bodies=(body,)))
 
 
+# --- artifact path safety -----------------------------------------------------
+
+
+def test_compile_rejects_a_symlinked_artifact_root(request_: CandidateLockRequest, tmp_path: Path) -> None:
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    request_.artifact_root.parent.mkdir(parents=True, exist_ok=True)
+    request_.artifact_root.symlink_to(outside, target_is_directory=True)
+    with pytest.raises(CandidateLockError, match="symlink"):
+        compile_candidate_lock(request_, runner=_FakeRunner())
+    assert list(outside.iterdir()) == []
+
+
+def test_compile_rejects_a_symlinked_artifact_path_component(
+    request_: CandidateLockRequest, tmp_path: Path
+) -> None:
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    request_.artifact_root.parent.mkdir(parents=True, exist_ok=True)
+    request_.artifact_root.symlink_to(outside, target_is_directory=True)
+    nested = replace(request_, artifact_root=request_.artifact_root / "phase-1")
+    with pytest.raises(CandidateLockError, match="symlink"):
+        compile_candidate_lock(nested, runner=_FakeRunner())
+    assert list(outside.iterdir()) == []
+
+
+@pytest.mark.parametrize("name", [REQUIREMENTS_IN_NAME, LOCK_FILE_NAME, RECEIPT_FILE_NAME])
+def test_compile_rejects_a_symlinked_artifact_output(
+    request_: CandidateLockRequest, tmp_path: Path, name: str
+) -> None:
+    outside = tmp_path / "outside.txt"
+    outside.write_text("stale\n", encoding="utf-8")
+    request_.artifact_root.mkdir(parents=True)
+    (request_.artifact_root / name).symlink_to(outside)
+    with pytest.raises(CandidateLockError, match="symlink"):
+        compile_candidate_lock(request_, runner=_FakeRunner())
+    assert outside.read_text(encoding="utf-8") == "stale\n"
+
+
+def test_compile_rejects_a_special_file_artifact_output(request_: CandidateLockRequest) -> None:
+    request_.artifact_root.mkdir(parents=True)
+    os.mkfifo(request_.artifact_root / LOCK_FILE_NAME)
+    with pytest.raises(CandidateLockError, match="regular file"):
+        compile_candidate_lock(request_, runner=_FakeRunner())
+
+
+def test_compile_rejects_a_symlinked_cache_directory(request_: CandidateLockRequest, tmp_path: Path) -> None:
+    outside = tmp_path / "outside-cache"
+    outside.mkdir()
+    request_.artifact_root.mkdir(parents=True)
+    (request_.artifact_root / "uv-cache").symlink_to(outside, target_is_directory=True)
+    with pytest.raises(CandidateLockError, match="symlink"):
+        compile_candidate_lock(request_, runner=_FakeRunner())
+    assert list(outside.iterdir()) == []
+
+
 # --- command failure ----------------------------------------------------------
 
 
 def test_compile_rejects_a_nonzero_command_exit(request_: CandidateLockRequest) -> None:
-    runner = _FakeRunner(returncode=2, stderr="no compatible version")
+    runner = _FakeRunner(returncode=2, stderr="no compatible version", write_output=False)
     with pytest.raises(CandidateLockError, match="no compatible version"):
         compile_candidate_lock(request_, runner=runner)
     assert not (request_.artifact_root / LOCK_FILE_NAME).exists()
+    assert not (request_.artifact_root / RECEIPT_FILE_NAME).exists()
 
 
 def test_compile_rejects_a_missing_output_file(request_: CandidateLockRequest) -> None:
     with pytest.raises(CandidateLockError, match="did not write"):
         compile_candidate_lock(request_, runner=_FakeRunner(write_output=False))
+    assert not (request_.artifact_root / LOCK_FILE_NAME).exists()
+
+
+def test_compile_removes_a_partial_output_when_the_first_resolution_fails(
+    request_: CandidateLockRequest,
+) -> None:
+    runner = _FakeRunner(bodies=("pyrefly==0.30.0\n",), returncode=1, stderr="interrupted")
+    with pytest.raises(CandidateLockError, match="interrupted"):
+        compile_candidate_lock(request_, runner=runner)
+    assert not (request_.artifact_root / LOCK_FILE_NAME).exists()
+    assert not (request_.artifact_root / RECEIPT_FILE_NAME).exists()
+
+
+def test_compile_rejects_a_symlinked_resolution_output(request_: CandidateLockRequest, tmp_path: Path) -> None:
+    outside = tmp_path / "planted.lock"
+    outside.write_text(_LOCK_BODY, encoding="utf-8")
+    runner = _SymlinkRunner(target=outside)
+    with pytest.raises(CandidateLockError, match="symlink"):
+        compile_candidate_lock(request_, runner=runner)
+    assert runner.calls == 1
+    assert not (request_.artifact_root / LOCK_FILE_NAME).exists()
+    assert not (request_.artifact_root / LOCK_FILE_NAME).is_symlink()
+    assert outside.read_text(encoding="utf-8") == _LOCK_BODY
+
+
+def test_recompilation_restores_the_freeze_after_a_symlinked_resolution_output(
+    request_: CandidateLockRequest, tmp_path: Path
+) -> None:
+    frozen, lock_bytes, receipt_bytes = _freeze(request_)
+    outside = tmp_path / "planted.lock"
+    outside.write_text(_LOCK_BODY.replace("0.0.24", "0.0.25"), encoding="utf-8")
+    with pytest.raises(CandidateLockError, match="symlink"):
+        compile_candidate_lock(request_, runner=_SymlinkRunner(target=outside), recompile=True)
+    assert not (request_.artifact_root / LOCK_FILE_NAME).is_symlink()
+    assert outside.read_text(encoding="utf-8") == _LOCK_BODY.replace("0.0.24", "0.0.25")
+    _assert_freeze_intact(request_, lock_bytes, receipt_bytes)
+    assert compile_candidate_lock(request_, runner=_FakeRunner()) == frozen
+
+
+def test_compile_normalizes_a_runner_start_failure(request_: CandidateLockRequest) -> None:
+    runner = _RaisingRunner()
+    with pytest.raises(CandidateLockError, match="cannot start"):
+        compile_candidate_lock(request_, runner=runner)
+    assert runner.calls == 1
+    assert not (request_.artifact_root / LOCK_FILE_NAME).exists()
 
 
 # --- production identity ------------------------------------------------------
 
 
-def test_compile_rejects_production_identity_drift(
-    request_: CandidateLockRequest, monkeypatch: pytest.MonkeyPatch
+def _drifting_capture(
+    monkeypatch: pytest.MonkeyPatch, *, after_call: int = 1
 ) -> None:
     real = candidate_lock_module.capture_production_identity
-    seen: list[ProductionIdentity] = []
+    seen: list[int] = []
 
     def drifting(root: Path) -> ProductionIdentity:
         identity = real(root)
-        seen.append(identity)
-        if len(seen) > 1:
+        seen.append(1)
+        if len(seen) > after_call:
             return replace(identity, uv_lock_sha256="f" * 64)
         return identity
 
     monkeypatch.setattr(candidate_lock_module, "capture_production_identity", drifting)
-    with pytest.raises(candidate_lock_module.ProductionIdentityChanged, match="uv.lock"):
+
+
+def test_compile_rejects_production_identity_drift(
+    request_: CandidateLockRequest, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _drifting_capture(monkeypatch)
+    with pytest.raises(ProductionIdentityChanged, match="uv.lock"):
         compile_candidate_lock(request_, runner=_FakeRunner())
+
+
+def test_production_identity_drift_takes_precedence_over_a_runner_failure(
+    request_: CandidateLockRequest, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _drifting_capture(monkeypatch)
+    runner = _FakeRunner(returncode=2, stderr="no compatible version", write_output=False)
+    with pytest.raises(ProductionIdentityChanged, match="uv.lock") as excinfo:
+        compile_candidate_lock(request_, runner=runner)
+    cause = excinfo.value.__cause__
+    assert isinstance(cause, CandidateLockError)
+    assert "no compatible version" in str(cause)
+
+
+def test_compile_rechecks_production_identity_when_reusing_a_frozen_lock(
+    request_: CandidateLockRequest, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    compile_candidate_lock(request_, runner=_FakeRunner())
+    _drifting_capture(monkeypatch)
+    runner = _FakeRunner()
+    with pytest.raises(ProductionIdentityChanged, match="uv.lock"):
+        compile_candidate_lock(request_, runner=runner)
+    assert runner.calls == []
+
+
+def test_production_identity_is_checked_after_a_rejected_artifact_root(
+    request_: CandidateLockRequest, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    request_.artifact_root.parent.mkdir(parents=True, exist_ok=True)
+    request_.artifact_root.symlink_to(outside, target_is_directory=True)
+    _drifting_capture(monkeypatch)
+    with pytest.raises(ProductionIdentityChanged) as excinfo:
+        compile_candidate_lock(request_, runner=_FakeRunner())
+    assert isinstance(excinfo.value.__cause__, CandidateLockError)
 
 
 # --- freeze idempotency -------------------------------------------------------
@@ -317,10 +556,16 @@ def test_compile_rejects_reuse_when_the_receipt_is_missing(request_: CandidateLo
         compile_candidate_lock(request_, runner=_FakeRunner())
 
 
-def test_compile_rejects_reuse_with_unexpected_direct_requirements(request_: CandidateLockRequest) -> None:
+@pytest.mark.parametrize(
+    "content",
+    [b"pyrefly\nrequests\nty\n", b"ty\npyrefly\n", b"pyrefly\nty", b"pyrefly ty\n", b" pyrefly\nty\n", b""],
+)
+def test_compile_rejects_reuse_with_a_non_canonical_requirements_input(
+    request_: CandidateLockRequest, content: bytes
+) -> None:
     compile_candidate_lock(request_, runner=_FakeRunner())
-    (request_.artifact_root / REQUIREMENTS_IN_NAME).write_text("pyrefly\nrequests\nty\n", encoding="utf-8")
-    with pytest.raises(CandidateLockError, match="requests"):
+    (request_.artifact_root / REQUIREMENTS_IN_NAME).write_bytes(content)
+    with pytest.raises(CandidateLockError, match="candidate requirements input"):
         compile_candidate_lock(request_, runner=_FakeRunner())
 
 
@@ -340,12 +585,62 @@ def test_recompilation_accepts_an_identical_second_freeze(request_: CandidateLoc
 
 
 def test_recompilation_rejects_a_changed_second_freeze_output(request_: CandidateLockRequest) -> None:
-    runner = _FakeRunner(bodies=(_LOCK_BODY, _LOCK_BODY.replace("0.0.24", "0.0.25")))
-    frozen = compile_candidate_lock(request_, runner=runner)
+    frozen, lock_bytes, receipt_bytes = _freeze(request_)
+    runner = _FakeRunner(bodies=(_LOCK_BODY.replace("0.0.24", "0.0.25"),))
     with pytest.raises(CandidateLockError, match="changed"):
         compile_candidate_lock(request_, runner=runner, recompile=True)
-    assert (request_.artifact_root / LOCK_FILE_NAME).read_bytes() == _LOCK_BODY.encode("utf-8")
-    assert frozen.digest == sha256_bytes(_LOCK_BODY.encode("utf-8"))
+    _assert_freeze_intact(request_, lock_bytes, receipt_bytes)
+    assert compile_candidate_lock(request_, runner=_FakeRunner()) == frozen
+
+
+def test_recompilation_restores_the_freeze_when_the_runner_writes_nothing(
+    request_: CandidateLockRequest,
+) -> None:
+    frozen, lock_bytes, receipt_bytes = _freeze(request_)
+    with pytest.raises(CandidateLockError, match="did not write"):
+        compile_candidate_lock(request_, runner=_FakeRunner(write_output=False), recompile=True)
+    _assert_freeze_intact(request_, lock_bytes, receipt_bytes)
+    assert compile_candidate_lock(request_, runner=_FakeRunner()) == frozen
+
+
+def test_recompilation_restores_the_freeze_after_a_nonzero_partial_write(
+    request_: CandidateLockRequest,
+) -> None:
+    frozen, lock_bytes, receipt_bytes = _freeze(request_)
+    runner = _FakeRunner(bodies=("pyrefly==0.30.0 \\\n",), returncode=1, stderr="interrupted")
+    with pytest.raises(CandidateLockError, match="interrupted"):
+        compile_candidate_lock(request_, runner=runner, recompile=True)
+    _assert_freeze_intact(request_, lock_bytes, receipt_bytes)
+    assert compile_candidate_lock(request_, runner=_FakeRunner()) == frozen
+
+
+def test_recompilation_restores_the_freeze_after_a_parse_failure(request_: CandidateLockRequest) -> None:
+    frozen, lock_bytes, receipt_bytes = _freeze(request_)
+    runner = _FakeRunner(bodies=("this is not a locked requirement\n",))
+    with pytest.raises(CandidateLockError):
+        compile_candidate_lock(request_, runner=runner, recompile=True)
+    _assert_freeze_intact(request_, lock_bytes, receipt_bytes)
+    assert compile_candidate_lock(request_, runner=_FakeRunner()) == frozen
+
+
+def test_recompilation_restores_the_freeze_after_a_runner_start_failure(
+    request_: CandidateLockRequest,
+) -> None:
+    frozen, lock_bytes, receipt_bytes = _freeze(request_)
+    with pytest.raises(CandidateLockError, match="cannot start"):
+        compile_candidate_lock(request_, runner=_RaisingRunner(), recompile=True)
+    _assert_freeze_intact(request_, lock_bytes, receipt_bytes)
+    assert compile_candidate_lock(request_, runner=_FakeRunner()) == frozen
+
+
+def test_recompilation_restores_the_freeze_when_the_caller_is_interrupted(
+    request_: CandidateLockRequest,
+) -> None:
+    frozen, lock_bytes, receipt_bytes = _freeze(request_)
+    with pytest.raises(KeyboardInterrupt):
+        compile_candidate_lock(request_, runner=_InterruptingRunner(), recompile=True)
+    _assert_freeze_intact(request_, lock_bytes, receipt_bytes)
+    assert compile_candidate_lock(request_, runner=_FakeRunner()) == frozen
 
 
 # --- default runner -----------------------------------------------------------
@@ -358,3 +653,8 @@ def test_subprocess_runner_reports_exit_status_and_streams(tmp_path: Path) -> No
         env={"PATH": "/usr/bin:/bin"},
     )
     assert result == CommandResult(returncode=3, stdout="resolved", stderr="failed")
+
+
+def test_subprocess_runner_normalizes_a_start_failure(tmp_path: Path) -> None:
+    with pytest.raises(CandidateLockError, match="cannot start"):
+        subprocess_runner([str(tmp_path / "absent-uv"), "pip", "compile"], cwd=tmp_path, env={})
