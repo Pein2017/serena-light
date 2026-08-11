@@ -36,4 +36,4 @@
 
 - [x] 6.1 Materialize and install the verified schema-6 Serena Light plugin/MCP for Codex and Claude Code without changing canonical Serena; restart only affected fresh clients.
 - [x] 6.2 Verify fresh Codex, Claude Code, and CC Agent clients expose the unchanged tool count, byte-identical instructions, schema-6 build identity, mismatch warning, compact status, and representative semantic recovery behavior.
-- [ ] 6.3 Record acceptance evidence and final dispositions, commit only Serena Light-owned files, push the accepted main branch, and archive this OpenSpec change only after every task and blocker is closed.
+- [x] 6.3 Record acceptance evidence and final dispositions, commit only Serena Light-owned files, push the accepted main branch, and archive this OpenSpec change only after every task and blocker is closed.

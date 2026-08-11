@@ -275,13 +275,15 @@ hook, RTK integration, or reserved schema-5 lexical rollover is planned.
 
 ## Phase E.6: schema-6 agent recovery guidance
 
-The active `tighten-agent-recovery-guidance` change keeps the 11-tool surface
+The archived `tighten-agent-recovery-guidance` change keeps the 11-tool surface
 and implements advisory environment mismatch detection, compact non-warming
 runtime status, explicit normalized-coordinate guidance, honest implementation
 fallback advice, and three deterministic oversized-body recovery routes. A
 fresh client is required because schema/build identity advances; old leased
 builds drain normally. The phase adds no lexical MCP, diagnostics hook, 1-based
-mode, body pagination/slicing, or automatic fallback.
+mode, body pagination/slicing, or automatic fallback. See
+[`openspec/changes/archive/2026-08-11-tighten-agent-recovery-guidance`](../openspec/changes/archive/2026-08-11-tighten-agent-recovery-guidance)
+for the owning tasks and acceptance evidence.
 
 ## Phase F: agent-facing position queries
 

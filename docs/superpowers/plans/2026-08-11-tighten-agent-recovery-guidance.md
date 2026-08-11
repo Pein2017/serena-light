@@ -4,7 +4,7 @@
 
 **Goal:** Implement the accepted Serena Light activation warning, compact runtime status, coordinate guidance, and closed semantic recovery actions without adding a tool or changing semantic truth.
 
-**Architecture:** The OpenSpec change at `openspec/changes/tighten-agent-recovery-guidance/` is the sole behavior and completion authority. This plan is execution-only: identity classifies an evident Conda path, daemon service attaches advisory activation presentation, one pure presenter compacts raw runtime status, and final error presentation selects closed recovery actions after the real public answer budget is known.
+**Architecture:** The OpenSpec change archived at `openspec/changes/archive/2026-08-11-tighten-agent-recovery-guidance/` is the sole behavior and completion authority. This plan is execution-only: identity classifies an evident Conda path, daemon service attaches advisory activation presentation, one pure presenter compacts raw runtime status, and final error presentation selects closed recovery actions after the real public answer budget is known.
 
 **Tech Stack:** Python 3.12, MCP Python SDK/FastMCP, Pyright, pinned TypeScript language server, pytest, Ruff, Ty, OpenSpec CLI.
 
@@ -12,7 +12,7 @@
 
 - Work in an isolated linked worktree created from the commit containing this plan; use branch `codex/tighten-agent-recovery-guidance`.
 - Run Python commands through `conda run -n ms` unless an acceptance case explicitly selects another environment.
-- Treat `openspec/changes/tighten-agent-recovery-guidance/{proposal.md,design.md,specs/**,tasks.md}` as the only authority for public behavior.
+- Treat `openspec/changes/archive/2026-08-11-tighten-agent-recovery-guidance/{proposal.md,design.md,specs/**,tasks.md}` as the only authority for public behavior.
 - Do not add public tools, dependencies, environment inference, a 1-based mode, workspace comparison, hierarchy inference, body slicing, lexical discovery, or automatic fallback dispatch.
 - Do not modify canonical Serena or `/data/CoordExp/external/serena`.
 - Preserve the dirty-worktree boundary: stage only the exact Serena Light files named by each task.
@@ -477,8 +477,8 @@ git commit -m "Guide oversized symbol body recovery"
 - Modify: `tests/unit/test_schema4_interaction_contract.py`
 - Modify: `tests/acceptance/test_real_shared_daemon_acceptance.py`
 - Modify: `tests/acceptance/test_real_versioned_rollover_acceptance.py`
-- Modify: `openspec/changes/tighten-agent-recovery-guidance/tasks.md`
-- Create after verification: `openspec/changes/tighten-agent-recovery-guidance/acceptance.md`
+- Modify: `openspec/changes/archive/2026-08-11-tighten-agent-recovery-guidance/tasks.md`
+- Create after verification: `openspec/changes/archive/2026-08-11-tighten-agent-recovery-guidance/acceptance.md`
 
 **Interfaces:**
 - Consumes: completed Tasks 1-4 and the source-computed build identity.

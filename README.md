@@ -322,9 +322,9 @@ URI, and offset internals stay out of successful payloads.
 This schema does not add lexical-discovery tools, diagnostics hooks or automatic
 diagnostic injection, a 1-based mode, body pagination/slicing, or RTK
 integration. Host shell/file tools continue to own lexical enumeration, exact
-range reads, and text search; diagnostics stay explicit and on demand. Current
-implementation and acceptance work is owned by
-`openspec/changes/tighten-agent-recovery-guidance`.
+range reads, and text search; diagnostics stay explicit and on demand. The
+accepted implementation and evidence are archived at
+`openspec/changes/archive/2026-08-11-tighten-agent-recovery-guidance`.
 
 ## Accepted scope-error readiness tightening
 
