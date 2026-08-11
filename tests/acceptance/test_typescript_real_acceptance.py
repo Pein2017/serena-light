@@ -13,7 +13,7 @@ import pytest
 from serena_light.bootstrap import runtime_paths
 from serena_light.lsp.typescript import TypeScriptAdapterConfig
 from serena_light.tools.envelopes import ToolEnvelope
-from serena_light.workspace.identity import PinnedMsRoots, WorkspacePolicy
+from serena_light.workspace.identity import WorkspacePolicy
 from serena_light.workspace.runtime import WorkspaceRuntime
 
 ROOT = Path("/data/CoordExp/external/codexUI")
@@ -68,7 +68,7 @@ def _stop_and_assert_no_lsp_leaks(runtime: WorkspaceRuntime, before: set[int]) -
 @pytest.fixture(scope="module")
 def acceptance() -> Iterator[RealTypeScriptAcceptance]:
     before = set(_locked_lsp_descendants())
-    policy = WorkspacePolicy(ms_roots=PinnedMsRoots.resolve())
+    policy = WorkspacePolicy()
     runtime = WorkspaceRuntime(policy.resolve_activation(ROOT), path_policy=policy)
     try:
         yield RealTypeScriptAcceptance(runtime, TypeScriptAdapterConfig.locked())
@@ -111,7 +111,7 @@ def test_cold_first_semantic_call_resolves_cross_file_owner_and_references() -> 
     """No prior overview or diagnostics call may be required for complete TS answers."""
 
     before = set(_locked_lsp_descendants())
-    policy = WorkspacePolicy(ms_roots=PinnedMsRoots.resolve())
+    policy = WorkspacePolicy()
     runtime = WorkspaceRuntime(policy.resolve_activation(ROOT), path_policy=policy)
     try:
         _assert_definition_references_and_implementation(
@@ -125,7 +125,7 @@ def test_cold_first_reference_call_returns_the_complete_cross_file_set() -> None
     """Reference completeness must not inherit warm state from another tool call."""
 
     before = set(_locked_lsp_descendants())
-    policy = WorkspacePolicy(ms_roots=PinnedMsRoots.resolve())
+    policy = WorkspacePolicy()
     runtime = WorkspaceRuntime(policy.resolve_activation(ROOT), path_policy=policy)
     try:
         references = _success(runtime.find_referencing_symbols(IN_PROGRAM_FILE, "resolveCodexCommand"))

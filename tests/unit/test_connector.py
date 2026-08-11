@@ -87,6 +87,7 @@ class FakeSession:
         self.call_behavior = call_behavior
         self.activation_error = activation_error
         self.activations: list[tuple[str, Path]] = []
+        self.activation_environments: list[str | None] = []
         self.call_names: list[str] = []
         self.heartbeats = 0
         self.released: list[str] = []
@@ -110,9 +111,15 @@ class FakeSession:
     async def release_lease(self, lease_id: str) -> None:
         self.released.append(lease_id)
 
-    async def activate_workspace(self, lease_id: str, path: Path) -> types.CallToolResult:
+    async def activate_workspace(
+        self,
+        lease_id: str,
+        path: Path,
+        python_environment: str | None = None,
+    ) -> types.CallToolResult:
         assert lease_id == self.lease.lease_id
         self.activations.append((lease_id, path))
+        self.activation_environments.append(python_environment)
         if self.activation_error is not None:
             raise self.activation_error
         return ok_result(path=str(path))
@@ -411,6 +418,46 @@ def test_identity_loss_rebinds_last_validated_binding_and_retries_read_once() ->
             assert second.call_names == ["find_symbol"]
             assert second.activations[0][1] == Path("/data/CoordExp/serena-light")
             assert connector.last_validated_binding == Path("/data/CoordExp/serena-light")
+        finally:
+            await connector.aclose()
+
+    run(scenario())
+
+
+def test_recovery_rebinds_the_explicit_python_environment() -> None:
+    async def scenario() -> None:
+        first_endpoint = endpoint()
+        second_endpoint = endpoint()
+        discovery = FakeDiscovery(first_endpoint)
+
+        async def activate_then_lose(
+            name: str,
+            _arguments: Mapping[str, object] | None,
+        ) -> types.CallToolResult:
+            if name == ACTIVATE_WORKSPACE_TOOL:
+                return ok_result()
+            discovery.current = second_endpoint
+            raise ConnectorSessionLost("response lost")
+
+        first = FakeSession(first_endpoint, call_behavior=activate_then_lose)
+        second = FakeSession(second_endpoint)
+        connector = Connector(
+            discovery,
+            FakeFactory([first, second]),
+            startup_cwd=Path("/data/CoordExp"),
+        )
+        try:
+            await connector.call_tool(
+                ACTIVATE_WORKSPACE_TOOL,
+                {
+                    "absolute_path": "/data/ms-swift",
+                    "python_environment": "llm-framework-study",
+                },
+            )
+            await connector.call_tool("find_symbol", {"name_path": "Trainer"})
+
+            assert second.activations == [(second.lease.lease_id, Path("/data/ms-swift"))]
+            assert second.activation_environments == ["llm-framework-study"]
         finally:
             await connector.aclose()
 

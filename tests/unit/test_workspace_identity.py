@@ -9,7 +9,6 @@ import pytest
 
 from serena_light.workspace.identity import (
     LocationKind,
-    PinnedMsRoots,
     WorkspaceError,
     WorkspaceErrorCode,
     WorkspaceKind,
@@ -22,24 +21,18 @@ def _git(path: Path) -> None:
 
 
 def _policy(tmp_path: Path) -> WorkspacePolicy:
-    external = tmp_path / "ms" / "lib" / "python3.12" / "site-packages"
-    for directory in (external, tmp_path / "ms" / "lib" / "python3.12", tmp_path / "ms"):
-        directory.mkdir(parents=True, exist_ok=True)
-    interpreter = tmp_path / "ms" / "bin" / "python"
-    interpreter.parent.mkdir(exist_ok=True)
-    interpreter.touch()
-    roots = PinnedMsRoots(
-        interpreter=interpreter.resolve(),
-        stdlib=(tmp_path / "ms" / "lib" / "python3.12").resolve(),
-        purelib=external.resolve(),
-        platlib=external.resolve(),
-        conda_prefix=(tmp_path / "ms").resolve(),
-    )
-    allowed = external / "transformers"
-    allowed.mkdir()
+    return _flexible_policy(tmp_path)[0]
+
+
+def _flexible_policy(tmp_path: Path) -> tuple[WorkspacePolicy, Path]:
+    envs_root = tmp_path / "conda" / "envs"
+    for name in ("ms", "llm-framework-study"):
+        interpreter = envs_root / name / "bin" / "python"
+        interpreter.parent.mkdir(parents=True)
+        interpreter.symlink_to(Path(sys.executable))
     data_root = tmp_path / "data"
     data_root.mkdir()
-    return WorkspacePolicy(ms_roots=roots, allowed_non_git_root=allowed, data_root=data_root)
+    return WorkspacePolicy(conda_envs_root=envs_root, data_root=data_root), envs_root
 
 
 def test_activation_requires_absolute_path(tmp_path: Path) -> None:
@@ -107,16 +100,98 @@ def test_ignored_linked_worktree_under_coordexp_is_another_workspace(tmp_path: P
     assert raised.value.data.activation_hint == linked.resolve()
 
 
-def test_only_exact_non_git_root_is_allowed(tmp_path: Path) -> None:
+def test_each_non_git_activation_uses_its_own_exact_root(tmp_path: Path) -> None:
     policy = _policy(tmp_path)
-    allowed = tmp_path / "ms" / "lib" / "python3.12" / "site-packages" / "transformers"
+    package = tmp_path / "external" / "package"
+    package.mkdir(parents=True)
 
-    identity = policy.resolve_activation(allowed)
-    assert identity.kind is WorkspaceKind.ALLOWLISTED_NON_GIT
+    package_identity = policy.resolve_activation(package)
+    parent_identity = policy.resolve_activation(package.parent)
+
+    assert package_identity.kind is WorkspaceKind.NON_GIT_READ_ONLY
+    assert package_identity.root == package.resolve()
+    assert parent_identity.root == package.parent.resolve()
+    assert package_identity.registry_key != parent_identity.registry_key
+
+
+def test_any_existing_non_git_directory_uses_exact_read_only_identity(tmp_path: Path) -> None:
+    policy, _envs_root = _flexible_policy(tmp_path)
+    package = tmp_path / "external" / "arbitrary-package"
+    package.mkdir(parents=True)
+
+    identity = policy.resolve_activation(package)
+
+    assert identity.root == package.resolve()
+    assert identity.working_subdirectory == package.resolve()
+    assert identity.kind is WorkspaceKind.NON_GIT_READ_ONLY
+    assert identity.python_environment == "ms"
+
+
+def test_entire_site_packages_directory_is_a_valid_non_git_root(tmp_path: Path) -> None:
+    policy, envs_root = _flexible_policy(tmp_path)
+    site_packages = envs_root / "llm-framework-study" / "lib" / "python3.12" / "site-packages"
+    site_packages.mkdir(parents=True)
+
+    identity = policy.resolve_activation(site_packages, python_environment="llm-framework-study")
+
+    assert identity.root == site_packages.resolve()
+    assert identity.kind is WorkspaceKind.NON_GIT_READ_ONLY
+    assert identity.python_environment == "llm-framework-study"
+    assert identity.python_interpreter == envs_root / "llm-framework-study" / "bin" / "python"
+
+
+def test_environment_selection_is_part_of_registry_identity(tmp_path: Path) -> None:
+    policy, envs_root = _flexible_policy(tmp_path)
+    root = tmp_path / "data" / "repo"
+    root.mkdir(parents=True)
+    _git(root)
+
+    default = policy.resolve_activation(root)
+    selected = policy.resolve_activation(root, python_environment="llm-framework-study")
+
+    assert default.python_environment == "ms"
+    assert default.python_interpreter == envs_root / "ms" / "bin" / "python"
+    assert selected.python_environment == "llm-framework-study"
+    assert selected.registry_key != default.registry_key
+
+
+@pytest.mark.parametrize("name", ["", "../ms", "nested/ms", "/absolute"])
+def test_invalid_environment_name_fails_closed(tmp_path: Path, name: str) -> None:
+    policy, _envs_root = _flexible_policy(tmp_path)
+    root = tmp_path / "non-git"
+    root.mkdir()
 
     with pytest.raises(WorkspaceError) as raised:
-        policy.resolve_activation(allowed.parent)
-    assert raised.value.data.code is WorkspaceErrorCode.UNTRUSTED_ROOT
+        policy.resolve_activation(root, python_environment=name)
+
+    assert raised.value.data.code is WorkspaceErrorCode.INVALID_PATH
+
+
+def test_missing_environment_fails_closed(tmp_path: Path) -> None:
+    policy, _envs_root = _flexible_policy(tmp_path)
+    root = tmp_path / "non-git"
+    root.mkdir()
+
+    with pytest.raises(WorkspaceError) as raised:
+        policy.resolve_activation(root, python_environment="missing")
+
+    assert raised.value.data.code is WorkspaceErrorCode.INVALID_PATH
+
+
+def test_any_existing_external_semantic_location_is_read_only(tmp_path: Path) -> None:
+    policy, _envs_root = _flexible_policy(tmp_path)
+    root = tmp_path / "data" / "repo"
+    root.mkdir(parents=True)
+    _git(root)
+    identity = policy.resolve_activation(root)
+    external = tmp_path / "outside-every-configured-root" / "module.py"
+    external.parent.mkdir()
+    external.write_text("answer = 42\n", encoding="utf-8")
+
+    location = policy.classify_semantic_location(identity, external)
+
+    assert location.kind is LocationKind.READ_ONLY_EXTERNAL
+    assert location.path == external.resolve()
 
 
 def test_semantic_external_is_read_only_without_becoming_inventory(tmp_path: Path) -> None:
@@ -126,6 +201,7 @@ def test_semantic_external_is_read_only_without_becoming_inventory(tmp_path: Pat
     _git(root)
     identity = policy.resolve_activation(root)
     external = tmp_path / "ms" / "lib" / "python3.12" / "site-packages" / "torch.py"
+    external.parent.mkdir(parents=True)
     external.touch()
 
     location = policy.classify_semantic_location(identity, external)
@@ -157,18 +233,19 @@ def test_path_outside_active_inventory_has_identity_and_absolute_activation_hint
     assert data.activation_hint.is_absolute()
 
 
-def test_edit_rejects_non_git_conda_and_symlink_escape_before_io(tmp_path: Path) -> None:
+def test_edit_rejects_out_of_workspace_and_symlink_escape_before_io(tmp_path: Path) -> None:
     policy = _policy(tmp_path)
     root = tmp_path / "data" / "repo"
     root.mkdir()
     _git(root)
     identity = policy.resolve_activation(root)
     external = tmp_path / "ms" / "lib" / "python3.12" / "site-packages" / "external.py"
+    external.parent.mkdir(parents=True)
     external.touch()
 
-    with pytest.raises(WorkspaceError) as conda:
+    with pytest.raises(WorkspaceError) as outside:
         policy.authorize_edit(identity, external, [external])
-    assert conda.value.data.code is WorkspaceErrorCode.READ_ONLY_ROOT
+    assert outside.value.data.code is WorkspaceErrorCode.OUT_OF_WORKSPACE
 
     # The escape is refused as a symlink before any resolution, so the target it
     # would have named never contributes to the decision.
@@ -232,10 +309,3 @@ def test_edit_allows_only_resolved_git_inventory_file_below_data(tmp_path: Path)
 
     assert policy.authorize_edit(identity, target, [target]) == target.resolve()
     assert policy.authorize_edit(identity, Path("module.py"), [target]) == target.resolve()
-
-
-def test_pinned_ms_roots_are_resolved_by_the_selected_interpreter() -> None:
-    roots = PinnedMsRoots.resolve(Path(sys.executable))
-
-    assert roots.interpreter == Path(sys.executable).resolve()
-    assert all(root.is_dir() for root in roots.semantic_roots)

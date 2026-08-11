@@ -148,8 +148,18 @@ class ObservedService:
     async def release_lease(self, *, lease_id: str, immediate: bool) -> Mapping[str, object]:
         return await self._service.release_lease(lease_id=lease_id, immediate=immediate)
 
-    async def activate_workspace(self, *, lease_id: str, absolute_path: str) -> Mapping[str, object]:
-        return await self._service.activate_workspace(lease_id=lease_id, absolute_path=absolute_path)
+    async def activate_workspace(
+        self,
+        *,
+        lease_id: str,
+        absolute_path: str,
+        python_environment: str | None = None,
+    ) -> Mapping[str, object]:
+        return await self._service.activate_workspace(
+            lease_id=lease_id,
+            absolute_path=absolute_path,
+            python_environment=python_environment,
+        )
 
     async def release_workspace(
         self, *, lease_id: str, immediate: bool = False
@@ -168,7 +178,7 @@ async def _run(arguments: argparse.Namespace) -> None:
     root = Path(arguments.root).resolve()
     root.mkdir(parents=True, exist_ok=True)
 
-    def resolver(path: Path) -> ResolvedWorkspace[str]:
+    def resolver(path: Path, _python_environment: str) -> ResolvedWorkspace[str]:
         resolved = path.resolve()
         return ResolvedWorkspace(identity=str(resolved), working_subdirectory=resolved)
 

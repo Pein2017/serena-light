@@ -114,6 +114,8 @@ from serena_light.tools.references import (
     ReferenceTarget,
 )
 from serena_light.workspace.identity import (
+    DEFAULT_PYTHON_ENVIRONMENT,
+    MS_INTERPRETER,
     LocationKind,
     SemanticLocation,
     WorkspaceError,
@@ -125,9 +127,9 @@ from serena_light.workspace.inventory import (
     PYTHON_EXTENSIONS,
     TargetedPathState,
     TrustInventory,
+    bounded_non_git_trust_inventory,
     git_trust_inventory,
     observe_file_digest,
-    transformers_trust_inventory,
 )
 from serena_light.workspace.scope import (
     FileChangeType,
@@ -139,7 +141,7 @@ from serena_light.workspace.scope import (
     bounded_difference_status,
 )
 
-type PhysicalWorkspaceKey = tuple[WorkspaceKind, Path]
+type PhysicalWorkspaceKey = tuple[WorkspaceKind, Path] | tuple[WorkspaceKind, Path, str, Path]
 type ProgramAttributor = Callable[[Path, tuple[str, ...]], ScopeProjection]
 type ContentIdentity = tuple[int | None, int | None, int | None, int | None, str | None]
 type AdapterResponseIdentity = tuple[
@@ -830,7 +832,7 @@ class FreshnessCoordinator:
         """
 
         if self._runtime.identity.kind is not WorkspaceKind.GIT:
-            # The allowlisted read-only root is never fully walked for an
+            # A read-only non-Git root is never fully walked for an
             # activation or an edit preflight; a read states its own scope
             # through ensure_paths_fresh_admitted or ensure_root_fresh_admitted.
             return self._admission(FreshnessScan(), witnessed)
@@ -842,7 +844,7 @@ class FreshnessCoordinator:
         A global query, and a directory scope, both depend on root membership:
         a file created, deleted, or replaced by a symlink since the last scan is
         invisible to any per-path observation, so targeted freshness can never
-        authorize them.  On the one allowlisted non-Git root this is the same
+        authorize them.  On a read-only non-Git root this is the same
         bounded no-symlink inventory the workspace was built from, reconciled by
         the same owner as Git rather than by a second mechanism.
         """
@@ -960,8 +962,8 @@ class FreshnessCoordinator:
         """Rebuild the whole owning inventory and reconcile everything it moved.
 
         The owning source is the workspace's own inventory factory: Git for a
-        repository, the bounded no-symlink package index for the allowlisted
-        non-Git root.  Membership, content, symlink substitution, and native
+        repository, or the bounded no-symlink index for an exact read-only
+        non-Git root. Membership, content, symlink substitution, and native
         config are therefore reconciled identically for both.
         """
 
@@ -1277,6 +1279,7 @@ class WorkspaceRuntime:
             raise ValueError("future_timeout must be positive")
         self.identity = _physical_identity(identity)
         self.key = self.identity.registry_key
+        self._python_facts = PyrightFacts.locked(interpreter=self.identity.python_interpreter)
         self._path_policy = path_policy
         self._future_timeout = future_timeout
         self._debug_reporter = debug_reporter
@@ -1791,7 +1794,10 @@ class WorkspaceRuntime:
     def _attribute(self, family: LanguageFamily, paths: tuple[str, ...]) -> ScopeProjection:
         attributor = self._attributors.get(family)
         if attributor is None:
-            attributor = self._supplied_attributors.get(family) or _default_attributor(family)
+            attributor = self._supplied_attributors.get(family) or _default_attributor(
+                family,
+                self._python_facts,
+            )
             self._attributors[family] = attributor
         try:
             projection = attributor(self.identity.root, paths)
@@ -1826,7 +1832,10 @@ class WorkspaceRuntime:
             operation_lock=self._operation_lock,
             debug_reporter=self._debug_reporter,
         )
-        factory = self._adapter_factories.get(family) or _default_adapter_factory(family)
+        factory = self._adapter_factories.get(family) or _default_adapter_factory(
+            family,
+            self._python_facts,
+        )
         return factory(context), tracker
 
     def route(self, relative_path: str) -> RuntimeAdapter:
@@ -2357,7 +2366,7 @@ class WorkspaceRuntime:
         per-path observation cannot produce—most plainly a source file created
         since the last scan—so they take the whole-root guarded scan.  A Git
         workspace always scans its whole root, so this only chooses scope on the
-        allowlisted non-Git root.
+        read-only non-Git root.
         """
 
         if relative_path is None:
@@ -2917,7 +2926,7 @@ class WorkspaceRuntime:
                             return error(ErrorCode.INVALID_INPUT, details={"field": "semantic_target_symbols"})
                         raw_symbols = capture.raw_symbols
                         if family is LanguageFamily.PYTHON:
-                            recovered = PyrightFacts.locked().recover_assignment_document_symbols(
+                            recovered = self._python_facts.recover_assignment_document_symbols(
                                 raw_symbols,
                                 snapshot=snapshot,
                                 position_encoding=position_encoding,
@@ -3237,7 +3246,7 @@ class WorkspaceRuntime:
         raw_symbols = capture.raw_symbols
         body_completeness = None
         if family is LanguageFamily.PYTHON:
-            recovered = PyrightFacts.locked().recover_assignment_document_symbols(
+            recovered = self._python_facts.recover_assignment_document_symbols(
                 raw_symbols,
                 snapshot=snapshot,
                 position_encoding=adapter_status.position_encoding,
@@ -3283,8 +3292,7 @@ class WorkspaceRuntime:
         return document, target, family, adapter
 
     def _external_diagnostic_root(self) -> Path | None:
-        value = getattr(self._path_policy, "allowed_non_git_root", None)
-        return value if isinstance(value, Path) else None
+        return self.identity.root if self.identity.kind is WorkspaceKind.NON_GIT_READ_ONLY else None
 
     def _adapter_for_workspace_uri(self, uri: str) -> RuntimeAdapter:
         path = _file_uri_path(uri)
@@ -3311,7 +3319,12 @@ class WorkspaceRuntime:
             adapters[family.value] = _adapter_status(adapter.snapshot(), projection)
         executor = self._executor.snapshot()
         return {
-            "identity": {"root": str(self.identity.root), "kind": self.identity.kind.value},
+            "identity": {
+                "root": str(self.identity.root),
+                "kind": self.identity.kind.value,
+                "python_environment": self.identity.python_environment,
+                "python_interpreter": str(self.identity.python_interpreter),
+            },
             "trust_inventory": {
                 "kind": self.inventory.kind,
                 "count": self.inventory.count,
@@ -3702,7 +3715,7 @@ class _EditBridge:
         body_completeness = None
         metadata = _adapter_metadata_for_snapshot(status)
         if metadata.language == LanguageFamily.PYTHON.value:
-            recovered = PyrightFacts.locked().recover_assignment_document_symbols(
+            recovered = self._runtime._python_facts.recover_assignment_document_symbols(
                 raw_symbols,
                 snapshot=snapshot,
                 position_encoding=status.position_encoding,
@@ -4063,13 +4076,14 @@ def _diagnostic_engine(
     engine = snapshot.engine
     if family is LanguageFamily.PYTHON:
         assert engine.interpreter is not None
-        root = identity.root if identity.kind is WorkspaceKind.ALLOWLISTED_NON_GIT else external_root
+        root = identity.root if identity.kind is WorkspaceKind.NON_GIT_READ_ONLY else external_root
         external = ExternalRootMetadata("read_only_external", str(root)) if root is not None else None
         return DiagnosticEngineFacts(
             engine.name,
             family.value,
             engine.version,
             interpreter=str(engine.interpreter),
+            python_environment=identity.python_environment,
             external_root=external,
         )
     return DiagnosticEngineFacts(
@@ -4350,19 +4364,32 @@ def _selected_symbol(document: DocumentNavigation, name_path: str) -> Normalized
 
 def _physical_identity(identity: WorkspaceIdentity | PhysicalWorkspaceKey) -> WorkspaceIdentity:
     if isinstance(identity, WorkspaceIdentity):
-        kind, supplied_root = identity.registry_key
-        root = supplied_root.resolve(strict=True)
+        kind, supplied_root, environment, interpreter = identity.registry_key
     else:
-        kind, supplied_root = identity
-        root = supplied_root.resolve(strict=True)
-    return WorkspaceIdentity(root=root, kind=kind, working_subdirectory=root)
+        if len(identity) == 2:
+            kind, supplied_root = cast(tuple[WorkspaceKind, Path], identity)
+            environment = DEFAULT_PYTHON_ENVIRONMENT
+            interpreter = MS_INTERPRETER
+        else:
+            kind, supplied_root, environment, interpreter = cast(
+                tuple[WorkspaceKind, Path, str, Path],
+                identity,
+            )
+    root = supplied_root.resolve(strict=True)
+    return WorkspaceIdentity(
+        root=root,
+        kind=kind,
+        working_subdirectory=root,
+        python_environment=environment,
+        python_interpreter=interpreter,
+    )
 
 
 def _default_inventory(identity: WorkspaceIdentity) -> TrustInventory:
     if identity.kind is WorkspaceKind.GIT:
         return git_trust_inventory(identity.root)
-    if identity.kind is WorkspaceKind.ALLOWLISTED_NON_GIT:
-        return transformers_trust_inventory(identity.root)
+    if identity.kind is WorkspaceKind.NON_GIT_READ_ONLY:
+        return bounded_non_git_trust_inventory(identity.root)
     raise ValueError(f"unsupported workspace kind: {identity.kind!r}")
 
 
@@ -4370,10 +4397,9 @@ def _paths_for(paths: tuple[str, ...], extensions: frozenset[str]) -> tuple[str,
     return tuple(path for path in paths if PurePosixPath(path).suffix.lower() in extensions)
 
 
-def _default_attributor(family: LanguageFamily) -> ProgramAttributor:
+def _default_attributor(family: LanguageFamily, python: PyrightFacts) -> ProgramAttributor:
     if family is LanguageFamily.PYTHON:
-        facts = PyrightFacts.locked()
-        return lambda root, paths: facts.attribute_program(root, paths)
+        return lambda root, paths: python.attribute_program(root, paths)
     config = TypeScriptAdapterConfig.locked()
     return lambda root, paths: attribute_native_program(
         config,
@@ -4383,9 +4409,9 @@ def _default_attributor(family: LanguageFamily) -> ProgramAttributor:
     ).require_compatible()
 
 
-def _default_adapter_factory(family: LanguageFamily) -> AdapterFactory:
+def _default_adapter_factory(family: LanguageFamily, python: PyrightFacts) -> AdapterFactory:
     def build(context: AdapterBuildContext) -> _WorkspaceLanguageAdapter:
-        language = PyrightFacts.locked() if family is LanguageFamily.PYTHON else TypeScriptAdapterConfig.locked()
+        language = python if family is LanguageFamily.PYTHON else TypeScriptAdapterConfig.locked()
         return _WorkspaceLanguageAdapter(
             workspace_root=context.workspace_root,
             facts=language.adapter_language_facts(context.workspace_root),

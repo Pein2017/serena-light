@@ -220,8 +220,8 @@ call rather than treat it as a hard failure. This guarantee is anchored at
 the call's own final guarded byte observation, not at response-delivery
 time, and there is no background watcher. Editing remains outside this
 replay: `replace_symbol_body` keeps its existing non-replayable commit-point
-contract and `UNCERTAIN` handling. The explicitly trusted non-Git conda `ms`
-transformers root keeps targeted stat-plus-byte pre/post validation for
+contract and `UNCERTAIN` handling. Exact read-only non-Git roots keep
+targeted stat-plus-byte pre/post validation for
 scoped/indexed reads and adds a bounded no-symlink full-root pre/post scan
 for global, directory, or not-yet-indexed reads on that root.
 
@@ -262,11 +262,11 @@ separately authorized PID-plus-create-time (or connection) revalidation
 outside this rollover. A live build-slot holder, including one created by
 this rollover, still retires normally through the existing lease/grace path.
 
-## Current schema-4 interaction migration
+## Current schema-5 interaction migration
 
-The archived sections above describe their own schema-3 acceptance evidence.
-The current public tool schema is 4, so a fresh connector resolves a distinct
-schema-4 build slot while a leased schema-3 slot drains normally. Do not stop a
+The archived sections above describe their own schema-3/schema-4 acceptance evidence.
+The current public tool schema is 5, so a fresh connector resolves a distinct
+schema-5 build slot while older leased slots drain normally. Do not stop a
 daemon by name to force this migration: restart or reconnect only the client
 being updated, then verify its tool list and `get_runtime_status`.
 
@@ -274,8 +274,12 @@ The exact MCP initialize text is owned by
 `serena_light.instructions.AGENT_INSTRUCTIONS` and is published byte-for-byte
 by both the outer stdio `Server` and inner daemon `FastMCP`; the canonical text
 is recorded in [the compatibility inventory](compatibility.json). Its operating
-rules are consequential for client behavior: startup cwd binds once, shell `cd`
-does not rebind, cross-root work requires absolute `activate_workspace`, symbol
+rules are consequential for client behavior: startup cwd binds once with the
+default `ms` Conda environment, shell `cd` does not rebind, cross-root work
+requires absolute `activate_workspace`, and Python work may pass an optional
+Conda environment name at activation. Any existing non-Git directory can bind
+as an exact read-only root; narrow package/project roots are recommended only
+for inventory efficiency. Symbol
 overview starts at depth 0, reference snippets need a positive opt-in, and
 diagnostics are explicit after a meaningful edit group. Runtime status is for
 debug/build/readiness questions, not a routine preflight.

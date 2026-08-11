@@ -40,7 +40,12 @@ from serena_light.tools.envelopes import (
     success,
 )
 from serena_light.tools.presentation import RecoveryAction
-from serena_light.workspace.identity import WorkspaceError, WorkspaceIdentity, WorkspacePolicy
+from serena_light.workspace.identity import (
+    DEFAULT_PYTHON_ENVIRONMENT,
+    WorkspaceError,
+    WorkspaceIdentity,
+    WorkspacePolicy,
+)
 from serena_light.workspace.registry import (
     PreparedWorkspaceActivation,
     ResolvedWorkspace,
@@ -82,7 +87,12 @@ _BOUND_QUERY_WORKSPACE_CODES = frozenset({ErrorCode.INVALID_PATH.value, ErrorCod
 class WorkspaceResolver[IdentityT](Protocol):
     """Resolve an activation path without mutating daemon-owned state."""
 
-    def __call__(self, activation_path: Path, /) -> ResolvedWorkspace[IdentityT] | WorkspaceIdentity: ...
+    def __call__(
+        self,
+        activation_path: Path,
+        python_environment: str,
+        /,
+    ) -> ResolvedWorkspace[IdentityT] | WorkspaceIdentity: ...
 
 
 class WorkspaceDaemonService[IdentityT: Hashable, RuntimeT]:
@@ -179,15 +189,26 @@ class WorkspaceDaemonService[IdentityT: Hashable, RuntimeT]:
             raise LeaseExpiredError(str(expiry_error)) from expiry_error
         return _release_workspace_data(daemon_lease_id, result, immediate=immediate, stopped=stopped)
 
-    async def activate_workspace(self, *, lease_id: str, absolute_path: str) -> Mapping[str, object]:
+    async def activate_workspace(
+        self,
+        *,
+        lease_id: str,
+        absolute_path: str,
+        python_environment: str | None = None,
+    ) -> Mapping[str, object]:
         """Resolve, refresh, then atomically bind one live daemon lease."""
 
         daemon_lease_id = _lease_uuid(lease_id)
         activation_path = Path(absolute_path)
         if not activation_path.is_absolute():
             return error(ErrorCode.INVALID_PATH, details={"path": absolute_path}).to_dict()
+        selected_environment = DEFAULT_PYTHON_ENVIRONMENT if python_environment is None else python_environment
         try:
-            resolved = await asyncio.to_thread(self._resolve_workspace, activation_path)
+            resolved = await asyncio.to_thread(
+                self._resolve_workspace,
+                activation_path,
+                selected_environment,
+            )
         except WorkspaceError as exc:
             # Resolution precedes registry/lifecycle mutation, so failures keep
             # the prior binding and lease authority unchanged.
@@ -327,13 +348,18 @@ class WorkspaceDaemonService[IdentityT: Hashable, RuntimeT]:
         )
         self._debug_reporter(event, message)
 
-    def _resolve_workspace(self, activation_path: Path) -> ResolvedWorkspace[IdentityT]:
+    def _resolve_workspace(
+        self,
+        activation_path: Path,
+        python_environment: str,
+    ) -> ResolvedWorkspace[IdentityT]:
         if isinstance(self._resolver, WorkspacePolicy):
             result: ResolvedWorkspace[IdentityT] | WorkspaceIdentity = self._resolver.resolve_activation(
-                activation_path
+                activation_path,
+                python_environment=python_environment,
             )
         else:
-            result = self._resolver(activation_path)
+            result = self._resolver(activation_path, python_environment)
         if isinstance(result, WorkspaceIdentity):
             # Working-subdirectory metadata is connection-local, so only the
             # physical root key participates in runtime reuse.
@@ -608,14 +634,25 @@ def _lease_data[IdentityT, RuntimeT](lease: DaemonLease[IdentityT, RuntimeT]) ->
 
 def _binding_data[IdentityT, RuntimeT](binding: WorkspaceBinding[IdentityT, RuntimeT]) -> dict[str, object]:
     identity: object = binding.identity
-    if isinstance(identity, tuple) and len(identity) == 2 and isinstance(identity[1], Path):
+    environment: str | None = None
+    interpreter: Path | None = None
+    if isinstance(identity, tuple) and len(identity) == 4 and isinstance(identity[1], Path):
+        _kind, root, raw_environment, raw_interpreter = identity
+        identity = str(root)
+        environment = raw_environment if isinstance(raw_environment, str) else None
+        interpreter = raw_interpreter if isinstance(raw_interpreter, Path) else None
+    elif isinstance(identity, tuple) and len(identity) == 2 and isinstance(identity[1], Path):
         identity = str(identity[1])
     elif isinstance(identity, Path) or (not isinstance(identity, bool | float | int | str) and identity is not None):
         identity = str(identity)
-    return {
+    data: dict[str, object] = {
         "identity": identity,
         "working_subdirectory": str(binding.working_subdirectory),
     }
+    if environment is not None and interpreter is not None:
+        data["python_environment"] = environment
+        data["python_interpreter"] = str(interpreter)
+    return data
 
 
 def _workspace_metadata_for_binding[IdentityT, RuntimeT](
@@ -637,8 +674,8 @@ def _workspace_metadata_for_binding[IdentityT, RuntimeT](
     working_subdirectory = binding.working_subdirectory
     if root is None or kind is None:
         identity = binding.identity
-        if isinstance(identity, tuple) and len(identity) == 2:
-            kind, root = identity
+        if isinstance(identity, tuple) and len(identity) in {2, 4}:
+            kind, root = identity[:2]
     if root is None or kind is None:
         return None
     kind_value = getattr(kind, "value", kind)

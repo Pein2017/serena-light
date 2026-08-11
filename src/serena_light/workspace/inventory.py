@@ -216,27 +216,8 @@ def git_trust_inventory(root: Path) -> TrustInventory:
     return _inventory_from_candidates(resolved_root, candidates, kind="git")
 
 
-def discover_transformers_root(site_package_roots: Iterable[Path]) -> Path | None:
-    """Find only the exact ``transformers`` child of explicit site-package roots.
-
-    This intentionally does not glob or walk site-packages: callers provide the
-    purelib/platlib roots resolved from the pinned interpreter at startup.
-    """
-    for parent in site_package_roots:
-        try:
-            parent_resolved = parent.resolve(strict=True)
-            candidate = parent_resolved / "transformers"
-            mode = candidate.lstat().st_mode
-            resolved = candidate.resolve(strict=True)
-        except (FileNotFoundError, OSError, RuntimeError):
-            continue
-        if stat.S_ISDIR(mode) and not stat.S_ISLNK(mode) and resolved == candidate:
-            return candidate
-    return None
-
-
-def transformers_trust_inventory(root: Path) -> TrustInventory:
-    """Boundedly index the exact trusted package root, without following links."""
+def bounded_non_git_trust_inventory(root: Path) -> TrustInventory:
+    """Boundedly index one exact non-Git root without following links."""
     resolved_root = _non_symlink_directory(root)
     return _inventory_from_candidates(resolved_root, _bounded_candidates(resolved_root), kind="bounded_no_symlink")
 

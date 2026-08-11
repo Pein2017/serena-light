@@ -81,7 +81,9 @@ def test_runtime_status_and_workspace_lifecycle_keep_lease_authority_and_outcome
     service = WorkspaceDaemonService[str, _Runtime](
         lifecycle=LeaseLifecycle(clock=lambda: 100.0),
         registry=WorkspaceRuntimeRegistry(factory),
-        resolver=lambda path: ResolvedWorkspace(identity=str(path.parent), working_subdirectory=path),
+        resolver=lambda path, _python_environment: ResolvedWorkspace(
+            identity=str(path.parent), working_subdirectory=path
+        ),
         runtime_stopper=lambda _runtime: None,
     )
 

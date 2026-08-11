@@ -13,11 +13,11 @@ from serena_light.instructions import AGENT_INSTRUCTIONS
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 
 
-def test_schema4_is_a_build_identity_input() -> None:
-    assert PUBLIC_TOOL_SCHEMA_VERSION == "4"
+def test_schema5_is_a_build_identity_input() -> None:
+    assert PUBLIC_TOOL_SCHEMA_VERSION == "5"
     assert compute_build_identity(REPOSITORY_ROOT) != compute_build_identity(
         REPOSITORY_ROOT,
-        public_tool_schema_version="3",
+        public_tool_schema_version="4",
     )
 
 
@@ -26,17 +26,17 @@ def test_agent_instructions_are_concise_and_cover_the_fixed_workflow() -> None:
     for required in (
         "Experimental",
         "Python/JS/TS",
-        "semantic navigation",
         "diagnostics",
         "won't rebind",
         "activate_workspace",
         "absolute path",
+        "optional Conda env",
+        "default ms",
         "rg/find",
-        "files/text",
-        "prefer Serena Light",
+        "text",
+        "Serena Light",
         "symbols/references/diagnostics",
-        "Report issues",
-        "user",
+        "report friction",
     ):
         assert required in AGENT_INSTRUCTIONS
     assert "hook" not in AGENT_INSTRUCTIONS.lower()

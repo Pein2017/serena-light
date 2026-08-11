@@ -234,7 +234,7 @@ def _make_harness() -> Harness:
         runtimes[identity] = runtime
         return runtime
 
-    def resolver(path: Path) -> ResolvedWorkspace[str]:
+    def resolver(path: Path, _python_environment: str) -> ResolvedWorkspace[str]:
         return ResolvedWorkspace(identity=_root_for(path), working_subdirectory=path.resolve())
 
     lifecycle = LeaseLifecycle[str, Runtime](clock=clock)

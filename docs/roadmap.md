@@ -215,8 +215,8 @@ lexical dependency or implementation plan.
    byte witnesses and run a real postflight, while invalid/trust/adapter-owned
    conditions keep one preflight. A changed postflight replays the complete
    read once, and a second race returns typed retryable `NOT_READY`
-   with reason `workspace_changed_during_read`. The explicitly trusted
-   non-Git conda `ms` transformers root keeps targeted stat-plus-byte
+   with reason `workspace_changed_during_read`. Exact read-only non-Git roots
+   keep targeted stat-plus-byte
    pre/post validation for scoped/indexed reads and adds a bounded
    no-symlink full-root pre/post scan for global, directory, or
    not-yet-indexed reads. Editing stays outside this replay boundary. This

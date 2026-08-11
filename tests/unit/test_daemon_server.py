@@ -71,9 +71,9 @@ def _metadata(daemon_id: str) -> DiscoveryMetadata:
 
 def test_agent_instructions_are_the_approved_bounded_source_contract() -> None:
     expected = (
-        "Experimental Python/JS/TS semantic navigation. Shell cd won't rebind; "
-        "activate_workspace needs absolute path. Use rg/find for files/text; prefer "
-        "Serena Light for symbols/references/diagnostics. Report issues to user."
+        "Experimental Python/JS/TS. Shell cd won't rebind; activate_workspace takes an absolute "
+        "path and optional Conda env (default ms). Use rg/find for text; Serena Light for "
+        "symbols/references/diagnostics; report friction."
     )
     assert expected == AGENT_INSTRUCTIONS
     assert len(AGENT_INSTRUCTIONS.encode()) == 216

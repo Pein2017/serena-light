@@ -183,8 +183,16 @@ class _HeldStdioClient:
     async def status(self) -> Mapping[str, object]:
         return _data(await self._call("get_runtime_status", None))
 
-    async def activate(self, workspace: Path) -> Mapping[str, object]:
-        return _data(await self._call("activate_workspace", {"absolute_path": str(workspace)}))
+    async def activate(
+        self,
+        workspace: Path,
+        *,
+        python_environment: str | None = None,
+    ) -> Mapping[str, object]:
+        arguments: dict[str, object] = {"absolute_path": str(workspace)}
+        if python_environment is not None:
+            arguments["python_environment"] = python_environment
+        return _data(await self._call("activate_workspace", arguments))
 
     async def overview(self, relative_path: str) -> Mapping[str, object]:
         return _data(
@@ -388,12 +396,30 @@ def test_real_shared_daemon_serves_concurrent_roots_and_survives_partial_release
             assert descendants, "shared daemon started no language-server descendant to account for"
 
             # 3) One client switches roots explicitly, then reactivates the same root.
-            switched = await other_c.activate(shared_root)
-            assert Path(cast(str, _mapping(switched["workspace"])["identity"])).resolve() == shared_root
-            _assert_bound_to(await other_c.status(), build_identity=build_identity, workspace=shared_root)
+            switched = await other_c.activate(
+                shared_root,
+                python_environment="llm-framework-study",
+            )
+            switched_workspace = _mapping(switched["workspace"])
+            assert Path(cast(str, switched_workspace["identity"])).resolve() == shared_root
+            assert switched_workspace["python_environment"] == "llm-framework-study"
+            assert switched_workspace["python_interpreter"] == (
+                "/root/miniconda3/envs/llm-framework-study/bin/python"
+            )
+            switched_status = await other_c.status()
+            _assert_bound_to(switched_status, build_identity=build_identity, workspace=shared_root)
+            switched_runtime_identity = _mapping(_mapping(switched_status["runtime"])["identity"])
+            assert switched_runtime_identity["python_environment"] == "llm-framework-study"
+            assert switched_runtime_identity["python_interpreter"] == (
+                "/root/miniconda3/envs/llm-framework-study/bin/python"
+            )
             reactivated = await other_c.activate(shared_root)
-            assert Path(cast(str, _mapping(reactivated["workspace"])["identity"])).resolve() == shared_root
-            _assert_bound_to(await other_c.status(), build_identity=build_identity, workspace=shared_root)
+            reactivated_workspace = _mapping(reactivated["workspace"])
+            assert Path(cast(str, reactivated_workspace["identity"])).resolve() == shared_root
+            assert reactivated_workspace["python_environment"] == "ms"
+            reactivated_status = await other_c.status()
+            _assert_bound_to(reactivated_status, build_identity=build_identity, workspace=shared_root)
+            assert _mapping(_mapping(reactivated_status["runtime"])["identity"])["python_environment"] == "ms"
             assert _active_holders(build_root, metadata) == 3
             assert _read_owned_daemon(build_root)[1] == daemon, "activation must not replace the daemon"
             assert [entry.name for entry in layout.builds_root.iterdir()] == [build_identity]

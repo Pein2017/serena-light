@@ -137,7 +137,12 @@ class DaemonSession(Protocol):
 
     async def release_lease(self, lease_id: str) -> None: ...
 
-    async def activate_workspace(self, lease_id: str, path: Path) -> types.CallToolResult: ...
+    async def activate_workspace(
+        self,
+        lease_id: str,
+        path: Path,
+        python_environment: str | None = None,
+    ) -> types.CallToolResult: ...
 
     async def list_tools(self) -> types.ListToolsResult: ...
 
@@ -217,8 +222,16 @@ class McpDaemonSession:
         result = await self._call_control(RELEASE_LEASE_TOOL, {"lease_id": lease_id})
         _require_ok_data(result, RELEASE_LEASE_TOOL)
 
-    async def activate_workspace(self, lease_id: str, path: Path) -> types.CallToolResult:
-        result = await self.call_tool(lease_id, ACTIVATE_WORKSPACE_TOOL, {"absolute_path": str(path)})
+    async def activate_workspace(
+        self,
+        lease_id: str,
+        path: Path,
+        python_environment: str | None = None,
+    ) -> types.CallToolResult:
+        arguments: dict[str, object] = {"absolute_path": str(path)}
+        if python_environment is not None:
+            arguments["python_environment"] = python_environment
+        result = await self.call_tool(lease_id, ACTIVATE_WORKSPACE_TOOL, arguments)
         _require_ok_data(result, ACTIVATE_WORKSPACE_TOOL)
         return result
 
@@ -296,8 +309,16 @@ class _OwnedMcpDaemonSession:
     async def release_lease(self, lease_id: str) -> None:
         await self._submit(lambda session: session.release_lease(lease_id), type(None))
 
-    async def activate_workspace(self, lease_id: str, path: Path) -> types.CallToolResult:
-        return await self._submit(lambda session: session.activate_workspace(lease_id, path), types.CallToolResult)
+    async def activate_workspace(
+        self,
+        lease_id: str,
+        path: Path,
+        python_environment: str | None = None,
+    ) -> types.CallToolResult:
+        return await self._submit(
+            lambda session: session.activate_workspace(lease_id, path, python_environment),
+            types.CallToolResult,
+        )
 
     async def list_tools(self) -> types.ListToolsResult:
         return await self._submit(lambda session: session.list_tools(), types.ListToolsResult)
@@ -443,6 +464,7 @@ class Connector:
         self._endpoint: DaemonEndpoint | None = None
         self._lease: LeaseGrant | None = None
         self._last_binding: Path | None = None
+        self._last_python_environment: str | None = None
         self._pending_startup_binding: Path | None = self._startup_cwd
         self._generation = 0
         self._lifecycle_lock = asyncio.Lock()
@@ -518,10 +540,15 @@ class Connector:
             path = None if arguments is None else arguments.get("absolute_path")
             if not isinstance(path, str) or not Path(path).is_absolute():
                 raise InvalidDaemonResponse("successful activate_workspace did not contain absolute_path")
+            python_environment = None if arguments is None else arguments.get("python_environment")
+            if python_environment is not None and not isinstance(python_environment, str):
+                raise InvalidDaemonResponse("successful activate_workspace contained invalid python_environment")
             self._last_binding = Path(path).resolve()
+            self._last_python_environment = python_environment
             self._pending_startup_binding = None
         elif name == RELEASE_WORKSPACE_TOOL and _is_ok(result):
             self._last_binding = None
+            self._last_python_environment = None
             self._pending_startup_binding = None
         return result
 
@@ -543,6 +570,7 @@ class Connector:
                 operation="startup activate_workspace",
             )
             self._last_binding = binding
+            self._last_python_environment = None
             self._pending_startup_binding = None
 
     async def aclose(self) -> None:
@@ -631,7 +659,10 @@ class Connector:
             if self._generation != observed_generation:
                 return
             binding = self._last_binding
-            endpoint, session, lease = await self._open_session(binding)
+            endpoint, session, lease = await self._open_session(
+                binding,
+                self._last_python_environment,
+            )
             old_session, old_lease = self._session, self._lease
             self._install(endpoint, session, lease)
             self._background_failure = None
@@ -642,7 +673,11 @@ class Connector:
                 with suppress(Exception, asyncio.CancelledError):
                     await old_session.aclose()
 
-    async def _open_session(self, binding: Path | None) -> tuple[DaemonEndpoint, DaemonSession, LeaseGrant]:
+    async def _open_session(
+        self,
+        binding: Path | None,
+        python_environment: str | None = None,
+    ) -> tuple[DaemonEndpoint, DaemonSession, LeaseGrant]:
         endpoint = await self._discovery.discover()
         session = await self._sessions.connect(endpoint)
         lease: LeaseGrant | None = None
@@ -653,7 +688,14 @@ class Connector:
             if binding is not None:
                 if not binding.is_absolute():
                     raise ConnectorError("remembered workspace binding is not absolute")
-                await session.activate_workspace(lease.lease_id, binding)
+                if python_environment is None:
+                    await session.activate_workspace(lease.lease_id, binding)
+                else:
+                    await session.activate_workspace(
+                        lease.lease_id,
+                        binding,
+                        python_environment,
+                    )
             return endpoint, session, lease
         except BaseException:
             if lease is not None:

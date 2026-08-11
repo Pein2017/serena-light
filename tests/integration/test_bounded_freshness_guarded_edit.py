@@ -33,8 +33,8 @@ from serena_light.lsp.adapter import (
 )
 from serena_light.lsp.positions import FileSnapshot, PositionEncoding
 from serena_light.tools.editing import NotificationResult, ReplacementNotification
-from serena_light.workspace.identity import PinnedMsRoots, WorkspacePolicy
-from serena_light.workspace.inventory import TrustInventory, transformers_trust_inventory
+from serena_light.workspace.identity import WorkspacePolicy
+from serena_light.workspace.inventory import TrustInventory, bounded_non_git_trust_inventory
 from serena_light.workspace.runtime import AdapterBuildContext, AdapterFactory, WorkspaceRuntime
 from serena_light.workspace.scope import (
     LanguageFamily,
@@ -192,17 +192,11 @@ def _policy(tmp_path: Path) -> tuple[WorkspacePolicy, Path]:
     transformers.mkdir(parents=True)
     interpreter = prefix / "bin" / "python"
     interpreter.parent.mkdir()
-    interpreter.touch()
+    interpreter.write_text("#!/bin/sh\n")
+    interpreter.chmod(0o755)
     return (
         WorkspacePolicy(
-            ms_roots=PinnedMsRoots(
-                interpreter=interpreter.resolve(),
-                stdlib=purelib.parent.resolve(),
-                purelib=purelib.resolve(),
-                platlib=purelib.resolve(),
-                conda_prefix=prefix.resolve(),
-            ),
-            allowed_non_git_root=transformers,
+            conda_envs_root=tmp_path,
             data_root=data_root,
         ),
         data_root,
@@ -445,7 +439,7 @@ def test_replace_symbol_body_takes_exactly_one_preflight_scan_and_one_edit_submi
 
 def test_read_only_transformers_root_is_not_editable(tmp_path: Path) -> None:
     policy, _data_root = _policy(tmp_path)
-    transformers = policy.allowed_non_git_root
+    transformers = tmp_path / "ms" / "lib" / "python3.12" / "site-packages" / "transformers"
     (transformers / "module.py").write_bytes(_SOURCE)
     adapters: list[_Adapter] = []
 
@@ -485,7 +479,7 @@ def test_transformers_read_scope_is_targeted_for_an_indexed_file_and_bounded_roo
     """
 
     policy, _data_root = _policy(tmp_path)
-    transformers = policy.allowed_non_git_root
+    transformers = tmp_path / "ms" / "lib" / "python3.12" / "site-packages" / "transformers"
     (transformers / "module.py").write_bytes(_SOURCE)
     adapters: list[_Adapter] = []
     walks = [0]
@@ -497,7 +491,7 @@ def test_transformers_read_scope_is_targeted_for_an_indexed_file_and_bounded_roo
 
     def counted_inventory(identity: Any) -> TrustInventory:
         walks[0] += 1
-        return transformers_trust_inventory(identity.root)
+        return bounded_non_git_trust_inventory(identity.root)
 
     runtime = WorkspaceRuntime(
         policy.resolve_activation(transformers),

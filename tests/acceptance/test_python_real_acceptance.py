@@ -21,11 +21,19 @@ import psutil
 import pytest
 
 from serena_light.lsp.pyright import PyrightFacts
-from serena_light.workspace.identity import MS_INTERPRETER, TRANSFORMERS_ROOT, PinnedMsRoots, WorkspacePolicy
+from serena_light.workspace.identity import (
+    MS_INTERPRETER,
+    WorkspaceError,
+    WorkspaceErrorCode,
+    WorkspaceKind,
+    WorkspacePolicy,
+)
 from serena_light.workspace.inventory import git_trust_inventory
 from serena_light.workspace.runtime import WorkspaceRuntime
 from serena_light.workspace.scope import LanguageFamily
 
+MS_SITE_PACKAGES = MS_INTERPRETER.parents[1] / "lib" / "python3.12" / "site-packages"
+TRANSFORMERS_ROOT = (MS_SITE_PACKAGES / "transformers").resolve(strict=True)
 COORDEXP = Path("/data/CoordExp")
 MS_SWIFT = Path("/data/ms-swift")
 RSS_LIMIT_BYTES = 8 * 1024**3
@@ -126,14 +134,17 @@ class _ProcessSampler:
 
 
 @contextmanager
-def _real_runtime(root: Path) -> Iterator[tuple[WorkspaceRuntime, _ProcessEvidence]]:
-    roots = PinnedMsRoots.resolve(MS_INTERPRETER)
-    policy = WorkspacePolicy(ms_roots=roots)
+def _real_runtime(
+    root: Path,
+    *,
+    python_environment: str | None = None,
+) -> Iterator[tuple[WorkspaceRuntime, _ProcessEvidence]]:
+    policy = WorkspacePolicy()
     sampler = _ProcessSampler()
     runtime: WorkspaceRuntime | None = None
     sampler.start()
     try:
-        identity = policy.resolve_activation(root)
+        identity = policy.resolve_activation(root, python_environment=python_environment)
         runtime = WorkspaceRuntime(identity, path_policy=policy, future_timeout=35.0)
         yield runtime, sampler.evidence
     finally:
@@ -286,7 +297,7 @@ def test_real_pyright_global_lookup_refreshes_a_previously_opened_external_chang
 @pytest.mark.external_repo(root=str(TRANSFORMERS_ROOT), snapshot_env="SERENA_LIGHT_TRANSFORMERS_SNAPSHOT")
 def test_ms_swift_definition_and_diagnostics_use_conda_ms(record_property: Any) -> None:
     source = "swift/infer_engine/lmdeploy_engine.py"
-    exact_transformers_root = (PinnedMsRoots.resolve(MS_INTERPRETER).purelib / "transformers").resolve(strict=True)
+    exact_transformers_root = (MS_SITE_PACKAGES / "transformers").resolve(strict=True)
     assert exact_transformers_root == TRANSFORMERS_ROOT.resolve(strict=True)
 
     with _real_runtime(MS_SWIFT) as (runtime, process):
@@ -318,9 +329,65 @@ def test_ms_swift_definition_and_diagnostics_use_conda_ms(record_property: Any) 
     assert _dict(status["engine"])["interpreter"] == str(MS_INTERPRETER)
 
 
+def test_explicit_conda_environment_resolves_its_installed_package(tmp_path: Path) -> None:
+    root = tmp_path / "llm-environment-workspace"
+    root.mkdir()
+    subprocess.run(["git", "init", "--quiet", str(root)], check=True)
+    (root / "pyrightconfig.json").write_text('{"include": ["example.py"]}\n', encoding="utf-8")
+    (root / "example.py").write_text(
+        "from torchtune.config import parse as selected\n",
+        encoding="utf-8",
+    )
+    interpreter = Path("/root/miniconda3/envs/llm-framework-study/bin/python")
+    site_packages = interpreter.parents[1] / "lib" / "python3.12" / "site-packages"
+    package_root = Path(
+        "/root/miniconda3/envs/llm-framework-study/lib/python3.12/site-packages/torchtune"
+    ).resolve(strict=True)
+    policy = WorkspacePolicy()
+    non_git_identity = policy.resolve_activation(
+        site_packages,
+        python_environment="llm-framework-study",
+    )
+    assert non_git_identity.root == site_packages.resolve(strict=True)
+    assert non_git_identity.kind is WorkspaceKind.NON_GIT_READ_ONLY
+    assert non_git_identity.python_environment == "llm-framework-study"
+    with pytest.raises(WorkspaceError) as read_only:
+        policy.authorize_edit(
+            non_git_identity,
+            package_root / "__init__.py",
+            [package_root / "__init__.py"],
+        )
+    assert read_only.value.data.code is WorkspaceErrorCode.READ_ONLY_ROOT
+
+    with _real_runtime(root, python_environment="llm-framework-study") as (runtime, process):
+        runtime_identity = _dict(runtime.status()["identity"])
+        definition = _dict(
+            runtime.find_declaration("example.py", r"import parse as (selected)").to_dict()
+        )
+        diagnostics = _dict(
+            runtime.get_diagnostics_for_file("example.py", timeout_seconds=15.0).to_dict()
+        )
+
+    assert process.cleanup_ok, f"real Pyright acceptance left owned descendants: {process.cleanup_live}"
+    assert runtime_identity["python_environment"] == "llm-framework-study"
+    assert runtime_identity["python_interpreter"] == str(interpreter)
+    assert definition["ok"] is True, definition
+    locations = [_dict(item) for item in _list(_dict(definition["data"])["locations"])]
+    assert any(
+        Path(item["absolute_path"]).is_relative_to(package_root)
+        and item["location_kind"] == "read_only_external"
+        and item["read_only_external"] is True
+        for item in locations
+    ), locations
+    assert diagnostics["ok"] is True, diagnostics
+    engine = _dict(_dict(diagnostics["data"])["engine"])
+    assert engine["python_environment"] == "llm-framework-study"
+    assert engine["interpreter"] == str(interpreter)
+
+
 @pytest.mark.external_repo(root=str(TRANSFORMERS_ROOT), snapshot_env="SERENA_LIGHT_TRANSFORMERS_SNAPSHOT")
 def test_transformers_semantic_liveness_and_all_edits_read_only(record_property: Any) -> None:
-    exact_root = (PinnedMsRoots.resolve(MS_INTERPRETER).purelib / "transformers").resolve(strict=True)
+    exact_root = (MS_SITE_PACKAGES / "transformers").resolve(strict=True)
     assert exact_root == TRANSFORMERS_ROOT.resolve(strict=True)
     target = "models/qwen2_vl/modeling_qwen2_vl.py"
 
@@ -387,7 +454,7 @@ def test_transformers_semantic_liveness_and_all_edits_read_only(record_property:
 @pytest.mark.performance_external
 @pytest.mark.external_repo(root=str(TRANSFORMERS_ROOT), snapshot_env="SERENA_LIGHT_TRANSFORMERS_SNAPSHOT")
 def test_transformers_first_production_readiness_attempt_performance(record_property: Any) -> None:
-    exact_root = (PinnedMsRoots.resolve(MS_INTERPRETER).purelib / "transformers").resolve(strict=True)
+    exact_root = (MS_SITE_PACKAGES / "transformers").resolve(strict=True)
     assert exact_root == TRANSFORMERS_ROOT.resolve(strict=True)
 
     with _real_runtime(exact_root) as (runtime, process):

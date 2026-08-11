@@ -50,10 +50,20 @@ class SessionService:
         self.leases.discard(lease_id)
         return {"lease_id": lease_id, "released": True, "immediate": immediate}
 
-    async def activate_workspace(self, *, lease_id: str, absolute_path: str) -> Mapping[str, object]:
+    async def activate_workspace(
+        self,
+        *,
+        lease_id: str,
+        absolute_path: str,
+        python_environment: str | None = None,
+    ) -> Mapping[str, object]:
         if lease_id not in self.leases:
             raise LeaseExpiredError
-        return {"lease_id": lease_id, "workspace": absolute_path}
+        return {
+            "lease_id": lease_id,
+            "workspace": absolute_path,
+            "python_environment": python_environment or "ms",
+        }
 
 
 def _initialize(client: TestClient, authorization: str, request_id: int) -> str:
@@ -187,7 +197,9 @@ def test_two_authenticated_streamable_http_sessions_have_distinct_leases() -> No
         }
         activation_schema = _mapping(activation["inputSchema"])
         assert activation_schema["required"] == ["absolute_path"]
-        assert "lease_id" not in _mapping(activation_schema["properties"])
+        activation_properties = _mapping(activation_schema["properties"])
+        assert "lease_id" not in activation_properties
+        assert "python_environment" in activation_properties
         symbol = next(tool for tool in tools if tool["name"] == "find_symbol")
         assert symbol["title"] == "Find Symbol"
         assert _mapping(symbol["annotations"])["readOnlyHint"] is True

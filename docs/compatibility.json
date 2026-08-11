@@ -1,5 +1,5 @@
 {
-  "schema_version": 4,
+  "schema_version": 5,
   "scope": "parallel serena-light registration; not canonical-serena replacement",
   "semantic_contract": {
     "coordinates": {
@@ -65,7 +65,7 @@
         "outer stdio Server",
         "inner daemon FastMCP"
       ],
-      "text": "Experimental Python/JS/TS semantic navigation. Shell cd won't rebind; activate_workspace needs absolute path. Use rg/find for files/text; prefer Serena Light for symbols/references/diagnostics. Report issues to user."
+      "text": "Experimental Python/JS/TS. Shell cd won't rebind; activate_workspace takes an absolute path and optional Conda env (default ms). Use rg/find for text; Serena Light for symbols/references/diagnostics; report friction."
     },
     "query_recovery": {
       "status": "pass",
@@ -102,7 +102,8 @@
     "admission": "every content-bearing read gets its own FIFO arrival ticket and runs its own guarded scan started after that ticket; a later caller may wait for an older in-flight scan to finish but never accepts it as its own admission evidence",
     "git_sources_and_native_config": "every call receives a guarded preflight; source-derived successes and failures retain response-owned byte witnesses and receive a real postflight, while invalid, trust, and adapter-owned conditions remain typed after one preflight; a changed postflight discards and replays the complete read once; a second race returns typed retryable NOT_READY with reason workspace_changed_during_read",
     "guarantee_boundary": "anchored at the call's own final guarded byte observation, not at response-delivery time; there is no background watcher, so a write landing after that observation is only ever picked up by the next call's own admission",
-    "non_git_transformers_root": "scoped/indexed reads use targeted stat-plus-byte pre/post validation; global, directory, and not-yet-indexed reads use a bounded no-symlink full-root pre/post scan because a targeted stat cannot prove membership",
+    "non_git_read_only_root": "any existing absolute non-Git directory binds as its own exact read-only root; scoped/indexed reads use targeted stat-plus-byte pre/post validation, while global, directory, and not-yet-indexed reads use a bounded no-symlink full-root pre/post scan because a targeted stat cannot prove membership",
+    "python_environment_selection": "activate_workspace accepts an optional Conda environment name, defaults to ms, validates its exact bin/python before swapping the lease, and includes environment plus interpreter in the physical runtime identity",
     "editing": "replace_symbol_body and all editing stay outside read replay; the existing non-replayable commit-point contract and UNCERTAIN handling are unchanged",
     "evidence_complete": [
       "deterministic_race_suite",
@@ -508,8 +509,11 @@
       "required_args": [
         "absolute_path"
       ],
+      "optional_args": [
+        "python_environment"
+      ],
       "classification": "shimmed",
-      "delta": "absolute path and session-scoped binding replace project name/path and global active project"
+      "delta": "any existing absolute directory and a binding-scoped optional Conda environment replace project name/path, a fixed interpreter, and global active project; non-Git bindings are read-only"
     },
     {
       "name": "release_workspace",
@@ -657,7 +661,7 @@
     "serena-light": {
       "consumer": "connector startup cwd",
       "classification": "supported",
-      "behavior": "auto-activate startup cwd; explicit activate_workspace for another root"
+      "behavior": "auto-activate startup cwd with ms; explicit activate_workspace for another root or Python Conda environment"
     }
   },
   "instruction_consumers": [

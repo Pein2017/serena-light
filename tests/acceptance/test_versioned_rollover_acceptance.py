@@ -95,10 +95,16 @@ class _DirectDaemonSession:
     async def release_lease(self, lease_id: str) -> None:
         await self._build.service.release_lease(lease_id=lease_id, immediate=False)
 
-    async def activate_workspace(self, lease_id: str, path: Path) -> types.CallToolResult:
+    async def activate_workspace(
+        self,
+        lease_id: str,
+        path: Path,
+        python_environment: str | None = None,
+    ) -> types.CallToolResult:
         data = await self._build.service.activate_workspace(
             lease_id=lease_id,
             absolute_path=str(path),
+            python_environment=python_environment,
         )
         return _tool_result({"ok": True, "data": dict(data)})
 
@@ -156,7 +162,7 @@ def _create_build(runtime_root: Path, identity: str, port: int) -> _Build:
         runtime.stopped = True
         stopped.append(runtime)
 
-    def resolve(path: Path) -> ResolvedWorkspace[Path]:
+    def resolve(path: Path, _python_environment: str) -> ResolvedWorkspace[Path]:
         root = path.resolve()
         return ResolvedWorkspace(identity=root, working_subdirectory=root)
 

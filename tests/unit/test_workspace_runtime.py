@@ -32,12 +32,17 @@ from serena_light.lsp.executor import BoundedLspExecutor
 from serena_light.lsp.positions import FileSnapshot, PositionEncoding
 from serena_light.tools.envelopes import ErrorCode, ErrorEnvelope, SuccessEnvelope
 from serena_light.tools.navigation import DocumentSymbolInput
-from serena_light.workspace.identity import WorkspaceIdentity, WorkspaceKind
+from serena_light.workspace.identity import (
+    DEFAULT_PYTHON_ENVIRONMENT,
+    MS_INTERPRETER,
+    WorkspaceIdentity,
+    WorkspaceKind,
+)
 from serena_light.workspace.inventory import (
     SupportedPathTree,
     TrustInventory,
+    bounded_non_git_trust_inventory,
     git_trust_inventory,
-    transformers_trust_inventory,
 )
 from serena_light.workspace.runtime import (
     AdapterBuildContext,
@@ -377,12 +382,55 @@ def test_composes_physical_key_and_skips_empty_language_family(tmp_path: Path) -
         adapter_factories=_factories(adapters, contexts),
     )
     try:
-        assert runtime.key == (WorkspaceKind.GIT, tmp_path.resolve())
+        assert runtime.key == (
+            WorkspaceKind.GIT,
+            tmp_path.resolve(),
+            DEFAULT_PYTHON_ENVIRONMENT,
+            MS_INTERPRETER,
+        )
         assert runtime.identity.working_subdirectory == tmp_path.resolve()
         assert runtime.route("main.py") is adapters[LanguageFamily.PYTHON]
         assert runtime.status()["skipped_language_families"] == ("typescript",)
         assert typescript_attributions == 0
         assert adapters[LanguageFamily.PYTHON].snapshot().phase is AdapterPhase.COLD
+    finally:
+        runtime.stop()
+
+
+def test_runtime_status_discloses_the_binding_selected_python_environment(tmp_path: Path) -> None:
+    source = tmp_path / "main.py"
+    source.write_text("value = 1\n")
+    interpreter = tmp_path / "llm-framework-study" / "bin" / "python"
+    interpreter.parent.mkdir(parents=True)
+    interpreter.write_text("#!/bin/sh\n")
+    identity = WorkspaceIdentity(
+        root=tmp_path,
+        kind=WorkspaceKind.NON_GIT_READ_ONLY,
+        working_subdirectory=tmp_path,
+        python_environment="llm-framework-study",
+        python_interpreter=interpreter,
+    )
+    adapters: dict[LanguageFamily, _Adapter] = {}
+    contexts: dict[LanguageFamily, AdapterBuildContext] = {}
+    runtime = WorkspaceRuntime(
+        identity,
+        path_policy=_PathPolicy(),
+        inventory=_inventory(tmp_path, "main.py"),
+        attributors={
+            LanguageFamily.PYTHON: lambda _root, paths: _projection(LanguageFamily.PYTHON, paths)
+        },
+        adapter_factories=_factories(adapters, contexts),
+    )
+    try:
+        status_identity = cast(Mapping[str, object], runtime.status()["identity"])
+        assert status_identity["python_environment"] == "llm-framework-study"
+        assert status_identity["python_interpreter"] == str(interpreter)
+        assert runtime.key == (
+            WorkspaceKind.NON_GIT_READ_ONLY,
+            tmp_path.resolve(),
+            "llm-framework-study",
+            interpreter,
+        )
     finally:
         runtime.stop()
 
@@ -2722,7 +2770,7 @@ def test_read_only_non_git_root_uses_targeted_stat_instead_of_a_full_scan(tmp_pa
         return _inventory(identity.root, "main.py")
 
     runtime = WorkspaceRuntime(
-        (WorkspaceKind.ALLOWLISTED_NON_GIT, tmp_path),
+        (WorkspaceKind.NON_GIT_READ_ONLY, tmp_path),
         path_policy=_PathPolicy(),
         inventory_factory=counted_inventory,
         attributors={LanguageFamily.PYTHON: lambda _root, paths: _projection(LanguageFamily.PYTHON, paths)},
@@ -2785,7 +2833,7 @@ def test_read_only_non_git_unstable_hash_fails_closed_and_recovers_without_a_ful
         return _inventory(identity.root, "main.py")
 
     runtime = WorkspaceRuntime(
-        (WorkspaceKind.ALLOWLISTED_NON_GIT, tmp_path),
+        (WorkspaceKind.NON_GIT_READ_ONLY, tmp_path),
         path_policy=_PathPolicy(),
         inventory_factory=counted_inventory,
         attributors={LanguageFamily.PYTHON: lambda _root, paths: _projection(LanguageFamily.PYTHON, paths)},
@@ -2850,10 +2898,10 @@ def _non_git_runtime(
 
     def counted_inventory(identity: Any) -> TrustInventory:
         walks[0] += 1
-        return transformers_trust_inventory(identity.root)
+        return bounded_non_git_trust_inventory(identity.root)
 
     return WorkspaceRuntime(
-        (WorkspaceKind.ALLOWLISTED_NON_GIT, root),
+        (WorkspaceKind.NON_GIT_READ_ONLY, root),
         path_policy=_PathPolicy(),
         inventory_factory=counted_inventory,
         attributors={LanguageFamily.PYTHON: lambda _root, paths: _projection(LanguageFamily.PYTHON, paths)},

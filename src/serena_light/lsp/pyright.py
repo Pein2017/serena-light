@@ -121,7 +121,12 @@ class PyrightFacts:
     definition_method: str = PYRIGHT_DEFINITION_METHOD
 
     @classmethod
-    def locked(cls, root: Path | None = None) -> PyrightFacts:
+    def locked(
+        cls,
+        root: Path | None = None,
+        *,
+        interpreter: Path = MS_INTERPRETER,
+    ) -> PyrightFacts:
         project_root = (root or repository_root()).resolve()
         paths = runtime_paths(project_root)
         node = paths["node"]
@@ -130,8 +135,8 @@ class PyrightFacts:
         for path in (node, language_server, cli):
             if not path.is_file():
                 raise PyrightConfigurationError(f"locked Pyright runtime path is missing: {path}")
-        if not MS_INTERPRETER.is_file():
-            raise PyrightConfigurationError(f"fixed conda ms interpreter is missing: {MS_INTERPRETER}")
+        if not interpreter.is_absolute() or not interpreter.is_file():
+            raise PyrightConfigurationError(f"selected Python interpreter is missing: {interpreter}")
         return cls(
             extensions=PYRIGHT_EXTENSIONS,
             language_id=PYRIGHT_LANGUAGE_ID,
@@ -140,7 +145,7 @@ class PyrightFacts:
             engine_version=PYRIGHT_VERSION,
             # Preserve the exact configured path rather than its python3.12
             # symlink target; this string is part of the adapter contract.
-            interpreter=MS_INTERPRETER,
+            interpreter=interpreter,
         )
 
     def initialize_params(self, workspace_root: Path, *, process_id: int | None = None) -> dict[str, Any]:

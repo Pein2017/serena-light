@@ -63,7 +63,7 @@ class DiagnosticEngineFacts:
 
     TypeScript is deliberately advisory regardless of a caller-provided value:
     repository-native typecheck or CI remains the authority.  Python facts
-    retain the fixed Pyright version and selected ``ms`` interpreter so import
+    retain the fixed Pyright version and binding-selected environment/interpreter so import
     results are not mistaken for ambient-Python diagnostics.  ``name`` and
     ``version`` identify the LSP server; ``semantic_engine_*`` separately
     identifies the pinned compiler/type engine behind that server.
@@ -73,6 +73,7 @@ class DiagnosticEngineFacts:
     language: str
     version: str
     interpreter: str | None = None
+    python_environment: str | None = None
     authority: str = "engine"
     repository_authority: str | None = None
     external_root: ExternalRootMetadata | None = None
@@ -85,8 +86,10 @@ class DiagnosticEngineFacts:
             raise ValueError("diagnostic engine facts require name, language, and version")
         if self.interpreter is not None and not self.interpreter.startswith("/"):
             raise ValueError("diagnostic interpreter must be an absolute path")
+        if self.python_environment is not None and not self.python_environment:
+            raise ValueError("diagnostic Python environment must be non-empty")
         if self.language == "python" and (self.name != "pyright" or self.interpreter is None):
-            raise ValueError("Python diagnostics require Pyright and the fixed interpreter")
+            raise ValueError("Python diagnostics require Pyright and the selected interpreter")
         if (self.semantic_engine_name is None) != (self.semantic_engine_version is None):
             raise ValueError("semantic engine name and version must be supplied together")
         if self.native_typecheck_command is not None and not self.native_typecheck_command.strip():
@@ -116,6 +119,8 @@ class DiagnosticEngineFacts:
             value["native_typecheck"] = native_typecheck
         if self.interpreter is not None:
             value["interpreter"] = self.interpreter
+        if self.python_environment is not None:
+            value["python_environment"] = self.python_environment
         if self.external_root is not None:
             value["external_root"] = self.external_root.to_dict()
         return value

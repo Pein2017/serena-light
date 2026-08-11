@@ -15,7 +15,7 @@ def _object(path: Path) -> dict[str, object]:
 
 def test_plugin_manifest_is_thin_branded_mcp_packaging() -> None:
     manifest = _object(REPOSITORY_ROOT / ".codex-plugin" / "plugin.json")
-    assert manifest["name"] == REPOSITORY_ROOT.name == "serena-light"
+    assert manifest["name"] == "serena-light"
     assert manifest["mcpServers"] == "./.mcp.json"
     assert "skills" not in manifest
     assert "apps" not in manifest

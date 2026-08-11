@@ -12,11 +12,13 @@ import pytest
 
 from serena_light.lsp.client import SyncLspClient
 from serena_light.lsp.pyright import PyrightFacts
-from serena_light.workspace.identity import TRANSFORMERS_ROOT, PinnedMsRoots, WorkspacePolicy
+from serena_light.workspace.identity import MS_INTERPRETER, WorkspacePolicy
 from serena_light.workspace.inventory import git_trust_inventory
 from serena_light.workspace.scope import ProjectKind
 
 MS_SWIFT = Path("/data/ms-swift")
+MS_SITE_PACKAGES = MS_INTERPRETER.parents[1] / "lib" / "python3.12" / "site-packages"
+TRANSFORMERS_ROOT = (MS_SITE_PACKAGES / "transformers").resolve(strict=True)
 
 pytestmark = [
     pytest.mark.timeout(90),
@@ -112,8 +114,7 @@ def _definition(
 
 def test_real_pyright_definitions_use_ms_interpreter_and_are_read_only_external() -> None:
     facts = PyrightFacts.locked()
-    roots = PinnedMsRoots.resolve(facts.interpreter)
-    policy = WorkspacePolicy(ms_roots=roots)
+    policy = WorkspacePolicy()
     identity = policy.resolve_activation(MS_SWIFT)
 
     with _real_pyright(facts) as client:
@@ -146,8 +147,8 @@ def test_real_pyright_definitions_use_ms_interpreter_and_are_read_only_external(
         peft_raw,
         classify=lambda path: policy.classify_semantic_location(identity, path),
     )
-    transformers_root = (roots.purelib / "transformers").resolve(strict=True)
-    peft_root = (roots.purelib / "peft").resolve(strict=True)
+    transformers_root = (MS_SITE_PACKAGES / "transformers").resolve(strict=True)
+    peft_root = (MS_SITE_PACKAGES / "peft").resolve(strict=True)
     assert generation
     assert all(item.semantic_location.read_only_external for item in generation)
     assert any(item.semantic_location.path.is_relative_to(transformers_root) for item in generation)

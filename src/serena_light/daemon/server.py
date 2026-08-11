@@ -128,7 +128,13 @@ class DaemonService(Protocol):
 
     async def release_lease(self, *, lease_id: str, immediate: bool) -> Mapping[str, object]: ...
 
-    async def activate_workspace(self, *, lease_id: str, absolute_path: str) -> Mapping[str, object]: ...
+    async def activate_workspace(
+        self,
+        *,
+        lease_id: str,
+        absolute_path: str,
+        python_environment: str | None = None,
+    ) -> Mapping[str, object]: ...
 
     async def release_workspace(
         self, *, lease_id: str, immediate: bool = False
@@ -332,12 +338,21 @@ def create_daemon_app(
             str,
             Field(
                 description=(
-                    "Absolute directory path inside the Git workspace or at the allowlisted "
-                    "read-only source root."
+                    "Any existing absolute directory. Git roots below /data may support guarded edits; "
+                    "non-Git roots are semantic read-only workspaces."
                 )
             ),
         ],
         context: Context,
+        python_environment: Annotated[
+            str | None,
+            Field(
+                description=(
+                    "Conda environment name used by Python semantics and diagnostics. "
+                    "Defaults to ms; pass another installed environment such as llm-framework-study to override."
+                )
+            ),
+        ] = None,
     ) -> dict[str, object]:
         """startup cwd is auto-bound; Shell cd does not change this lease; use an absolute path to switch or return."""
 
@@ -346,8 +361,19 @@ def create_daemon_app(
         except ValueError:
             return _lease_expired()
         try:
+            if python_environment is None:
+                return _as_tool_envelope(
+                    await service.activate_workspace(
+                        lease_id=lease_id,
+                        absolute_path=absolute_path,
+                    )
+                )
             return _as_tool_envelope(
-                await service.activate_workspace(lease_id=lease_id, absolute_path=absolute_path)
+                await service.activate_workspace(
+                    lease_id=lease_id,
+                    absolute_path=absolute_path,
+                    python_environment=python_environment,
+                )
             )
         except (LeaseExpiredError, LifecycleLeaseExpiredError):
             return _lease_expired()

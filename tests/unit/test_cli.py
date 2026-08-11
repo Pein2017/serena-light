@@ -30,7 +30,7 @@ from serena_light.runtime_files import (
     prepare_runtime_layout,
     write_discovery_metadata,
 )
-from serena_light.workspace.identity import WorkspaceKind, WorkspacePolicy
+from serena_light.workspace.identity import MS_INTERPRETER, WorkspaceKind, WorkspacePolicy
 from serena_light.workspace.registry import ResolvedWorkspace, WorkspaceRuntimeRegistry
 
 
@@ -551,15 +551,21 @@ class _FailOnceRuntime:
             raise RuntimeError("stop rejected")
 
 
-def _single_root_resolution(path: Path) -> ResolvedWorkspace[cli.PhysicalWorkspaceKey]:
-    return ResolvedWorkspace(identity=(WorkspaceKind.GIT, path), working_subdirectory=path)
+def _single_root_resolution(
+    path: Path,
+    python_environment: str,
+) -> ResolvedWorkspace[cli.PhysicalWorkspaceKey]:
+    return ResolvedWorkspace(
+        identity=(WorkspaceKind.GIT, path, python_environment, MS_INTERPRETER),
+        working_subdirectory=path,
+    )
 
 
 def test_runtime_owner_stop_retains_ownership_until_stop_succeeds() -> None:
     policy = cast(WorkspacePolicy, object())
     runtime = _FailOnceRuntime()
     owner = cli._RuntimeOwner(policy, builder=lambda _identity, _policy: runtime)
-    created = owner.create((WorkspaceKind.GIT, Path("/data/one")))
+    created = owner.create((WorkspaceKind.GIT, Path("/data/one"), "ms", MS_INTERPRETER))
     assert created is runtime
 
     with pytest.raises(RuntimeError, match="stop rejected"):

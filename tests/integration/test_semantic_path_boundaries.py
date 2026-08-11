@@ -13,7 +13,6 @@ import pytest
 from serena_light.tools.envelopes import ToolEnvelope
 from serena_light.workspace.identity import (
     LocationKind,
-    PinnedMsRoots,
     WorkspaceError,
     WorkspaceErrorCode,
     WorkspacePolicy,
@@ -36,17 +35,11 @@ def _policy(tmp_path: Path) -> tuple[WorkspacePolicy, Path]:
     transformers.mkdir(parents=True)
     interpreter = prefix / "bin" / "python"
     interpreter.parent.mkdir()
-    interpreter.touch()
+    interpreter.write_text("#!/bin/sh\n")
+    interpreter.chmod(0o755)
     return (
         WorkspacePolicy(
-            ms_roots=PinnedMsRoots(
-                interpreter=interpreter.resolve(),
-                stdlib=stdlib.resolve(),
-                purelib=purelib.resolve(),
-                platlib=purelib.resolve(),
-                conda_prefix=prefix.resolve(),
-            ),
-            allowed_non_git_root=transformers,
+            conda_envs_root=tmp_path,
             data_root=data_root,
         ),
         data_root,
@@ -112,9 +105,7 @@ def test_semantic_result_boundary_matrix_uses_active_nested_identity(tmp_path: P
     assert policy.classify_semantic_location(identity, other_file).kind is LocationKind.READ_ONLY_EXTERNAL
     assert policy.classify_semantic_location(identity, linked_file).kind is LocationKind.READ_ONLY_EXTERNAL
     assert policy.classify_semantic_location(identity, allowed).kind is LocationKind.READ_ONLY_EXTERNAL
-    with pytest.raises(WorkspaceError) as raised:
-        policy.classify_semantic_location(identity, untrusted)
-    assert raised.value.data.code is WorkspaceErrorCode.UNTRUSTED_ROOT
+    assert policy.classify_semantic_location(identity, untrusted).kind is LocationKind.READ_ONLY_EXTERNAL
 
     for foreign in (other_file, linked_file):
         with pytest.raises(WorkspaceError) as rejected:

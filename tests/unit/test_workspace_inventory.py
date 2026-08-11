@@ -10,9 +10,8 @@ import pytest
 import serena_light.workspace.inventory as inventory_module
 from serena_light.workspace.inventory import (
     SUPPORTED_EXTENSIONS,
-    discover_transformers_root,
+    bounded_non_git_trust_inventory,
     git_trust_inventory,
-    transformers_trust_inventory,
 )
 
 
@@ -89,7 +88,7 @@ def test_git_inventory_rejects_deleted_nonregular_and_symlink_candidates(tmp_pat
     }
 
 
-def test_transformers_discovery_is_exact_and_inventory_is_bounded_no_symlink(
+def test_non_git_inventory_is_bounded_and_does_not_follow_symlinks(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     site_packages = tmp_path / "site-packages"
@@ -101,8 +100,6 @@ def test_transformers_discovery_is_exact_and_inventory_is_bounded_no_symlink(
     (site_packages / "another-package").mkdir()
     (site_packages / "another-package" / "should_not_be_seen.py").write_text("x = 1\n")
 
-    assert discover_transformers_root([site_packages]) == package
-
     real_walk = os.walk
 
     walked = list(real_walk(package))
@@ -112,7 +109,7 @@ def test_transformers_discovery_is_exact_and_inventory_is_bounded_no_symlink(
         return iter(walked)
 
     monkeypatch.setattr(os, "walk", bounded_walk)
-    inventory = transformers_trust_inventory(package)
+    inventory = bounded_non_git_trust_inventory(package)
 
     assert inventory.kind == "bounded_no_symlink"
     assert inventory.paths == ("visible.py",)
@@ -132,7 +129,7 @@ def test_transformers_discovery_is_exact_and_inventory_is_bounded_no_symlink(
     package_link = tmp_path / "transformers-link"
     package_link.symlink_to(package, target_is_directory=True)
     with pytest.raises(ValueError, match="non-symlink directory"):
-        transformers_trust_inventory(package_link)
+        bounded_non_git_trust_inventory(package_link)
 
 
 def test_supported_extensions_are_the_fixed_python_and_javascript_typescript_set() -> None:

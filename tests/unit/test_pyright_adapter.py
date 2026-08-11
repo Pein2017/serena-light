@@ -124,6 +124,20 @@ def test_workspace_configuration_answers_known_sections_in_order() -> None:
         facts.workspace_configuration({})
 
 
+def test_locked_facts_use_binding_selected_interpreter(tmp_path: Path) -> None:
+    interpreter = tmp_path / "conda" / "envs" / "llm-framework-study" / "bin" / "python"
+    interpreter.parent.mkdir(parents=True)
+    interpreter.touch()
+
+    facts = PyrightFacts.locked(interpreter=interpreter)
+
+    assert facts.interpreter == interpreter
+    assert facts.adapter_language_facts(tmp_path).engine.interpreter == interpreter
+    assert facts.workspace_configuration({"items": [{"section": "python"}]}) == [
+        {"pythonPath": str(interpreter)}
+    ]
+
+
 def test_raw_provider_facts_are_separate_from_derived_tools() -> None:
     facts = PyrightFacts.locked()
     fixture = json.loads(

@@ -133,7 +133,9 @@ def _service() -> tuple[WorkspaceDaemonService[str, FakeRuntime], list[FakeRunti
     service = WorkspaceDaemonService[str, FakeRuntime](
         lifecycle=LeaseLifecycle(clock=lambda: 0.0),
         registry=WorkspaceRuntimeRegistry(factory),
-        resolver=lambda path: ResolvedWorkspace(identity=str(path.parent), working_subdirectory=path),
+        resolver=lambda path, _python_environment: ResolvedWorkspace(
+            identity=str(path.parent), working_subdirectory=path
+        ),
         runtime_stopper=lambda _runtime: None,
     )
     return service, created
@@ -370,7 +372,7 @@ def test_http_activation_rejections_are_typed_and_keep_the_prior_binding() -> No
         created.append(runtime)
         return runtime
 
-    def resolver(path: Path) -> ResolvedWorkspace[str]:
+    def resolver(path: Path, _python_environment: str) -> ResolvedWorkspace[str]:
         if path == Path("/data/missing"):
             raise WorkspaceError(WorkspaceErrorData(WorkspaceErrorCode.INVALID_PATH, "missing", path=path))
         if path == Path("/outside/untrusted"):
@@ -436,7 +438,9 @@ def test_http_immediate_workspace_release_stops_only_the_last_holder() -> None:
     service = WorkspaceDaemonService[str, FakeRuntime](
         lifecycle=LeaseLifecycle(clock=lambda: 0.0),
         registry=WorkspaceRuntimeRegistry(factory),
-        resolver=lambda path: ResolvedWorkspace(identity=str(path.parent), working_subdirectory=path),
+        resolver=lambda path, _python_environment: ResolvedWorkspace(
+            identity=str(path.parent), working_subdirectory=path
+        ),
         runtime_stopper=stopped.append,
     )
     token = "t" * 48
@@ -679,7 +683,9 @@ def test_two_leases_on_one_physical_root_report_their_own_working_subdirectory_o
     service = WorkspaceDaemonService[str, _RichRuntime](
         lifecycle=LeaseLifecycle(clock=lambda: 0.0),
         registry=WorkspaceRuntimeRegistry(factory),
-        resolver=lambda path: ResolvedWorkspace(identity=str(path.parent), working_subdirectory=path),
+        resolver=lambda path, _python_environment: ResolvedWorkspace(
+            identity=str(path.parent), working_subdirectory=path
+        ),
         runtime_stopper=lambda _runtime: None,
     )
 
@@ -738,7 +744,9 @@ def _lsp_failing_service() -> tuple[WorkspaceDaemonService[str, LspFailingRuntim
     service = WorkspaceDaemonService[str, LspFailingRuntime](
         lifecycle=LeaseLifecycle(clock=lambda: 0.0),
         registry=WorkspaceRuntimeRegistry(factory),
-        resolver=lambda path: ResolvedWorkspace(identity=str(path.parent), working_subdirectory=path),
+        resolver=lambda path, _python_environment: ResolvedWorkspace(
+            identity=str(path.parent), working_subdirectory=path
+        ),
         runtime_stopper=lambda _runtime: None,
     )
     return service, created
@@ -818,7 +826,9 @@ def _lsp_transport_lost_service() -> tuple[
     service = WorkspaceDaemonService[str, LspTransportLostRuntime](
         lifecycle=LeaseLifecycle(clock=lambda: 0.0),
         registry=WorkspaceRuntimeRegistry(factory),
-        resolver=lambda path: ResolvedWorkspace(identity=str(path.parent), working_subdirectory=path),
+        resolver=lambda path, _python_environment: ResolvedWorkspace(
+            identity=str(path.parent), working_subdirectory=path
+        ),
         runtime_stopper=lambda _runtime: None,
     )
     return service, created

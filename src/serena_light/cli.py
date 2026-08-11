@@ -59,7 +59,7 @@ from serena_light.runtime_files import (
     write_discovery_metadata,
     write_service_git_config,
 )
-from serena_light.workspace.identity import PinnedMsRoots, WorkspaceKind, WorkspacePolicy
+from serena_light.workspace.identity import WorkspaceKind, WorkspacePolicy
 from serena_light.workspace.registry import WorkspaceRuntimeRegistry
 
 DAEMON_STARTUP_TIMEOUT_SECONDS = 30.0
@@ -99,7 +99,7 @@ class _Server(Protocol):
     async def serve(self, sockets: list[socket.socket] | None = None) -> None: ...
 
 
-type PhysicalWorkspaceKey = tuple[WorkspaceKind, Path]
+type PhysicalWorkspaceKey = tuple[WorkspaceKind, Path, str, Path]
 type RuntimeBuilder = Callable[[PhysicalWorkspaceKey, WorkspacePolicy], _Runtime]
 type AsyncCallback = Callable[[], Awaitable[None]]
 
@@ -592,7 +592,7 @@ async def _run_daemon() -> None:
     daemon_id = str(uuid4())
     process_start_time = psutil.Process(os.getpid()).create_time()
 
-    policy = WorkspacePolicy(ms_roots=PinnedMsRoots.resolve())
+    policy = WorkspacePolicy()
     runtime_owner = _RuntimeOwner(policy, debug_reporter=logger.report)
     registry = WorkspaceRuntimeRegistry(runtime_owner.create)
     lifecycle = (

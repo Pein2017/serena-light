@@ -8,8 +8,8 @@ cannot turn an apparently in-root operation into an external read or write.
 
 from __future__ import annotations
 
-import json
 import os
+import re
 import stat
 import subprocess
 from collections.abc import Collection, Sequence
@@ -19,15 +19,17 @@ from pathlib import Path
 from typing import NoReturn
 
 DATA_ROOT = Path("/data")
+CONDA_ENVS_ROOT = Path("/root/miniconda3/envs")
+DEFAULT_PYTHON_ENVIRONMENT = "ms"
 MS_INTERPRETER = Path("/root/miniconda3/envs/ms/bin/python")
-TRANSFORMERS_ROOT = Path("/root/miniconda3/envs/ms/lib/python3.12/site-packages/transformers")
+_CONDA_ENVIRONMENT_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*\Z")
 
 
 class WorkspaceKind(StrEnum):
-    """The two deliberately narrow v1 workspace identity kinds."""
+    """Whether a workspace is Git-owned or an exact read-only directory."""
 
     GIT = "git"
-    ALLOWLISTED_NON_GIT = "allowlisted_non_git"
+    NON_GIT_READ_ONLY = "non_git_read_only"
 
 
 class LocationKind(StrEnum):
@@ -51,18 +53,22 @@ class WorkspaceIdentity:
     root: Path
     kind: WorkspaceKind
     working_subdirectory: Path
+    python_environment: str = DEFAULT_PYTHON_ENVIRONMENT
+    python_interpreter: Path = MS_INTERPRETER
 
     def __post_init__(self) -> None:
         if not self.root.is_absolute() or not self.working_subdirectory.is_absolute():
             raise ValueError("workspace identity paths must be absolute")
+        if not self.python_environment or not self.python_interpreter.is_absolute():
+            raise ValueError("workspace Python environment identity is invalid")
         if not _is_within(self.working_subdirectory, self.root):
             raise ValueError("working subdirectory must be inside the workspace root")
 
     @property
-    def registry_key(self) -> tuple[WorkspaceKind, Path]:
+    def registry_key(self) -> tuple[WorkspaceKind, Path, str, Path]:
         """The key shared by sessions that bind the same physical workspace."""
 
-        return (self.kind, self.root)
+        return (self.kind, self.root, self.python_environment, self.python_interpreter)
 
 
 @dataclass(frozen=True, slots=True)
@@ -93,110 +99,90 @@ class WorkspaceError(ValueError):
 
 
 @dataclass(frozen=True, slots=True)
-class PinnedMsRoots:
-    """Resolved roots reported by the fixed conda ``ms`` interpreter."""
+class CondaEnvironment:
+    """One explicit, validated Conda environment selection."""
 
+    name: str
     interpreter: Path
-    stdlib: Path
-    purelib: Path
-    platlib: Path
-    conda_prefix: Path
 
-    @classmethod
-    def resolve(cls, interpreter: Path = MS_INTERPRETER) -> PinnedMsRoots:
-        """Query ``sysconfig`` through the pinned interpreter, never ambient Python."""
 
-        resolved_interpreter = _resolve_existing(interpreter, purpose="pinned ms interpreter")
-        if not resolved_interpreter.is_file():
-            _fail(WorkspaceErrorCode.INVALID_PATH, "pinned ms interpreter is not a file", path=resolved_interpreter)
-        program = (
-            "import json, sys, sysconfig; "
-            "print(json.dumps({'stdlib': sysconfig.get_path('stdlib'), "
-            "'purelib': sysconfig.get_path('purelib'), 'platlib': sysconfig.get_path('platlib'), "
-            "'prefix': sys.prefix}))"
-        )
-        try:
-            completed = subprocess.run(
-                [str(resolved_interpreter), "-c", program],
-                check=True,
-                capture_output=True,
-                text=True,
-                timeout=10,
-            )
-            reported = json.loads(completed.stdout)
-        except (OSError, subprocess.SubprocessError, json.JSONDecodeError) as error:
-            _fail(
-                WorkspaceErrorCode.INVALID_PATH,
-                f"could not resolve pinned ms roots: {error}",
-                path=resolved_interpreter,
-            )
-        if not isinstance(reported, dict):  # pragma: no cover - defensive for hostile interpreter output
-            _fail(WorkspaceErrorCode.INVALID_PATH, "pinned ms interpreter returned invalid sysconfig data")
-        roots: dict[str, Path] = {}
-        for name in ("stdlib", "purelib", "platlib", "prefix"):
-            value = reported.get(name)
-            if not isinstance(value, str) or not Path(value).is_absolute():
-                _fail(WorkspaceErrorCode.INVALID_PATH, f"pinned ms interpreter reported invalid {name}")
-            roots[name] = _resolve_existing(Path(value), purpose=f"pinned ms {name}")
-        return cls(
-            interpreter=resolved_interpreter,
-            stdlib=roots["stdlib"],
-            purelib=roots["purelib"],
-            platlib=roots["platlib"],
-            conda_prefix=roots["prefix"],
-        )
+class CondaEnvironmentResolver:
+    """Resolve safe environment names without consulting ambient shell state."""
+
+    def __init__(self, envs_root: Path = CONDA_ENVS_ROOT) -> None:
+        self._envs_root = _resolve_existing(envs_root, purpose="Conda environments root")
+        if not self._envs_root.is_dir():
+            _fail(WorkspaceErrorCode.INVALID_PATH, "Conda environments root must be a directory", path=self._envs_root)
 
     @property
-    def semantic_roots(self) -> tuple[Path, Path, Path]:
-        return (self.stdlib, self.purelib, self.platlib)
+    def envs_root(self) -> Path:
+        return self._envs_root
 
-    def contains_semantic_path(self, path: Path) -> bool:
-        return any(_is_within(path, root) for root in self.semantic_roots)
-
-    def contains_conda_path(self, path: Path) -> bool:
-        return _is_within(path, self.conda_prefix)
+    def resolve(self, name: str | None = None) -> CondaEnvironment:
+        selected = DEFAULT_PYTHON_ENVIRONMENT if name is None else name
+        if not isinstance(selected, str) or _CONDA_ENVIRONMENT_NAME.fullmatch(selected) is None:
+            _fail(WorkspaceErrorCode.INVALID_PATH, "Python environment name is invalid")
+        configured = self._envs_root / selected / "bin" / "python"
+        try:
+            mode = configured.stat().st_mode
+        except OSError:
+            _fail(
+                WorkspaceErrorCode.INVALID_PATH,
+                "selected Conda environment interpreter is unavailable",
+                path=configured,
+            )
+        if not stat.S_ISREG(mode) or not os.access(configured, os.X_OK):
+            _fail(
+                WorkspaceErrorCode.INVALID_PATH,
+                "selected Conda environment interpreter is not executable",
+                path=configured,
+            )
+        # Preserve the configured environment path instead of its symlink target;
+        # this value owns Pyright configuration and runtime identity.
+        return CondaEnvironment(name=selected, interpreter=configured)
 
 
 class WorkspacePolicy:
-    """Resolve only v1 workspace identities and enforce their path boundary."""
+    """Resolve workspace identities and enforce the read/write path boundary."""
 
     def __init__(
         self,
         *,
-        ms_roots: PinnedMsRoots,
-        allowed_non_git_root: Path = TRANSFORMERS_ROOT,
+        conda_envs_root: Path = CONDA_ENVS_ROOT,
         data_root: Path = DATA_ROOT,
     ) -> None:
-        self._ms_roots = ms_roots
-        self._allowed_non_git_root = _resolve_existing(allowed_non_git_root, purpose="allowlisted non-Git root")
+        self._environments = CondaEnvironmentResolver(conda_envs_root)
         self._data_root = _resolve_existing(data_root, purpose="data root")
 
-    @property
-    def allowed_non_git_root(self) -> Path:
-        return self._allowed_non_git_root
-
-    def resolve_activation(self, activation_path: str | Path) -> WorkspaceIdentity:
+    def resolve_activation(
+        self,
+        activation_path: str | Path,
+        python_environment: str | None = None,
+    ) -> WorkspaceIdentity:
         """Validate one absolute activation path and return its physical identity."""
 
         supplied = Path(activation_path)
         if not supplied.is_absolute():
             _fail(WorkspaceErrorCode.INVALID_PATH, "activation path must be absolute")
+        environment = self._environments.resolve(python_environment)
         resolved = _resolve_existing(supplied, purpose="activation path")
         if not resolved.is_dir():
             _fail(WorkspaceErrorCode.INVALID_PATH, "activation path must be a directory", path=resolved)
         git_root = _git_top_level(resolved)
         if git_root is not None:
-            return WorkspaceIdentity(root=git_root, kind=WorkspaceKind.GIT, working_subdirectory=resolved)
-        if resolved == self._allowed_non_git_root:
             return WorkspaceIdentity(
-                root=resolved,
-                kind=WorkspaceKind.ALLOWLISTED_NON_GIT,
+                root=git_root,
+                kind=WorkspaceKind.GIT,
                 working_subdirectory=resolved,
+                python_environment=environment.name,
+                python_interpreter=environment.interpreter,
             )
-        _fail(
-            WorkspaceErrorCode.UNTRUSTED_ROOT,
-            "activation path is not a Git workspace or exact allowlisted root",
-            path=resolved,
+        return WorkspaceIdentity(
+            root=resolved,
+            kind=WorkspaceKind.NON_GIT_READ_ONLY,
+            working_subdirectory=resolved,
+            python_environment=environment.name,
+            python_interpreter=environment.interpreter,
         )
 
     def classify_semantic_location(self, identity: WorkspaceIdentity, path: str | Path) -> SemanticLocation:
@@ -205,9 +191,7 @@ class WorkspacePolicy:
         resolved = _resolve_existing(Path(path), purpose="semantic location")
         if _is_within(resolved, identity.root):
             return SemanticLocation(resolved, LocationKind.WORKSPACE)
-        if _is_within(resolved, self._data_root) or self._ms_roots.contains_semantic_path(resolved):
-            return SemanticLocation(resolved, LocationKind.READ_ONLY_EXTERNAL)
-        _fail(WorkspaceErrorCode.UNTRUSTED_ROOT, "semantic location is outside trusted query roots", path=resolved)
+        return SemanticLocation(resolved, LocationKind.READ_ONLY_EXTERNAL)
 
     def authorize_path_operand(
         self,
@@ -236,8 +220,6 @@ class WorkspacePolicy:
         """
 
         lexical = _lexical_workspace_path(identity, Path(path))
-        if self._ms_roots.contains_conda_path(lexical):
-            _fail(WorkspaceErrorCode.READ_ONLY_ROOT, "conda environment paths are read-only", path=lexical)
         if identity.kind is not WorkspaceKind.GIT or not _is_within(identity.root, self._data_root):
             _fail(WorkspaceErrorCode.READ_ONLY_ROOT, "only Git workspaces below /data are editable", path=lexical)
         if not _is_within(lexical, identity.root):

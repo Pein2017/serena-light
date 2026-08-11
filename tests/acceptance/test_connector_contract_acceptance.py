@@ -79,7 +79,6 @@ from serena_light.lsp.state import DiagnosticsSnapshot, DiagnosticsState
 from serena_light.runtime_files import LEGACY_BUILD_IDENTITY, BearerSecret
 from serena_light.tools.editing import NotificationResult, ReplacementNotification
 from serena_light.workspace.identity import (
-    PinnedMsRoots,
     WorkspaceIdentity,
     WorkspaceKind,
     WorkspacePolicy,
@@ -344,7 +343,10 @@ class _ObservedService:
 
     def __init__(
         self,
-        service: WorkspaceDaemonService[tuple[WorkspaceKind, Path], WorkspaceRuntime],
+        service: WorkspaceDaemonService[
+            tuple[WorkspaceKind, Path, str, Path],
+            WorkspaceRuntime,
+        ],
         semantic_calls: list[str],
     ) -> None:
         self._service = service
@@ -402,8 +404,13 @@ class _LostResponseSession:
     async def release_lease(self, lease_id: str) -> None:
         await self._inner.release_lease(lease_id)
 
-    async def activate_workspace(self, lease_id: str, path: Path) -> types.CallToolResult:
-        return await self._inner.activate_workspace(lease_id, path)
+    async def activate_workspace(
+        self,
+        lease_id: str,
+        path: Path,
+        python_environment: str | None = None,
+    ) -> types.CallToolResult:
+        return await self._inner.activate_workspace(lease_id, path, python_environment)
 
     async def list_tools(self) -> types.ListToolsResult:
         return await self._inner.list_tools()
@@ -475,17 +482,11 @@ def _policy(tmp_path: Path) -> tuple[WorkspacePolicy, Path]:
     transformers.mkdir(parents=True)
     interpreter = prefix / "bin" / "python"
     interpreter.parent.mkdir()
-    interpreter.touch()
+    interpreter.write_text("#!/bin/sh\n")
+    interpreter.chmod(0o755)
     return (
         WorkspacePolicy(
-            ms_roots=PinnedMsRoots(
-                interpreter=interpreter.resolve(),
-                stdlib=purelib.parent.resolve(),
-                purelib=purelib.resolve(),
-                platlib=purelib.resolve(),
-                conda_prefix=prefix.resolve(),
-            ),
-            allowed_non_git_root=transformers,
+            conda_envs_root=tmp_path,
             data_root=data_root,
         ),
         data_root,
@@ -583,10 +584,16 @@ def _acceptance(
         adapters[context.family] = adapter
         return adapter
 
-    def build_runtime(key: tuple[WorkspaceKind, Path]) -> WorkspaceRuntime:
-        kind, workspace_root = key
+    def build_runtime(key: tuple[WorkspaceKind, Path, str, Path]) -> WorkspaceRuntime:
+        kind, workspace_root, python_environment, python_interpreter = key
         runtime = WorkspaceRuntime(
-            WorkspaceIdentity(root=workspace_root, kind=kind, working_subdirectory=workspace_root),
+            WorkspaceIdentity(
+                root=workspace_root,
+                kind=kind,
+                working_subdirectory=workspace_root,
+                python_environment=python_environment,
+                python_interpreter=python_interpreter,
+            ),
             path_policy=policy,
             attributors={family: _attributor(family) for family in _EXTENSIONS},
             adapter_factories={family: cast(AdapterFactory, build_adapter) for family in _EXTENSIONS},
@@ -604,9 +611,13 @@ def _acceptance(
         return runtime
 
     service = _ObservedService(
-        WorkspaceDaemonService[tuple[WorkspaceKind, Path], WorkspaceRuntime](
+        WorkspaceDaemonService[tuple[WorkspaceKind, Path, str, Path], WorkspaceRuntime](
             lifecycle=LeaseLifecycle(clock=time.monotonic),
-            registry=WorkspaceRuntimeRegistry[tuple[WorkspaceKind, Path], WorkspaceRuntime, UUID](build_runtime),
+            registry=WorkspaceRuntimeRegistry[
+                tuple[WorkspaceKind, Path, str, Path],
+                WorkspaceRuntime,
+                UUID,
+            ](build_runtime),
             resolver=policy,
             runtime_stopper=lambda runtime: runtime.stop(),
         ),

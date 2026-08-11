@@ -200,7 +200,7 @@ typed retryable `NOT_READY` with reason
 guarantee is anchored at the call's own final guarded byte observation, not
 at response-delivery time — there is **no background watcher**; a write that
 lands after that observation is only ever picked up by the *next* call's own
-admission. For the explicitly trusted non-Git conda `ms` transformers root,
+admission. For any exact read-only non-Git root,
 a scoped/indexed read uses targeted stat-plus-byte pre/post validation, while
 a global, directory, or not-yet-indexed read on that root instead runs a
 bounded no-symlink full-root pre/post scan, because a targeted stat cannot
@@ -265,9 +265,10 @@ requires a single file `relative_path` and does not enumerate a directory
 such as `"."`; host `rg`/`find` owns that lexical discovery route and no lexical
 MCP replacement is currently planned.
 
-## Current schema-4 agent interaction contract
+## Current schema-5 agent interaction contract
 
-The current public tool schema is version 4. The archived compact-interaction
+The current public tool schema is version 5. It adds binding-scoped Python
+environment selection and flexible read-only non-Git roots. The archived compact-interaction
 revision owns its success presentation; the archived `tighten-query-recovery`
 revision changes only initialize/tool guidance and deterministic error
 correction evidence. It preserves the existing semantic, freshness, editing,
@@ -277,11 +278,12 @@ until their holders drain; fresh clients resolve the current source build.
 Both the outer stdio connector and inner daemon publish this exact source-owned
 initialize guidance from `serena_light.instructions.AGENT_INSTRUCTIONS`:
 
-> Experimental Python/JS/TS semantic navigation. Shell cd won't rebind; activate_workspace needs absolute path. Use rg/find for files/text; prefer Serena Light for symbols/references/diagnostics. Report issues to user.
+> Experimental Python/JS/TS. Shell cd won't rebind; activate_workspace takes an absolute path and optional Conda env (default ms). Use rg/find for text; Serena Light for symbols/references/diagnostics; report friction.
 
 The short global instruction is deliberately complemented by the owning tool
-descriptions: startup cwd is auto-bound; `activate_workspace` switches or
-returns to an absolute root; unfamiliar files start with a depth-0 overview;
+descriptions: startup cwd is auto-bound with `ms`; `activate_workspace` switches or
+returns to any existing absolute directory and optionally selects another installed
+Conda environment for Python; non-Git roots remain read-only; unfamiliar files start with a depth-0 overview;
 an ambiguous symbol is retried with one returned qualified name path;
 reference snippets remain opt-in; diagnostics remain explicit after a
 meaningful edit group; and runtime status is for debug/build/readiness rather

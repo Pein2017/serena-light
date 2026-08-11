@@ -14,7 +14,13 @@ from serena_light import cli
 from serena_light.daemon.leases import LEASE_EXPIRY_SECONDS, WARM_GRACE_SECONDS, LeaseLifecycle
 from serena_light.daemon.server import LeaseExpiredError
 from serena_light.daemon.service import WorkspaceDaemonService
-from serena_light.workspace.identity import WorkspaceIdentity, WorkspaceKind
+from serena_light.workspace.identity import (
+    WorkspaceError,
+    WorkspaceErrorCode,
+    WorkspaceErrorData,
+    WorkspaceIdentity,
+    WorkspaceKind,
+)
 from serena_light.workspace.registry import ResolvedWorkspace, WorkspaceRuntimeRegistry
 
 
@@ -69,15 +75,18 @@ def test_bound_query_invalid_path_retains_active_workspace_and_recovery_action()
     activation_paths: list[Path] = []
     runtime = QueryRuntime(identity, [])
 
-    def resolve(path: Path) -> ResolvedWorkspace[tuple[WorkspaceKind, Path]]:
+    def resolve(
+        path: Path,
+        _python_environment: str,
+    ) -> ResolvedWorkspace[tuple[WorkspaceKind, Path, str, Path]]:
         activation_paths.append(path)
         return ResolvedWorkspace(identity.registry_key, identity.working_subdirectory)
 
-    registry = WorkspaceRuntimeRegistry[tuple[WorkspaceKind, Path], QueryRuntime, UUID](
+    registry = WorkspaceRuntimeRegistry[tuple[WorkspaceKind, Path, str, Path], QueryRuntime, UUID](
         lambda _key: runtime
     )
-    service = WorkspaceDaemonService[tuple[WorkspaceKind, Path], QueryRuntime](
-        lifecycle=LeaseLifecycle[tuple[WorkspaceKind, Path], QueryRuntime](clock=lambda: 0.0),
+    service = WorkspaceDaemonService[tuple[WorkspaceKind, Path, str, Path], QueryRuntime](
+        lifecycle=LeaseLifecycle[tuple[WorkspaceKind, Path, str, Path], QueryRuntime](clock=lambda: 0.0),
         registry=registry,
         resolver=resolve,
         runtime_stopper=lambda _runtime: None,
@@ -143,7 +152,7 @@ class FakeClock:
         self.now += seconds
 
 
-def resolution(path: Path) -> ResolvedWorkspace[str]:
+def resolution(path: Path, _python_environment: str = "ms") -> ResolvedWorkspace[str]:
     return ResolvedWorkspace(identity=str(path), working_subdirectory=path)
 
 
@@ -151,7 +160,7 @@ def make_service(
     *,
     clock: FakeClock | None = None,
     factory: Callable[[str], Runtime] | None = None,
-    resolver: Callable[[Path], ResolvedWorkspace[str]] = resolution,
+    resolver: Callable[..., ResolvedWorkspace[str]] = resolution,
     debug_reporter: Callable[[str, str], object] | None = None,
 ) -> tuple[
     WorkspaceDaemonService[str, Runtime],
@@ -170,10 +179,13 @@ def make_service(
         stopped.append(runtime)
         stop_threads.append(threading.get_ident())
 
+    def selected_resolver(path: Path, python_environment: str) -> ResolvedWorkspace[str]:
+        return resolver(path, python_environment)
+
     service = WorkspaceDaemonService[str, Runtime](
         lifecycle=LeaseLifecycle[str, Runtime](clock=service_clock),
         registry=registry,
-        resolver=resolver,
+        resolver=selected_resolver,
         runtime_stopper=stop,
         debug_reporter=debug_reporter,
     )
@@ -256,6 +268,73 @@ def test_same_root_reuses_runtime_while_cross_root_bindings_remain_isolated() ->
     run(scenario())
 
 
+def test_environment_selection_is_lease_bound_and_failed_switch_keeps_old_binding() -> None:
+    created: list[Runtime] = []
+    calls: list[tuple[Path, str]] = []
+
+    def resolver(path: Path, python_environment: str) -> ResolvedWorkspace[str]:
+        calls.append((path, python_environment))
+        if python_environment == "missing":
+            raise WorkspaceError(
+                WorkspaceErrorData(
+                    code=WorkspaceErrorCode.INVALID_PATH,
+                    message="selected Conda environment is unavailable",
+                    path=path,
+                )
+            )
+        return ResolvedWorkspace(
+            identity=f"{path}:{python_environment}",
+            working_subdirectory=path,
+        )
+
+    def factory(identity: str) -> Runtime:
+        runtime = Runtime(identity)
+        created.append(runtime)
+        return runtime
+
+    service, _registry, _clock, _stopped, _threads = make_service(
+        factory=factory,
+        resolver=cast(Callable[[Path], ResolvedWorkspace[str]], resolver),
+    )
+
+    async def scenario() -> None:
+        first = await acquire(service, "environment-a")
+        second = await acquire(service, "environment-b")
+
+        default = await service.activate_workspace(lease_id=first, absolute_path="/data/shared")
+        explicit = await service.activate_workspace(
+            lease_id=second,
+            absolute_path="/data/shared",
+            python_environment="llm-framework-study",
+        )
+        first_binding = await service.binding_for(lease_id=first)
+        second_binding = await service.binding_for(lease_id=second)
+
+        default_workspace = cast(Mapping[str, object], default["workspace"])
+        explicit_workspace = cast(Mapping[str, object], explicit["workspace"])
+        assert default_workspace["identity"] == "/data/shared:ms"
+        assert explicit_workspace["identity"] == "/data/shared:llm-framework-study"
+        assert first_binding.runtime is not second_binding.runtime
+        assert len(created) == 2
+
+        failed = await service.activate_workspace(
+            lease_id=first,
+            absolute_path="/data/shared",
+            python_environment="missing",
+        )
+
+        failed_error = cast(Mapping[str, object], failed["error"])
+        assert failed_error["code"] == "INVALID_PATH"
+        assert await service.binding_for(lease_id=first) == first_binding
+        assert calls == [
+            (Path("/data/shared"), "ms"),
+            (Path("/data/shared"), "llm-framework-study"),
+            (Path("/data/shared"), "missing"),
+        ]
+
+    run(scenario())
+
+
 def test_heartbeat_stays_responsive_while_runtime_acquisition_blocks() -> None:
     acquisition_started = threading.Event()
     unblock_acquisition = threading.Event()
@@ -284,11 +363,11 @@ def test_release_during_off_loop_resolution_prevents_registry_orphan() -> None:
     unblock_resolution = threading.Event()
     resolver_threads: list[int] = []
 
-    def blocking_resolver(path: Path) -> ResolvedWorkspace[str]:
+    def blocking_resolver(path: Path, python_environment: str) -> ResolvedWorkspace[str]:
         resolver_threads.append(threading.get_ident())
         resolution_started.set()
         assert unblock_resolution.wait(timeout=5)
-        return resolution(path)
+        return resolution(path, python_environment)
 
     service, registry, _clock, stopped, _threads = make_service(resolver=blocking_resolver)
     caller_thread = threading.get_ident()
@@ -343,7 +422,9 @@ def test_expiry_during_cross_root_acquisition_rolls_back_orphan_runtime() -> Non
 
 def test_failed_same_root_refresh_preserves_prior_binding_and_holder_count() -> None:
     service, registry, _clock, stopped, _threads = make_service(
-        resolver=lambda path: ResolvedWorkspace(identity=str(path.parent), working_subdirectory=path)
+        resolver=lambda path, _python_environment: ResolvedWorkspace(
+            identity=str(path.parent), working_subdirectory=path
+        )
     )
 
     async def scenario() -> None:
@@ -378,7 +459,9 @@ def test_failed_cross_root_refresh_restores_prior_binding_and_retires_new_runtim
 
     service, registry, _clock, stopped, _threads = make_service(
         factory=factory,
-        resolver=lambda path: ResolvedWorkspace(identity=str(path.parent), working_subdirectory=path),
+        resolver=lambda path, _python_environment: ResolvedWorkspace(
+            identity=str(path.parent), working_subdirectory=path
+        ),
     )
 
     async def scenario() -> None:
@@ -409,7 +492,9 @@ def test_failed_cross_root_refresh_restores_prior_binding_and_retires_new_runtim
 
 def test_failed_refresh_keeps_an_existing_warm_runtime_retained() -> None:
     service, registry, _clock, stopped, _threads = make_service(
-        resolver=lambda path: ResolvedWorkspace(identity=str(path.parent), working_subdirectory=path)
+        resolver=lambda path, _python_environment: ResolvedWorkspace(
+            identity=str(path.parent), working_subdirectory=path
+        )
     )
 
     async def scenario() -> None:
