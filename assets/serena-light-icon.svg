@@ -1,0 +1,29 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" role="img" aria-labelledby="title desc">
+  <title id="title">Serena Light</title>
+  <desc id="desc">A luminous semantic navigation compass.</desc>
+  <defs>
+    <linearGradient id="bg" x1="28" y1="20" x2="228" y2="236" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#241B4B"/>
+      <stop offset="1" stop-color="#101426"/>
+    </linearGradient>
+    <linearGradient id="beam" x1="64" y1="54" x2="194" y2="202" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#A78BFA"/>
+      <stop offset="0.52" stop-color="#6D5EF7"/>
+      <stop offset="1" stop-color="#45E6D0"/>
+    </linearGradient>
+    <filter id="glow" x="-40%" y="-40%" width="180%" height="180%">
+      <feGaussianBlur stdDeviation="5" result="blur"/>
+      <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+  </defs>
+  <rect x="8" y="8" width="240" height="240" rx="56" fill="url(#bg)"/>
+  <circle cx="128" cy="128" r="72" fill="none" stroke="#FFFFFF" stroke-opacity=".12" stroke-width="2"/>
+  <path d="M128 42v18M128 196v18M42 128h18M196 128h18" stroke="#C4B5FD" stroke-linecap="round" stroke-width="5"/>
+  <path d="M84 84c14-17 37-25 58-17 18 7 30 22 30 39 0 24-21 34-43 37-20 3-35 9-35 25 0 12 11 22 26 24 18 3 38-4 51-20" fill="none" stroke="url(#beam)" stroke-linecap="round" stroke-width="14" filter="url(#glow)"/>
+  <path d="m169 167 8 22-22-8" fill="none" stroke="#45E6D0" stroke-linecap="round" stroke-linejoin="round" stroke-width="6"/>
+  <g fill="#F8FAFC" stroke="#6D5EF7" stroke-width="4">
+    <circle cx="84" cy="84" r="8"/>
+    <circle cx="172" cy="106" r="8"/>
+    <circle cx="94" cy="168" r="8"/>
+  </g>
+</svg>

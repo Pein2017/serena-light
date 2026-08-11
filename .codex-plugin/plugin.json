@@ -1,0 +1,42 @@
+{
+  "name": "serena-light",
+  "version": "0.1.0+codex.20260807035408",
+  "description": "Experimental shared semantic code navigation and diagnostics for coding agents.",
+  "author": {
+    "name": "Pein",
+    "email": "852128461@qq.com",
+    "url": "https://github.com/Pein2017"
+  },
+  "homepage": "https://github.com/Pein2017/serena-light",
+  "repository": "https://github.com/Pein2017/serena-light",
+  "license": "MIT",
+  "keywords": [
+    "codex",
+    "mcp",
+    "semantic-navigation",
+    "language-server",
+    "coding-agents"
+  ],
+  "mcpServers": "./.mcp.json",
+  "interface": {
+    "displayName": "Serena Light",
+    "shortDescription": "Experimental shared semantic navigation for coding agents",
+    "longDescription": "Navigate Python and JavaScript/TypeScript code with compact symbol overviews, exact semantic lookup, references, implementations, LSP diagnostics, guarded symbol replacement, and workspace leases backed by a shared local daemon.",
+    "developerName": "Pein",
+    "category": "Coding",
+    "capabilities": [
+      "Read",
+      "Write",
+      "Interactive"
+    ],
+    "websiteURL": "https://github.com/Pein2017/serena-light",
+    "brandColor": "#6D5EF7",
+    "composerIcon": "./assets/serena-light-icon.svg",
+    "logo": "./assets/serena-light-logo.svg",
+    "defaultPrompt": [
+      "Map the symbols in a Python or TypeScript file with Serena Light.",
+      "Find a symbol and trace its semantic references with Serena Light.",
+      "Check LSP diagnostics for the code I just changed."
+    ]
+  }
+}

@@ -20,6 +20,20 @@ the final dual audit, stable-spec sync, and archive all pass.
 JetBrains integration, UI, memories, telemetry, broad logging, and unrelated
 editing operations are intentionally out of scope.
 
+## Codex plugin packaging
+
+Codex can install this repository as the branded `serena-light` plugin from
+the local `coordexp-local` marketplace. The plugin is intentionally a thin
+package: `.codex-plugin/plugin.json` owns its visual identity and `.mcp.json`
+starts the same service-owned connector used by every other client. It does
+not copy the daemon, add a UI, or change the public MCP tool contract.
+
+The plugin MCP entry deliberately omits `cwd`. A connector must inherit the
+new Codex task's startup directory so its first workspace-dependent call keeps
+the existing lazy-binding behavior. Claude Code and CC Agents continue to use
+their direct native MCP registration because Codex plugin metadata is not a
+cross-client packaging format.
+
 ## Admission status
 
 Section 1 passed after the source-scope contract was corrected to keep Git
@@ -71,9 +85,9 @@ See
 [the final acceptance record](openspec/changes/archive/2026-07-29-build-serena-light-v1/final-acceptance.md)
 for the full gate evidence and residual risks.
 
-See [client registration](docs/client-registration.md) for parallel setup and
-rollback, and [the compatibility inventory](docs/compatibility.json) for the
-public contract delta.
+See [client registration](docs/client-registration.md) for plugin installation,
+cross-client setup, and rollback, and [the compatibility inventory](docs/compatibility.json)
+for the public contract delta.
 
 ## Correctness revision archived
 
@@ -263,7 +277,7 @@ until their holders drain; fresh clients resolve the current source build.
 Both the outer stdio connector and inner daemon publish this exact source-owned
 initialize guidance from `serena_light.instructions.AGENT_INSTRUCTIONS`:
 
-> Experimental Python/JS/TS semantic navigation/diagnostics. Shell cd does not rebind; activate_workspace requires absolute path. Use rg/find for files/text, then overview/symbol tools. Report friction/issues to user.
+> Experimental Python/JS/TS semantic navigation. Shell cd won't rebind; activate_workspace needs absolute path. Use rg/find for files/text; prefer Serena Light for symbols/references/diagnostics. Report issues to user.
 
 The short global instruction is deliberately complemented by the owning tool
 descriptions: startup cwd is auto-bound; `activate_workspace` switches or

@@ -174,9 +174,32 @@ def test_two_authenticated_streamable_http_sessions_have_distinct_leases() -> No
         }
         assert all(isinstance(tool.get("description"), str) and tool["description"] for tool in tools)
         activation = next(tool for tool in tools if tool["name"] == "activate_workspace")
+        assert activation["title"] == "Activate Workspace"
+        assert _mapping(activation["annotations"]) == {
+            "readOnlyHint": False,
+            "destructiveHint": False,
+            "idempotentHint": True,
+            "openWorldHint": False,
+        }
+        assert _mapping(activation["_meta"]) == {
+            "openai/toolInvocation/invoking": "Binding workspace…",
+            "openai/toolInvocation/invoked": "Workspace ready",
+        }
         activation_schema = _mapping(activation["inputSchema"])
         assert activation_schema["required"] == ["absolute_path"]
         assert "lease_id" not in _mapping(activation_schema["properties"])
+        symbol = next(tool for tool in tools if tool["name"] == "find_symbol")
+        assert symbol["title"] == "Find Symbol"
+        assert _mapping(symbol["annotations"])["readOnlyHint"] is True
+        edit = next(tool for tool in tools if tool["name"] == "replace_symbol_body")
+        assert edit["title"] == "Replace Symbol Body"
+        assert _mapping(edit["annotations"])["destructiveHint"] is True
+        for tool in (activation, symbol, edit):
+            status = _mapping(tool["_meta"])
+            assert all(
+                isinstance(value, str) and 0 < len(value) <= 64
+                for value in status.values()
+            )
         declaration = next(tool for tool in tools if tool["name"] == "find_declaration")
         declaration_properties = _mapping(_mapping(declaration["inputSchema"])["properties"])
         regex_schema = _mapping(declaration_properties["regex"])

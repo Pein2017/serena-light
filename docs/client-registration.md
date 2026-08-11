@@ -57,8 +57,24 @@ unchanged. Existing leased clients stay on their prior build slot until restart.
 
 ## Codex
 
-Add this parallel entry to `/data/CoordExp/.codex/config.toml` only when
-running the acceptance procedure:
+Codex should load Serena Light through the branded `serena-light@coordexp-local`
+plugin. The local marketplace at `/data/CoordExp/.agents/plugins/marketplace.json`
+points to this checkout, and the plugin's `.mcp.json` starts the same
+service-owned connector documented above. Install or refresh it with:
+
+```bash
+codex plugin add serena-light@coordexp-local
+```
+
+The plugin MCP entry intentionally has no `cwd`: the connector inherits the
+new task's startup directory and preserves lazy workspace binding. Start a new
+Codex task after installation or refresh, then verify `serena-light` appears in
+the MCP server/tool list and call `get_runtime_status`.
+
+Do not retain the direct `[mcp_servers.serena-light]` entry while the plugin is
+enabled. A same-name user MCP shadows the plugin-provided server and loses the
+plugin identity and visual presentation. The direct entry remains a rollback
+fallback when the plugin is disabled:
 
 ```toml
 [mcp_servers.serena-light]
@@ -66,12 +82,9 @@ command = "/data/CoordExp/.codex/runtime/serena-light/deps/eff6ebdf252faff7f77cb
 args = []
 ```
 
-Restart Codex after changing its configuration. Start the new task from the
-target workspace directory; the connector binds that inherited cwd. Verify the
-MCP server/tool list contains both canonical `serena` and parallel
-`serena-light`, then call `get_runtime_status` on the latter. Clients may
-normalize the server name when constructing an internal tool prefix. Do not edit the
-existing `[mcp_servers.serena]` block or its `serena-hooks` entries.
+Restart Codex after changing either registration mode. Start the new task from
+the target workspace directory; the connector binds that inherited cwd. Keep
+canonical `serena` and its hooks unchanged during the parallel trial.
 
 ## Claude Code
 
@@ -302,8 +315,9 @@ holders remain served. `runtime_stopped=true` means cleanup actually settled;
 will be retried while status remains non-idle. The shared daemon may stay warm
 after a normal release.
 
-To roll back a parallel trial, stop the affected client(s), remove only the
-`serena-light` registration you added, and restart those clients. Leave
+To roll back a parallel trial, stop the affected client(s), disable the Codex
+plugin or remove only the direct `serena-light` registration you added, and
+restart those clients. Leave
 canonical `serena`, its hooks, its command, and its runtime untouched. If the
 daemon remains after clients have stopped, use normal process inspection and
 stop only the identified `serena-light` daemon; never stop canonical Serena as

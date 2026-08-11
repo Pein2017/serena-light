@@ -2,9 +2,9 @@
 
 
 AGENT_INSTRUCTIONS = (
-    "Experimental Python/JS/TS semantic navigation/diagnostics. Shell cd does not rebind; "
-    "activate_workspace requires absolute path. Use rg/find for files/text, then "
-    "overview/symbol tools. Report friction/issues to user."
+    "Experimental Python/JS/TS semantic navigation. Shell cd won't rebind; "
+    "activate_workspace needs absolute path. Use rg/find for files/text; prefer "
+    "Serena Light for symbols/references/diagnostics. Report issues to user."
 )
 
 

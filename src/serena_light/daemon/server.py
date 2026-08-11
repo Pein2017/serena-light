@@ -67,6 +67,33 @@ _INTERNAL_NAVIGATION_MAX_ANSWER_CHARS = 2_147_483_647
 _DIAGNOSTIC_OPERATIONS = frozenset(
     {"get_diagnostics_for_file", "get_diagnostics_for_symbol"}
 )
+_READ_ONLY_TOOL_ANNOTATIONS = types.ToolAnnotations(
+    readOnlyHint=True,
+    destructiveHint=False,
+    idempotentHint=True,
+    openWorldHint=False,
+)
+_SESSION_TOOL_ANNOTATIONS = types.ToolAnnotations(
+    readOnlyHint=False,
+    destructiveHint=False,
+    idempotentHint=True,
+    openWorldHint=False,
+)
+_EDIT_TOOL_ANNOTATIONS = types.ToolAnnotations(
+    readOnlyHint=False,
+    destructiveHint=True,
+    idempotentHint=False,
+    openWorldHint=False,
+)
+
+
+def _tool_status(invoking: str, invoked: str) -> dict[str, str]:
+    """Return bounded OpenAI-compatible presentation text for one tool."""
+
+    return {
+        "openai/toolInvocation/invoking": invoking,
+        "openai/toolInvocation/invoked": invoked,
+    }
 
 
 class DaemonConfigurationError(ValueError):
@@ -293,7 +320,13 @@ def create_daemon_app(
         except (LeaseExpiredError, LifecycleLeaseExpiredError):
             return _lease_expired()
 
-    @mcp.tool(name="activate_workspace", structured_output=True)
+    @mcp.tool(
+        name="activate_workspace",
+        title="Activate Workspace",
+        annotations=_SESSION_TOOL_ANNOTATIONS,
+        meta=_tool_status("Binding workspace…", "Workspace ready"),
+        structured_output=True,
+    )
     async def activate_workspace(
         absolute_path: Annotated[
             str,
@@ -398,7 +431,13 @@ def create_daemon_app(
         except (LeaseExpiredError, LifecycleLeaseExpiredError):
             return _lease_expired()
 
-    @mcp.tool(name="release_workspace", structured_output=True)
+    @mcp.tool(
+        name="release_workspace",
+        title="Release Workspace",
+        annotations=_SESSION_TOOL_ANNOTATIONS,
+        meta=_tool_status("Releasing workspace…", "Workspace released"),
+        structured_output=True,
+    )
     async def release_workspace(
         context: Context,
         immediate: Annotated[
@@ -424,7 +463,13 @@ def create_daemon_app(
         except (LeaseExpiredError, LifecycleLeaseExpiredError):
             return _lease_expired()
 
-    @mcp.tool(name="get_runtime_status", structured_output=True)
+    @mcp.tool(
+        name="get_runtime_status",
+        title="Inspect Runtime Status",
+        annotations=_READ_ONLY_TOOL_ANNOTATIONS,
+        meta=_tool_status("Checking Serena Light…", "Runtime status ready"),
+        structured_output=True,
+    )
     async def get_runtime_status(context: Context) -> dict[str, object]:
         """Workspace/generation/adapter/cleanup status for debug/build/readiness, not routine preflight."""
 
@@ -436,7 +481,13 @@ def create_daemon_app(
         assert isinstance(data, Mapping)
         return _success(_with_daemon_health({str(key): value for key, value in data.items()}, health))
 
-    @mcp.tool(name="get_symbols_overview", structured_output=True)
+    @mcp.tool(
+        name="get_symbols_overview",
+        title="Map File Symbols",
+        annotations=_READ_ONLY_TOOL_ANNOTATIONS,
+        meta=_tool_status("Mapping symbols…", "Symbol map ready"),
+        structured_output=True,
+    )
     async def get_symbols_overview(
         relative_path: Annotated[
             str,
@@ -485,7 +536,13 @@ def create_daemon_app(
             ),
         )
 
-    @mcp.tool(name="find_symbol", structured_output=True)
+    @mcp.tool(
+        name="find_symbol",
+        title="Find Symbol",
+        annotations=_READ_ONLY_TOOL_ANNOTATIONS,
+        meta=_tool_status("Locating symbol…", "Symbol results ready"),
+        structured_output=True,
+    )
     async def find_symbol(
         name_path: Annotated[
             str,
@@ -535,7 +592,13 @@ def create_daemon_app(
             ),
         )
 
-    @mcp.tool(name="find_declaration", structured_output=True)
+    @mcp.tool(
+        name="find_declaration",
+        title="Find Declaration",
+        annotations=_READ_ONLY_TOOL_ANNOTATIONS,
+        meta=_tool_status("Resolving declaration…", "Declaration ready"),
+        structured_output=True,
+    )
     async def find_declaration(
         relative_path: str,
         regex: Annotated[
@@ -572,7 +635,13 @@ def create_daemon_app(
             ),
         )
 
-    @mcp.tool(name="find_implementations", structured_output=True)
+    @mcp.tool(
+        name="find_implementations",
+        title="Find Implementations",
+        annotations=_READ_ONLY_TOOL_ANNOTATIONS,
+        meta=_tool_status("Finding implementations…", "Implementations ready"),
+        structured_output=True,
+    )
     async def find_implementations(
         name_path: Annotated[
             str,
@@ -607,7 +676,13 @@ def create_daemon_app(
             ),
         )
 
-    @mcp.tool(name="find_referencing_symbols", structured_output=True)
+    @mcp.tool(
+        name="find_referencing_symbols",
+        title="Trace Symbol References",
+        annotations=_READ_ONLY_TOOL_ANNOTATIONS,
+        meta=_tool_status("Tracing references…", "References ready"),
+        structured_output=True,
+    )
     async def find_referencing_symbols(
         name_path: Annotated[
             str,
@@ -641,7 +716,13 @@ def create_daemon_app(
             ),
         )
 
-    @mcp.tool(name="get_diagnostics_for_file", structured_output=True)
+    @mcp.tool(
+        name="get_diagnostics_for_file",
+        title="Check File Diagnostics",
+        annotations=_READ_ONLY_TOOL_ANNOTATIONS,
+        meta=_tool_status("Checking file diagnostics…", "File diagnostics ready"),
+        structured_output=True,
+    )
     async def get_diagnostics_for_file(
         relative_path: Annotated[
             str,
@@ -675,7 +756,13 @@ def create_daemon_app(
             ),
         )
 
-    @mcp.tool(name="get_diagnostics_for_symbol", structured_output=True)
+    @mcp.tool(
+        name="get_diagnostics_for_symbol",
+        title="Check Symbol Diagnostics",
+        annotations=_READ_ONLY_TOOL_ANNOTATIONS,
+        meta=_tool_status("Checking symbol diagnostics…", "Symbol diagnostics ready"),
+        structured_output=True,
+    )
     async def get_diagnostics_for_symbol(
         relative_path: Annotated[
             str,
@@ -714,7 +801,13 @@ def create_daemon_app(
             ),
         )
 
-    @mcp.tool(name="replace_symbol_body", structured_output=True)
+    @mcp.tool(
+        name="replace_symbol_body",
+        title="Replace Symbol Body",
+        annotations=_EDIT_TOOL_ANNOTATIONS,
+        meta=_tool_status("Replacing symbol…", "Symbol replaced"),
+        structured_output=True,
+    )
     async def replace_symbol_body(
         name_path: str,
         relative_path: str,

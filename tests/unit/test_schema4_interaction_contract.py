@@ -28,13 +28,14 @@ def test_agent_instructions_are_concise_and_cover_the_fixed_workflow() -> None:
         "Python/JS/TS",
         "semantic navigation",
         "diagnostics",
-        "does not rebind",
+        "won't rebind",
         "activate_workspace",
         "absolute path",
         "rg/find",
         "files/text",
-        "overview/symbol tools",
-        "Report friction/issues",
+        "prefer Serena Light",
+        "symbols/references/diagnostics",
+        "Report issues",
         "user",
     ):
         assert required in AGENT_INSTRUCTIONS
