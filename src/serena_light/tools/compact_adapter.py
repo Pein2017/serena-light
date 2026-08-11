@@ -296,7 +296,7 @@ def _symbol_records(
         if child_fact is not None and not isinstance(child_fact, bool):
             raise ValueError("symbol.has_children must be a boolean")
         if isinstance(child_fact, bool):
-            recovery = ExactBodyRecovery(child_fact)
+            recovery = ExactBodyRecovery(child_fact, records[0].path, records[0].record.name_path)
     return tuple(records), recovery
 
 

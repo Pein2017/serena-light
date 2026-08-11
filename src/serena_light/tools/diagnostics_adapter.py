@@ -64,13 +64,13 @@ def compact_diagnostics_result(
                 advisory,
                 omitted + len(findings) - 1,
             )
-            return minimum_required_chars_result(len(canonical_json(minimum)))
+            return minimum_required_chars_result(len(canonical_json(minimum)), max_answer_chars=budget)
         payload = _payload(workspace, path, retained, advisory, omitted + (len(findings) - len(retained)))
         text = canonical_json(payload)
         if len(text) <= budget:
             return render_payload(payload)
         if not retained:
-            return minimum_required_chars_result(len(text))
+            return minimum_required_chars_result(len(text), max_answer_chars=budget)
         retained = retained[:-1]
 
 

@@ -16,9 +16,10 @@ from serena_light.tools.navigation import DocumentNavigation, DocumentSymbolInpu
 
 
 class _Service:
-    def __init__(self) -> None:
+    def __init__(self, *, workspace_root: str = "/repo") -> None:
         self.lease_id = str(uuid4())
         self.semantic_calls: list[tuple[str, Mapping[str, object]]] = []
+        self.workspace_root = workspace_root
 
     async def status(self, *, mcp_session_id: str) -> Mapping[str, object]:
         return {"session": mcp_session_id}
@@ -49,7 +50,11 @@ class _Service:
     ) -> Mapping[str, object]:
         del lease_id
         self.semantic_calls.append((operation, dict(kwargs)))
-        workspace = {"root": "/repo", "kind": "git", "working_subdirectory": "/repo"}
+        workspace = {
+            "root": self.workspace_root,
+            "kind": "git",
+            "working_subdirectory": self.workspace_root,
+        }
         if operation == "find_symbol":
             if kwargs.get("name_path") == "invalid-path":
                 return {
@@ -117,6 +122,58 @@ class _Service:
                             "has_children": has_children,
                         },
                     },
+                    "workspace": workspace,
+                    "adapter": {"name": "pyright", "language": "python"},
+                    "generations": {"trust": 1, "program": 2, "document": 3, "index": 4},
+                    "truncation": {"truncated": False, "omitted_count": 0},
+                }
+            scoped_container = {
+                "global-huge-container": ("global", "src/global_target.py", "Global/Huge"),
+                "directory-huge-container": ("directory", "src/nested/directory_target.py", "Directory/Huge"),
+            }.get(cast(str, kwargs.get("name_path")))
+            if scoped_container is not None:
+                scope, target_path, target_name_path = scoped_container
+                body = "class Huge:\n" + "    value = 1\n" * 80
+                symbol = {
+                    "name_path": target_name_path,
+                    "kind": 5,
+                    "range": {
+                        "start": {"line": 0, "column": 0, "text_offset": 0, "byte_offset": 0},
+                        "end": {
+                            "line": body.count("\n"),
+                            "column": 0,
+                            "text_offset": len(body),
+                            "byte_offset": len(body),
+                        },
+                    },
+                    "body": body,
+                    "has_children": True,
+                }
+                if scope == "global":
+                    data: Mapping[str, object] = {
+                        "scope": "configured_program",
+                        "adapters": [],
+                        "symbols": [
+                            {
+                                **symbol,
+                                "relative_path": target_path,
+                                "sha256": "a" * 64,
+                                "location": {"uri": f"file:///repo/{target_path}", "range": symbol["range"]},
+                                "adapter": {"name": "pyright", "language": "python"},
+                                "generations": {"trust": 1, "program": 2, "document": 3, "index": 4},
+                            }
+                        ],
+                    }
+                else:
+                    data = {
+                        "relative_path": "src/nested",
+                        "scope": "directory",
+                        "name_path": "Huge",
+                        "symbols": [{"relative_path": target_path, "sha256": "a" * 64, "symbol": symbol}],
+                    }
+                return {
+                    "ok": True,
+                    "data": data,
                     "workspace": workspace,
                     "adapter": {"name": "pyright", "language": "python"},
                     "generations": {"trust": 1, "program": 2, "document": 3, "index": 4},
@@ -650,8 +707,8 @@ def test_real_fastmcp_diagnostics_rejects_a_first_finding_that_cannot_fit() -> N
     )
 
 
-def test_real_fastmcp_exact_body_errors_select_all_three_closed_recoveries() -> None:
-    service = _Service()
+def test_real_fastmcp_exact_body_errors_select_all_three_closed_recoveries_with_long_workspace() -> None:
+    service = _Service(workspace_root="/" + "/".join("workspace" for _ in range(80)))
     token = "b" * 48
     authorization = f"Bearer {token}"
     app = create_daemon_app(
@@ -698,6 +755,55 @@ def test_real_fastmcp_exact_body_errors_select_all_three_closed_recoveries() -> 
         assert details["field"] == "max_answer_chars"
         assert details["minimum_required_chars"] > 512
         assert details["next_action"] == expected[name]
+        assert "body" not in text and "has_children" not in text
+        assert "workspace" not in payload
+
+
+def test_real_fastmcp_scoped_container_recovery_identifies_the_matched_target_file() -> None:
+    service = _Service()
+    token = "c" * 48
+    authorization = f"Bearer {token}"
+    app = create_daemon_app(
+        service=cast(DaemonService, service),
+        bearer=BearerSecret(token),
+        daemon_id=str(uuid4()),
+    )
+
+    with TestClient(app, base_url="http://127.0.0.1:8000", client=("127.0.0.1", 50109)) as client:
+        session_id = _initialize(client, authorization)
+        results = {
+            scope: _tool_call(
+                client,
+                authorization,
+                session_id,
+                request_id,
+                "find_symbol",
+                {
+                    "name_path": name,
+                    "include_body": True,
+                    "max_answer_chars": 512,
+                    **({"relative_path": "src/nested"} if scope == "directory" else {}),
+                },
+                service.lease_id,
+            )
+            for request_id, (scope, name) in enumerate(
+                (("global", "global-huge-container"), ("directory", "directory-huge-container")),
+                start=2,
+            )
+        }
+
+    expected_targets = {
+        "global": ("src/global_target.py", "Global/Huge"),
+        "directory": ("src/nested/directory_target.py", "Directory/Huge"),
+    }
+    for scope, result in results.items():
+        text = result["content"][0]["text"]
+        payload = result["structuredContent"]
+        details = payload["error"]["details"]
+        assert len(text) <= 512
+        assert payload["ok"] is False
+        assert details["next_action"] == "overview_then_find_child_symbol"
+        assert (details["relative_path"], details["name_path"]) == expected_targets[scope]
         assert "body" not in text and "has_children" not in text
 
 

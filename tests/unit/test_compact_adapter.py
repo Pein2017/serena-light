@@ -446,6 +446,8 @@ def test_exact_body_child_fact_selects_recovery_but_never_reaches_success() -> N
     )
 
     assert oversized["error"]["details"]["next_action"] == "overview_then_find_child_symbol"
+    assert oversized["error"]["details"]["relative_path"] == "src/huge.py"
+    assert oversized["error"]["details"]["name_path"] == "Huge"
     assert body not in json.dumps(oversized, ensure_ascii=False)
     assert fitting["ok"] is True
     assert "has_children" not in json.dumps(fitting, ensure_ascii=False)

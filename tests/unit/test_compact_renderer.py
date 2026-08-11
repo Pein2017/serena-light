@@ -374,7 +374,7 @@ def test_oversized_container_recommends_child_navigation_without_partial_body() 
         "/repo",
         [record],
         max_answer_chars=512,
-        exact_body_recovery=ExactBodyRecovery(has_children=True),
+        exact_body_recovery=ExactBodyRecovery(has_children=True, relative_path="src/huge.py", name_path="Container"),
     )
 
     details = _structured(result)["error"]["details"]
@@ -396,7 +396,7 @@ def test_oversized_leaf_with_legal_minimum_recommends_exact_budget_retry() -> No
         "/repo",
         [record],
         max_answer_chars=512,
-        exact_body_recovery=ExactBodyRecovery(has_children=False),
+        exact_body_recovery=ExactBodyRecovery(has_children=False, relative_path="src/huge.py", name_path="leaf"),
     )
 
     details = _structured(result)["error"]["details"]
@@ -418,7 +418,11 @@ def test_oversized_leaf_above_public_maximum_recommends_exact_range_read() -> No
         "/repo",
         [record],
         max_answer_chars=512,
-        exact_body_recovery=ExactBodyRecovery(has_children=False),
+        exact_body_recovery=ExactBodyRecovery(
+            has_children=False,
+            relative_path="src/enormous.py",
+            name_path="enormous",
+        ),
     )
 
     details = _structured(result)["error"]["details"]
@@ -440,7 +444,7 @@ def test_fitting_exact_body_ignores_internal_recovery_fact() -> None:
         "/repo",
         [record],
         max_answer_chars=512,
-        exact_body_recovery=ExactBodyRecovery(has_children=False),
+        exact_body_recovery=ExactBodyRecovery(has_children=False, relative_path="src/leaf.py", name_path="leaf"),
     )
 
     assert _structured(result)["ok"] is True
@@ -558,3 +562,39 @@ def test_minimum_required_chars_helper_uses_existing_rich_error_shape() -> None:
             "details": {"field": "max_answer_chars", "minimum_required_chars": 734},
         },
     }
+
+
+@pytest.mark.parametrize(
+    "next_action",
+    (
+        "overview_then_find_child_symbol",
+        "retry_with_minimum_answer_chars",
+        "find_symbol_location_then_exact_file_read",
+    ),
+)
+def test_minimum_required_chars_error_sheds_long_optional_workspace_but_keeps_recovery(
+    next_action: str,
+) -> None:
+    root = "/" + "/".join("workspace" for _ in range(80))
+    result = minimum_required_chars_result(
+        734,
+        workspace=WorkspaceMetadata(root, "git", f"{root}/subdir"),
+        adapter=AdapterMetadata("pyright", "python"),
+        generations=GenerationMetadata(trust=2, program=3, document=4, index=5),
+        authorities=(
+            {
+                "adapter": {"name": "pyright", "language": "python"},
+                "generations": {"trust": 2, "program": 3, "document": 4, "index": 5},
+            },
+        ),
+        next_action=next_action,  # type: ignore[arg-type]
+        max_answer_chars=512,
+    )
+
+    payload = _structured(result)
+
+    assert len(_text(result)) <= 512
+    assert json.loads(_text(result)) == payload
+    assert payload["error"]["details"]["minimum_required_chars"] == 734
+    assert payload["error"]["details"]["next_action"] == next_action
+    assert "workspace" not in payload

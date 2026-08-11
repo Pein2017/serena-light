@@ -301,10 +301,14 @@ class ExactBodyRecovery:
     """Verified child fact used only when an exact body cannot fit."""
 
     has_children: bool
+    relative_path: str
+    name_path: str
 
     def __post_init__(self) -> None:
         if not isinstance(self.has_children, bool):
             raise TypeError("has_children must be a boolean")
+        object.__setattr__(self, "relative_path", _normalize_path(self.relative_path))
+        _non_empty(self.name_path, "symbol name_path")
 
 
 @dataclass(frozen=True, slots=True)
@@ -477,6 +481,9 @@ def render_bounded_records(
                 generations=error_generations,
                 authorities=error_authorities,
                 next_action=_exact_body_recovery_action(exact_body_recovery, minimum),
+                relative_path=_recovery_relative_path(exact_body_recovery),
+                name_path=_recovery_name_path(exact_body_recovery),
+                max_answer_chars=budget,
             )
         pruned = len(ordered) - len(retained)
         success = CompactNavigationSuccess(
@@ -495,6 +502,7 @@ def render_bounded_records(
                 adapter=error_adapter,
                 generations=error_generations,
                 authorities=error_authorities,
+                max_answer_chars=budget,
             )
         retained.pop()
 
@@ -526,6 +534,7 @@ def render_bounded_overview(
                 adapter=error_adapter,
                 generations=error_generations,
                 authorities=error_authorities,
+                max_answer_chars=budget,
             )
         success = CompactNavigationSuccess(workspace, retained, omitted + removed)
         rendered = render_success(success)
@@ -539,6 +548,7 @@ def render_bounded_overview(
                 adapter=error_adapter,
                 generations=error_generations,
                 authorities=error_authorities,
+                max_answer_chars=budget,
             )
         removed += removed_now
 
@@ -551,9 +561,13 @@ def minimum_required_chars_result(
     generations: GenerationMetadata | None = None,
     authorities: Sequence[Mapping[str, Any]] = (),
     next_action: ExactBodyRecoveryAction | None = None,
+    relative_path: str | None = None,
+    name_path: str | None = None,
+    max_answer_chars: int = DEFAULT_MAX_ANSWER_CHARS,
 ) -> types.CallToolResult:
     """Return the bounded budget error without changing general error semantics."""
 
+    budget = validate_max_answer_chars(max_answer_chars)
     if isinstance(minimum_required_chars, bool) or not isinstance(minimum_required_chars, int):
         raise TypeError("minimum_required_chars must be an integer")
     if minimum_required_chars < 0:
@@ -570,6 +584,14 @@ def minimum_required_chars_result(
         }:
             raise ValueError("next_action is not an exact-body recovery action")
         details["next_action"] = next_action
+    if (relative_path is None) != (name_path is None):
+        raise ValueError("exact-body recovery target requires both relative_path and name_path")
+    if relative_path is not None:
+        if next_action != "overview_then_find_child_symbol":
+            raise ValueError("exact-body recovery target requires child-overview recovery")
+        details["relative_path"] = _normalize_path(relative_path)
+        _non_empty(name_path, "symbol name_path")
+        details["name_path"] = name_path
     if authorities:
         details["authorities"] = list(authorities)
     envelope = error(
@@ -580,7 +602,7 @@ def minimum_required_chars_result(
         generations=generations,
     )
     payload = envelope.to_dict()
-    return render_payload(payload)
+    return render_payload(_bound_minimum_required_chars_error(payload, budget))
 
 
 def _exact_body_recovery_action(
@@ -594,6 +616,33 @@ def _exact_body_recovery_action(
     if minimum_required_chars <= MAX_MAX_ANSWER_CHARS:
         return "retry_with_minimum_answer_chars"
     return "find_symbol_location_then_exact_file_read"
+
+
+def _recovery_relative_path(recovery: ExactBodyRecovery | None) -> str | None:
+    return recovery.relative_path if recovery is not None and recovery.has_children else None
+
+
+def _recovery_name_path(recovery: ExactBodyRecovery | None) -> str | None:
+    return recovery.name_path if recovery is not None and recovery.has_children else None
+
+
+def _bound_minimum_required_chars_error(payload: dict[str, Any], budget: int) -> dict[str, Any]:
+    """Shed whole optional authority fields while retaining the measured recovery."""
+
+    if len(canonical_json(payload)) <= budget:
+        return payload
+    for field in ("workspace", "adapter", "generations"):
+        payload.pop(field, None)
+        if len(canonical_json(payload)) <= budget:
+            return payload
+    error_value = payload.get("error")
+    if isinstance(error_value, dict):
+        details = error_value.get("details")
+        if isinstance(details, dict):
+            details.pop("authorities", None)
+            if len(canonical_json(payload)) <= budget:
+                return payload
+    raise ValueError("minimum required chars error exceeds the public answer budget")
 
 
 def _validate_kind_filter(value: Sequence[str] | None, field: str) -> tuple[str, ...]:
