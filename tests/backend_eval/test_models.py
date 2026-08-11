@@ -12,6 +12,7 @@ from scripts.backend_eval.models import (
     PathRecord,
     PhaseBudget,
     ProductionIdentity,
+    ResolvedPackage,
     RootManifest,
     WriteDelta,
     canonical_json,
@@ -23,6 +24,7 @@ _SHA_B = "b" * 64
 _SHA_C = "c" * 64
 _SHA_D = "d" * 64
 _SHA_E = "e" * 64
+_GIT_REV = "f" * 40
 
 
 def _production_identity(**overrides: object) -> ProductionIdentity:
@@ -36,6 +38,17 @@ def _production_identity(**overrides: object) -> ProductionIdentity:
     }
     fields.update(overrides)
     return ProductionIdentity(**fields)
+
+
+def _resolved_package(name: str, **overrides: object) -> ResolvedPackage:
+    fields: dict[str, object] = {
+        "name": name,
+        "version": "0.0.1",
+        "requirement": f"{name}==0.0.1",
+        "artifact_hashes": ((f"{name}-0.0.1.tar.gz", _SHA_A),),
+    }
+    fields.update(overrides)
+    return ResolvedPackage(**fields)
 
 
 def _candidate_package(name: str = "ty", **overrides: object) -> CandidatePackage:
@@ -54,7 +67,12 @@ def _candidate_lock(**overrides: object) -> CandidateLock:
     fields: dict[str, object] = {
         "digest": _SHA_A,
         "exclude_newer": "2026-08-11T00:00:00Z",
-        "packages": (_candidate_package("ty"), _candidate_package("pyrefly")),
+        "resolved_packages": (
+            _resolved_package("click"),
+            _resolved_package("pyrefly"),
+            _resolved_package("ty"),
+        ),
+        "candidates": (_candidate_package("pyrefly"), _candidate_package("ty")),
     }
     fields.update(overrides)
     return CandidateLock(**fields)
@@ -64,6 +82,7 @@ def _path_record(path: str = "src/a.py", **overrides: object) -> PathRecord:
     fields: dict[str, object] = {
         "path": path,
         "kind": "file",
+        "disposition": "tracked",
         "size": 12,
         "mtime_ns": 1,
         "inode": 1,
@@ -78,10 +97,11 @@ def _root_manifest(**overrides: object) -> RootManifest:
     fields: dict[str, object] = {
         "root": "/data/CoordExp/serena-light",
         "kind": "git",
+        "source_revision": _GIT_REV,
         "inventory_digest": _SHA_A,
         "inventory_count": 1,
         "hashed_paths": (_path_record("src/a.py"),),
-        "metadata_paths": (_path_record("model_cache/blob.bin", content_sha256=None),),
+        "metadata_paths": (_path_record("model_cache/blob.bin", disposition="declared", content_sha256=None),),
         "manifest_digest": _SHA_B,
     }
     fields.update(overrides)
@@ -174,6 +194,31 @@ def test_production_identity_rejects_unsorted_runtime_paths() -> None:
         _production_identity(runtime_paths=(("server", "/data/x/server.py"), ("cli", "/data/x/cli.py")))
 
 
+def test_production_identity_rejects_non_tuple_runtime_paths() -> None:
+    with pytest.raises(ValueError, match="tuple"):
+        _production_identity(runtime_paths=[("cli", "/data/x/cli.py")])
+
+
+def test_resolved_package_rejects_noncanonical_artifact_hash() -> None:
+    with pytest.raises(ValueError, match="SHA-256"):
+        _resolved_package("ty", artifact_hashes=(("ty-0.0.1.tar.gz", "deadbeef"),))
+
+
+def test_resolved_package_rejects_duplicate_artifact_hash_filenames() -> None:
+    with pytest.raises(ValueError, match="duplicate"):
+        _resolved_package("ty", artifact_hashes=(("ty-0.0.1.tar.gz", _SHA_A), ("ty-0.0.1.tar.gz", _SHA_B)))
+
+
+def test_resolved_package_rejects_unsorted_artifact_hashes() -> None:
+    with pytest.raises(ValueError, match="sorted"):
+        _resolved_package("ty", artifact_hashes=(("z.tar.gz", _SHA_A), ("a.tar.gz", _SHA_B)))
+
+
+def test_resolved_package_rejects_non_tuple_artifact_hashes() -> None:
+    with pytest.raises(ValueError, match="tuple"):
+        _resolved_package("ty", artifact_hashes=[("ty-0.0.1.tar.gz", _SHA_A)])
+
+
 def test_candidate_package_rejects_absolute_executable_relpath() -> None:
     with pytest.raises(ValueError, match="relative"):
         _candidate_package(executable_relpath="/bin/ty")
@@ -189,14 +234,67 @@ def test_candidate_package_rejects_noncanonical_artifact_hash() -> None:
         _candidate_package(artifact_hashes=(("ty-0.0.1.tar.gz", "deadbeef"),))
 
 
-def test_candidate_lock_rejects_duplicate_package_names() -> None:
+def test_candidate_package_rejects_unsorted_artifact_hashes() -> None:
+    with pytest.raises(ValueError, match="sorted"):
+        _candidate_package(artifact_hashes=(("z.tar.gz", _SHA_A), ("a.tar.gz", _SHA_B)))
+
+
+def test_candidate_package_rejects_non_tuple_artifact_hashes() -> None:
+    with pytest.raises(ValueError, match="tuple"):
+        _candidate_package(artifact_hashes=[("ty-0.0.1.tar.gz", _SHA_A)])
+
+
+def test_candidate_lock_rejects_duplicate_resolved_package_names() -> None:
     with pytest.raises(ValueError, match="duplicate"):
-        _candidate_lock(packages=(_candidate_package("ty"), _candidate_package("ty")))
+        _candidate_lock(
+            resolved_packages=(_resolved_package("ty"), _resolved_package("ty"), _resolved_package("pyrefly"))
+        )
 
 
-def test_candidate_lock_rejects_empty_packages() -> None:
+def test_candidate_lock_rejects_empty_resolved_packages() -> None:
     with pytest.raises(ValueError, match="empty"):
-        _candidate_lock(packages=())
+        _candidate_lock(resolved_packages=())
+
+
+def test_candidate_lock_rejects_unsorted_resolved_packages() -> None:
+    with pytest.raises(ValueError, match="sorted"):
+        _candidate_lock(resolved_packages=(_resolved_package("ty"), _resolved_package("pyrefly")))
+
+
+def test_candidate_lock_rejects_non_tuple_resolved_packages() -> None:
+    with pytest.raises(ValueError, match="tuple"):
+        _candidate_lock(resolved_packages=[_resolved_package("pyrefly"), _resolved_package("ty")])
+
+
+def test_candidate_lock_requires_both_ty_and_pyrefly_candidates() -> None:
+    with pytest.raises(ValueError, match="candidates"):
+        _candidate_lock(candidates=(_candidate_package("ty"),))
+
+
+def test_candidate_lock_rejects_extra_candidate() -> None:
+    with pytest.raises(ValueError, match="candidates"):
+        _candidate_lock(
+            resolved_packages=(
+                _resolved_package("click"),
+                _resolved_package("pyrefly"),
+                _resolved_package("ty"),
+            ),
+            candidates=(
+                _candidate_package("click"),
+                _candidate_package("pyrefly"),
+                _candidate_package("ty"),
+            ),
+        )
+
+
+def test_candidate_lock_rejects_unsorted_candidates() -> None:
+    with pytest.raises(ValueError, match="sorted"):
+        _candidate_lock(candidates=(_candidate_package("ty"), _candidate_package("pyrefly")))
+
+
+def test_candidate_lock_rejects_candidate_inconsistent_with_resolved_entry() -> None:
+    with pytest.raises(ValueError, match="does not match"):
+        _candidate_lock(candidates=(_candidate_package("pyrefly"), _candidate_package("ty", version="9.9.9")))
 
 
 def test_path_record_requires_symlink_target_for_symlink_kind() -> None:
@@ -214,6 +312,11 @@ def test_path_record_rejects_unknown_kind() -> None:
         _path_record(kind="directory")
 
 
+def test_path_record_rejects_unknown_disposition() -> None:
+    with pytest.raises(ValueError, match="disposition"):
+        _path_record(disposition="mutated")
+
+
 def test_root_manifest_rejects_non_absolute_root() -> None:
     with pytest.raises(ValueError, match="absolute"):
         _root_manifest(root="relative/path")
@@ -223,13 +326,60 @@ def test_root_manifest_rejects_duplicate_paths_across_hashed_and_metadata() -> N
     with pytest.raises(ValueError, match="duplicate"):
         _root_manifest(
             hashed_paths=(_path_record("src/a.py"),),
-            metadata_paths=(_path_record("src/a.py", content_sha256=None),),
+            metadata_paths=(_path_record("src/a.py", disposition="declared", content_sha256=None),),
         )
+
+
+def test_root_manifest_requires_git_source_revision_when_kind_is_git() -> None:
+    with pytest.raises(ValueError, match="source_revision"):
+        _root_manifest(source_revision=None)
+
+
+def test_root_manifest_rejects_malformed_git_source_revision() -> None:
+    with pytest.raises(ValueError, match="source_revision"):
+        _root_manifest(source_revision="not-a-revision")
+
+
+def test_root_manifest_rejects_source_revision_when_kind_is_non_git() -> None:
+    with pytest.raises(ValueError, match="source_revision"):
+        _root_manifest(kind="non_git", source_revision=_GIT_REV)
+
+
+def test_root_manifest_rejects_hashed_path_without_content_sha256() -> None:
+    with pytest.raises(ValueError, match="content_sha256"):
+        _root_manifest(hashed_paths=(_path_record("src/a.py", content_sha256=None),))
+
+
+def test_root_manifest_allows_metadata_path_with_content_sha256() -> None:
+    manifest = _root_manifest(
+        metadata_paths=(_path_record("model_cache/blob.bin", disposition="declared", content_sha256=_SHA_C),)
+    )
+    assert manifest.metadata_paths[0].content_sha256 == _SHA_C
+
+
+def test_root_manifest_rejects_unsorted_hashed_paths() -> None:
+    with pytest.raises(ValueError, match="sorted"):
+        _root_manifest(hashed_paths=(_path_record("z.py"), _path_record("a.py")))
+
+
+def test_root_manifest_rejects_non_tuple_hashed_paths() -> None:
+    with pytest.raises(ValueError, match="tuple"):
+        _root_manifest(hashed_paths=[_path_record("src/a.py")])
 
 
 def test_write_delta_rejects_duplicate_declared_paths() -> None:
     with pytest.raises(ValueError, match="duplicate"):
         _write_delta(declared=("src/a.py", "src/a.py"))
+
+
+def test_write_delta_rejects_unsorted_declared_paths() -> None:
+    with pytest.raises(ValueError, match="sorted"):
+        _write_delta(declared=("z.py", "a.py"))
+
+
+def test_write_delta_rejects_non_tuple_declared() -> None:
+    with pytest.raises(ValueError, match="tuple"):
+        _write_delta(declared=["src/a.py"])
 
 
 def test_admission_receipt_rejects_pass_status_with_changed_production_identity() -> None:
@@ -240,6 +390,26 @@ def test_admission_receipt_rejects_pass_status_with_changed_production_identity(
 def test_admission_receipt_allows_hold_status_with_changed_production_identity() -> None:
     receipt = _admission_receipt(status="hold", after=_production_identity(build_identity=_SHA_C))
     assert receipt.status == "hold"
+
+
+def test_admission_receipt_rejects_non_tuple_budgets() -> None:
+    with pytest.raises(ValueError, match="tuple"):
+        AdmissionReceipt(
+            schema_version=1,
+            evaluation_identity="eval-2026-08-11-0001",
+            status="pass",
+            started_at="2026-08-11T00:00:00Z",
+            ended_at="2026-08-11T00:10:00Z",
+            budgets=[DEFAULT_PHASE_BUDGETS["admission"]],  # type: ignore[arg-type]
+            production_identity_before=_production_identity(),
+            production_identity_after=_production_identity(),
+            candidate_lock=_candidate_lock(),
+            root_manifests=(_root_manifest(),),
+            write_deltas=(_write_delta(),),
+            artifact_tree_digest=_SHA_C,
+            issues=(),
+            next_action="proceed to protocol phase",
+        )
 
 
 def test_admission_receipt_round_trips_through_to_dict_and_from_dict() -> None:
