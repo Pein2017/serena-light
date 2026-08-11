@@ -809,7 +809,9 @@ def test_document_symbol_provider_preserves_snapshot_and_uses_futures(tmp_path: 
         (WorkspaceKind.GIT, tmp_path),
         path_policy=_PathPolicy(),
         inventory=_inventory(tmp_path, "main.py"),
-        attributors={LanguageFamily.PYTHON: lambda _root, paths: _projection(LanguageFamily.PYTHON, paths)},
+        attributors={
+            LanguageFamily.PYTHON: lambda _root, paths: _projection(LanguageFamily.PYTHON, paths)
+        },
         adapter_factories=_factories(
             adapters,
             contexts,
@@ -1201,7 +1203,7 @@ def test_call_arriving_during_a_scan_waits_then_runs_its_own_distinct_scan(
     runtime = _git_runtime(tmp_path, adapters, contexts, inventory_factory=blocking_inventory)
     try:
         results: dict[str, Any] = {}
-        call_a = threading.Thread(target=lambda: results.__setitem__("a", runtime.ensure_fresh()))
+        call_a = threading.Thread(target=lambda: results.__setitem__("a", runtime.freshness.ensure_fresh()))
         call_a.start()
         assert first_entered.wait(5)
 
@@ -1209,7 +1211,7 @@ def test_call_arriving_during_a_scan_waits_then_runs_its_own_distinct_scan(
         # regressed or overwritten ``_last`` commit is observable below.
         (tmp_path / "main.py").write_text("value = 2\n")
 
-        call_b = threading.Thread(target=lambda: results.__setitem__("b", runtime.ensure_fresh()))
+        call_b = threading.Thread(target=lambda: results.__setitem__("b", runtime.freshness.ensure_fresh()))
         call_b.start()
         # Exact ticket-issued barrier: wait on the same condition the admission
         # queue itself notifies on, rather than polling or guessing a duration.
@@ -1274,12 +1276,12 @@ def test_a_failed_scan_propagates_only_to_its_own_caller_and_unblocks_the_next_t
 
         def call_a() -> None:
             try:
-                runtime.ensure_fresh()
+                runtime.freshness.ensure_fresh()
             except BaseException as caught:
                 errors["a"] = caught
 
         def call_b() -> None:
-            results["b"] = runtime.ensure_fresh()
+            results["b"] = runtime.freshness.ensure_fresh()
 
         thread_a = threading.Thread(target=call_a)
         thread_a.start()
@@ -1872,7 +1874,10 @@ def test_change_consumed_by_another_calls_scan_between_this_calls_scans_still_re
             # A file this read never witnesses changes, and a different call's
             # ticketed scan commits it before this read's postflight runs.
             (tmp_path / "other.py").write_text("elsewhere = 1\n")
-            runtime.ensure_fresh()
+            # Exercise the coordinator's monotonic-version guard directly.
+            # Public same-workspace semantic transactions can no longer enter
+            # this window because they queue at the runtime boundary.
+            runtime.freshness.ensure_fresh()
         settled: Future[Any] = Future()
         settled.set_result(observed)
         return settled
@@ -1917,7 +1922,9 @@ def test_repeatedly_consumed_changes_fail_with_version_evidence_and_no_changed_p
         future = real_load(**kwargs)
         observed = future.result(timeout=5)
         (tmp_path / f"other_{loads}.py").write_text("elsewhere = 1\n")
-        runtime.ensure_fresh()
+        # Public calls are serialized outside this window; direct coordinator
+        # admission retains the lower-level version regression coverage.
+        runtime.freshness.ensure_fresh()
         settled: Future[Any] = Future()
         settled.set_result(observed)
         return settled
@@ -2647,9 +2654,7 @@ def test_runtime_stop_settles_pending_restart_once_without_publishing_replacemen
         (WorkspaceKind.GIT, tmp_path),
         path_policy=_PathPolicy(),
         inventory_factory=lambda identity: git_trust_inventory(identity.root),
-        attributors={
-            LanguageFamily.PYTHON: lambda _root, paths: _projection(LanguageFamily.PYTHON, paths)
-        },
+        attributors={LanguageFamily.PYTHON: lambda _root, paths: _projection(LanguageFamily.PYTHON, paths)},
         adapter_factories=_factories(adapters, contexts, symbols=[]),
         future_timeout=0.2,
     )

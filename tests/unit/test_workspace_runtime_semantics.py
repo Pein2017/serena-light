@@ -24,12 +24,13 @@ from serena_light.lsp.adapter import (
     RawLspProviders,
 )
 from serena_light.lsp.client import LspResponseError
+from serena_light.lsp.executor import BoundedLspExecutor, ExecutorBusyError
 from serena_light.lsp.normalize import Location
 from serena_light.lsp.positions import FileSnapshot, PositionEncoding
 from serena_light.lsp.state import DiagnosticsSnapshot, DiagnosticsState
 from serena_light.tools.compact_adapter import compact_navigation_result
 from serena_light.tools.editing import NotificationResult, ReplacementNotification
-from serena_light.tools.envelopes import ErrorEnvelope, GenerationMetadata
+from serena_light.tools.envelopes import ErrorEnvelope, GenerationMetadata, ToolEnvelope
 from serena_light.tools.references import ReferenceTarget
 from serena_light.workspace.identity import (
     LocationKind,
@@ -315,6 +316,7 @@ def _runtime(
     raw_providers: RawLspProviders | None = None,
     future_timeout: float = 35.0,
     attributors: Mapping[LanguageFamily, Callable[[Path, tuple[str, ...]], ScopeProjection]] | None = None,
+    transaction_executor_factory: Callable[[Path], BoundedLspExecutor] | None = None,
 ) -> tuple[WorkspaceRuntime, _Adapter, _Policy]:
     paths = tuple(
         sorted(str(path.relative_to(tmp_path)) for extension in ("*.py", "*.ts") for path in tmp_path.rglob(extension))
@@ -348,6 +350,7 @@ def _runtime(
             LanguageFamily.TYPESCRIPT: cast(AdapterFactory, build),
         },
         future_timeout=future_timeout,
+        transaction_executor_factory=transaction_executor_factory,
     )
     return runtime, adapters[0], policy
 
@@ -911,6 +914,390 @@ def test_declaration_generation_transition_during_authoritative_response_fails_c
         assert calls == 2
     finally:
         runtime.stop()
+
+
+def test_same_workspace_parallel_declarations_serialize_complete_semantic_transactions(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A sibling query must not invalidate an otherwise stable read.
+
+    The first query has already captured its source adapter identity when it is
+    paused at the semantic-request boundary.  Without a workspace transaction
+    owner, the second query opens another document and advances the shared
+    document generation, making the first query fail with a synthetic
+    ``NOT_READY`` even though no source bytes changed.
+    """
+
+    first_source = tmp_path / "src/first.py"
+    second_source = tmp_path / "src/second.py"
+    target = tmp_path / "src/target.py"
+    first_source.parent.mkdir()
+    first_source.write_text("target()\n")
+    second_source.write_text("target()\n")
+    target.write_text("def target(): pass\n")
+    runtime, _adapter, _policy = _runtime(
+        tmp_path,
+        {
+            "textDocument/documentSymbol": [_symbol("target")],
+            "textDocument/definition": {
+                "uri": target.as_uri(),
+                "range": {"start": {"line": 0, "character": 4}, "end": {"line": 0, "character": 10}},
+            },
+        },
+    )
+    first_at_request = threading.Event()
+    second_at_request = threading.Event()
+    release_first = threading.Event()
+    original_request = runtime._request_locations
+    request_count = 0
+    request_lock = threading.Lock()
+
+    def gated_request(*args: object, **kwargs: object) -> object:
+        nonlocal request_count
+        with request_lock:
+            request_count += 1
+            ordinal = request_count
+        if ordinal == 1:
+            first_at_request.set()
+            assert release_first.wait(5)
+        elif ordinal == 2:
+            second_at_request.set()
+        return original_request(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(runtime, "_request_locations", gated_request)
+    results: dict[str, Mapping[str, object]] = {}
+
+    def find(label: str, relative_path: str) -> None:
+        results[label] = runtime.find_declaration(relative_path, r"(target)\(\)").to_dict()
+
+    first = threading.Thread(target=find, args=("first", "src/first.py"), name="first-declaration")
+    second = threading.Thread(target=find, args=("second", "src/second.py"), name="second-declaration")
+    try:
+        first.start()
+        assert first_at_request.wait(5)
+        second.start()
+        second_entered_before_release = second_at_request.wait(0.25)
+        release_first.set()
+        first.join(timeout=5)
+        second.join(timeout=5)
+
+        assert not first.is_alive() and not second.is_alive()
+        assert second_entered_before_release is False
+        assert results["first"]["ok"] is True
+        assert results["second"]["ok"] is True
+    finally:
+        release_first.set()
+        first.join(timeout=5)
+        if second.ident is not None:
+            second.join(timeout=5)
+        runtime.stop()
+
+
+def test_same_workspace_edit_waits_for_complete_read_and_preserves_hash_guard(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An edit queues behind a read, then keeps the existing stale-hash guard."""
+
+    source = tmp_path / "src/caller.py"
+    target = tmp_path / "src/target.py"
+    source.parent.mkdir()
+    source.write_text("target()\n")
+    original = b"def target():\n    return 1\n"
+    target.write_bytes(original)
+    runtime, _adapter, _policy = _runtime(
+        tmp_path,
+        {
+            "textDocument/documentSymbol": [_symbol("target")],
+            "textDocument/definition": {
+                "uri": target.as_uri(),
+                "range": {"start": {"line": 0, "character": 4}, "end": {"line": 0, "character": 10}},
+            },
+        },
+    )
+    read_at_request = threading.Event()
+    release_read = threading.Event()
+    edit_done = threading.Event()
+    original_request = runtime._request_locations
+    first_request = True
+    request_lock = threading.Lock()
+
+    def gated_request(*args: object, **kwargs: object) -> object:
+        nonlocal first_request
+        with request_lock:
+            should_block = first_request
+            first_request = False
+        if should_block:
+            read_at_request.set()
+            assert release_read.wait(5)
+        return original_request(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(runtime, "_request_locations", gated_request)
+    results: dict[str, Mapping[str, object]] = {}
+
+    def read() -> None:
+        results["read"] = runtime.find_declaration("src/caller.py", r"(target)\(\)").to_dict()
+
+    def edit() -> None:
+        results["edit"] = runtime.replace_symbol_body(
+            "target",
+            "src/target.py",
+            "def target():\n    return 2",
+            hashlib.sha256(original).hexdigest(),
+        ).to_dict()
+        edit_done.set()
+
+    reader = threading.Thread(target=read, name="blocked-read")
+    editor = threading.Thread(target=edit, name="queued-edit")
+    try:
+        reader.start()
+        assert read_at_request.wait(5)
+        editor.start()
+        edit_completed_before_release = edit_done.wait(0.25)
+        newer = b"def target():\n    return 9\n"
+        target.write_bytes(newer)
+        release_read.set()
+        reader.join(timeout=5)
+        editor.join(timeout=5)
+
+        assert not reader.is_alive() and not editor.is_alive()
+        assert edit_completed_before_release is False
+        assert results["read"]["ok"] is True
+        assert results["edit"]["ok"] is False
+        edit_error = cast(Mapping[str, object], results["edit"]["error"])
+        assert edit_error["code"] == "STALE_HASH"
+        assert target.read_bytes() == newer
+    finally:
+        release_read.set()
+        reader.join(timeout=5)
+        if editor.ident is not None:
+            editor.join(timeout=5)
+        runtime.stop()
+
+
+def test_workspace_transaction_queue_is_bounded_and_reports_executor_busy(tmp_path: Path) -> None:
+    source = tmp_path / "main.py"
+    source.write_text("target()\n")
+    release = threading.Event()
+    runtime, _adapter, _policy = _runtime(
+        tmp_path,
+        {"textDocument/documentSymbol": [_symbol("target")]},
+        transaction_executor_factory=lambda _root: BoundedLspExecutor(queue_capacity=1, name="transaction-saturation"),
+    )
+    try:
+        active = runtime.transaction_executor.submit(lambda: release.wait(5))
+        deadline = time.monotonic() + 5
+        while not runtime.transaction_executor.snapshot().active and time.monotonic() < deadline:
+            time.sleep(0.001)
+        assert runtime.transaction_executor.snapshot().active is True
+        queued = runtime.transaction_executor.submit(lambda: None)
+
+        with pytest.raises(ExecutorBusyError, match="queue is full"):
+            runtime.get_symbols_overview("main.py")
+
+        release.set()
+        assert active.result(timeout=5) is True
+        assert queued.result(timeout=5) is None
+    finally:
+        release.set()
+        runtime.stop()
+
+
+def test_same_root_activation_refresh_waits_for_complete_semantic_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "caller.py"
+    target = tmp_path / "target.py"
+    source.write_text("target()\n")
+    target.write_text("def target(): pass\n")
+    read_at_request = threading.Event()
+    release_read = threading.Event()
+    refresh_started = threading.Event()
+    runtime, _adapter, _policy = _runtime(
+        tmp_path,
+        {
+            "textDocument/documentSymbol": [_symbol("target")],
+            "textDocument/definition": {
+                "uri": target.as_uri(),
+                "range": {"start": {"line": 0, "character": 4}, "end": {"line": 0, "character": 10}},
+            },
+        },
+    )
+    original_request = runtime._request_locations
+    original_refresh = runtime.freshness.ensure_fresh
+
+    def gated_request(*args: object, **kwargs: object) -> object:
+        read_at_request.set()
+        assert release_read.wait(5)
+        return original_request(*args, **kwargs)  # type: ignore[arg-type]
+
+    def observed_refresh() -> object:
+        refresh_started.set()
+        return original_refresh()
+
+    monkeypatch.setattr(runtime, "_request_locations", gated_request)
+    monkeypatch.setattr(runtime.freshness, "ensure_fresh", observed_refresh)
+    results: dict[str, object] = {}
+    reader = threading.Thread(
+        target=lambda: results.__setitem__("read", runtime.find_declaration("caller.py", r"(target)\(\)")),
+        name="activation-overlap-read",
+    )
+    refresher = threading.Thread(
+        target=lambda: results.__setitem__("refresh", runtime.ensure_fresh()),
+        name="same-root-activation-refresh",
+    )
+    try:
+        reader.start()
+        assert read_at_request.wait(5)
+        refresher.start()
+        assert refresh_started.wait(0.25) is False
+        release_read.set()
+        reader.join(timeout=5)
+        refresher.join(timeout=5)
+
+        assert not reader.is_alive() and not refresher.is_alive()
+        assert cast(ToolEnvelope, results["read"]).to_dict()["ok"] is True
+        assert refresh_started.is_set()
+    finally:
+        release_read.set()
+        reader.join(timeout=5)
+        if refresher.ident is not None:
+            refresher.join(timeout=5)
+        runtime.stop()
+
+
+def test_runtime_stop_cancels_a_queued_edit_before_it_can_dispatch(tmp_path: Path) -> None:
+    source = tmp_path / "main.py"
+    original = b"def target():\n    return 1\n"
+    source.write_bytes(original)
+    release = threading.Event()
+    runtime, adapter, _policy = _runtime(
+        tmp_path,
+        {"textDocument/documentSymbol": [_symbol("target")]},
+        future_timeout=1.0,
+    )
+    active = runtime.transaction_executor.submit(lambda: release.wait(5))
+    result: dict[str, Mapping[str, object]] = {}
+
+    def edit() -> None:
+        result["edit"] = runtime.replace_symbol_body(
+            "target",
+            "main.py",
+            "def target():\n    return 2",
+            hashlib.sha256(original).hexdigest(),
+        ).to_dict()
+
+    editor = threading.Thread(target=edit, name="edit-cancelled-by-stop")
+    stopper = threading.Thread(target=runtime.stop, name="runtime-stop")
+    try:
+        editor.start()
+        deadline = time.monotonic() + 5
+        while runtime.transaction_executor.snapshot().queue_size < 1 and time.monotonic() < deadline:
+            time.sleep(0.001)
+        assert runtime.transaction_executor.snapshot().queue_size == 1
+
+        stopper.start()
+        deadline = time.monotonic() + 5
+        while not runtime.transaction_executor.snapshot().stopping and time.monotonic() < deadline:
+            time.sleep(0.001)
+        assert runtime.transaction_executor.snapshot().stopping is True
+        release.set()
+        editor.join(timeout=5)
+        stopper.join(timeout=5)
+
+        assert not editor.is_alive() and not stopper.is_alive()
+        assert active.result(timeout=5) is True
+        assert result["edit"]["ok"] is False
+        assert source.read_bytes() == original
+        assert adapter.edit_dispatches == 0
+    finally:
+        release.set()
+        editor.join(timeout=5)
+        if stopper.ident is not None:
+            stopper.join(timeout=5)
+        runtime.stop()
+
+
+def test_different_workspaces_run_concurrently_while_status_stays_responsive(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    roots = (tmp_path / "left", tmp_path / "right")
+    runtimes: list[WorkspaceRuntime] = []
+    entered = (threading.Event(), threading.Event())
+    release = threading.Event()
+    results: dict[str, Mapping[str, object]] = {}
+
+    for index, root in enumerate(roots):
+        root.mkdir()
+        source = root / "caller.py"
+        target = root / "target.py"
+        source.write_text("target()\n")
+        target.write_text("def target(): pass\n")
+        runtime, _adapter, _policy = _runtime(
+            root,
+            {
+                "textDocument/documentSymbol": [_symbol("target")],
+                "textDocument/definition": {
+                    "uri": target.as_uri(),
+                    "range": {
+                        "start": {"line": 0, "character": 4},
+                        "end": {"line": 0, "character": 10},
+                    },
+                },
+            },
+        )
+        original_request = runtime._request_locations
+
+        def gated_request(
+            *args: object,
+            _entered: threading.Event = entered[index],
+            _original: Callable[..., object] = original_request,
+            **kwargs: object,
+        ) -> object:
+            _entered.set()
+            assert release.wait(5)
+            return _original(*args, **kwargs)
+
+        monkeypatch.setattr(runtime, "_request_locations", gated_request)
+        runtimes.append(runtime)
+
+    def find(label: str, runtime: WorkspaceRuntime) -> None:
+        results[label] = runtime.find_declaration("caller.py", r"(target)\(\)").to_dict()
+
+    threads = (
+        threading.Thread(target=find, args=("left", runtimes[0]), name="left-query"),
+        threading.Thread(target=find, args=("right", runtimes[1]), name="right-query"),
+    )
+    status_done = threading.Event()
+    status_result: dict[str, Mapping[str, object]] = {}
+
+    def status() -> None:
+        status_result["left"] = runtimes[0].status()
+        status_done.set()
+
+    status_thread = threading.Thread(target=status, name="status-during-query")
+    try:
+        for thread in threads:
+            thread.start()
+        assert entered[0].wait(5) and entered[1].wait(5)
+        status_thread.start()
+        assert status_done.wait(0.25)
+        assert status_result["left"]["stopping"] is False
+
+        release.set()
+        for thread in threads:
+            thread.join(timeout=5)
+        assert all(not thread.is_alive() for thread in threads)
+        assert results["left"]["ok"] is True
+        assert results["right"]["ok"] is True
+    finally:
+        release.set()
+        for thread in threads:
+            if thread.ident is not None:
+                thread.join(timeout=5)
+        if status_thread.ident is not None:
+            status_thread.join(timeout=5)
+        for runtime in runtimes:
+            runtime.stop()
 
 
 def test_implementation_target_change_between_response_and_snapshot_fails_closed_then_replays(
@@ -1962,6 +2349,63 @@ def test_global_find_symbol_warms_from_one_exact_candidate(tmp_path: Path) -> No
             "workspace/symbol",
         ]
     finally:
+        runtime.stop()
+
+
+def test_cold_global_transaction_precedes_a_later_same_workspace_path_query(tmp_path: Path) -> None:
+    source = tmp_path / "main.py"
+    source.write_text("class Target: pass\n")
+    warm_started = threading.Event()
+    release_warm = threading.Event()
+    path_done = threading.Event()
+
+    def blocked_candidate() -> list[dict[str, object]]:
+        warm_started.set()
+        assert release_warm.wait(5)
+        return [
+            {
+                "name": "Target",
+                "kind": 12,
+                "location": {"uri": source.as_uri(), "range": _symbol("Target")["range"]},
+            }
+        ]
+
+    runtime, _adapter, _policy = _runtime(
+        tmp_path,
+        {
+            "workspace/symbol": blocked_candidate,
+            "textDocument/documentSymbol": [_symbol("Target")],
+        },
+        phase=AdapterPhase.COLD,
+    )
+    results: dict[str, Mapping[str, object]] = {}
+
+    def global_query() -> None:
+        results["global"] = runtime.find_symbol("Target").to_dict()
+
+    def path_query() -> None:
+        results["path"] = runtime.get_symbols_overview("main.py").to_dict()
+        path_done.set()
+
+    global_thread = threading.Thread(target=global_query, name="cold-global")
+    path_thread = threading.Thread(target=path_query, name="later-path")
+    try:
+        global_thread.start()
+        assert warm_started.wait(5)
+        path_thread.start()
+        assert path_done.wait(0.25) is False
+        release_warm.set()
+        global_thread.join(timeout=5)
+        path_thread.join(timeout=5)
+
+        assert not global_thread.is_alive() and not path_thread.is_alive()
+        assert results["global"]["ok"] is True
+        assert results["path"]["ok"] is True
+    finally:
+        release_warm.set()
+        global_thread.join(timeout=5)
+        if path_thread.ident is not None:
+            path_thread.join(timeout=5)
         runtime.stop()
 
 

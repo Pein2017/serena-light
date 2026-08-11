@@ -14,7 +14,7 @@ import json
 import threading
 import time
 from collections.abc import Callable, Collection, Mapping, Sequence
-from concurrent.futures import Future
+from concurrent.futures import CancelledError, Future
 from contextlib import suppress
 from dataclasses import dataclass
 from enum import StrEnum
@@ -1269,6 +1269,7 @@ class WorkspaceRuntime:
         attributors: Mapping[LanguageFamily, ProgramAttributor] | None = None,
         adapter_factories: Mapping[LanguageFamily, AdapterFactory] | None = None,
         executor_factory: ExecutorFactory | None = None,
+        transaction_executor_factory: ExecutorFactory | None = None,
         future_timeout: float = 35.0,
         debug_reporter: Callable[[str, str], object] | None = None,
     ) -> None:
@@ -1307,6 +1308,13 @@ class WorkspaceRuntime:
                 self._family_errors[family] = _projection_error(family, projection)
 
         self._executor = (executor_factory or _default_executor)(self.identity.root)
+        try:
+            self._transaction_executor = (transaction_executor_factory or _default_transaction_executor)(
+                self.identity.root
+            )
+        except BaseException:
+            self._executor.close(cancel_queued=True)
+            raise
         self._operation_lock = threading.RLock()
         self._adapter_factories = dict(adapter_factories or {})
         self._adapters: dict[LanguageFamily, RuntimeAdapter] = {}
@@ -1338,6 +1346,7 @@ class WorkspaceRuntime:
             for future in stop_futures:
                 with suppress(BaseException):
                     future.result(timeout=self._future_timeout)
+            self._transaction_executor.close(cancel_queued=True)
             self._executor.close(cancel_queued=True)
             raise
         self._freshness = FreshnessCoordinator(self)
@@ -1345,6 +1354,10 @@ class WorkspaceRuntime:
     @property
     def executor(self) -> BoundedLspExecutor:
         return self._executor
+
+    @property
+    def transaction_executor(self) -> BoundedLspExecutor:
+        return self._transaction_executor
 
     @property
     def projections(self) -> Mapping[LanguageFamily, ScopeProjection]:
@@ -1365,8 +1378,25 @@ class WorkspaceRuntime:
     def ensure_fresh(self) -> FreshnessScan:
         """Reconcile the workspace with disk; also the same-root activation hook."""
 
+        return self._run_workspace_transaction(self._freshness.ensure_fresh)
+
+    def _submit_workspace_transaction[T](self, operation: Callable[[], T]) -> Future[T]:
+        """Admit one complete semantic transaction to this workspace's FIFO."""
+
         self._require_running()
-        return self._freshness.ensure_fresh()
+        try:
+            return self._transaction_executor.submit(operation)
+        except RuntimeError as error:
+            if self._transaction_executor.snapshot().stopping:
+                raise WorkspaceRuntimeError(RuntimeErrorCode.STOPPED, "workspace runtime is stopped") from error
+            raise
+
+    def _run_workspace_transaction[T](self, operation: Callable[[], T]) -> T:
+        future = self._submit_workspace_transaction(operation)
+        try:
+            return future.result()
+        except CancelledError as error:
+            raise WorkspaceRuntimeError(RuntimeErrorCode.STOPPED, "workspace runtime is stopped") from error
 
     def rebuild_inventory(self) -> TrustInventory:
         """Rebuild the lexical inventory from this workspace's owning source."""
@@ -2151,8 +2181,14 @@ class WorkspaceRuntime:
     ) -> ToolEnvelope:
         """Run one hash-guarded edit transaction on the selected adapter worker."""
 
+        transaction_commit = EditCommit()
+        authorized_holder: list[AuthorizedEdit] = []
+        authorized_lock = threading.Lock()
+
         def operation() -> ToolEnvelope:
             adapter, authorized = self._edit_adapter(relative_path)
+            with authorized_lock:
+                authorized_holder.append(authorized)
             commit = EditCommit()
 
             def transaction(client: AdapterClient) -> ToolEnvelope:
@@ -2194,10 +2230,46 @@ class WorkspaceRuntime:
         def preflighted() -> ToolEnvelope:
             # Exactly one preflight, and no postflight or replay: an edit that
             # started or may have committed is never invoked a second time.
-            self.ensure_fresh()
+            transaction_commit.mark_running()
+            self._freshness.ensure_fresh()
             return operation()
 
-        return self._tool_envelope(preflighted)
+        def admitted() -> ToolEnvelope:
+            future = self._submit_workspace_transaction(preflighted)
+            try:
+                # Let the already-bounded adapter edit report its more precise
+                # queued/running/install state before the outer queue declares
+                # the whole transaction uncertain.  The second bound is for
+                # time spent waiting at the workspace transaction head.
+                return future.result(timeout=self._future_timeout * 2)
+            except CancelledError as caught:
+                raise WorkspaceRuntimeError(RuntimeErrorCode.STOPPED, "workspace runtime is stopped") from caught
+            except TimeoutError:
+                if future.cancel() and transaction_commit.state is EditCommitState.QUEUED:
+                    return error(
+                        ErrorCode.TIMED_OUT,
+                        retry=RetryMetadata(retryable=True),
+                        details={"relative_path": relative_path, "commit_state": transaction_commit.state.value},
+                        workspace=_workspace_metadata(self.identity),
+                    )
+                with authorized_lock:
+                    authorized = authorized_holder[-1] if authorized_holder else None
+                if authorized is not None:
+                    return _uncertain_edit(authorized, transaction_commit, "workspace_transaction_timeout")
+                return error(
+                    ErrorCode.UNCERTAIN,
+                    retry=RetryMetadata(retryable=False),
+                    details={
+                        "relative_path": relative_path,
+                        "commit_state": transaction_commit.state.value,
+                        "current_hash": None,
+                        "uncertain_stage": "workspace_transaction_timeout",
+                        "requires_current_reread": True,
+                    },
+                    workspace=_workspace_metadata(self.identity),
+                )
+
+        return self._tool_envelope(admitted)
 
     def _edit_adapter(self, relative_path: str) -> tuple[RuntimeAdapter, AuthorizedEdit]:
         normalized = _relative_path(relative_path, allow_parent=True)
@@ -2296,7 +2368,9 @@ class WorkspaceRuntime:
     def _fresh_read_envelope(
         self, operation: Callable[[], ToolEnvelope], *, scope: tuple[str, ...] | None = None
     ) -> ToolEnvelope:
-        return self._tool_envelope(lambda: self._run_fresh_read(operation, scope=scope))
+        return self._tool_envelope(
+            lambda: self._run_workspace_transaction(lambda: self._run_fresh_read(operation, scope=scope))
+        )
 
     def _admit_fresh_read(self, scope: tuple[str, ...] | None, *, witnessed: Sequence[str] = ()) -> _FreshnessAdmission:
         """Run one guarded scan over exactly the scope this read claims."""
@@ -3281,6 +3355,14 @@ class WorkspaceRuntime:
                 pending_restarts = tuple(self._pending_restarts.values())
 
             failures: list[BaseException] = []
+            try:
+                # Seal semantic admission before stopping adapters.  A running
+                # transaction settles (or observes ``_stopping``); queued work
+                # is cancelled and can never reach an adapter or an edit.
+                self._transaction_executor.close(cancel_queued=True, timeout=min(self._future_timeout, 5.0))
+            except BaseException as error:
+                raise RuntimeError(f"workspace runtime stop failed: {error}") from error
+
             responsibilities: dict[int, Future[AdapterSnapshot]] = {}
             for adapter in adapters:
                 adapter_key = id(adapter)
@@ -4321,6 +4403,10 @@ def _default_adapter_factory(family: LanguageFamily) -> AdapterFactory:
 
 def _default_executor(root: Path) -> BoundedLspExecutor:
     return BoundedLspExecutor(queue_capacity=32, name=f"workspace:{root.name}")
+
+
+def _default_transaction_executor(root: Path) -> BoundedLspExecutor:
+    return BoundedLspExecutor(queue_capacity=32, name=f"workspace-transaction:{root.name}")
 
 
 def _relative_path(path: str, *, allow_parent: bool = False) -> str:

@@ -73,6 +73,7 @@ from serena_light.lsp.adapter import (
     EngineMetadata,
     RawLspProviders,
 )
+from serena_light.lsp.executor import BoundedLspExecutor
 from serena_light.lsp.positions import FileSnapshot, PositionEncoding
 from serena_light.lsp.state import DiagnosticsSnapshot, DiagnosticsState
 from serena_light.runtime_files import LEGACY_BUILD_IDENTITY, BearerSecret
@@ -562,7 +563,12 @@ def _serving(app: ASGIApp, port: int) -> Iterator[None]:
 
 
 @contextmanager
-def _acceptance(tmp_path: Path, *, future_timeout: float = 35.0) -> Iterator[_Harness]:
+def _acceptance(
+    tmp_path: Path,
+    *,
+    future_timeout: float = 35.0,
+    transaction_queue_capacity: int | None = None,
+) -> Iterator[_Harness]:
     """Compose the real daemon stack over a real Git workspace."""
 
     policy, data_root = _policy(tmp_path)
@@ -585,6 +591,14 @@ def _acceptance(tmp_path: Path, *, future_timeout: float = 35.0) -> Iterator[_Ha
             attributors={family: _attributor(family) for family in _EXTENSIONS},
             adapter_factories={family: cast(AdapterFactory, build_adapter) for family in _EXTENSIONS},
             future_timeout=future_timeout,
+            transaction_executor_factory=(
+                None
+                if transaction_queue_capacity is None
+                else lambda _root: BoundedLspExecutor(
+                    queue_capacity=transaction_queue_capacity,
+                    name="acceptance-transaction",
+                )
+            ),
         )
         runtimes.append(runtime)
         return runtime
@@ -1131,6 +1145,111 @@ def test_connector_content_attaches_one_coverage_object_to_reference_successes(t
             assert all("coverage" not in reference for file in non_empty_files for reference in file["references"])
 
         asyncio.run(scenario())
+
+
+def test_connector_parallel_same_workspace_reference_burst_has_no_sibling_not_ready(tmp_path: Path) -> None:
+    """Nine public calls share one runtime without invalidating each other."""
+
+    with _acceptance(tmp_path) as harness:
+
+        async def scenario() -> list[tuple[types.CallToolResult, Mapping[str, Any]]]:
+            async with _connected(harness) as connector:
+                harness.python.client.references = (
+                    {
+                        "uri": (harness.root / "main.py").as_uri(),
+                        "range": {
+                            "start": {"line": 0, "character": 4},
+                            "end": {"line": 0, "character": 10},
+                        },
+                    },
+                )
+                return await asyncio.gather(
+                    *(
+                        _call_content(
+                            connector,
+                            "find_referencing_symbols",
+                            relative_path="main.py",
+                            name_path="target",
+                        )
+                        for _ in range(9)
+                    )
+                )
+
+        responses = asyncio.run(scenario())
+
+        assert len(responses) == 9
+        for result, payload in responses:
+            assert result.isError is False
+            assert payload["ok"] is True
+            assert "error" not in payload
+            data = cast(Mapping[str, Any], payload["data"])
+            assert len(cast(list[Any], data["files"])) == 1
+        assert harness.semantic_calls[-9:] == ["find_referencing_symbols"] * 9
+
+
+def test_connector_transaction_queue_saturation_returns_busy_and_never_runs_rejected_call(tmp_path: Path) -> None:
+    """The public daemon boundary preserves fixed transaction admission."""
+
+    started = threading.Event()
+    release = threading.Event()
+    with _acceptance(tmp_path, transaction_queue_capacity=1) as harness:
+
+        async def scenario() -> tuple[
+            tuple[types.CallToolResult, Mapping[str, Any]],
+            tuple[types.CallToolResult, Mapping[str, Any]],
+            tuple[types.CallToolResult, Mapping[str, Any]],
+        ]:
+            async with _connected(harness) as connector:
+                harness.python.client.references = ()
+
+                def block_first_request() -> None:
+                    started.set()
+                    assert release.wait(5)
+
+                harness.python.client.before_request = block_first_request
+                first = asyncio.create_task(
+                    _call_content(
+                        connector,
+                        "find_referencing_symbols",
+                        relative_path="main.py",
+                        name_path="target",
+                    )
+                )
+                assert await asyncio.to_thread(started.wait, 5)
+                second = asyncio.create_task(
+                    _call_content(
+                        connector,
+                        "find_referencing_symbols",
+                        relative_path="main.py",
+                        name_path="target",
+                    )
+                )
+                deadline = time.monotonic() + 5
+                while harness.runtime.transaction_executor.snapshot().queue_size < 1:
+                    assert time.monotonic() < deadline
+                    await asyncio.sleep(0.001)
+
+                rejected = await _call_content(
+                    connector,
+                    "find_referencing_symbols",
+                    relative_path="main.py",
+                    name_path="target",
+                )
+                release.set()
+                return await first, await second, rejected
+
+        first, second, rejected = asyncio.run(scenario())
+
+        assert first[1]["ok"] is True
+        assert second[1]["ok"] is True
+        assert rejected[0].isError is False
+        assert rejected[1]["ok"] is False
+        rejected_error = cast(Mapping[str, Any], rejected[1]["error"])
+        assert rejected_error["code"] == "BUSY"
+        assert cast(Mapping[str, Any], rejected_error["retry"])["retryable"] is True
+        # Only the two admitted operations ever reached the language server.
+        assert harness.python.client.requests.count("textDocument/documentSymbol") == 2
+        assert harness.python.client.requests.count("textDocument/references") == 4
 
 
 def test_connector_content_preserves_external_references_as_raw_read_only_targets(tmp_path: Path) -> None:
