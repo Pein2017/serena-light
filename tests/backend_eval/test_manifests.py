@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -17,6 +18,7 @@ from scripts.backend_eval.manifests import (
     capture_root_manifest,
     default_corpus_requests,
 )
+from scripts.backend_eval.models import PathRecord
 from serena_light.workspace.inventory import git_trust_inventory
 
 
@@ -55,6 +57,31 @@ def _non_git_request(root: Path, **overrides: object) -> RootManifestRequest:
     }
     fields.update(overrides)
     return RootManifestRequest(**fields)
+
+
+def _mutate_after_metadata_records(
+    monkeypatch: pytest.MonkeyPatch, mutation: Callable[[], None]
+) -> Callable[[], bool]:
+    """Inject one controlled write after all records exist but before a final Git snapshot."""
+
+    import scripts.backend_eval.manifests as manifests
+
+    original = manifests._metadata_records
+    mutated = False
+
+    def capture_then_mutate(
+        root: Path,
+        metadata_roots: tuple[str, ...],
+        disposition_for: Callable[[str], str],
+    ) -> tuple[PathRecord, ...]:
+        nonlocal mutated
+        records = original(root, metadata_roots, disposition_for)
+        mutation()
+        mutated = True
+        return records
+
+    monkeypatch.setattr(manifests, "_metadata_records", capture_then_mutate)
+    return lambda: mutated
 
 
 def test_git_manifest_hashes_trust_inventory_but_only_stats_declared_ignored_root(tmp_path: Path) -> None:
@@ -124,6 +151,9 @@ def test_manifest_is_byte_stable_and_lexically_ordered(tmp_path: Path) -> None:
 
 def test_manifest_does_not_follow_symlinked_directory(tmp_path: Path) -> None:
     root = _repository(tmp_path)
+    (root / "README.md").write_text("fixture\n", encoding="utf-8")
+    _git(root, "add", "README.md")
+    _git(root, "commit", "-m", "fixture")
     outside = tmp_path / "outside"
     outside.mkdir()
     (outside / "secret.bin").write_bytes(b"outside")
@@ -233,6 +263,59 @@ def test_manifest_rejects_mid_freeze_same_size_rewrite(tmp_path: Path, monkeypat
     assert rewritten
 
 
+def test_git_manifest_rejects_untracked_source_created_after_records(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = _repository(tmp_path)
+    (root / "source.py").write_text("source = True\n", encoding="utf-8")
+    _git(root, "add", "source.py")
+    _git(root, "commit", "-m", "fixture")
+    was_mutated = _mutate_after_metadata_records(
+        monkeypatch,
+        lambda: (root / "created.py").write_text("created = True\n", encoding="utf-8"),
+    )
+
+    with pytest.raises(ManifestError, match="changed while freezing"):
+        capture_root_manifest(_git_request(root))
+    assert was_mutated()
+
+
+def test_git_manifest_rejects_untracked_source_deleted_after_records(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = _repository(tmp_path)
+    (root / "source.py").write_text("source = True\n", encoding="utf-8")
+    _git(root, "add", "source.py")
+    _git(root, "commit", "-m", "fixture")
+    untracked = root / "untracked.py"
+    untracked.write_text("untracked = True\n", encoding="utf-8")
+    was_mutated = _mutate_after_metadata_records(monkeypatch, untracked.unlink)
+
+    with pytest.raises(ManifestError, match="changed while freezing"):
+        capture_root_manifest(_git_request(root))
+    assert was_mutated()
+
+
+def test_git_manifest_rejects_head_changed_after_records(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    root = _repository(tmp_path)
+    (root / "source.py").write_text("source = True\n", encoding="utf-8")
+    readme = root / "README.md"
+    readme.write_text("before\n", encoding="utf-8")
+    _git(root, "add", "source.py", "README.md")
+    _git(root, "commit", "-m", "fixture")
+
+    def replace_head() -> None:
+        readme.write_text("after\n", encoding="utf-8")
+        _git(root, "add", "README.md")
+        _git(root, "commit", "-m", "changed-head")
+
+    was_mutated = _mutate_after_metadata_records(monkeypatch, replace_head)
+
+    with pytest.raises(ManifestError, match="changed while freezing"):
+        capture_root_manifest(_git_request(root))
+    assert was_mutated()
+
+
 def test_non_git_manifest_hashes_only_declared_task_paths_without_inventory_walk(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -292,6 +375,9 @@ def test_default_corpus_requests_are_fixed_and_do_not_capture_live_roots() -> No
         MS_TRANSFORMERS_ROOT,
         LLM_FRAMEWORK_STUDY_SITE_PACKAGES,
     }
+    ms_swift_request = by_root[Path("/data/ms-swift")]
+    assert ms_swift_request.required_config_paths == ("setup.cfg",)
+    assert (ms_swift_request.root / ms_swift_request.required_config_paths[0]).is_file()
     assert by_root[Path("/data/CoordExp/.worktrees/research-probes")].metadata_roots == ("model_cache",)
     assert by_root[LLM_FRAMEWORK_STUDY_SITE_PACKAGES].fully_hashed_paths == (
         "torchtune/__init__.py",

@@ -36,6 +36,19 @@ class ManifestError(RuntimeError):
 
 
 @dataclass(frozen=True, slots=True)
+class _GitFreezeState:
+    """The Git-backed inputs that must not move during one manifest capture."""
+
+    source_revision: str
+    inventory_digest: str
+    inventory_count: int
+    inventory_paths: tuple[str, ...]
+    inventory_rejections: tuple[tuple[str, str], ...]
+    tracked_paths: frozenset[str]
+    untracked_paths: frozenset[str]
+
+
+@dataclass(frozen=True, slots=True)
 class RootManifestRequest:
     """The explicit bounded inputs required to capture one corpus root."""
 
@@ -81,7 +94,7 @@ def default_corpus_requests() -> tuple[RootManifestRequest, ...]:
             kind="git",
             fully_hashed_paths=(),
             metadata_roots=(),
-            required_config_paths=("pyproject.toml",),
+            required_config_paths=("setup.cfg",),
         ),
         RootManifestRequest(
             root=RESEARCH_PROBES_ROOT,
@@ -130,29 +143,27 @@ def capture_root_manifest(request: RootManifestRequest) -> RootManifest:
 
 def _capture_git_manifest(root: Path, request: RootManifestRequest) -> RootManifest:
     _require_git_root(root)
-    try:
-        inventory = git_trust_inventory(root)
-    except (OSError, subprocess.SubprocessError, ValueError) as error:
-        raise ManifestError(f"cannot capture Git trust inventory: {error}") from error
+    before, inventory = _git_freeze_state(root)
     _reject_inventory_rejections(inventory)
-    tracked, untracked = _git_path_sets(root)
     source_paths = inventory.paths
     hashed_paths = set(source_paths) | set(request.fully_hashed_paths) | set(request.required_config_paths)
     records = tuple(
-        _hashed_record(root, relative, _git_disposition(root, relative, tracked, untracked))
+        _hashed_record(root, relative, _git_disposition(root, relative, before.tracked_paths, before.untracked_paths))
         for relative in sorted(hashed_paths)
     )
     metadata = _metadata_records(
         root,
         request.metadata_roots,
-        lambda relative: _git_disposition(root, relative, tracked, untracked),
+        lambda relative: _git_disposition(root, relative, before.tracked_paths, before.untracked_paths),
     )
     _require_disjoint_records(records, metadata)
-    source_revision = _git_stdout(root, "rev-parse", "HEAD")
+    after, _ = _git_freeze_state(root)
+    if after != before:
+        raise ManifestError("Git manifest inputs changed while freezing")
     return _root_manifest(
         root=root,
         kind="git",
-        source_revision=source_revision,
+        source_revision=before.source_revision,
         inventory_digest=inventory.digest,
         inventory_count=inventory.count,
         hashed_paths=records,
@@ -395,6 +406,29 @@ def _git_path_sets(root: Path) -> tuple[frozenset[str], frozenset[str]]:
     return (
         _git_path_set(root, "ls-files", "--cached", "-z"),
         _git_path_set(root, "ls-files", "--others", "--exclude-standard", "-z"),
+    )
+
+
+def _git_freeze_state(root: Path) -> tuple[_GitFreezeState, TrustInventory]:
+    """Capture every Git-derived closure fact used by one manifest pass."""
+
+    source_revision = _git_stdout(root, "rev-parse", "HEAD")
+    try:
+        inventory = git_trust_inventory(root)
+    except (OSError, subprocess.SubprocessError, ValueError) as error:
+        raise ManifestError(f"cannot capture Git trust inventory: {error}") from error
+    tracked, untracked = _git_path_sets(root)
+    return (
+        _GitFreezeState(
+            source_revision=source_revision,
+            inventory_digest=inventory.digest,
+            inventory_count=inventory.count,
+            inventory_paths=inventory.paths,
+            inventory_rejections=tuple((entry.path, entry.reason) for entry in inventory.rejected),
+            tracked_paths=tracked,
+            untracked_paths=untracked,
+        ),
+        inventory,
     )
 
 
