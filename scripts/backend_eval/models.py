@@ -99,18 +99,14 @@ def _validate_tuple(value: object, label: str) -> tuple[Any, ...]:
     return value
 
 
-def _validate_hash_pairs(value: object, label: str) -> tuple[tuple[str, str], ...]:
-    pairs = _validate_tuple(value, label)
-    filenames: list[str] = []
-    for entry in pairs:
-        if not isinstance(entry, tuple) or len(entry) != 2:
-            raise ValueError(f"{label} entries must be (filename, sha256) tuples")
-        filename, digest = entry
-        _validate_non_empty_str(filename, f"{label} filename")
-        _validate_sha256(digest, f"{label}[{filename}]")
-        filenames.append(filename)
-    _validate_sorted_unique(filenames, label)
-    return pairs
+def _validate_artifact_hashes(value: object, label: str) -> tuple[str, ...]:
+    hashes = _validate_tuple(value, label)
+    if not hashes:
+        raise ValueError(f"{label} must not be empty")
+    for digest in hashes:
+        _validate_sha256(digest, label)
+    _validate_sorted_unique(cast("Sequence[str]", hashes), label)
+    return cast("tuple[str, ...]", hashes)
 
 
 def _validate_path_pairs(value: object, label: str) -> tuple[tuple[str, str], ...]:
@@ -367,13 +363,13 @@ class ResolvedPackage:
     name: str
     version: str
     requirement: str
-    artifact_hashes: tuple[tuple[str, str], ...]
+    artifact_hashes: tuple[str, ...]
 
     def __post_init__(self) -> None:
         _validate_non_empty_str(self.name, "ResolvedPackage.name")
         _validate_non_empty_str(self.version, "ResolvedPackage.version")
         _validate_non_empty_str(self.requirement, "ResolvedPackage.requirement")
-        _validate_hash_pairs(self.artifact_hashes, f"ResolvedPackage.artifact_hashes[{self.name}]")
+        _validate_artifact_hashes(self.artifact_hashes, f"ResolvedPackage.artifact_hashes[{self.name}]")
 
 
 _RESOLVED_PACKAGE_FIELDS = frozenset({"name", "version", "requirement", "artifact_hashes"})
@@ -384,22 +380,16 @@ def _resolved_package_to_dict(package: ResolvedPackage) -> dict[str, object]:
         "name": package.name,
         "version": package.version,
         "requirement": package.requirement,
-        "artifact_hashes": dict(package.artifact_hashes),
+        "artifact_hashes": list(package.artifact_hashes),
     }
 
 
 def _resolved_package_from_dict(value: object) -> ResolvedPackage:
     mapping = _expect_mapping(value, "ResolvedPackage")
     _closed_fields(mapping, _RESOLVED_PACKAGE_FIELDS, "ResolvedPackage")
-    artifact_hashes_mapping = _expect_mapping(mapping["artifact_hashes"], "ResolvedPackage.artifact_hashes")
     artifact_hashes = tuple(
-        sorted(
-            (
-                _expect_str(filename, "ResolvedPackage.artifact_hashes filename"),
-                _expect_str(digest, "ResolvedPackage.artifact_hashes digest"),
-            )
-            for filename, digest in artifact_hashes_mapping.items()
-        )
+        _expect_str(digest, "ResolvedPackage.artifact_hashes digest")
+        for digest in _expect_list(mapping["artifact_hashes"], "ResolvedPackage.artifact_hashes")
     )
     return ResolvedPackage(
         name=_expect_str(mapping["name"], "ResolvedPackage.name"),
@@ -414,7 +404,7 @@ class CandidatePackage:
     name: str
     version: str
     requirement: str
-    artifact_hashes: tuple[tuple[str, str], ...]
+    artifact_hashes: tuple[str, ...]
     executable_relpath: str
 
     def __post_init__(self) -> None:
@@ -422,7 +412,7 @@ class CandidatePackage:
         _validate_non_empty_str(self.version, "CandidatePackage.version")
         _validate_non_empty_str(self.requirement, "CandidatePackage.requirement")
         _validate_relative_path(self.executable_relpath, "CandidatePackage.executable_relpath")
-        _validate_hash_pairs(self.artifact_hashes, f"CandidatePackage.artifact_hashes[{self.name}]")
+        _validate_artifact_hashes(self.artifact_hashes, f"CandidatePackage.artifact_hashes[{self.name}]")
 
 
 _CANDIDATE_PACKAGE_FIELDS = frozenset({"name", "version", "requirement", "artifact_hashes", "executable_relpath"})
@@ -433,7 +423,7 @@ def _candidate_package_to_dict(package: CandidatePackage) -> dict[str, object]:
         "name": package.name,
         "version": package.version,
         "requirement": package.requirement,
-        "artifact_hashes": dict(package.artifact_hashes),
+        "artifact_hashes": list(package.artifact_hashes),
         "executable_relpath": package.executable_relpath,
     }
 
@@ -441,15 +431,9 @@ def _candidate_package_to_dict(package: CandidatePackage) -> dict[str, object]:
 def _candidate_package_from_dict(value: object) -> CandidatePackage:
     mapping = _expect_mapping(value, "CandidatePackage")
     _closed_fields(mapping, _CANDIDATE_PACKAGE_FIELDS, "CandidatePackage")
-    artifact_hashes_mapping = _expect_mapping(mapping["artifact_hashes"], "CandidatePackage.artifact_hashes")
     artifact_hashes = tuple(
-        sorted(
-            (
-                _expect_str(filename, "CandidatePackage.artifact_hashes filename"),
-                _expect_str(digest, "CandidatePackage.artifact_hashes digest"),
-            )
-            for filename, digest in artifact_hashes_mapping.items()
-        )
+        _expect_str(digest, "CandidatePackage.artifact_hashes digest")
+        for digest in _expect_list(mapping["artifact_hashes"], "CandidatePackage.artifact_hashes")
     )
     return CandidatePackage(
         name=_expect_str(mapping["name"], "CandidatePackage.name"),

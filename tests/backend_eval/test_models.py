@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import cast
+
 import pytest
 
 from scripts.backend_eval.models import (
@@ -71,7 +73,7 @@ def _resolved_package(name: str, **overrides: object) -> ResolvedPackage:
         "name": name,
         "version": "0.0.1",
         "requirement": f"{name}==0.0.1",
-        "artifact_hashes": ((f"{name}-0.0.1.tar.gz", _SHA_A),),
+        "artifact_hashes": (_SHA_A,),
     }
     fields.update(overrides)
     return ResolvedPackage(**fields)
@@ -82,7 +84,7 @@ def _candidate_package(name: str = "ty", **overrides: object) -> CandidatePackag
         "name": name,
         "version": "0.0.1",
         "requirement": f"{name}==0.0.1",
-        "artifact_hashes": ((f"{name}-0.0.1.tar.gz", _SHA_A),),
+        "artifact_hashes": (_SHA_A,),
         "executable_relpath": f"bin/{name}",
     }
     fields.update(overrides)
@@ -285,22 +287,27 @@ def test_service_config_identity_rejects_relative_home_path() -> None:
 
 def test_resolved_package_rejects_noncanonical_artifact_hash() -> None:
     with pytest.raises(ValueError, match="SHA-256"):
-        _resolved_package("ty", artifact_hashes=(("ty-0.0.1.tar.gz", "deadbeef"),))
+        _resolved_package("ty", artifact_hashes=("deadbeef",))
 
 
-def test_resolved_package_rejects_duplicate_artifact_hash_filenames() -> None:
+def test_resolved_package_rejects_duplicate_artifact_hash_digests() -> None:
     with pytest.raises(ValueError, match="duplicate"):
-        _resolved_package("ty", artifact_hashes=(("ty-0.0.1.tar.gz", _SHA_A), ("ty-0.0.1.tar.gz", _SHA_B)))
+        _resolved_package("ty", artifact_hashes=(_SHA_A, _SHA_A))
 
 
 def test_resolved_package_rejects_unsorted_artifact_hashes() -> None:
     with pytest.raises(ValueError, match="sorted"):
-        _resolved_package("ty", artifact_hashes=(("z.tar.gz", _SHA_A), ("a.tar.gz", _SHA_B)))
+        _resolved_package("ty", artifact_hashes=(_SHA_B, _SHA_A))
 
 
 def test_resolved_package_rejects_non_tuple_artifact_hashes() -> None:
     with pytest.raises(ValueError, match="tuple"):
-        _resolved_package("ty", artifact_hashes=[("ty-0.0.1.tar.gz", _SHA_A)])
+        _resolved_package("ty", artifact_hashes=[_SHA_A])
+
+
+def test_resolved_package_rejects_empty_artifact_hashes() -> None:
+    with pytest.raises(ValueError, match="empty"):
+        _resolved_package("ty", artifact_hashes=())
 
 
 def test_candidate_package_rejects_absolute_executable_relpath() -> None:
@@ -308,24 +315,29 @@ def test_candidate_package_rejects_absolute_executable_relpath() -> None:
         _candidate_package(executable_relpath="/bin/ty")
 
 
-def test_candidate_package_rejects_duplicate_artifact_hash_filenames() -> None:
+def test_candidate_package_rejects_duplicate_artifact_hash_digests() -> None:
     with pytest.raises(ValueError, match="duplicate"):
-        _candidate_package(artifact_hashes=(("ty-0.0.1.tar.gz", _SHA_A), ("ty-0.0.1.tar.gz", _SHA_B)))
+        _candidate_package(artifact_hashes=(_SHA_A, _SHA_A))
 
 
 def test_candidate_package_rejects_noncanonical_artifact_hash() -> None:
     with pytest.raises(ValueError, match="SHA-256"):
-        _candidate_package(artifact_hashes=(("ty-0.0.1.tar.gz", "deadbeef"),))
+        _candidate_package(artifact_hashes=("deadbeef",))
 
 
 def test_candidate_package_rejects_unsorted_artifact_hashes() -> None:
     with pytest.raises(ValueError, match="sorted"):
-        _candidate_package(artifact_hashes=(("z.tar.gz", _SHA_A), ("a.tar.gz", _SHA_B)))
+        _candidate_package(artifact_hashes=(_SHA_B, _SHA_A))
 
 
 def test_candidate_package_rejects_non_tuple_artifact_hashes() -> None:
     with pytest.raises(ValueError, match="tuple"):
-        _candidate_package(artifact_hashes=[("ty-0.0.1.tar.gz", _SHA_A)])
+        _candidate_package(artifact_hashes=[_SHA_A])
+
+
+def test_candidate_package_rejects_empty_artifact_hashes() -> None:
+    with pytest.raises(ValueError, match="empty"):
+        _candidate_package(artifact_hashes=())
 
 
 def test_candidate_lock_rejects_duplicate_resolved_package_names() -> None:
@@ -651,6 +663,15 @@ def test_admission_receipt_allows_incomplete_status_with_unexpected_paths() -> N
 def test_admission_receipt_round_trips_through_to_dict_and_from_dict() -> None:
     receipt = _admission_receipt()
     assert AdmissionReceipt.from_dict(receipt.to_dict()) == receipt
+
+
+def test_admission_receipt_serializes_artifact_hashes_as_digest_arrays() -> None:
+    payload = _admission_receipt().to_dict()
+    candidate_lock = cast("dict[str, object]", payload["candidate_lock"])
+    resolved_packages = cast("list[dict[str, object]]", candidate_lock["resolved_packages"])
+    candidates = cast("list[dict[str, object]]", candidate_lock["candidates"])
+    assert resolved_packages[0]["artifact_hashes"] == [_SHA_A]
+    assert candidates[0]["artifact_hashes"] == [_SHA_A]
 
 
 def test_admission_receipt_to_dict_is_canonical_json_serializable() -> None:
