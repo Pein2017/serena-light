@@ -290,7 +290,8 @@ binding automatically.
 
 `get_runtime_status` is a non-warming control-plane probe. Its fixed public
 shape is `workspace`, `build`, `languages`, `executor`, and `issues`; healthy
-status omits lease/daemon IDs, paths, generations, timestamps, and histories.
+status omits lease/daemon IDs, interpreter/configuration paths, generations,
+timestamps, and histories.
 Issue records remain bounded and actionable.
 
 Closed recovery actions are advice, never automatic calls. File misses may
@@ -298,7 +299,10 @@ recommend an overview; wrong-root paths may recommend activation; unavailable
 implementation providers recommend an independent references query. An exact
 oversized body recommends either depth-1 child navigation, a retry using the
 measured legal answer budget, or a no-body lookup followed by an exact host
-range read. Serena Light never guesses a symbol, relabels references as
+range read. If an exact container path/name cannot itself fit the final error
+budget, the action becomes location-first and returns only length/SHA-256 target
+witnesses; repeating the original no-body query recovers the authoritative
+location. Serena Light never guesses a symbol, relabels references as
 implementations, performs a lexical fallback, returns partial source, rebinds,
 or retries on the Agent's behalf.
 

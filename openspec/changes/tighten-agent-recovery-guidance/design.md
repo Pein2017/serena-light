@@ -148,8 +148,16 @@ For exact body budgeting, the rich symbol record will carry one internal-only
 `has_children` fact derived from the verified document-symbol tree. Compact
 success strips it. When final rendering cannot retain the first complete body,
 the minimum-error renderer selects one recovery action from `has_children` and
-the measured size. The measured value remains in
-`minimum_required_chars`; no source fragment enters the error.
+the measured size. For a container, it retains the exact matched
+`relative_path` and `name_path` when the final bounded error can carry them. It
+first sheds optional workspace/adapter/generation and authority evidence when
+needed. If the target strings still cannot fit, it changes to the truthful
+location-first recovery and replaces the strings with fixed-shape length and
+SHA-256 witnesses; the Agent repeats its original no-body lookup to obtain the
+authoritative location. The measured value remains in
+`minimum_required_chars`; no source fragment or raw overflow target enters the
+error. The malformed-navigation fallback is constrained by the same final
+budget and may shed its optional tool label.
 
 Alternative rejected: selecting recovery in the semantic core. The public
 budget can reject a body that fits the private semantic budget, so the final
@@ -179,6 +187,10 @@ actions, unchanged compact success schema, and fresh-client requirement.
   exact-MCP acceptance tests assert it is absent.
 - **Recovery advice could be stale or free-form** → actions are closed enum
   values validated at presentation, and capability success never contains them.
+- **A valid long path/name could make the recovery error exceed its own budget**
+  → optional authority evidence is shed in a fixed order, then the action uses a
+  fixed-shape target witness and a location-first query that does not require
+  the undisclosed matched path.
 - **A long initialize string could regress repeated metadata cost** → retain the
   existing 220-character hard bound and byte-identity tests for inner/outer MCP.
 

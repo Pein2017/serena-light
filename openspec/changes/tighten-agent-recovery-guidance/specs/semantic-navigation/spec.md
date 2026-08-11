@@ -30,23 +30,41 @@ When an exact `find_symbol(include_body=true)` match cannot fit as one complete
 record, the existing bounded `INVALID_INPUT` error SHALL retain
 `field=max_answer_chars` and `minimum_required_chars` and SHALL add one bounded
 `next_action`. If the matched symbol is a structural container with known child
-symbols, the next action SHALL direct the Agent to call
-`get_symbols_overview(max_depth=1)` for the same file and then request an exact
-child `name_path`. If the exact body has no known child expansion and its
-measured minimum is within the public maximum, the next action SHALL direct a
-retry with that exact `max_answer_chars`. If neither recovery applies, the next
-action SHALL direct the Agent to repeat the exact `find_symbol` without body,
-then use that compact range for an exact host file read rather than a broad
-scan.
+symbols and its exact matched `relative_path` plus `name_path` fit the bounded
+error, the error SHALL include those target fields and direct the Agent to call
+`get_symbols_overview(max_depth=1)` for that file and then request an exact child
+`name_path`. If those exact target strings cannot fit the caller's final answer
+budget after optional authority evidence is shed, the error SHALL instead
+direct the Agent to repeat the original exact `find_symbol` without body and use
+the returned location for an exact host file read. This overflow exception
+SHALL replace the raw strings with a bounded `target` witness containing
+`relative_path` and `name_path`, each represented only as an integer `length`
+and lowercase SHA-256 `sha256` digest.
 
-The error MUST NOT include partial body text, invent child symbols, echo adapter
-or generation metadata not already required by the measured error, increase the
-public maximum, or introduce body slicing, pagination, AST-node editing, or a
-new tool.
+If the exact body has no known child expansion and its measured minimum is
+within the public maximum, the next action SHALL direct a retry with that exact
+`max_answer_chars`. If neither recovery applies, the next action SHALL direct
+the Agent to repeat the exact `find_symbol` without body, then use that compact
+range for an exact host file read rather than a broad scan.
+
+The final serialized error MUST NOT exceed the validated `max_answer_chars`.
+Before using the overflow exception, the renderer MAY deterministically shed
+top-level `workspace`, `adapter`, and `generations`, followed by error-detail
+`authorities`; it MUST retain the error code, `field=max_answer_chars`,
+`minimum_required_chars`, and one closed `next_action`. A bounded malformed
+fallback MAY additionally omit its optional `details.tool`. Text and structured
+content SHALL remain identical. The error MUST NOT include partial body text,
+invent child symbols, echo raw overflow target strings, increase the public
+maximum, or introduce body slicing, pagination, AST-node editing, or a new
+tool.
 
 #### Scenario: Oversized class has known methods
-- **WHEN** an exact class body exceeds the answer budget and its verified symbol tree contains children
-- **THEN** the error recommends a depth-1 overview followed by exact child `find_symbol`, without returning a partial class body
+- **WHEN** an exact class body exceeds the answer budget, its verified symbol tree contains children, and the exact matched target fits the bounded error
+- **THEN** the error includes that `relative_path` and `name_path` and recommends a depth-1 overview followed by exact child `find_symbol`, without returning a partial class body
+
+#### Scenario: Container target strings exceed the final error budget
+- **WHEN** a global or directory-scoped exact container match has known children but its exact `relative_path` and `name_path` cannot fit after optional authority evidence is shed
+- **THEN** the error remains within `max_answer_chars`, changes to `find_symbol_location_then_exact_file_read`, replaces both raw strings with length/SHA-256 witnesses, and the original no-body query returns the authoritative location
 
 #### Scenario: Oversized leaf fits a legal larger budget
 - **WHEN** an exact function body exceeds the caller's budget but its `minimum_required_chars` is at most 50000

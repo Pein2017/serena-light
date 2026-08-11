@@ -290,7 +290,10 @@ has the fixed compact keys `workspace`, `build`, `languages`, `executor`, and
 `issues`, and does not warm adapters. Unavailable implementation lookup advises
 `find_referencing_symbols` without automatic fallback. Oversized exact bodies
 advise child navigation, an exact legal answer-budget retry, or an exact host
-range read. The 11-tool count is unchanged.
+range read. When an exact container target cannot fit the error budget, the
+response switches to the location/read action and exposes only bounded
+length/SHA-256 target witnesses; repeat the original no-body query to recover
+the location. The 11-tool count is unchanged.
 
 Navigation and diagnostics success now expose only canonical
 `{"ok":true,"data":{"workspace":"<absolute root>","files":[...],"omitted":<int>}}`

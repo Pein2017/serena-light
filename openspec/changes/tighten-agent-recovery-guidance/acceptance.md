@@ -17,8 +17,9 @@ boundary for loading the newly installed Codex plugin version.
 
 ## Deterministic verification
 
-All commands ran from `/data/CoordExp/serena-light` through the `ms` Conda
-environment unless the command is a host-level OpenSpec or plugin command.
+All commands ran from `/data/CoordExp/serena-light` through either the `ms`
+Conda environment or the repository service virtual environment, unless the
+command is a host-level OpenSpec or plugin command.
 
 - Full suite: `rtk run '.venv/bin/python -m pytest -q'` — 940 passed, 35
   skipped, one Starlette/httpx deprecation warning, 238.06 seconds.
@@ -36,7 +37,8 @@ environment unless the command is a host-level OpenSpec or plugin command.
 - Focused real schema-6 shared-daemon, rollover, and stdio connector acceptance
   passed: 6 tests in 77.96 seconds.
 - Current external-snapshot Python and TypeScript acceptance passed: 14 tests,
-  with three observation-only performance/latency cases deselected, in 182.63
+  with three observation-only performance/latency cases excluded (deselected in
+  the recorded command and marker-skipped in the independent audit), in 182.63
   seconds.
 - The final long-root/path/name recovery regressions passed in the 107-test
   compact/navigation slice. Independent Sol-xhigh reproduction measured 435

@@ -109,7 +109,38 @@
       "file_symbol_miss": "an existing authorized file-scoped SYMBOL_NOT_FOUND carries get_symbols_overview; directory and global misses do not",
       "bound_invalid_path": "a bound semantic or diagnostic INVALID_PATH carries the active workspace and conditional activate_workspace_if_other_root without discovery, activation, or replay",
       "implementation_provider_unavailable": "find_implementations returns UNSUPPORTED and recommends an independent find_referencing_symbols call without relabeling references or dispatching automatically",
-      "oversized_exact_body": "a verified container recommends overview then exact child lookup; a leaf within the 50000-character public maximum recommends the measured budget; a larger leaf recommends no-body lookup then an exact host range read",
+      "oversized_exact_body": "a verified container recommends overview then exact child lookup when its exact matched target fits the bounded error; if those target strings cannot fit, it recommends repeating the original no-body query then an exact host range read; a leaf within the 50000-character public maximum recommends the measured budget; a larger leaf recommends no-body lookup then an exact host range read",
+      "oversized_container_target": {
+        "fitting_error_fields": [
+          "relative_path",
+          "name_path"
+        ],
+        "overflow_action": "find_symbol_location_then_exact_file_read",
+        "overflow_witness": {
+          "target.relative_path": [
+            "length",
+            "sha256"
+          ],
+          "target.name_path": [
+            "length",
+            "sha256"
+          ]
+        },
+        "raw_overflow_target_excluded": true
+      },
+      "minimum_error_shed_order": [
+        "workspace",
+        "adapter",
+        "generations",
+        "details.authorities",
+        "exact_container_target_to_bounded_witness"
+      ],
+      "malformed_fallback_optional_shedding": [
+        "workspace",
+        "adapter",
+        "generations",
+        "details.tool"
+      ],
       "ambiguity": "bounded candidates remain authoritative and no next_action or automatic selection is added",
       "excluded_behavior": [
         "automatic semantic retry",
