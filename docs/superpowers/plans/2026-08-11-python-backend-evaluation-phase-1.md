@@ -56,7 +56,7 @@ Task 1: shared schemas
 **Interfaces:**
 - Produces: `canonical_json(value: Mapping[str, object]) -> bytes`
 - Produces: `sha256_bytes(value: bytes) -> str`
-- Produces frozen dataclasses `PhaseBudget`, `ProductionIdentity`, `CandidatePackage`, `CandidateLock`, `PathRecord`, `RootManifest`, `WriteDelta`, `AdmissionReceipt`
+- Produces frozen dataclasses `PhaseBudget`, `ProductionIdentity`, `ResolvedPackage`, `CandidatePackage`, `CandidateLock`, `PathRecord`, `RootManifest`, `WriteDelta`, `AdmissionReceipt`
 - Produces: `AdmissionReceipt.to_dict() -> dict[str, object]`
 - Produces: `AdmissionReceipt.from_dict(value: Mapping[str, object]) -> AdmissionReceipt`
 - All later tasks consume these exact names; no later task may introduce a second receipt/manifest representation.
@@ -92,9 +92,9 @@ Expected: FAIL during import because `scripts.backend_eval.models` does not exis
 
 - [ ] **Step 3: Implement minimal frozen models with strict closed fields**
 
-Use `@dataclass(frozen=True, slots=True)` for every record. `CandidatePackage` contains `name`, `version`, `requirement`, `artifact_hashes`, and `executable_relpath`. `ProductionIdentity` contains all three lockfile SHA-256 values, `dependency_lock_digest`, `build_identity`, and sorted production runtime paths. `RootManifest` contains root, kind, inventory digest/count, fully hashed `PathRecord`s, metadata-only `PathRecord`s, and a manifest digest. `AdmissionReceipt` contains schema version `1`, evaluation identity, status, timestamps, budgets, production identity before/after, candidate lock, root manifests, write deltas, artifact-tree digest, issues, and next action.
+Use `@dataclass(frozen=True, slots=True)` for every record. `ResolvedPackage` contains `name`, `version`, `requirement`, and `artifact_hashes` for every package in the compiled lock. `CandidatePackage` contains those same fields plus `executable_relpath`, and is used only for the direct `ty` and `pyrefly` candidates. `CandidateLock` contains the lock digest, resolution cutoff, all resolved packages, and exactly the two direct candidates. `ProductionIdentity` contains all three lockfile SHA-256 values, `dependency_lock_digest`, `build_identity`, and sorted production runtime paths. `PathRecord` includes its lexical disposition (`tracked`, `untracked`, `ignored`, or `declared`). `RootManifest` contains root, kind, Git source revision when applicable, inventory digest/count, fully hashed `PathRecord`s, metadata-only `PathRecord`s, and a manifest digest. A fully hashed record must have `content_sha256`; a metadata record normally omits it but may carry the required after-change digest when the write guard detects changed metadata. `AdmissionReceipt` contains schema version `1`, evaluation identity, status, timestamps, budgets, production identity before/after, candidate lock, root manifests, write deltas, artifact-tree digest, issues, and next action.
 
-Reject unknown or missing fields, noncanonical SHA-256 values, duplicate package/path names, non-absolute roots, non-positive budgets, and a successful receipt whose before/after production identities differ.
+Reject unknown or missing fields, mutable/non-tuple sequence inputs to frozen records, noncanonical SHA-256 values, duplicate or noncanonical package/path ordering, non-absolute roots, missing or malformed Git source revisions, invalid per-path dispositions, fully hashed records without content digests, non-positive budgets, and a successful receipt whose before/after production identities differ.
 
 - [ ] **Step 4: Run focused tests**
 
@@ -128,7 +128,7 @@ git commit -m "Add backend evaluation receipt models"
 - Create: `tests/backend_eval/test_candidate_lock.py`
 
 **Interfaces:**
-- Consumes: Task 1 `CandidateLock`, `CandidatePackage`, `ProductionIdentity`, `canonical_json`, `sha256_bytes`
+- Consumes: Task 1 `CandidateLock`, `ResolvedPackage`, `CandidatePackage`, `ProductionIdentity`, `canonical_json`, `sha256_bytes`
 - Produces: `capture_production_identity(repo_root: Path) -> ProductionIdentity`
 - Produces: `assert_production_identity_unchanged(before: ProductionIdentity, after: ProductionIdentity) -> None`
 - Produces: `compile_candidate_lock(request: CandidateLockRequest, *, runner: CommandRunner = subprocess_runner) -> CandidateLock`
@@ -179,7 +179,7 @@ Import `dependency_lock_digest` and `compute_build_identity` from `serena_light.
 
 - [ ] **Step 5: Implement one-shot lock compilation and parsing**
 
-Write input and output only below the caller's ignored artifact root. Run the exact explicit command with a service-owned cache directory under the artifact root and bootstrap proxy inheritance unchanged. Parse the generated hash-locked requirements; record all resolved packages for reproducibility, while `CandidatePackage` entries identify the direct `ty` and `pyrefly` versions and expected `bin/ty` / `bin/pyrefly` paths. Hash the lock bytes into `CandidateLock.digest`. If a lock already exists, accept it only when recompilation is not requested and its canonical receipt matches exactly.
+Write input and output only below the caller's ignored artifact root. Run the exact explicit command with a service-owned cache directory under the artifact root and bootstrap proxy inheritance unchanged. Parse the generated hash-locked requirements into `ResolvedPackage` entries for every resolved distribution. Populate exactly two `CandidatePackage` entries for the direct `ty` and `pyrefly` versions and expected `bin/ty` / `bin/pyrefly` paths. Hash the lock bytes into `CandidateLock.digest`. If a lock already exists, accept it only when recompilation is not requested and its canonical receipt matches exactly.
 
 - [ ] **Step 6: Run focused tests and production-identity regression tests**
 
