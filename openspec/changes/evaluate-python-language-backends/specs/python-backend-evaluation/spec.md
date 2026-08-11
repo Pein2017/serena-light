@@ -43,7 +43,27 @@ Candidate language servers SHALL use service-owned HOME, configuration, cache, e
 
 #### Scenario: A candidate runs on a read-only input
 - **WHEN** a protocol, common-surface, feature, cold-start, or warm-query probe completes
-- **THEN** a before-and-after lexical manifest fully hashes the trust-inventory closure and declared fixture paths, metadata-scans all remaining in-scope paths for path membership, file type, symlink target, size, `mtime_ns`, and inode, and hashes any remainder path whose metadata changed
+- **THEN** a before-and-after lexical manifest fully hashes the trust-inventory closure and declared fixture paths, metadata-scans the complete declared in-scope remainder of every Git root -- files, symlink targets, directories including empty ones, and any other node -- for path membership, file type, symlink target, size, `mtime_ns`, and inode, and hashes any remainder path whose metadata changed or that did not exist before
+
+#### Scenario: A scan boundary is required to keep the sweep bounded
+- **WHEN** a Git corpus root contains a service- or repository-owned tree that is not part of the evaluated corpus
+- **THEN** only `.git`, the evaluation `.admission-artifacts`, a lane-owned `.venv`, and `node_modules` are pruned, every pruned path is published in the manifest and counted in the acceptance record, and `research-probes/model_cache` remains in scope
+
+#### Scenario: A setup operation could touch a corpus root
+- **WHEN** a phase compiles a candidate lock, prepares a candidate runtime, or performs any other setup work
+- **THEN** the first capture precedes that work and the second follows it and precedes cleanup and receipt publication, so the delta brackets every operation the phase performed
+
+#### Scenario: The remainder changes between captures
+- **WHEN** a remainder path is created, deleted, or changes its metadata, or a trust-inventory member is created or deleted, between the two captures
+- **THEN** the comparison reports it as an unexpected path and holds, rather than reporting an unstable root, and the phase publishes the changed manifest controls alongside the delta
+
+#### Scenario: A remainder file changes while its content is being read
+- **WHEN** the second stage hashes a changed or created remainder file and the file cannot be read stably, or its metadata moves again during the read
+- **THEN** the observation is incomplete and is never reported as clean
+
+#### Scenario: One freeze moves while it is being captured
+- **WHEN** a Git revision, trust inventory, or tracked/untracked disposition changes during a single capture
+- **THEN** that capture fails closed rather than returning a manifest describing two different filesystem states
 
 #### Scenario: Pyrefly lacks workspace configuration
 - **WHEN** Pyrefly evaluates any workspace through the controlled arm
@@ -52,6 +72,25 @@ Candidate language servers SHALL use service-owned HOME, configuration, cache, e
 #### Scenario: A controlled edit is required
 - **WHEN** diagnostics, freshness, or stale-hash behavior requires a source mutation
 - **THEN** the mutation occurs only in a disposable snapshot, the intended mutation is declared separately from backend side effects, and the snapshot is destroyed after evidence capture
+
+### Requirement: Every receipt binds its evaluator, host, environment, and runtime
+Every phase receipt SHALL be bound to the exact evaluator source closure that produced it, the CLI host interpreter that executed it, the environment its bootstrap downloads received, and the service-owned candidate runtime it evaluated, and each execution SHALL publish immutable evidence that no later execution can replace.
+
+#### Scenario: A receipt is published
+- **WHEN** any phase publishes a receipt
+- **THEN** it records the digest of the executed evaluation source closure, the source Git commit and whether that source was clean, the CLI host interpreter's configured path, realpath, SHA-256, and version, and the candidate runtime's logical root and canonical runtime-manifest SHA-256 recomputed from disk before the gate can pass
+
+#### Scenario: Evaluation code or the CLI host changes
+- **WHEN** the evaluation source closure, the CLI host interpreter, or the artifact root differs from an earlier run
+- **THEN** the reproducible evaluation identity differs, so new evidence is published beside the earlier evidence rather than over it
+
+#### Scenario: A run is repeated or two runs overlap
+- **WHEN** the same evaluation identity is executed again, concurrently or later
+- **THEN** each execution carries its own immutable run identity, publishes to its own receipt path under a per-identity lock, and can neither delete nor replace another execution's receipt
+
+#### Scenario: A resolver or installer needs the external network
+- **WHEN** a bootstrap download runs
+- **THEN** it inherits only the allowlisted external-network proxy, CA, and locale values plus service-owned state, refuses ambient package-index, source, `PATH`, and `PYTHONPATH` controls, and the receipt records only key names and SHA-256 digests of values
 
 ### Requirement: Hard gates precede feature and efficiency comparison
 Every candidate SHALL pass correctness, workspace freshness, selected-environment import resolution, zero-write, current-surface compatibility, bounded-response, and lifecycle gates before candidate-specific features or efficiency can influence selection.
@@ -146,6 +185,18 @@ The frozen evaluation contract SHALL cap active wall time at 30 minutes for mani
 #### Scenario: A phase exceeds its ceiling
 - **WHEN** a phase or Agent arm reaches its frozen active wall-time ceiling without a valid terminal receipt
 - **THEN** the phase stops, evaluation-owned processes and leases are released, the timeout is dispositioned as backend, wrapper, or infrastructure behavior, and no further expensive phase starts until the lead determines the decision remains reachable
+
+#### Scenario: A phase ceiling is measured
+- **WHEN** a phase measures its own wall time
+- **THEN** the ceiling covers every step the phase performs, including resolution, preparation, each snapshot capture, cleanup, final identity checks, artifact digests, and receipt publication, and is not limited to the phase's expensive middle
+
+#### Scenario: A child process does not return
+- **WHEN** an evaluation-started subprocess exceeds the phase's remaining time
+- **THEN** it receives that remaining time as its own bound, its whole process group is terminated on expiry, and it cannot outlive the phase or block cleanup
+
+#### Scenario: A phase reaches its ceiling with usable evidence
+- **WHEN** collection reaches the ceiling but the phase already holds the identities and frozen inputs a timeout receipt requires
+- **THEN** a reserved finalization window publishes that timeout receipt, and a phase that cannot complete even that evidence fails closed without publishing a receipt
 
 #### Scenario: The total ceiling is reached
 - **WHEN** cumulative active evaluation time reaches 16 hours
