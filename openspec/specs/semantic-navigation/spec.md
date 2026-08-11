@@ -429,24 +429,23 @@ filter removal SHALL contribute to `omitted` together with budget removals.
 - **THEN** `find_declaration` returns `AMBIGUOUS_SYMBOL` without choosing an occurrence
 
 ### Requirement: External Python definitions remain navigable and read-only
-The Pyright adapter SHALL use the conda `ms` interpreter through the
-`workspace/configuration` protocol and SHALL return trusted definitions inside
-the pinned environment's standard-library and site-packages trees. Compact
-public identity SHALL be the authoritative absolute path plus `read_only=true`;
-the internal external-root classification MUST NOT create a second public trust
-identifier.
+The Pyright adapter SHALL use the Conda environment selected when the workspace was activated and SHALL return definitions resolved through that environment. Compact public identity SHALL be the authoritative absolute path plus `read_only=true`; an external location MUST NOT create a second public trust identifier or become editable.
 
-#### Scenario: ms-swift imports transformers
-- **WHEN** a caller requests the definition of `GenerationConfig` from an `ms-swift` source file
-- **THEN** `find_declaration` points into the installed transformers package selected by the `ms` interpreter and marks its file group read-only
+#### Scenario: Default environment resolves an installed package
+- **WHEN** a caller omits `python_environment` and requests the definition of an import available in `ms`
+- **THEN** navigation uses the `ms` interpreter and marks the external file group read-only
+
+#### Scenario: Explicit environment resolves its installed package
+- **WHEN** a caller activates with `python_environment="llm-framework-study"` and requests a definition available in that environment
+- **THEN** navigation uses the selected environment rather than an identically named or missing package in `ms`
 
 #### Scenario: External definition becomes an edit input
-- **WHEN** a caller passes the returned transformers path to an editing tool
+- **WHEN** a caller passes any returned external path to an editing tool
 - **THEN** navigation remains allowed but editing returns `READ_ONLY_ROOT`
 
-#### Scenario: ms-swift imports another installed package
-- **WHEN** `find_declaration` resolves a source occurrence into another package under the pinned `ms` environment
-- **THEN** the external path remains visible with read-only metadata and cannot expand the active workspace inventory
+#### Scenario: Environment selection remains binding-scoped
+- **WHEN** two leases query the same root through different selected environments
+- **THEN** each result is produced by its own environment's adapter without changing the other lease
 
 ### Requirement: Multi-adapter global results retain language ownership
 When a global workspace query covers both supported language families, the

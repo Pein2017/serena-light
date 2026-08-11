@@ -22,6 +22,6 @@
 ## 4. Verification and release evidence
 
 - [x] 4.1 Run focused identity, service, connector, runtime, Pyright, diagnostics, and guarded-edit tests; run Ruff and Ty on the changed closure.
-- [ ] 4.2 Run real connector/daemon activation of `llm-framework-study/site-packages` with default `ms` and explicit `llm-framework-study`; prove status interpreter selection, read-only editing, release cleanup, and no orphan processes.
-- [ ] 4.3 Run the full pytest suite, strict OpenSpec validation, bootstrap/build-identity, source ownership/provenance, and production LOC informational report.
-- [ ] 4.4 Sync stable specs, archive the completed change, verify a fresh client negotiates the new activation schema/build, and publish only after all blockers are closed.
+- [x] 4.2 Run real connector/daemon activation of `llm-framework-study/site-packages` with default `ms` and explicit `llm-framework-study`; prove status interpreter selection, read-only editing, release cleanup, and no orphan processes.
+- [x] 4.3 Run the full pytest suite, strict OpenSpec validation, bootstrap/build-identity, source ownership/provenance, and production LOC informational report.
+- [x] 4.4 Sync stable specs, archive the completed change, verify a fresh client negotiates the new activation schema/build, and publish only after all blockers are closed.

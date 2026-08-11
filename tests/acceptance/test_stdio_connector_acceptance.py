@@ -267,6 +267,9 @@ async def _run_fresh_stdio_client(
         assert len(listed.tools) == 11
         assert "get_runtime_status" in tool_names
         assert "replace_symbol_body" in tool_names
+        activation_tool = next(tool for tool in listed.tools if tool.name == "activate_workspace")
+        activation_properties = _mapping(activation_tool.inputSchema["properties"])
+        assert "python_environment" in activation_properties
         descriptions = {tool.name: (tool.description or "") for tool in listed.tools}
         assert "startup cwd is auto-bound" in descriptions["activate_workspace"]
         assert "Shell cd does not change this lease" in descriptions["activate_workspace"]

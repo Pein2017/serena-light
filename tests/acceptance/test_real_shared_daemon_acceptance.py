@@ -11,6 +11,7 @@ descendants.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import os
 import signal
 import subprocess
@@ -202,6 +203,13 @@ class _HeldStdioClient:
             )
         )
 
+    async def call_tool(
+        self,
+        name: str,
+        arguments: Mapping[str, object] | None,
+    ) -> types.CallToolResult:
+        return await self._call(name, arguments)
+
     async def aclose(self) -> None:
         task, self._task = self._task, None
         if task is None:
@@ -348,6 +356,10 @@ def test_real_shared_daemon_serves_concurrent_roots_and_survives_partial_release
     assert not RUNTIME_ROOT.is_relative_to(runtime_root)
     shared_root = (tmp_path / "shared-root").resolve()
     other_root = (tmp_path / "other-root").resolve()
+    llm_site_packages = Path(
+        "/root/miniconda3/envs/llm-framework-study/lib/python3.12/site-packages"
+    ).resolve(strict=True)
+    llm_read_only_target = (llm_site_packages / "torchtune" / "__init__.py").resolve(strict=True)
     _initialize_git_workspace(shared_root, module="shared")
     _initialize_git_workspace(other_root, module="other")
     nested = shared_root / "nested"
@@ -395,30 +407,49 @@ def test_real_shared_daemon_serves_concurrent_roots_and_survives_partial_release
             descendants = _descendants(daemon)
             assert descendants, "shared daemon started no language-server descendant to account for"
 
-            # 3) One client switches roots explicitly, then reactivates the same root.
+            # 3) One client switches to an exact non-Git root with an explicit
+            # environment, proves MCP editing is denied, then reactivates that
+            # same root through the default ``ms`` binding.
             switched = await other_c.activate(
-                shared_root,
+                llm_site_packages,
                 python_environment="llm-framework-study",
             )
             switched_workspace = _mapping(switched["workspace"])
-            assert Path(cast(str, switched_workspace["identity"])).resolve() == shared_root
+            assert Path(cast(str, switched_workspace["identity"])).resolve() == llm_site_packages
             assert switched_workspace["python_environment"] == "llm-framework-study"
             assert switched_workspace["python_interpreter"] == (
                 "/root/miniconda3/envs/llm-framework-study/bin/python"
             )
             switched_status = await other_c.status()
-            _assert_bound_to(switched_status, build_identity=build_identity, workspace=shared_root)
+            _assert_bound_to(switched_status, build_identity=build_identity, workspace=llm_site_packages)
             switched_runtime_identity = _mapping(_mapping(switched_status["runtime"])["identity"])
+            assert switched_runtime_identity["kind"] == "non_git_read_only"
             assert switched_runtime_identity["python_environment"] == "llm-framework-study"
             assert switched_runtime_identity["python_interpreter"] == (
                 "/root/miniconda3/envs/llm-framework-study/bin/python"
             )
-            reactivated = await other_c.activate(shared_root)
+            original = llm_read_only_target.read_bytes()
+            denied = await other_c.call_tool(
+                "replace_symbol_body",
+                {
+                    "name_path": "unused",
+                    "relative_path": "torchtune/__init__.py",
+                    "body": "pass",
+                    "expected_hash": hashlib.sha256(original).hexdigest(),
+                },
+            )
+            denied_payload = _mapping(denied.structuredContent)
+            assert denied.isError is not True
+            assert denied_payload["ok"] is False
+            assert _mapping(denied_payload["error"])["code"] == "READ_ONLY_ROOT"
+            assert llm_read_only_target.read_bytes() == original
+
+            reactivated = await other_c.activate(llm_site_packages)
             reactivated_workspace = _mapping(reactivated["workspace"])
-            assert Path(cast(str, reactivated_workspace["identity"])).resolve() == shared_root
+            assert Path(cast(str, reactivated_workspace["identity"])).resolve() == llm_site_packages
             assert reactivated_workspace["python_environment"] == "ms"
             reactivated_status = await other_c.status()
-            _assert_bound_to(reactivated_status, build_identity=build_identity, workspace=shared_root)
+            _assert_bound_to(reactivated_status, build_identity=build_identity, workspace=llm_site_packages)
             assert _mapping(_mapping(reactivated_status["runtime"])["identity"])["python_environment"] == "ms"
             assert _active_holders(build_root, metadata) == 3
             assert _read_owned_daemon(build_root)[1] == daemon, "activation must not replace the daemon"
@@ -438,7 +469,7 @@ def test_real_shared_daemon_serves_concurrent_roots_and_survives_partial_release
             assert _active_holders(build_root, metadata) == 1
             await asyncio.sleep(_WARM_GRACE_SECONDS * 2)
             assert _is_live(daemon), "daemon retired while the last client still held its lease"
-            _assert_bound_to(await other_c.status(), build_identity=build_identity, workspace=shared_root)
+            _assert_bound_to(await other_c.status(), build_identity=build_identity, workspace=llm_site_packages)
 
             # 5) Only a zero-holder daemon retires, taking its language servers with it.
             # Refresh after every activation/query has completed so the owned

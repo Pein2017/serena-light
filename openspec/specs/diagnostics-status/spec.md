@@ -164,18 +164,19 @@ finding.
 - **THEN** its rich typed error retains the engine and repository-authority facts needed to diagnose or validate independently
 
 ### Requirement: Python diagnostics disclose interpreter and engine
-Successful Python diagnostics SHALL omit Pyright version and interpreter path.
-`get_runtime_status` and rich Python diagnostic operational errors SHALL retain
-the pinned Pyright version, selected `ms` interpreter, and trusted external
-package context used for import resolution.
+Successful Python diagnostics SHALL omit Pyright version, environment name, and interpreter path. `get_runtime_status` and rich Python diagnostic operational errors SHALL retain the pinned Pyright version plus the binding-selected Conda environment and interpreter used for import resolution.
 
-#### Scenario: Python diagnostic references an external import
-- **WHEN** Pyright reports or clears an import diagnostic for transformers
-- **THEN** compact success returns the finding or clean state while runtime status remains the owner of interpreter, engine, and trusted-external context
+#### Scenario: Python diagnostic uses the default environment
+- **WHEN** a client omits `python_environment`
+- **THEN** compact diagnostic success stays minimal while runtime status identifies `ms` and its interpreter
+
+#### Scenario: Python diagnostic uses an explicit environment
+- **WHEN** a client activates with `python_environment="llm-framework-study"`
+- **THEN** compact diagnostic success stays minimal while runtime status identifies that selected environment and interpreter
 
 #### Scenario: Python diagnostics fail operationally
-- **WHEN** a Python diagnostic cannot run because its engine, interpreter, or external-root setup is not ready
-- **THEN** the rich typed error retains the setup facts needed to recover
+- **WHEN** a Python diagnostic cannot run because its selected engine or interpreter setup is not ready
+- **THEN** the rich typed error retains the binding-owned setup facts needed to recover
 
 ### Requirement: Diagnostics obey the client-visible answer budget
 Both public diagnostics tools SHALL default `max_answer_chars` to 12,000 and
