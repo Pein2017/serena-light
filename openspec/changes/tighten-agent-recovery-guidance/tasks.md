@@ -21,8 +21,8 @@
 
 ## 4. Schema, Compatibility, and Regression Coverage
 
-- [ ] 4.1 Advance the public schema version to 6 so source/schema changes select a new build daemon and old leased builds remain undisturbed.
-- [ ] 4.2 Update README, compatibility JSON, client-registration guidance, roadmap, and initialization snapshots with the exact warning, compact status, coordinate, recovery, fresh-client, and non-goal contracts.
+- [x] 4.1 Advance the public schema version to 6 so source/schema changes select a new build daemon and old leased builds remain undisturbed.
+- [x] 4.2 Update README, compatibility JSON, client-registration guidance, roadmap, and initialization snapshots with the exact warning, compact status, coordinate, recovery, fresh-client, and non-goal contracts.
 - [ ] 4.3 Run focused unit/integration suites after each implementation group, then the full deterministic pytest suite, Ruff, Ty, bootstrap, source ownership/provenance, copied-source hashes, and strict OpenSpec validation.
 
 ## 5. Production-Shaped Acceptance

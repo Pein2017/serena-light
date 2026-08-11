@@ -12,8 +12,8 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 def test_compatibility_revision_matches_public_tool_schema_and_build_identity() -> None:
     compatibility = json.loads((REPOSITORY_ROOT / "docs" / "compatibility.json").read_text())
 
-    assert compatibility["schema_version"] == 5
-    assert PUBLIC_TOOL_SCHEMA_VERSION == "5"
+    assert compatibility["schema_version"] == 6
+    assert PUBLIC_TOOL_SCHEMA_VERSION == "6"
     assert compatibility["semantic_contract"]["coordinates"] == {
         "line": "0-based decoded-text line",
         "column": "0-based Unicode code-point column",
@@ -22,7 +22,7 @@ def test_compatibility_revision_matches_public_tool_schema_and_build_identity() 
     }
     assert compute_build_identity(REPOSITORY_ROOT) != compute_build_identity(
         REPOSITORY_ROOT,
-        public_tool_schema_version="4",
+        public_tool_schema_version="5",
     )
 
 

@@ -1,5 +1,5 @@
 {
-  "schema_version": 5,
+  "schema_version": 6,
   "scope": "parallel serena-light registration; not canonical-serena replacement",
   "semantic_contract": {
     "coordinates": {
@@ -8,7 +8,7 @@
       "text_offset": "decoded-text offset in the exact verified snapshot",
       "byte_offset": "physical UTF-8 file offset in the same snapshot, including any BOM"
     },
-    "navigation_success_coordinates": "compact [[start_line,start_column],[end_line,end_column]] ranges retain the same 0-based decoded-text line and Unicode code-point column semantics; text and byte offsets remain internal",
+    "navigation_success_coordinates": "compact [[start_line,start_column],[end_line,end_column]] ranges retain the same 0-based decoded-text line and Unicode code-point column semantics; an editor or nl -ba display line is returned line plus one; text and byte offsets remain internal",
     "assignment_bodies": "Python module-executed variables/constants and TypeScript/JavaScript top-level variable bindings return a unique complete assignment statement when include_body=true; TypeScript/JavaScript includes an existing terminal semicolon and requires the exact selected snapshot text to equal the semantic candidate name; body lookup and guarded editing share the same fail-closed recovery",
     "semantic_replay": "at most 64 unique workspace plus external target URIs; exact runtime token, complete capability identity, encoding, generations, and canonical location multiset must remain stable; deterministic overflow is non-retryable UNSUPPORTED",
     "diagnostics_publication": "versioned engines install ownership before didChange and require integer publication version evidence; unversioned engines disown old tracking, send didClose, await a bounded same-connection response barrier, and only then install a new owner before exact-full-text didOpen or cached diagnostics reuse; watcher-created temporary opens never close a URI already owned open, and close publications plus barrier or notification failures cannot satisfy or leave the new generation",
@@ -65,22 +65,57 @@
         "outer stdio Server",
         "inner daemon FastMCP"
       ],
-      "text": "Experimental Python/JS/TS. Shell cd won't rebind; activate_workspace takes an absolute path and optional Conda env (default ms). Use rg/find for text; Serena Light for symbols/references/diagnostics; report friction."
+      "text": "Experimental Python/JS/TS. Shell cd won't rebind; activate_workspace needs an absolute path; Conda defaults to ms. Use rg/find for text, Light for symbols/references/diagnostics. Ranges are 0-based. Report friction."
+    },
+    "public_tool_count": 11,
+    "activation_environment_warning": {
+      "code": "PYTHON_ENVIRONMENT_PATH_MISMATCH",
+      "behavior": "successful activation retains the caller-selected environment and emits at most one advisory warning when an installed Conda path unambiguously indicates another environment",
+      "next_action": "reactivate_with_path_environment",
+      "automatic_switch": false
+    },
+    "runtime_status": {
+      "success_keys": [
+        "workspace",
+        "build",
+        "languages",
+        "executor",
+        "issues"
+      ],
+      "healthy_issues": [],
+      "language_states": [
+        "cold",
+        "warming",
+        "ready",
+        "cooldown",
+        "failed",
+        "unavailable"
+      ],
+      "healthy_debug_metadata_excluded": true,
+      "control_plane_only": true
     },
     "query_recovery": {
       "status": "pass",
       "closed_actions": [
         "get_symbols_overview",
-        "activate_workspace_if_other_root"
+        "activate_workspace_if_other_root",
+        "reactivate_with_path_environment",
+        "activate_workspace",
+        "find_referencing_symbols",
+        "overview_then_find_child_symbol",
+        "retry_with_minimum_answer_chars",
+        "find_symbol_location_then_exact_file_read"
       ],
       "file_symbol_miss": "an existing authorized file-scoped SYMBOL_NOT_FOUND carries get_symbols_overview; directory and global misses do not",
       "bound_invalid_path": "a bound semantic or diagnostic INVALID_PATH carries the active workspace and conditional activate_workspace_if_other_root without discovery, activation, or replay",
+      "implementation_provider_unavailable": "find_implementations returns UNSUPPORTED and recommends an independent find_referencing_symbols call without relabeling references or dispatching automatically",
+      "oversized_exact_body": "a verified container recommends overview then exact child lookup; a leaf within the 50000-character public maximum recommends the measured budget; a larger leaf recommends no-body lookup then an exact host range read",
       "ambiguity": "bounded candidates remain authoritative and no next_action or automatic selection is added",
       "excluded_behavior": [
         "automatic semantic retry",
         "automatic workspace activation or root discovery",
         "fuzzy or lexical fallback",
-        "editing or success-envelope changes"
+        "partial body, pagination, body slicing, or new editing behavior"
       ]
     },
     "agent_surface_exclusions": [
@@ -843,6 +878,16 @@
       "full_gate_suite": "909_passed_35_external_snapshot_skipped_1_warning",
       "archived_change": "openspec/changes/archive/2026-08-11-configure-workspace-python-environment",
       "release_pass": true
+    },
+    "tighten_agent_recovery_guidance": {
+      "status": "implementation_complete_acceptance_pending",
+      "build_identity": null,
+      "public_tool_schema_version": 6,
+      "dependency_digest": "eff6ebdf252faff7f77cb3a2f3894d17b9a0dfc89b46bd193fafdaa9e9ab4941",
+      "public_tool_count": 11,
+      "fresh_client_required": true,
+      "archived_change": null,
+      "release_pass": false
     }
   }
 }

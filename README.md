@@ -265,38 +265,42 @@ requires a single file `relative_path` and does not enumerate a directory
 such as `"."`; host `rg`/`find` owns that lexical discovery route and no lexical
 MCP replacement is currently planned.
 
-## Current schema-5 agent interaction contract
+## Current schema-6 agent interaction contract
 
-The current public tool schema is version 5. It adds binding-scoped Python
-environment selection and flexible read-only non-Git roots. The archived compact-interaction
-revision owns its success presentation; the archived `tighten-query-recovery`
-revision changes only initialize/tool guidance and deterministic error
-correction evidence. It preserves the existing semantic, freshness, editing,
-and lifecycle owners. Older clients stay isolated on their own build slots
-until their holders drain; fresh clients resolve the current source build.
+The current public tool schema is version 6. It keeps the 11-tool surface and
+compact success schema while tightening activation warnings, control-plane
+status, coordinate guidance, and deterministic recovery advice. It preserves
+the existing semantic, freshness, editing, and lifecycle owners. Older clients
+remain isolated on their own build slots until their holders drain; a fresh
+client is required to resolve this source/schema build.
 
 Both the outer stdio connector and inner daemon publish this exact source-owned
 initialize guidance from `serena_light.instructions.AGENT_INSTRUCTIONS`:
 
-> Experimental Python/JS/TS. Shell cd won't rebind; activate_workspace takes an absolute path and optional Conda env (default ms). Use rg/find for text; Serena Light for symbols/references/diagnostics; report friction.
+> Experimental Python/JS/TS. Shell cd won't rebind; activate_workspace needs an absolute path; Conda defaults to ms. Use rg/find for text, Light for symbols/references/diagnostics. Ranges are 0-based. Report friction.
 
-The short global instruction is deliberately complemented by the owning tool
-descriptions: startup cwd is auto-bound with `ms`; `activate_workspace` switches or
-returns to any existing absolute directory and optionally selects another installed
-Conda environment for Python; non-Git roots remain read-only; unfamiliar files start with a depth-0 overview;
-an ambiguous symbol is retried with one returned qualified name path;
-reference snippets remain opt-in; diagnostics remain explicit after a
-meaningful edit group; and runtime status is for debug/build/readiness rather
-than routine preflight.
+The short global instruction is complemented by owning tool descriptions:
+startup cwd is auto-bound with `ms`; `activate_workspace` switches to any
+existing absolute directory and may explicitly select another installed Conda
+environment; non-Git roots remain read-only; and normalized ranges use 0-based
+decoded-text lines plus Unicode code-point columns (editor or `nl -ba` line is
+returned line + 1). An evident site-packages/environment mismatch produces one
+advisory `PYTHON_ENVIRONMENT_PATH_MISMATCH` warning and never switches the
+binding automatically.
 
-Two deterministic query failures expose one closed correction action without
-performing it. A file-scoped `SYMBOL_NOT_FOUND` may return
-`next_action=get_symbols_overview`. A bound semantic/diagnostic `INVALID_PATH`
-returns the active workspace and
-`next_action=activate_workspace_if_other_root`. Directory/global symbol misses,
-ambiguity, activation validation, and editing errors do not receive those
-actions. Serena Light never guesses a root or symbol, performs a lexical
-fallback, rebinds, or retries on the Agent's behalf.
+`get_runtime_status` is a non-warming control-plane probe. Its fixed public
+shape is `workspace`, `build`, `languages`, `executor`, and `issues`; healthy
+status omits lease/daemon IDs, paths, generations, timestamps, and histories.
+Issue records remain bounded and actionable.
+
+Closed recovery actions are advice, never automatic calls. File misses may
+recommend an overview; wrong-root paths may recommend activation; unavailable
+implementation providers recommend an independent references query. An exact
+oversized body recommends either depth-1 child navigation, a retry using the
+measured legal answer budget, or a no-body lookup followed by an exact host
+range read. Serena Light never guesses a symbol, relabels references as
+implementations, performs a lexical fallback, returns partial source, rebinds,
+or retries on the Agent's behalf.
 
 Successful navigation and diagnostics use compact canonical JSON with one
 absolute `data.workspace`, deterministic `data.files`, and one `data.omitted`.
@@ -312,10 +316,11 @@ adds `authority="advisory"` once per file, while engine, adapter, generation,
 URI, and offset internals stay out of successful payloads.
 
 This schema does not add lexical-discovery tools, diagnostics hooks or automatic
-diagnostic injection, or RTK integration. Host shell/file tools continue to own
-lexical enumeration and text search; diagnostics stay explicit and on demand.
-Implementation and acceptance receipts live in
-`openspec/changes/archive/2026-08-02-tighten-query-recovery/acceptance.md`.
+diagnostic injection, a 1-based mode, body pagination/slicing, or RTK
+integration. Host shell/file tools continue to own lexical enumeration, exact
+range reads, and text search; diagnostics stay explicit and on demand. Current
+implementation and acceptance work is owned by
+`openspec/changes/tighten-agent-recovery-guidance`.
 
 ## Accepted scope-error readiness tightening
 

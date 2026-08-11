@@ -273,6 +273,16 @@ overview begins at depth 0, references exclude the declaration and keep
 snippets opt-in, and diagnostics stay explicit. No lexical tool, diagnostics
 hook, RTK integration, or reserved schema-5 lexical rollover is planned.
 
+## Phase E.6: schema-6 agent recovery guidance
+
+The active `tighten-agent-recovery-guidance` change keeps the 11-tool surface
+and implements advisory environment mismatch detection, compact non-warming
+runtime status, explicit normalized-coordinate guidance, honest implementation
+fallback advice, and three deterministic oversized-body recovery routes. A
+fresh client is required because schema/build identity advances; old leased
+builds drain normally. The phase adds no lexical MCP, diagnostics hook, 1-based
+mode, body pagination/slicing, or automatic fallback.
+
 ## Phase F: agent-facing position queries
 
 After v1 archive, create the independent OpenSpec change

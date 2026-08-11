@@ -262,11 +262,11 @@ separately authorized PID-plus-create-time (or connection) revalidation
 outside this rollover. A live build-slot holder, including one created by
 this rollover, still retires normally through the existing lease/grace path.
 
-## Current schema-5 interaction migration
+## Current schema-6 interaction migration
 
 The archived sections above describe their own schema-3/schema-4 acceptance evidence.
-The current public tool schema is 5, so a fresh connector resolves a distinct
-schema-5 build slot while older leased slots drain normally. Do not stop a
+The current public tool schema is 6, so a fresh connector resolves a distinct
+schema-6 build slot while older leased slots drain normally. Do not stop a
 daemon by name to force this migration: restart or reconnect only the client
 being updated, then verify its tool list and `get_runtime_status`.
 
@@ -274,15 +274,22 @@ The exact MCP initialize text is owned by
 `serena_light.instructions.AGENT_INSTRUCTIONS` and is published byte-for-byte
 by both the outer stdio `Server` and inner daemon `FastMCP`; the canonical text
 is recorded in [the compatibility inventory](compatibility.json). Its operating
-rules are consequential for client behavior: startup cwd binds once with the
-default `ms` Conda environment, shell `cd` does not rebind, cross-root work
-requires absolute `activate_workspace`, and Python work may pass an optional
-Conda environment name at activation. Any existing non-Git directory can bind
-as an exact read-only root; narrow package/project roots are recommended only
-for inventory efficiency. Symbol
-overview starts at depth 0, reference snippets need a positive opt-in, and
-diagnostics are explicit after a meaningful edit group. Runtime status is for
-debug/build/readiness questions, not a routine preflight.
+rules are consequential for client behavior: startup cwd binds once with `ms`,
+shell `cd` does not rebind, and cross-root work requires absolute
+`activate_workspace`. Python work may explicitly select another installed
+Conda environment. If a site-packages path unambiguously indicates a different
+installed environment, activation retains the selected binding and returns one
+`PYTHON_ENVIRONMENT_PATH_MISMATCH` warning with
+`next_action=reactivate_with_path_environment`; it never auto-switches. Any
+existing non-Git directory binds as an exact read-only root.
+
+Normalized ranges use 0-based decoded-text lines and Unicode code-point
+columns; editor or `nl -ba` lines are returned line + 1. `get_runtime_status`
+has the fixed compact keys `workspace`, `build`, `languages`, `executor`, and
+`issues`, and does not warm adapters. Unavailable implementation lookup advises
+`find_referencing_symbols` without automatic fallback. Oversized exact bodies
+advise child navigation, an exact legal answer-budget retry, or an exact host
+range read. The 11-tool count is unchanged.
 
 Navigation and diagnostics success now expose only canonical
 `{"ok":true,"data":{"workspace":"<absolute root>","files":[...],"omitted":<int>}}`
@@ -296,9 +303,10 @@ TypeScript file group. Engine, adapter, generation, configured-program digest,
 URI, text-offset, and byte-offset details remain in runtime status or typed
 operational errors rather than successful results.
 
-Schema 4 does not enable lexical discovery, diagnostics hooks/automatic
-injection, or RTK. Continue to use host shell/file tools for lexical file and
-text work; do not configure a hook or a second instructions tool.
+Schema 6 does not enable lexical discovery, diagnostics hooks/automatic
+injection, a 1-based coordinate mode, body slicing/pagination, or RTK. Continue
+to use host shell/file tools for lexical file/text work and exact range reads;
+do not configure a hook or a second instructions tool.
 
 The accepted `tighten-scope-error-readiness` source-only rollover selects build
 `7deb20c2cbff6b6fac622d012ff80a923987efd80b673e14c0bcc3fa9b6e0fcf`.

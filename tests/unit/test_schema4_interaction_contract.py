@@ -13,11 +13,11 @@ from serena_light.instructions import AGENT_INSTRUCTIONS
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 
 
-def test_schema5_is_a_build_identity_input() -> None:
-    assert PUBLIC_TOOL_SCHEMA_VERSION == "5"
+def test_schema6_is_a_build_identity_input() -> None:
+    assert PUBLIC_TOOL_SCHEMA_VERSION == "6"
     assert compute_build_identity(REPOSITORY_ROOT) != compute_build_identity(
         REPOSITORY_ROOT,
-        public_tool_schema_version="4",
+        public_tool_schema_version="5",
     )
 
 

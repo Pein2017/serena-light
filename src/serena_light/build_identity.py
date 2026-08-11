@@ -8,8 +8,8 @@ from pathlib import Path
 from typing import Protocol
 
 BUILD_IDENTITY_ALGORITHM_VERSION = 3
-# Bump for binding-scoped Python environment selection and flexible non-Git roots.
-PUBLIC_TOOL_SCHEMA_VERSION = "5"
+# Bump for compact runtime status and closed agent recovery guidance.
+PUBLIC_TOOL_SCHEMA_VERSION = "6"
 RUNTIME_SOURCE_SUFFIXES = frozenset({".mjs", ".py"})
 # The dependency slot is content-addressed by resolved lock state, not by
 # unrelated project metadata or developer-tool configuration.  Both lockfiles
