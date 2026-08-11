@@ -139,6 +139,7 @@
         "workspace",
         "adapter",
         "generations",
+        "details.authorities",
         "details.tool"
       ],
       "ambiguity": "bounded candidates remain authoritative and no next_action or automatic selection is added",

@@ -52,8 +52,9 @@ Before using the overflow exception, the renderer MAY deterministically shed
 top-level `workspace`, `adapter`, and `generations`, followed by error-detail
 `authorities`; it MUST retain the error code, `field=max_answer_chars`,
 `minimum_required_chars`, and one closed `next_action`. A bounded malformed
-fallback MAY additionally omit its optional `details.tool`. Text and structured
-content SHALL remain identical. The error MUST NOT include partial body text,
+fallback MAY shed those same optional authority fields and then omit its
+optional `details.tool`. Text and structured content SHALL remain identical.
+The error MUST NOT include partial body text,
 invent child symbols, echo raw overflow target strings, increase the public
 maximum, or introduce body slicing, pagination, AST-node editing, or a new
 tool.

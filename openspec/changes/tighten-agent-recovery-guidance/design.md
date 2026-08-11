@@ -157,7 +157,8 @@ SHA-256 witnesses; the Agent repeats its original no-body lookup to obtain the
 authoritative location. The measured value remains in
 `minimum_required_chars`; no source fragment or raw overflow target enters the
 error. The malformed-navigation fallback is constrained by the same final
-budget and may shed its optional tool label.
+budget, sheds the same optional authority evidence, and may then shed its
+optional tool label.
 
 Alternative rejected: selecting recovery in the semantic core. The public
 budget can reject a body that fits the private semantic budget, so the final
