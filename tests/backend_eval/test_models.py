@@ -168,7 +168,8 @@ def _admission_receipt(
             _service_config_identity("pyright"),
             _service_config_identity("ty"),
         ),
-        "root_manifests": (_root_manifest(),),
+        "root_manifests_before": (_root_manifest(),),
+        "root_manifests_after": (_root_manifest(manifest_digest=_SHA_C),),
         "write_deltas": (_write_delta(),),
         "artifact_tree_digest": _SHA_C,
         "issues": (),
@@ -536,17 +537,42 @@ def test_admission_receipt_rejects_duplicate_service_config_backends() -> None:
         _admission_receipt(service_configs=(_service_config_identity("ty"), _service_config_identity("ty")))
 
 
-def test_admission_receipt_rejects_unsorted_root_manifests() -> None:
+def test_admission_receipt_rejects_non_tuple_root_manifests_before() -> None:
+    with pytest.raises(ValueError, match="tuple"):
+        _admission_receipt(status="hold", root_manifests_before=[_root_manifest()])
+
+
+def test_admission_receipt_rejects_unsorted_root_manifests_before() -> None:
     first = _root_manifest(root="/data/ms-swift", manifest_digest=_SHA_D)
     second = _root_manifest()
     with pytest.raises(ValueError, match="sorted"):
-        _admission_receipt(status="hold", root_manifests=(first, second))
+        _admission_receipt(status="hold", root_manifests_before=(first, second))
 
 
-def test_admission_receipt_rejects_duplicate_root_manifest_roots() -> None:
+def test_admission_receipt_rejects_duplicate_root_manifest_before_roots() -> None:
     with pytest.raises(ValueError, match="duplicate"):
         _admission_receipt(
-            status="hold", root_manifests=(_root_manifest(), _root_manifest(manifest_digest=_SHA_D))
+            status="hold", root_manifests_before=(_root_manifest(), _root_manifest(manifest_digest=_SHA_D))
+        )
+
+
+def test_admission_receipt_rejects_non_tuple_root_manifests_after() -> None:
+    with pytest.raises(ValueError, match="tuple"):
+        _admission_receipt(status="hold", root_manifests_after=[_root_manifest(manifest_digest=_SHA_C)])
+
+
+def test_admission_receipt_rejects_unsorted_root_manifests_after() -> None:
+    first = _root_manifest(root="/data/ms-swift", manifest_digest=_SHA_D)
+    second = _root_manifest(manifest_digest=_SHA_C)
+    with pytest.raises(ValueError, match="sorted"):
+        _admission_receipt(status="hold", root_manifests_after=(first, second))
+
+
+def test_admission_receipt_rejects_duplicate_root_manifest_after_roots() -> None:
+    with pytest.raises(ValueError, match="duplicate"):
+        _admission_receipt(
+            status="hold",
+            root_manifests_after=(_root_manifest(manifest_digest=_SHA_C), _root_manifest(manifest_digest=_SHA_D)),
         )
 
 
@@ -574,10 +600,16 @@ def test_admission_receipt_rejects_duplicate_issues() -> None:
         _admission_receipt(issues=("same issue", "same issue"))
 
 
-def test_admission_receipt_pass_requires_root_manifest_roots_match_write_delta_roots() -> None:
+def test_admission_receipt_pass_requires_before_manifest_roots_match_write_delta_roots() -> None:
     other_manifest = _root_manifest(root="/data/ms-swift", manifest_digest=_SHA_D)
-    with pytest.raises(ValueError, match="root_manifests"):
-        _admission_receipt(root_manifests=(other_manifest,))
+    with pytest.raises(ValueError, match="root manifest"):
+        _admission_receipt(root_manifests_before=(other_manifest,))
+
+
+def test_admission_receipt_pass_requires_after_manifest_roots_match_write_delta_roots() -> None:
+    other_manifest = _root_manifest(root="/data/ms-swift", manifest_digest=_SHA_D)
+    with pytest.raises(ValueError, match="root manifest"):
+        _admission_receipt(root_manifests_after=(other_manifest,))
 
 
 def test_admission_receipt_pass_requires_before_manifest_digest_matches_root_manifest() -> None:
@@ -585,9 +617,34 @@ def test_admission_receipt_pass_requires_before_manifest_digest_matches_root_man
         _admission_receipt(write_deltas=(_write_delta(before_manifest_digest=_SHA_D),))
 
 
+def test_admission_receipt_pass_requires_after_manifest_digest_matches_root_manifest() -> None:
+    with pytest.raises(ValueError, match="after_manifest_digest"):
+        _admission_receipt(write_deltas=(_write_delta(after_manifest_digest=_SHA_D),))
+
+
+def test_admission_receipt_pass_rejects_write_delta_with_unexpected_paths() -> None:
+    """The exact false-PASS case this fix round closes: matching roots and
+    digests on both sides must not be sufficient for PASS if an unexpected
+    (undeclared) path exists — that is a real, uncompensated write."""
+    with pytest.raises(ValueError, match="unexpected"):
+        _admission_receipt(write_deltas=(_write_delta(unexpected=("evil/backdoor.py",)),))
+
+
+def test_admission_receipt_pass_allows_declared_mutations() -> None:
+    receipt = _admission_receipt(write_deltas=(_write_delta(declared=("src/a.py", "src/b.py")),))
+    assert receipt.status == "pass"
+
+
 def test_admission_receipt_allows_incomplete_status_with_mismatched_manifest_roots() -> None:
     other_manifest = _root_manifest(root="/data/ms-swift", manifest_digest=_SHA_D)
-    receipt = _admission_receipt(status="incomplete", root_manifests=(other_manifest,))
+    receipt = _admission_receipt(status="incomplete", root_manifests_before=(other_manifest,))
+    assert receipt.status == "incomplete"
+
+
+def test_admission_receipt_allows_incomplete_status_with_unexpected_paths() -> None:
+    receipt = _admission_receipt(
+        status="incomplete", write_deltas=(_write_delta(unexpected=("evil/backdoor.py",)),)
+    )
     assert receipt.status == "incomplete"
 
 

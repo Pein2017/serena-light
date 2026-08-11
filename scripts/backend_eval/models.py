@@ -751,7 +751,8 @@ class AdmissionReceipt:
     candidate_lock: CandidateLock
     environments: tuple[EnvironmentIdentity, ...]
     service_configs: tuple[ServiceConfigIdentity, ...]
-    root_manifests: tuple[RootManifest, ...]
+    root_manifests_before: tuple[RootManifest, ...]
+    root_manifests_after: tuple[RootManifest, ...]
     write_deltas: tuple[WriteDelta, ...]
     issues: tuple[str, ...]
     artifact_tree_digest: str
@@ -781,8 +782,14 @@ class AdmissionReceipt:
         _validate_sorted_unique(
             [identity.backend for identity in service_configs], "AdmissionReceipt.service_configs"
         )
-        root_manifests = _validate_tuple(self.root_manifests, "AdmissionReceipt.root_manifests")
-        _validate_sorted_unique([manifest.root for manifest in root_manifests], "AdmissionReceipt.root_manifests")
+        root_manifests_before = _validate_tuple(self.root_manifests_before, "AdmissionReceipt.root_manifests_before")
+        _validate_sorted_unique(
+            [manifest.root for manifest in root_manifests_before], "AdmissionReceipt.root_manifests_before"
+        )
+        root_manifests_after = _validate_tuple(self.root_manifests_after, "AdmissionReceipt.root_manifests_after")
+        _validate_sorted_unique(
+            [manifest.root for manifest in root_manifests_after], "AdmissionReceipt.root_manifests_after"
+        )
         write_deltas = _validate_tuple(self.write_deltas, "AdmissionReceipt.write_deltas")
         _validate_sorted_unique([delta.root for delta in write_deltas], "AdmissionReceipt.write_deltas")
         issues = _validate_tuple(self.issues, "AdmissionReceipt.issues")
@@ -794,18 +801,29 @@ class AdmissionReceipt:
                 raise ValueError(
                     "AdmissionReceipt status is pass but production identity changed between before and after"
                 )
-            manifests_by_root = {manifest.root: manifest for manifest in root_manifests}
+            before_by_root = {manifest.root: manifest for manifest in root_manifests_before}
+            after_by_root = {manifest.root: manifest for manifest in root_manifests_after}
             delta_roots = {delta.root for delta in write_deltas}
-            if set(manifests_by_root) != delta_roots:
+            if set(before_by_root) != delta_roots or set(after_by_root) != delta_roots:
                 raise ValueError(
-                    "AdmissionReceipt status is pass but root_manifests roots do not match write_deltas roots"
+                    "AdmissionReceipt status is pass but root manifest roots do not match write_deltas roots"
                 )
             for delta in write_deltas:
-                manifest = manifests_by_root[delta.root]
-                if delta.before_manifest_digest != manifest.manifest_digest:
+                before_manifest = before_by_root[delta.root]
+                after_manifest = after_by_root[delta.root]
+                if delta.before_manifest_digest != before_manifest.manifest_digest:
                     raise ValueError(
                         f"AdmissionReceipt status is pass but write_deltas[{delta.root}]."
-                        "before_manifest_digest does not match its root_manifests entry"
+                        "before_manifest_digest does not match its root_manifests_before entry"
+                    )
+                if delta.after_manifest_digest != after_manifest.manifest_digest:
+                    raise ValueError(
+                        f"AdmissionReceipt status is pass but write_deltas[{delta.root}]."
+                        "after_manifest_digest does not match its root_manifests_after entry"
+                    )
+                if delta.unexpected:
+                    raise ValueError(
+                        f"AdmissionReceipt status is pass but write_deltas[{delta.root}] has unexpected paths"
                     )
 
     def to_dict(self) -> dict[str, object]:
@@ -822,7 +840,8 @@ class AdmissionReceipt:
             "candidate_lock": _candidate_lock_to_dict(self.candidate_lock),
             "environments": [_environment_identity_to_dict(identity) for identity in self.environments],
             "service_configs": [_service_config_identity_to_dict(identity) for identity in self.service_configs],
-            "root_manifests": [_root_manifest_to_dict(manifest) for manifest in self.root_manifests],
+            "root_manifests_before": [_root_manifest_to_dict(manifest) for manifest in self.root_manifests_before],
+            "root_manifests_after": [_root_manifest_to_dict(manifest) for manifest in self.root_manifests_after],
             "write_deltas": [_write_delta_to_dict(delta) for delta in self.write_deltas],
             "issues": list(self.issues),
             "artifact_tree_digest": self.artifact_tree_digest,
@@ -860,9 +879,13 @@ class AdmissionReceipt:
                 _service_config_identity_from_dict(item)
                 for item in _expect_list(value["service_configs"], "AdmissionReceipt.service_configs")
             ),
-            root_manifests=tuple(
+            root_manifests_before=tuple(
                 _root_manifest_from_dict(item)
-                for item in _expect_list(value["root_manifests"], "AdmissionReceipt.root_manifests")
+                for item in _expect_list(value["root_manifests_before"], "AdmissionReceipt.root_manifests_before")
+            ),
+            root_manifests_after=tuple(
+                _root_manifest_from_dict(item)
+                for item in _expect_list(value["root_manifests_after"], "AdmissionReceipt.root_manifests_after")
             ),
             write_deltas=tuple(
                 _write_delta_from_dict(item)
@@ -891,7 +914,8 @@ _ADMISSION_RECEIPT_FIELDS = frozenset(
         "candidate_lock",
         "environments",
         "service_configs",
-        "root_manifests",
+        "root_manifests_before",
+        "root_manifests_after",
         "write_deltas",
         "issues",
         "artifact_tree_digest",
