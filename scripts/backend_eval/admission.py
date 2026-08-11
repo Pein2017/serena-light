@@ -22,14 +22,25 @@ before/after pair is compared by the Task 5 write guard, so every delta carries 
 manifest digests it was derived from.  A changed manifest control (revision, inventory
 digest, inventory count) or a missing root is an unstable observation, not a clean result.
 
-**Fail-closed statuses.**  ``pass`` requires equal production identity before and after,
-one delta per root bound to both manifest digests, no unexpected path, and a clean
-cleanup.  ``hold`` is a trustworthy observation of a violation -- unexpected writes or
-production drift.  ``incomplete`` is an untrustworthy or unfinished observation -- the
-deadline, a resolution or preparation failure, an unstable root, or a cleanup that failed
-or had to remove partial state.  A receipt is published only when its evidence is
-trustworthy: without the production identity on both sides and the frozen candidate lock
-the run raises instead of publishing a receipt that would understate what is unknown.
+**The production identity brackets cleanup too.**  Production identity is captured before
+any work, again after the last external step under the ceiling, and a third time *after*
+evaluation-owned cleanup has run.  The receipt records that final post-cleanup capture, so
+a cleanup that reports success while changing a production lock, digest, build identity, or
+runtime path cannot hide behind an earlier clean reading.  The final capture is mandatory:
+if it fails the run raises instead of publishing, because a receipt whose ``after`` side is
+older than the last thing that touched the filesystem would be a false clean bill.
+
+**Fail-closed statuses.**  ``pass`` requires equal production identity before and after
+cleanup, one delta per root bound to both manifest digests, no unexpected path, and a
+cleanup that neither failed nor had to remove anything.  ``hold`` is a trustworthy
+observation of a violation -- unexpected writes, or production drift observed at any of the
+three captures.  ``incomplete`` is an untrustworthy or unfinished observation -- the
+deadline, a resolution or preparation failure, an unstable root, or a cleanup that failed or
+had to remove partial state; a dirty cleanup always ends ``incomplete``, whatever the run
+looked like before it, because the run can no longer describe its own side effects.  A
+receipt is published only when its evidence is trustworthy: without the production identity
+on both sides and the frozen candidate lock the run raises instead of publishing a receipt
+that would understate what is unknown.
 
 The receipt is serialized to canonical JSON, written to a same-directory temporary file,
 fsynced, ``os.replace``-d over the canonical name, and the directory is fsynced, so a
@@ -403,6 +414,7 @@ class _Evidence:
 
     production_identity_before: ProductionIdentity | None = None
     production_identity_after: ProductionIdentity | None = None
+    production_identity_final: ProductionIdentity | None = None
     identity: str | None = None
     evaluation_root: Path | None = None
     candidate_lock: CandidateLock | None = None
@@ -467,7 +479,8 @@ def run_admission(
         evidence.issues.append(_issue(request, failure.code, failure.detail))
     status = "pass" if failure is None else failure.status
     status = _cleanup(request, active, evidence, status)
-    _capture_final_production_identity(request, active, evidence)
+    _capture_final_production_identity(request, active, evidence, failure)
+    status = _bracket_cleanup(request, evidence, status)
     receipt = _build_receipt(request, active, evidence, status=status, started_at=started_at, failure=failure)
     _publish_receipt(request, evidence, receipt)
     return receipt
@@ -600,27 +613,60 @@ def _cleanup(
         summary = services.cleanup(evidence.evaluation_root, status)
     except AdmissionError as exc:
         evidence.issues.append(_issue(request, "cleanup_failed", exc.failure.detail))
-        return "incomplete" if status == "pass" else status
+        return "incomplete"
     except (OSError, RuntimeError, ValueError) as exc:
         evidence.issues.append(_issue(request, "cleanup_failed", str(exc)))
-        return "incomplete" if status == "pass" else status
+        return "incomplete"
     if summary:
         evidence.issues.append(_issue(request, "cleanup_removed_partial_state", ", ".join(sorted(summary))))
-        return "incomplete" if status == "pass" else status
+        return "incomplete"
     return status
 
 
 def _capture_final_production_identity(
-    request: AdmissionRequest, services: AdmissionServices, evidence: _Evidence
+    request: AdmissionRequest,
+    services: AdmissionServices,
+    evidence: _Evidence,
+    failure: AdmissionFailure | None,
 ) -> None:
-    """Bracket even a failed run with a second production-identity capture."""
+    """Capture the production identity the receipt publishes, after cleanup has run.
 
-    if evidence.production_identity_after is not None or evidence.production_identity_before is None:
+    This capture is not optional and not deadline-gated: it is the only reading taken after
+    the last thing this run could have changed, so a run that cannot take it has no honest
+    ``after`` side to publish and fails closed instead.
+    """
+
+    if evidence.production_identity_before is None:
         return
     try:
-        evidence.production_identity_after = services.capture_production_identity(request.repo_root)
+        evidence.production_identity_final = services.capture_production_identity(request.repo_root)
     except (OSError, RuntimeError, ValueError) as exc:
-        evidence.issues.append(_issue(request, "production_identity_capture_failed", str(exc)))
+        context = "" if failure is None else f" (after {failure.code})"
+        raise _fail(
+            "incomplete",
+            "production_identity_capture_failed",
+            f"cannot bracket cleanup with a final production identity capture{context}: {exc}",
+        ) from exc
+
+
+def _bracket_cleanup(request: AdmissionRequest, evidence: _Evidence, status: str) -> str:
+    """Compare the pre-work identity with the post-cleanup one; drift can never pass.
+
+    Cleanup runs after every other check, so a cleanup that returned success while changing
+    production is only visible here.  A prior non-``pass`` disposition is preserved: it
+    already describes something the run could not establish.
+    """
+
+    before = evidence.production_identity_before
+    final = evidence.production_identity_final
+    if before is None or final is None:
+        return status
+    try:
+        assert_production_identity_unchanged(before, final)
+    except ProductionIdentityChanged as exc:
+        evidence.issues.append(_issue(request, "production_identity_changed", str(exc)))
+        return "hold" if status == "pass" else status
+    return status
 
 
 def _build_receipt(
@@ -633,7 +679,8 @@ def _build_receipt(
     failure: AdmissionFailure | None,
 ) -> AdmissionReceipt:
     before = evidence.production_identity_before
-    after = evidence.production_identity_after
+    # The published ``after`` side is the post-cleanup capture, never the mid-run one.
+    after = evidence.production_identity_final
     lock = evidence.candidate_lock
     if before is None or after is None or lock is None or evidence.identity is None:
         # The run knows less than any publishable receipt would imply: report the original

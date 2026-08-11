@@ -38,7 +38,7 @@ from scripts.backend_eval.models import (
     canonical_json,
     sha256_bytes,
 )
-from scripts.backend_eval.production_identity import ProductionIdentityChanged
+from scripts.backend_eval.production_identity import ProductionIdentityChanged, ProductionIdentityError
 from scripts.backend_eval.runtime import (
     SERVICE_CONFIG_RELPATHS,
     CandidateRuntime,
@@ -212,6 +212,7 @@ class FakeServices:
     failures: dict[str, BaseException] = field(default_factory=dict)
     cleanup_summary: tuple[str, ...] = ()
     cleanup_error: BaseException | None = None
+    cleanup_mutates: ProductionIdentity | None = None
     lock_requests: list[CandidateLockRequest] = field(default_factory=list)
     runtime_requests: list[RuntimeRequest] = field(default_factory=list)
     identity_calls: int = 0
@@ -235,7 +236,7 @@ class FakeServices:
 
     def capture_production_identity(self, repo_root: Path) -> ProductionIdentity:
         assert repo_root.is_absolute()
-        step = "identity_before" if self.identity_calls == 0 else "identity_after"
+        step = ("identity_before", "identity_after", "identity_final")[min(self.identity_calls, 2)]
         self.identity_calls += 1
         self._enter(step)
         index = min(self.identity_calls - 1, len(self.identities) - 1)
@@ -268,6 +269,9 @@ class FakeServices:
 
     def cleanup(self, evaluation_root: Path, stage: str) -> tuple[str, ...]:
         self.cleanup_stages.append(stage)
+        if self.cleanup_mutates is not None:
+            # A cleanup that reports success but changed production identity anyway.
+            self.identities.append(self.cleanup_mutates)
         if self.cleanup_error is not None:
             raise self.cleanup_error
         return self.cleanup_summary
@@ -377,7 +381,7 @@ def test_admission_resolves_the_candidate_lock_exactly_once(
     assert services.resolution_count == 1
     assert len(services.runtime_requests) == 1
     assert services.corpus_calls == 2
-    assert services.identity_calls == 2
+    assert services.identity_calls == 3
 
 
 def test_admission_confines_every_derived_request_to_the_declared_roots(
@@ -516,6 +520,7 @@ def test_admission_runtime_failure_publishes_a_trustworthy_incomplete_receipt(
     assert receipt.write_deltas == ()
     assert any(issue.startswith("runtime_preparation_failed") for issue in receipt.issues)
     assert admission_receipt_path(request_.artifact_root, receipt.evaluation_identity).is_file()
+    assert receipt.production_identity_after == services.identities[-1]
 
 
 def test_admission_unstable_corpus_root_is_incomplete(
@@ -608,6 +613,79 @@ def test_admission_cleanup_that_removed_partial_state_downgrades_a_passing_run(
     receipt = run_admission(request_, services=services, clock=clock)
     assert receipt.status == "incomplete"
     assert any("removed_temporary_receipt" in issue for issue in receipt.issues)
+
+
+def test_admission_receipt_brackets_cleanup_with_the_final_production_identity(
+    request_: AdmissionRequest, services: FakeServices, clock: FakeClock
+) -> None:
+    receipt = run_admission(request_, services=services, clock=clock)
+    assert receipt.status == "pass"
+    # Before the operation, after the operation, and again after cleanup.
+    assert services.identity_calls == 3
+    assert services.cleanup_stages == ["pass"]
+    assert receipt.production_identity_after == services.identities[-1]
+
+
+def test_admission_cleanup_that_mutates_production_identity_is_held(
+    request_: AdmissionRequest, services: FakeServices, clock: FakeClock
+) -> None:
+    drifted = _production_identity(build_identity="7" * 64)
+    services.cleanup_mutates = drifted
+    receipt = run_admission(request_, services=services, clock=clock)
+    assert receipt.status == "hold"
+    assert receipt.next_action == NEXT_ACTION_HOLD
+    assert receipt.production_identity_after == drifted
+    assert receipt.production_identity_before != receipt.production_identity_after
+    assert [issue for issue in receipt.issues if issue.startswith("production_identity_changed")] == [
+        "production_identity_changed: production identity changed: build_identity"
+    ]
+
+
+def test_admission_final_production_identity_failure_fails_closed(
+    request_: AdmissionRequest, services: FakeServices, clock: FakeClock
+) -> None:
+    services.failures["identity_final"] = ProductionIdentityError("cannot capture production identity")
+    with pytest.raises(AdmissionError, match="production_identity_capture_failed") as error:
+        run_admission(request_, services=services, clock=clock)
+    assert error.value.failure.status == "incomplete"
+    identity = evaluation_identity(request_, services.identities[0])
+    assert not admission_receipt_path(request_.artifact_root, identity).exists()
+
+
+def test_admission_cleanup_failure_overrides_a_hold(
+    request_: AdmissionRequest, services: FakeServices, clock: FakeClock
+) -> None:
+    dirtied = (
+        _manifest("/data/CoordExp/serena-light", hashed=(_record("pyproject.toml", content="8" * 64),)),
+        _manifest("/data/ms-swift"),
+    )
+    services.corpora = [_corpus(), dirtied]
+    services.cleanup_error = OSError("cannot remove the partial receipt")
+    receipt = run_admission(request_, services=services, clock=clock)
+    assert receipt.status == "incomplete"
+    assert any(issue.startswith("unexpected_evaluation_writes") for issue in receipt.issues)
+    assert any(issue.startswith("cleanup_failed") for issue in receipt.issues)
+
+
+def test_admission_cleanup_removal_overrides_a_hold(
+    request_: AdmissionRequest, services: FakeServices, clock: FakeClock
+) -> None:
+    services.identities = [_production_identity(), _production_identity(build_identity="7" * 64)]
+    services.cleanup_summary = ("removed_temporary_receipt",)
+    receipt = run_admission(request_, services=services, clock=clock)
+    assert receipt.status == "incomplete"
+    assert any(issue.startswith("production_identity_changed") for issue in receipt.issues)
+    assert any(issue.startswith("cleanup_removed_partial_state") for issue in receipt.issues)
+
+
+def test_admission_cleanup_failure_still_brackets_the_production_identity(
+    request_: AdmissionRequest, services: FakeServices, clock: FakeClock
+) -> None:
+    services.cleanup_error = OSError("cannot remove the partial receipt")
+    receipt = run_admission(request_, services=services, clock=clock)
+    assert receipt.status == "incomplete"
+    assert services.identity_calls == 3
+    assert receipt.production_identity_after == services.identities[-1]
 
 
 def test_admission_cleanup_runs_once_on_the_passing_path(

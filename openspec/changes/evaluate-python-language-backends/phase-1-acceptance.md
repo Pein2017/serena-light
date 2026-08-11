@@ -1,7 +1,8 @@
 # Phase 1 acceptance: admission gate
 
 **Disposition: PASS.** The admission receipt is canonical, production identity is
-byte-identical before and after, every bounded corpus root shows zero unexpected writes,
+byte-identical before the run and after evaluation-owned cleanup, every bounded corpus root
+shows zero unexpected writes,
 and the permitted next action is `begin_protocol_probe_planning`. No candidate language
 server was launched, no installed or canonical Serena Light registration was touched, and
 the production dependency slot was not modified.
@@ -9,7 +10,8 @@ the production dependency slot was not modified.
 ## Exact command
 
 ```bash
-backend_eval_freeze_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"   # 2026-08-11T21:11:47Z
+# Run 1 resolved the freeze timestamp; run 2 reused that exact frozen value.
+backend_eval_freeze_at="2026-08-11T21:11:47Z"   # run 1: "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 test -n "$backend_eval_freeze_at"
 echo "$backend_eval_freeze_at"
 python -m scripts.backend_eval.admission \
@@ -21,8 +23,18 @@ python -m scripts.backend_eval.admission \
   --exclude-newer "$backend_eval_freeze_at"
 ```
 
-Exit status `0`, wall time 22 s against the 1800 s admission ceiling
-(`started_at=2026-08-11T21:11:47Z`, `ended_at=2026-08-11T21:12:09Z`).
+Exit status `0`, wall time 6 s against the 1800 s admission ceiling
+(`started_at=2026-08-11T21:31:13Z`, `ended_at=2026-08-11T21:31:19Z`).
+
+**This is the receipt of the second, authoritative run.** The admission code changed after
+the first run (the receipt's `after` production identity now brackets evaluation-owned
+cleanup), so the gate was rerun against the *same* frozen `--exclude-newer
+2026-08-11T21:11:47Z`. The evaluation identity is therefore unchanged, the frozen candidate
+lock was accepted without a second resolution (lock file inode unchanged across both runs),
+the prepared runtime was verified and reused, and the canonical receipt was replaced
+atomically (receipt inode `125834142` -> `125834110`). The first run's own values were
+identical apart from its timestamps and its 22 s cold wall time, which included the one
+candidate resolution and the one runtime build.
 
 **Recorded deviation.** The declared form of this command is
 `conda run -n ms python -m scripts.backend_eval.admission ...`. That form fails before the
@@ -48,7 +60,7 @@ only, not the evaluated identity.
 | receipt | `<repo>/.admission-artifacts/backend-eval/<evaluation-identity>/admission-receipt.json` |
 | `status` / `next_action` | `pass` / `begin_protocol_probe_planning` |
 | `issues` | none |
-| admission budget | 1800 s (`budgets.admission`); elapsed 22 s |
+| admission budget | 1800 s (`budgets.admission`); elapsed 6 s (warm reuse; 22 s cold on the first run) |
 
 ## Candidate lock
 
@@ -92,6 +104,9 @@ All three configurations own the runtime `HOME` and cache
 ## Production identity invariant
 
 `production_identity_before == production_identity_after` (receipt-enforced for `pass`).
+The published `after` side is captured *after* evaluation-owned cleanup has run, so it also
+covers anything cleanup itself could have changed; the mid-run post-operation capture is
+still taken and asserted under the deadline.
 
 | Field | Value |
 | --- | --- |
@@ -102,9 +117,24 @@ All three configurations own the runtime `HOME` and cache
 | `compute_build_identity` | `77e0ff6e7b74c3e100e75a3b81bb025a8e906642a089d0c81c755aaba6d183aa` |
 | `runtime_paths` | 9 production entries, all below `…/serena-light/deps/eff6ebdf…ab4941/`, unchanged |
 
-Independently re-measured after the run from `/data/CoordExp/serena-light`:
-`dependency_lock_digest` and `compute_build_identity` reproduce the two values above exactly.
-`git status --short` in the production repository is empty.
+Independently re-measured after the run against the production root
+`/data/CoordExp/serena-light`: `dependency_lock_digest` and `compute_build_identity` return
+`eff6ebdf…ab4941` and `77e0ff6e…d183aa`, matching the receipt exactly. `git status --short`
+in the production repository is empty.
+
+**How that re-measurement was run.** It was *not* run with the declared
+`conda run -n ms python -c ...` form, which fails for the same reason as the admission
+command itself (see *Recorded deviation*); it used the same
+`/data/CoordExp/.worktrees/serena-light-backend-eval/.venv/bin/python` host, whose editable
+install resolves `serena_light` to `/data/CoordExp/.worktrees/serena-light-backend-eval/src/serena_light`
+rather than to the production checkout. No claim is made that the literal `conda` command
+reproduced these values. The re-measurement is trustworthy because the *measuring code* is
+provably the same code production carries: the Git tree object for `src/serena_light` is
+`e29217431a15bee9a95bf4339c2583213d302fab` in the production checkout (`main`, `5e7d8ba`),
+in the editable worktree (`ef740c6`), and in this change's worktree, and `git status
+--porcelain -- src pyproject.toml` is empty in both checkouts, so the on-disk sources match
+those trees. The measured *input* is in every case the production root passed explicitly as
+an argument.
 
 ## Bounded corpus manifests and write deltas
 
@@ -131,8 +161,12 @@ rebuildable resolver cache and the receipt itself. Published members:
 ## Cleanup
 
 Evaluation-owned cleanup ran once on the passing path and removed nothing (`issues` empty);
-a cleanup that had to remove partial state, or that failed, would have downgraded the run to
-`incomplete`. No evaluation-owned child process remains: admission launches only synchronous
+a cleanup that had to remove partial state, or that failed, would have made the run
+`incomplete` whatever it looked like beforehand. Production identity was then captured a
+third time, after cleanup, and that post-cleanup value is the receipt's `after` side: it
+equals the pre-work value, so cleanup changed no production lock, digest, build identity, or
+runtime path. A cleanup that reported success while changing any of those would have been
+held; a failure to take that final capture would have failed the run closed with no receipt. No evaluation-owned child process remains: admission launches only synchronous
 `uv` invocations and starts no candidate language server, and a post-run process scan found
 no surviving `uv`, `ty`, or `pyrefly` process. The frozen candidate lock and the prepared
 runtime are retained deliberately as Phase 2 inputs.
