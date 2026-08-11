@@ -28,6 +28,7 @@ from scripts.backend_eval.models import (
     canonical_json,
     sha256_bytes,
 )
+from scripts.backend_eval.process import CommandTimeout, Deadline
 from scripts.backend_eval.production_identity import PRODUCTION_IDENTITY_FILES, ProductionIdentityChanged
 from scripts.backend_eval.runtime import (
     BACKEND_ENVIRONMENT_KEYS,
@@ -1387,3 +1388,77 @@ def test_runtime_preparation_fails_and_cleans_up_when_production_identity_drifts
         assert not (request_.runtime_base / lock.digest).exists()
     finally:
         pyproject.write_bytes(original)
+
+
+# --- bounded commands and service-owned modes ------------------------------------
+
+
+def test_a_hung_preparation_command_is_reported_as_a_typed_timeout(
+    lock: CandidateLock, request_: RuntimeRequest
+) -> None:
+    """A hung `uv` cannot outlive the phase: the runner kills it and this module types it."""
+
+    def hanging_runner(
+        command: Sequence[str], *, cwd: Path, env: Mapping[str, str], timeout: float | None = None
+    ) -> CommandResult:
+        del command, cwd, env, timeout
+        raise CommandTimeout("uv timed out after 1s and its process group was killed")
+
+    with pytest.raises(RuntimePreparationError, match="timed out"):
+        prepare_candidate_runtime(lock, request_, runner=hanging_runner)
+
+
+def test_the_preparation_deadline_is_propagated_to_every_child(
+    lock: CandidateLock, request_: RuntimeRequest
+) -> None:
+    clock = _StepClock()
+    deadline = Deadline.start(clock, 600, reserve=100)
+    runner = _RecordingTimeoutRunner()
+
+    prepare_candidate_runtime(lock, request_, runner=runner, deadline=deadline)
+
+    assert runner.timeouts, "no command received a bound"
+    assert all(timeout is not None and 0 < timeout <= 500 for timeout in runner.timeouts)
+    # Later commands receive strictly less remaining time than earlier ones.
+    assert runner.timeouts == sorted(runner.timeouts, reverse=True)
+
+
+def test_service_owned_files_and_directories_ignore_the_ambient_umask(
+    lock: CandidateLock, request_: RuntimeRequest
+) -> None:
+    previous = os.umask(0o000)
+    try:
+        runtime = prepare_candidate_runtime(lock, request_, runner=_FakeRunner())
+    finally:
+        os.umask(previous)
+
+    assert stat.S_IMODE(runtime.root.stat().st_mode) == 0o700
+    for name in RUNTIME_DIRECTORY_NAMES:
+        assert stat.S_IMODE((runtime.root / name).stat().st_mode) == 0o700, name
+    for relpath in SERVICE_CONFIG_RELPATHS.values():
+        config = runtime.config / relpath
+        assert stat.S_IMODE(config.stat().st_mode) == 0o600, relpath
+        assert stat.S_IMODE(config.parent.stat().st_mode) == 0o700, relpath
+    assert stat.S_IMODE((runtime.root / REQUIREMENTS_SNAPSHOT_NAME).stat().st_mode) == 0o600
+    assert stat.S_IMODE((runtime.root / MANIFEST_FILE_NAME).stat().st_mode) == 0o600
+
+
+@dataclass(slots=True)
+class _StepClock:
+    now: float = 0.0
+
+    def __call__(self) -> float:
+        self.now += 1.0
+        return self.now
+
+
+@dataclass(slots=True)
+class _RecordingTimeoutRunner:
+    delegate: _FakeRunner = field(default_factory=lambda: _FakeRunner())
+    timeouts: list[float | None] = field(default_factory=list)
+
+    def __call__(
+        self, command: Sequence[str], *, cwd: Path, env: Mapping[str, str], timeout: float | None = None
+    ) -> CommandResult:
+        self.timeouts.append(timeout)
+        return self.delegate(command, cwd=cwd, env=env, timeout=timeout)

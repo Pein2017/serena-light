@@ -8,6 +8,12 @@
 - [x] 1.6 Implement bounded non-Git manifests for `ms` transformers and the exact `llm-framework-study` task paths without scanning the full environment.
 - [ ] 1.7 Implement before/after write detection that hashes the trust-inventory closure and declared fixture paths, metadata-scans the *complete* declared in-scope remainder of every Git root for path membership, type, symlink target, size, `mtime_ns`, and inode, and hashes only changed or created remainder paths; publish the declared exclusions; test declared disposable edits separately from unexpected backend mutation.
 - [ ] 1.8 Run the admission command under its 30-minute ceiling, record exact versions, hashes, roots, interpreters, configuration, production identity invariants, and phase budget, and stop for lead disposition if any candidate or required corpus cannot be frozen reproducibly.
+> Tasks 1.7 and 1.8 are satisfied by the rerun receipt recorded in
+> `phase-1-acceptance.md` (evaluation identity `1d00793b…a36297`, run
+> `c7136711…166767`, `status=pass`, 0 unexpected paths across 68,059 in-scope corpus
+> paths, 8 s of the 1800 s ceiling). They stay unchecked until the Sol-xhigh and Opus-max
+> reviews of *that* receipt approve it: a checked box may never stand for an unreviewed run.
+
 - [x] 1.9 Move the first corpus capture before candidate-lock compilation and runtime preparation and the second after preparation and before cleanup and publication, so the delta brackets every Phase 1 setup operation; treat a created, deleted, or changed inventory member as a write delta rather than an unstable root, and keep an individual freeze that moves while being captured fail-closed.
 - [x] 1.10 Implement the spec's two-stage remainder algorithm: compare metadata first, hash only changed or created regular remainder files through guarded no-follow reads, rebuild the after manifest and digest with those hashes before constructing the delta, and treat a race during enrichment as incomplete rather than clean.
 - [x] 1.11 Bind every receipt to a typed evaluator identity (executed source closure digest, source commit and cleanliness, CLI host interpreter path/realpath/SHA-256/version), the allowlisted bootstrap environment recorded as key names and value digests only, and the candidate runtime's logical root and canonical `runtime-manifest.json` SHA-256 recomputed before PASS; include the evaluator identity and artifact root in the reproducible evaluation identity.
