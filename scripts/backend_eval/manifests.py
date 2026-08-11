@@ -15,13 +15,19 @@ bounded: ``.git``, the evaluation ``.admission-artifacts``, a lane-owned ``.venv
 evidence rather than a silent hole.  ``research-probes/model_cache`` is deliberately in
 scope.
 
-**Bounded external commands.**  Every Git invocation this module starts runs through the
+**Every Git child is bounded, with no exception.**  Every Git invocation runs through the
 shared bounded runner with an explicit remaining-time budget, an explicit minimal
 environment with no ambient ``GIT_*`` control, and process-group termination on expiry.
-``serena_light.workspace.inventory.git_trust_inventory`` starts one further ``git ls-files``
-of its own that production owns; this module runs the identical bounded probe immediately
-before it, so a hung Git is observed and the phase stops before the production helper is
-reached.
+That includes the trust inventory: rather than calling
+``serena_light.workspace.inventory.git_trust_inventory``, which would start its own
+unbounded ``git ls-files``, this module reads the *same* combined
+``git ls-files --cached --others --exclude-standard -z`` through the bounded runner and
+hands those bytes to production's own pure candidate normalization and inspection helpers.
+Decoding, normalization, extension filtering, guarded candidate inspection, rejection
+reasons, the path digest, and the query tree are therefore production's code, unchanged, and
+the resulting inventory is identical to the one production would have built --
+:func:`_git_trust_inventory_from_bounded_bytes` and its equivalence test own that claim.
+No evaluation code path calls ``git_trust_inventory``.
 
 **Fail-closed individual freezes.**  One capture re-reads every Git-derived control after
 its records exist; a revision, inventory, or tracked/untracked change observed while
@@ -41,10 +47,19 @@ from pathlib import Path
 from scripts.backend_eval.models import PathRecord, RootManifest, canonical_json, sha256_bytes
 from scripts.backend_eval.process import CommandTimeout, Deadline, run_bounded_bytes
 from serena_light.workspace.identity import open_guarded_directory
+
+# Evaluation-only reuse of production's *pure* inventory helpers.  Neither touches a
+# subprocess: they only decode, normalize, and inspect candidate paths through guarded
+# descriptors.  Importing them is what lets the evaluation bound the one Git command
+# ``git_trust_inventory`` would otherwise start for itself while keeping byte-identical
+# inventory semantics; `_git_trust_inventory_from_bounded_bytes` is tested against
+# ``git_trust_inventory`` for exact equality of root, kind, paths, count, digest, and
+# rejections.
 from serena_light.workspace.inventory import (
     TrustInventory,
+    _decode_git_path,
+    _inventory_from_candidates,
     bounded_non_git_trust_inventory,
-    git_trust_inventory,
     observe_file_digest,
 )
 
@@ -571,19 +586,41 @@ def _git_path_set(root: Path, args: tuple[str, ...], deadline: Deadline | None) 
     return frozenset(item.decode("utf-8", "surrogateescape") for item in payload.split(b"\0") if item)
 
 
+def _git_trust_inventory_from_bounded_bytes(root: Path, payload: bytes) -> TrustInventory:
+    """Build production's Git trust inventory from bytes this module already bounded.
+
+    ``git_trust_inventory`` differs from this function in exactly one respect: it starts its
+    own unbounded ``git ls-files --cached --others --exclude-standard -z``, while the
+    evaluation reads that same command through :func:`run_bounded_bytes` and passes the
+    bytes here.  The root is resolved the same way, the bytes are split and decoded by
+    production's ``_decode_git_path``, and the candidates go through production's
+    ``_inventory_from_candidates``, so the accepted paths, their digest, the rejected
+    entries and reasons, the query tree, and the recorded kind are all production's.
+    """
+
+    try:
+        resolved_root = root.resolve(strict=True)
+    except OSError as error:
+        raise ManifestError(f"cannot resolve the Git corpus root {root}: {error}") from error
+    candidates = (_decode_git_path(item) for item in payload.split(b"\0") if item)
+    try:
+        return _inventory_from_candidates(resolved_root, candidates, kind="git")
+    except (OSError, ValueError) as error:
+        raise ManifestError(f"cannot capture Git trust inventory: {error}") from error
+
+
 def _git_freeze_state(root: Path, deadline: Deadline | None) -> tuple[_GitFreezeState, TrustInventory]:
-    """Capture every Git-derived closure fact used by one manifest pass."""
+    """Capture every Git-derived closure fact used by one manifest pass.
+
+    Four bounded Git children, and no others: the revision, the tracked set, the untracked
+    set, and the combined candidate list the trust inventory is built from.
+    """
 
     source_revision = _git_stdout(root, ("rev-parse", "HEAD"), deadline)
     tracked = _git_path_set(root, ("ls-files", "--cached", "-z"), deadline)
     untracked = _git_path_set(root, ("ls-files", "--others", "--exclude-standard", "-z"), deadline)
-    # The identical bounded probe of the command the production inventory helper runs.  A
-    # hung Git is observed here, before the unbounded production call is reached.
-    _git_path_set(root, ("ls-files", "--cached", "--others", "--exclude-standard", "-z"), deadline)
-    try:
-        inventory = git_trust_inventory(root)
-    except (OSError, ValueError) as error:
-        raise ManifestError(f"cannot capture Git trust inventory: {error}") from error
+    combined = _git_bytes(root, ("ls-files", "--cached", "--others", "--exclude-standard", "-z"), deadline)
+    inventory = _git_trust_inventory_from_bounded_bytes(root, combined)
     return (
         _GitFreezeState(
             source_revision=source_revision,

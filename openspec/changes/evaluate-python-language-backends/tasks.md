@@ -8,11 +8,13 @@
 - [x] 1.6 Implement bounded non-Git manifests for `ms` transformers and the exact `llm-framework-study` task paths without scanning the full environment.
 - [ ] 1.7 Implement before/after write detection that hashes the trust-inventory closure and declared fixture paths, metadata-scans the *complete* declared in-scope remainder of every Git root for path membership, type, symlink target, size, `mtime_ns`, and inode, and hashes only changed or created remainder paths; publish the declared exclusions; test declared disposable edits separately from unexpected backend mutation.
 - [ ] 1.8 Run the admission command under its 30-minute ceiling, record exact versions, hashes, roots, interpreters, configuration, production identity invariants, and phase budget, and stop for lead disposition if any candidate or required corpus cannot be frozen reproducibly.
-> Tasks 1.7 and 1.8 are satisfied by the rerun receipt recorded in
-> `phase-1-acceptance.md` (evaluation identity `1d00793b…a36297`, run
-> `c7136711…166767`, `status=pass`, 0 unexpected paths across 68,059 in-scope corpus
-> paths, 8 s of the 1800 s ceiling). They stay unchecked until the Sol-xhigh and Opus-max
-> reviews of *that* receipt approve it: a checked box may never stand for an unreviewed run.
+> Tasks 1.7 and 1.8 stay unchecked and now require a **fresh real run**. The repaired
+> instrument passed on the real corpus (evaluation identity `1d00793b…a36297`, run
+> `c7136711…166767`, `status=pass`, 0 unexpected paths across 68,059 in-scope corpus paths,
+> 8 s of the 1800 s ceiling), but task 1.16 then changed the evaluator source closure, which
+> the evaluation identity binds. That receipt is therefore evidence that the instrument
+> works, not the receipt Phase 1 admits on. A rerun from the current commit, followed by the
+> Sol-xhigh and Opus-max reviews of *that* receipt, is what may check these two boxes.
 
 - [x] 1.9 Move the first corpus capture before candidate-lock compilation and runtime preparation and the second after preparation and before cleanup and publication, so the delta brackets every Phase 1 setup operation; treat a created, deleted, or changed inventory member as a write delta rather than an unstable root, and keep an individual freeze that moves while being captured fail-closed.
 - [x] 1.10 Implement the spec's two-stage remainder algorithm: compare metadata first, hash only changed or created regular remainder files through guarded no-follow reads, rebuild the after manifest and digest with those hashes before constructing the delta, and treat a race during enrichment as incomplete rather than clean.
@@ -21,6 +23,7 @@
 - [x] 1.13 Make the 1800-second admission ceiling cover resolution, runtime preparation, both captures, cleanup, the final production identity, the artifact digest, and publication; propagate the remaining time to every subprocess and kill its process group on expiry; reserve enough finalization time to publish a trustworthy timeout receipt and fail closed without a receipt when that evidence cannot be completed.
 - [x] 1.14 Make typed PASS structurally strict (exact budgets, ordered timestamps, exact environment and service-config names, one delta per root bound to both manifest digests, no unexpected path, no declared mutation, no changed manifest control, every identity present), recompute `RootManifest.manifest_digest` at construction and parsing, carry an explicit raw-lock digest witness on `CandidateLock`, and cover each case with adversarial parsing tests.
 - [x] 1.15 Close the remaining evidence-integrity defects: a descriptor-relative `O_NOFOLLOW` artifact-tree traversal with no reopen after validation, redaction by path component rather than string prefix, and service-owned files and directories at `0600`/`0700` independent of the ambient umask.
+- [x] 1.16 Remove the last unbounded subprocess from the corpus capture: derive the Git trust inventory from the already bounded combined `git ls-files --cached --others --exclude-standard -z` bytes and reuse production's subprocess-free candidate normalization and inspection, without modifying `src/serena_light`; prove field-by-field equivalence with `git_trust_inventory`, prove capture succeeds with that helper forbidden, and account for every Git child of a capture through the bounded runner.
 
 ## 2. Build and gate raw protocol probes
 

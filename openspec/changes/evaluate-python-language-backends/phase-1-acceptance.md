@@ -1,15 +1,17 @@
 # Phase 1 acceptance: admission gate
 
-**Admission gate disposition: PASS, pending the two independent final reviews of this
-rerun.** The repaired instrument produced a new, code-bound receipt under a new evaluation
-identity; it passes every invariant, brackets every Phase 1 setup operation, and leaves
-zero unexpected writes across 68,059 in-scope corpus paths. Tasks 1.7 and 1.8 remain
-unchecked on purpose: this rerun has not yet been reviewed, and a checked box must never
-stand for an unreviewed run. The lead may check them once the Sol-xhigh and Opus-max
-reviews of this receipt approve it.
+**Disposition: HOLD. Phase 1 is not complete, and a fresh real run is required.** The
+repaired instrument produced a passing receipt (recorded below), but the evaluator source
+closure has since changed: the last unbounded Git child was removed from the corpus
+capture. The evaluation identity binds the evaluator source digest, so the receipt below is
+no longer code-bound to the current implementation and **cannot** be the receipt Phase 1
+passes on. It is retained as evidence that the repaired instrument works end to end, not as
+the admitting receipt. Tasks 1.7 and 1.8 stay unchecked.
 
-The earlier attempted run is preserved below, unchanged and superseded. Its receipt bytes,
-lock, and artifacts were not touched by the rerun.
+Two runs are now on record, both preserved and neither erased: the original *attempted* run
+(instrument-limited) and the *repaired-instrument* run (superseded by a code change). The
+next real run, from the current commit, is the one that can admit Phase 1 -- and only after
+the two independent final reviews approve it.
 
 ## What the reviews held on
 
@@ -147,7 +149,11 @@ trust-inventory closure, the declared configuration paths, and one declared meta
 
 `artifact_tree_digest = 12c15677bac4a4ca1ee7ea13b53d928f3990421eebb8514745e32f2237b7bc30`.
 
-## The authoritative run
+## The repaired-instrument run (passing, superseded by a later code change)
+
+This run demonstrates the repaired instrument on the real corpus. It is **not** the
+admitting receipt: `scripts/backend_eval` changed after it, so a rerun from the current
+commit will publish a different evaluation identity.
 
 | Field | Value |
 | --- | --- |
@@ -309,7 +315,9 @@ could not have replaced them.
 - The corpus roots are live worktrees other lanes may write. A concurrent write during a
   future phase will hold rather than pass. That is the instrument working; it must not be
   compensated for by narrowing the sweep.
-- `serena_light.workspace.inventory.git_trust_inventory` starts one further `git ls-files`
-  that production owns and this change may not modify, so that single call is not bounded by
-  the phase deadline. The evaluation runs the identical bounded probe immediately before it,
-  so a hung Git is observed and the phase stops before the production helper is reached.
+- Every Git child of a corpus capture is now bounded without exception. The evaluation no
+  longer calls `git_trust_inventory`; it reads the identical combined
+  `git ls-files --cached --others --exclude-standard -z` through the bounded runner and
+  reuses production's subprocess-free normalization and inspection helpers, with an
+  equivalence test pinning the result to `git_trust_inventory` field by field. One capture
+  starts exactly nine bounded Git children and no other process.

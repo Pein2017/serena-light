@@ -64,6 +64,15 @@ Read-only tasks use immutable snapshots or verified manifests. Full content dige
 
 Exactly four trees are pruned, by name, to keep the sweep bounded: `.git`, the evaluation `.admission-artifacts`, a lane-owned `.venv`, and `node_modules`. Every pruned path is published in the manifest and counted in the acceptance record, so the boundary is evidence rather than a silent hole; a trust-inventory member that happens to live inside a pruned tree is still fully hashed. The remainder is bound by what metadata can express: a rewrite that preserves size, inode, *and* `mtime_ns` is not observable there, which is why the trust-inventory closure and declared configuration paths are content hashed on every capture instead.
 
+The trust inventory itself is production's, without production's unbounded child. Rather
+than calling `git_trust_inventory`, which starts its own `git ls-files`, the evaluation reads
+that same combined `git ls-files --cached --others --exclude-standard -z` through the bounded
+runner and hands the bytes to production's pure candidate normalization and inspection
+helpers. Decoding, extension filtering, guarded inspection, rejection reasons, the path
+digest, and the query tree are unchanged production code, and an equivalence test pins the
+result to `git_trust_inventory` field by field, so every Git child of a capture is bounded
+with no exception.
+
 Each phase captures the corpus *before* its first setup operation and again *after* the last one and before cleanup and receipt publication, so the delta brackets everything the phase did rather than only its expensive middle. A created, deleted, or changed inventory member between captures is a write delta with an unexpected path, not an unstable-root error; a freeze that moves *while one capture is running* stays fail-closed. Controlled diagnostics, concurrent-change, and guarded-edit tasks use disposable copies under a temporary evaluation root. The manifest distinguishes declared fixture mutations from unexpected backend writes. Missing roots or an inability to freeze dirty state stops the run.
 
 ### Decision 4: Separate backend program ownership from test trust

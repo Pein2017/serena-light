@@ -194,6 +194,10 @@ The frozen evaluation contract SHALL cap active wall time at 30 minutes for mani
 - **WHEN** an evaluation-started subprocess exceeds the phase's remaining time
 - **THEN** it receives that remaining time as its own bound, its whole process group is terminated on expiry, and it cannot outlive the phase or block cleanup
 
+#### Scenario: A production helper would start its own child
+- **WHEN** a phase needs evidence a production helper computes by spawning its own unbounded process
+- **THEN** the phase supplies that helper's input from a bounded invocation of the identical command and reuses only the helper's subprocess-free logic, so no phase step is exempt from the ceiling, and an equivalence test pins the reused result to the production helper's output
+
 #### Scenario: A phase reaches its ceiling with usable evidence
 - **WHEN** collection reaches the ceiling but the phase already holds the identities and frozen inputs a timeout receipt requires
 - **THEN** a reserved finalization window publishes that timeout receipt, and a phase that cannot complete even that evidence fails closed without publishing a receipt
