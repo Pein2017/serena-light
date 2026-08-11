@@ -168,8 +168,9 @@ success must migrate off the current `{"ok":true,"data":{...},"workspace":
 <int>}}`, with `data.coverage` added once for references only. Per-record
 `path`/`sha256`/`language` repetition, per-record text/byte offsets, adapter
 phase, runtime generations, and configured-program detail disappear from
-navigation success; a client that inspected those fields directly must instead
-read them once per file group or from `get_runtime_status`/typed errors.
+navigation success; a client that inspected those fields directly must use the
+remaining compact file-group facts and bounded typed-error evidence rather than
+expecting healthy `get_runtime_status` to expose debug internals.
 Tool schemas gain `find_symbol.max_matches` (1-100, default 20),
 `find_declaration.max_answer_chars`, lowercase `include_kinds`/`exclude_kinds`
 on `get_symbols_overview`, the existing integer kind filters on
@@ -300,22 +301,21 @@ complete coverage; incomplete coverage carries only `complete=false`, the
 uncovered total, a bounded path/reason sample, and its omitted count. Diagnostics
 are file-grouped compact findings, with `authority="advisory"` only once for a
 TypeScript file group. Engine, adapter, generation, configured-program digest,
-URI, text-offset, and byte-offset details remain in runtime status or typed
-operational errors rather than successful results.
+URI, text-offset, and byte-offset details are omitted from healthy navigation
+and status; only bounded facts needed to explain an operational error remain
+public.
 
 Schema 6 does not enable lexical discovery, diagnostics hooks/automatic
 injection, a 1-based coordinate mode, body slicing/pagination, or RTK. Continue
 to use host shell/file tools for lexical file/text work and exact range reads;
 do not configure a hook or a second instructions tool.
 
-The accepted `tighten-scope-error-readiness` source-only rollover selects build
-`7deb20c2cbff6b6fac622d012ff80a923987efd80b673e14c0bcc3fa9b6e0fcf`.
-It preserves this registration command, dependency digest, schema 4, initialize
-text, and tool surface. Projection-backed `SCOPE_INCOMPATIBLE` failures now
-carry bounded language/project/config/outside-trust evidence, while a bound
-failure reports the calling lease's own `working_subdirectory`. Existing
-clients remain on their prior build slot; restart the client and verify this
-identity with `get_runtime_status` to adopt the release.
+The accepted `tighten-agent-recovery-guidance` rollover selects build
+`77e0ff6e7b74c3e100e75a3b81bb025a8e906642a089d0c81c755aaba6d183aa`.
+It preserves this registration command, dependency digest, initialize text,
+and 11-tool surface while advancing the public schema to 6. Existing clients
+remain on their prior build slot; restart the client and verify this identity
+with `get_runtime_status` to adopt the release.
 
 ## Stop, rollback, and limits
 

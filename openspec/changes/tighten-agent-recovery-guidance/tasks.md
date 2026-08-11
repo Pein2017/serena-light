@@ -27,7 +27,7 @@
 
 ## 5. Production-Shaped Acceptance
 
-- [x] 5.1 Through a real installed daemon and stdio connector, activate `/data/CoordExp` and `/data/CoordExp/ms-swift` with `ms`; verify compact healthy status, no mismatch warning, overview, exact symbol lookup, references, and diagnostics.
+- [x] 5.1 Through a real installed daemon and stdio connector, activate `/data/CoordExp` and the current `/data/ms-swift` checkout with `ms`; verify compact healthy status, no mismatch warning, overview, exact symbol lookup, references, and diagnostics.
 - [x] 5.2 Activate the `llm-framework-study` site-packages path first with the default and then explicit environment; verify advisory mismatch, explicit correction, read-only isolation, selected interpreter identity, and no automatic rebind.
 - [x] 5.3 Exercise real Pyright `UNSUPPORTED` recovery, real TypeScript implementation success, 0-based Unicode coordinates, all three oversized-body recoveries, and exact final MCP text/structured-content parity.
 - [x] 5.4 Repeat daemon startup, connector health, activation, status, and representative semantic calls in clean and poisoned-proxy environments; verify no new orphan process and zero-holder build retirement.

@@ -4,12 +4,12 @@
 
 PASS for the schema-6 source, installed daemon/connector, shared runtime, and
 fresh Agent surfaces. The accepted build identity is
-`03d5192d16ba97f5fd2ff4e365d1a86ccb4100e0a66b46b5d6cb84d951a88b08`, the
+`77e0ff6e7b74c3e100e75a3b81bb025a8e906642a089d0c81c755aaba6d183aa`, the
 dependency lock digest is
 `eff6ebdf252faff7f77cb3a2f3894d17b9a0dfc89b46bd193fafdaa9e9ab4941`, and the
 public surface remains 11 tools. The source-owned initialize guidance is 215
-bytes and was byte-identical in the connector, daemon, fresh Codex Agent, and
-fresh CC Agent observations.
+bytes and was byte-identical in the connector, daemon, fresh Codex Agent,
+native Claude Code, and fresh CC Agent observations.
 
 This acceptance does not switch or remove canonical Serena. Existing clients
 may retain their old build slot; a new top-level task is still the required
@@ -20,21 +20,29 @@ boundary for loading the newly installed Codex plugin version.
 All commands ran from `/data/CoordExp/serena-light` through the `ms` Conda
 environment unless the command is a host-level OpenSpec or plugin command.
 
-- Full suite: `conda run -n ms uv run --extra dev pytest -q` — 933 passed, 35
-  skipped, one Starlette/httpx deprecation warning, 238.89 seconds.
+- Full suite: `rtk run '.venv/bin/python -m pytest -q'` — 940 passed, 35
+  skipped, one Starlette/httpx deprecation warning, 238.06 seconds.
 - Static checks: Ruff passed for `src`, `tests`, and `scripts`; Ty passed for
   `src/serena_light`.
 - Bootstrap check passed with runtime-owned CPython, Node 22.22, npm 11.13,
   Pyright 1.1.403, TypeScript 5.9.3, and TypeScript language server 5.1.3.
-- Source ownership/provenance passed: 20,194 production lines were reported as
+- Source ownership/provenance passed: 20,281 production lines were reported as
   informational, `maximum_production_lines` remained null, census and manifest
   agreed, nine copied-symbol hashes matched, direct dependency ownership and
   forbidden-import checks passed, and official Serena reference commit
-  `9a9d07d74aec6c3bf53e012499c8b5e8f11382c0` matched.
+  `9a9d07e83d8c1cba3458992707f440c624446c6d` matched.
 - `openspec validate tighten-agent-recovery-guidance --strict` passed before
   client materialization and is rerun as part of closeout.
 - Focused real schema-6 shared-daemon, rollover, and stdio connector acceptance
   passed: 6 tests in 77.96 seconds.
+- Current external-snapshot Python and TypeScript acceptance passed: 14 tests,
+  with three observation-only performance/latency cases deselected, in 182.63
+  seconds.
+- The final long-root/path/name recovery regressions passed in the 107-test
+  compact/navigation slice. Independent Sol-xhigh reproduction measured 435
+  characters at a 512-character budget, verified bounded path/name witnesses,
+  followed the exact no-body recovery, retried the measured legal budget, and
+  measured the malformed fallback at 276 characters.
 
 ## Production-shaped runtime evidence
 
@@ -68,22 +76,28 @@ environment unless the command is a host-level OpenSpec or plugin command.
 
 - The plugin validator passed before and after materialization. Codex installed
   `serena-light@coordexp-local` as
-  `0.1.0+codex.20260811122708` from this repository. The shared Claude Code
+  `0.1.0+codex.20260811133933` from this repository. The shared Claude Code
   configuration and the installed Codex plugin both use the service-owned
   connector under the pinned dependency digest; canonical Serena is unchanged.
 - A newly spawned Codex Agent observed exactly 11 Serena Light tools and the
-  exact 215-byte instructions, activated this repository, reported compact
+  exact 215-byte instructions. It proved the default `ms` mismatch warning and
+  explicit `llm-framework-study` correction, reported compact
   `workspace/build/languages/executor/issues` status with the accepted build
-  identity, recovered from `SYMBOL_NOT_FOUND` through
-  `get_symbols_overview`, and resolved `compact_runtime_status` at the expected
-  0-based range. This proves a fresh Agent lease, not an independently launched
-  top-level desktop task.
+  identity, received a 418-character `WorkspaceRuntime` recovery under a 512
+  budget, followed the overview/no-body route, resolved a normal exact symbol,
+  and released to zero holders.
+- A separate non-persistent native Claude Code Sonnet session loaded only the
+  Serena Light MCP and denied shell/file tools. With an explicit MCP allowlist,
+  it independently observed the 11 tools and exact instructions, reported the
+  accepted build and compact status, resolved `compact_runtime_status`, and
+  released its lease. An initial `dontAsk` run without that allowlist correctly
+  denied MCP activation and is not counted as a product failure or pass.
 - A newly spawned Claude Sonnet 5 CC Agent independently observed the same 11
-  tools and instructions, activated this repository, reported the same build
-  identity and compact status, and resolved the same symbol. It encountered no
-  auth, network, configuration, or runtime error. This also proves the current
-  Claude Code-backed CC surface after the prior transient 401 was retried at
-  user direction.
+  tools and instructions, proved the mismatch/correction sequence, reported
+  the same build identity and compact status, received a 418-character
+  oversized-container recovery, followed it through overview to an exact child
+  body, and released. It encountered no auth, network, configuration, or
+  runtime error.
 
 ## Dispositions and boundaries
 

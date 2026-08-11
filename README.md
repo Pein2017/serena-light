@@ -329,8 +329,9 @@ The schema-4 source-only rollover archived as
 `SCOPE_INCOMPATIBLE` directly actionable without adding a readiness tool or
 expanding routine success payloads. Projection-backed failures now retain the
 language, project kind, selected native config when present, and bounded
-outside-trust path/reason evidence; engine and interpreter identity remain in
-`get_runtime_status`. A bound operational failure also reports the calling
+outside-trust path/reason evidence. Engine and interpreter identity were
+available in that archived schema-4 status; the current schema-6 healthy status
+intentionally omits them. A bound operational failure also reports the calling
 lease's own `working_subdirectory`, including when another lease shares the same
 physical Git root. Blocked families still run call-time freshness before
 failing prior to adapter/executor work, so another Agent's config or trust fix
