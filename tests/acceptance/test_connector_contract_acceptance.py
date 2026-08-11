@@ -719,16 +719,14 @@ async def _replace(connector: Connector, expected_hash: str = _SOURCE_HASH) -> M
     )
 
 
-async def _runtime_status(connector: Connector) -> Mapping[str, Any]:
-    """Read shared-runtime status; ``status`` deliberately never scans itself."""
+def _runtime_status(harness: _Harness) -> Mapping[str, Any]:
+    """Inspect internal evidence that the compact public status intentionally omits."""
 
-    payload = await _call(connector, "get_runtime_status")
-    assert payload["ok"] is True, payload
-    return cast(Mapping[str, Any], payload["data"]["runtime"])
+    return cast(Mapping[str, Any], harness.runtime.status())
 
 
-async def _freshness(connector: Connector) -> Mapping[str, Any]:
-    return cast(Mapping[str, Any], (await _runtime_status(connector))["freshness"])
+def _freshness(harness: _Harness) -> Mapping[str, Any]:
+    return cast(Mapping[str, Any], _runtime_status(harness)["freshness"])
 
 
 def _permit_edits(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -791,6 +789,55 @@ def test_connector_activation_environment_warning_is_advisory_and_correctable(tm
         asyncio.run(scenario())
 
 
+def test_connector_runtime_status_is_compact_and_unbound_state_is_actionable(tmp_path: Path) -> None:
+    with _acceptance(tmp_path) as harness:
+
+        async def scenario() -> None:
+            async with _connected(harness) as connector:
+                status = await _call(connector, "get_runtime_status")
+                assert status["ok"] is True
+                data = cast(Mapping[str, object], status["data"])
+                assert data == {
+                    "workspace": {
+                        "root": str(harness.root),
+                        "working_subdirectory": str(harness.root),
+                        "kind": "git",
+                        "python_environment": "ms",
+                    },
+                    "build": {
+                        "identity": LEGACY_BUILD_IDENTITY,
+                        "server_version": __version__,
+                        "protocol_version": types.LATEST_PROTOCOL_VERSION,
+                    },
+                    "languages": [
+                        {"language": "python", "state": "ready"},
+                        {"language": "typescript", "state": "ready"},
+                    ],
+                    "executor": {"active": 0, "queued": 0, "capacity": 32},
+                    "issues": [],
+                }
+                serialized = json.dumps(data)
+                for forbidden in ("lease_id", "daemon_id", "python_interpreter", "transitions", "sha256"):
+                    assert forbidden not in serialized
+                assert harness.python.client.requests == []
+                assert harness.typescript.client.requests == []
+
+                released = await _call(connector, "release_workspace", immediate=True)
+                assert released["ok"] is True
+                unbound = cast(Mapping[str, object], (await _call(connector, "get_runtime_status"))["data"])
+                assert unbound["workspace"] is None
+                assert unbound["languages"] == []
+                assert unbound["issues"] == [
+                    {
+                        "code": "WORKSPACE_UNBOUND",
+                        "retryable": False,
+                        "remediation": "activate_workspace",
+                    }
+                ]
+
+        asyncio.run(scenario())
+
+
 def test_connector_scan_reports_create_change_delete_and_python_native_config(tmp_path: Path) -> None:
     with _acceptance(tmp_path) as harness:
         root = harness.root
@@ -805,7 +852,7 @@ def test_connector_scan_reports_create_change_delete_and_python_native_config(tm
                 (root / "pyrightconfig.json").write_text('{"include": ["."]}\n')
 
                 assert (await _call(connector, "get_symbols_overview", relative_path="main.py"))["ok"] is True
-                status = await _runtime_status(connector)
+                status = _runtime_status(harness)
 
             # status() reports the latest completed guarded scan.  A
             # source-derived read also runs a clean postflight scan once the
@@ -815,13 +862,13 @@ def test_connector_scan_reports_create_change_delete_and_python_native_config(tm
             # membership and by the watcher notification the affected python
             # adapter received.
             freshness = status["freshness"]
-            assert freshness["created"] == []
-            assert freshness["changed"] == []
-            assert freshness["deleted"] == []
-            assert freshness["config_changed"] == []
-            assert freshness["opened"] == []
-            assert freshness["reattributed"] == []
-            assert freshness["notified"] == []
+            assert freshness["created"] == ()
+            assert freshness["changed"] == ()
+            assert freshness["deleted"] == ()
+            assert freshness["config_changed"] == ()
+            assert freshness["opened"] == ()
+            assert freshness["reattributed"] == ()
+            assert freshness["notified"] == ()
             assert "created.py" in harness.runtime.inventory.paths
             assert "spare.py" not in harness.runtime.inventory.paths
             assert "workspace/didChangeWatchedFiles" in harness.python.client.notifications
@@ -845,7 +892,7 @@ def test_connector_scan_reattributes_only_the_typescript_family(tmp_path: Path) 
                 (root / "tsconfig.json").write_text('{"include": ["."]}\n')
 
                 assert (await _call(connector, "get_symbols_overview", relative_path="main.py"))["ok"] is True
-                status = await _runtime_status(connector)
+                status = _runtime_status(harness)
 
             # status() reports the latest completed guarded scan.  A
             # source-derived read also runs a clean postflight scan once the
@@ -855,12 +902,12 @@ def test_connector_scan_reattributes_only_the_typescript_family(tmp_path: Path) 
             # membership and by the watcher notification the affected
             # typescript adapter received.
             freshness = status["freshness"]
-            assert freshness["created"] == []
-            assert freshness["config_changed"] == []
-            assert freshness["changed"] == []
-            assert freshness["deleted"] == []
-            assert freshness["reattributed"] == []
-            assert freshness["notified"] == []
+            assert freshness["created"] == ()
+            assert freshness["config_changed"] == ()
+            assert freshness["changed"] == ()
+            assert freshness["deleted"] == ()
+            assert freshness["reattributed"] == ()
+            assert freshness["notified"] == ()
             assert "widget.ts" in harness.runtime.inventory.paths
             assert "workspace/didChangeWatchedFiles" in harness.typescript.client.notifications
             assert set(status["adapters"]) == {"python", "typescript"}
@@ -1010,7 +1057,7 @@ def test_connector_lost_edit_response_is_uncertain_and_is_never_replayed(
                 # root, so its activation refresh observed the install.
                 assert sessions.connects == 2
                 assert connector.last_validated_binding == harness.root
-                assert (await _freshness(connector))["changed"] == ["main.py"]
+                assert _freshness(harness)["changed"] == ("main.py",)
 
         asyncio.run(scenario())
 
@@ -1019,14 +1066,14 @@ def test_second_lease_on_the_same_root_reuses_the_runtime_and_refreshes_it(tmp_p
     with _acceptance(tmp_path) as harness:
 
         async def scenario() -> None:
-            async with _connected(harness) as first:
-                assert (await _freshness(first))["changed"] == []
+            async with _connected(harness):
+                assert _freshness(harness)["changed"] == ()
                 (harness.root / "main.py").write_bytes(_SOURCE + b"\n# appended\n")
 
                 # A second lease activating the same root must refresh it before
                 # any semantic operation runs on that connector.
-                async with _connected(harness) as second:
-                    assert (await _freshness(second))["changed"] == ["main.py"]
+                async with _connected(harness):
+                    assert _freshness(harness)["changed"] == ("main.py",)
 
             assert len(harness.runtimes) == 1
 

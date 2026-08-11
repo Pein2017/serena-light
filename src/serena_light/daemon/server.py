@@ -55,6 +55,7 @@ from serena_light.tools.declarations import _MAX_SYMBOL_KIND, _MIN_SYMBOL_KIND
 from serena_light.tools.diagnostics_adapter import compact_diagnostics_result
 from serena_light.tools.envelopes import ErrorCode, RetryMetadata, error
 from serena_light.tools.presentation import render_error_result
+from serena_light.tools.runtime_status import compact_runtime_status
 
 LOOPBACK_HOST = "127.0.0.1"
 HEALTH_PATH = "/health"
@@ -497,7 +498,7 @@ def create_daemon_app(
         structured_output=True,
     )
     async def get_runtime_status(context: Context) -> dict[str, object]:
-        """Workspace/generation/adapter/cleanup status for debug/build/readiness, not routine preflight."""
+        """Compact workspace/build/readiness and actionable issue status; never warms adapters."""
 
         result = await bound_call(context, "get_runtime_status")
         assert isinstance(result, dict)
@@ -505,7 +506,14 @@ def create_daemon_app(
             return result
         data = result.get("data")
         assert isinstance(data, Mapping)
-        return _success(_with_daemon_health({str(key): value for key, value in data.items()}, health))
+        return _success(
+            compact_runtime_status(
+                {str(key): value for key, value in data.items()},
+                build_identity=health.build_identity,
+                server_version=health.server_version,
+                protocol_version=health.protocol_version,
+            )
+        )
 
     @mcp.tool(
         name="get_symbols_overview",

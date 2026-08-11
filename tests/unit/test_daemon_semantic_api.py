@@ -38,7 +38,18 @@ class FakeRuntime:
     calls: list[tuple[str, dict[str, object]]] = field(default_factory=list)
 
     def status(self) -> Mapping[str, object]:
-        return {"identity": self.identity, "executor": {"queue_size": 0}}
+        return {
+            "identity": {
+                "root": self.identity,
+                "kind": "git",
+                "python_environment": "ms",
+                "python_interpreter": "/private/ms/bin/python",
+            },
+            "adapters": {},
+            "unavailable_language_families": {},
+            "skipped_language_families": ("python", "typescript"),
+            "executor": {"queue_size": 0, "queue_capacity": 32, "active": False, "stopping": False},
+        }
 
     def find_symbol(self, **kwargs: object) -> object:
         self.calls.append(("find_symbol", dict(kwargs)))
@@ -265,9 +276,17 @@ def test_public_semantic_tools_bind_only_through_meta_and_preserve_envelopes() -
         ]
 
         status = _data(_call(client, authorization, session, "get_runtime_status", lease_id=lease))
-        assert status["daemon_id"] == daemon_id
-        assert _data_map(status["binding"])["working_subdirectory"] == "/data/one/subdir"
-        assert _data_map(status["runtime"])["identity"] == "/data/one"
+        assert status["workspace"] == {
+            "root": "/data/one",
+            "working_subdirectory": "/data/one/subdir",
+            "kind": "git",
+            "python_environment": "ms",
+        }
+        assert _data_map(status["build"])["identity"] == "0" * 64
+        assert status["languages"] == []
+        assert status["executor"] == {"active": 0, "queued": 0, "capacity": 32}
+        assert status["issues"] == []
+        assert "daemon_id" not in status
         assert token not in json.dumps(status)
 
         missing = _call(client, authorization, session, "find_symbol", {"name_path": "Thing"})
@@ -421,7 +440,7 @@ def test_http_activation_rejections_are_typed_and_keep_the_prior_binding() -> No
             assert _data_map(rejected["error"])["code"] == code
 
         status = _data(_call(client, authorization, session, "get_runtime_status", lease_id=lease))
-        assert _data_map(status["binding"])["working_subdirectory"] == "/data/active/subdir"
+        assert _data_map(status["workspace"])["working_subdirectory"] == "/data/active/subdir"
         assert _data(_call(client, authorization, session, "heartbeat", {"lease_id": lease}))["lease_id"] == lease
         assert [runtime.identity for runtime in created] == ["/data/active"]
 

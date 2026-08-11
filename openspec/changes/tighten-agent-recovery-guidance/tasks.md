@@ -6,9 +6,9 @@
 
 ## 2. Compact Runtime Status
 
-- [ ] 2.1 Add failing presenter and service tests for healthy cold/warming/ready states, one-family incompatibility, cooldown, executor activity/saturation, and an intentionally unbound lease.
-- [ ] 2.2 Implement the single compact public status projection with fixed binding/build/language/executor/issues keys, stable state values, bounded affected-family evidence, and no healthy debug-history leakage.
-- [ ] 2.3 Prove runtime status remains off the semantic FIFO, does not start or warm adapters, preserves caller-local working subdirectories on shared roots, and remains responsive while another root or same-root transaction is blocked.
+- [x] 2.1 Add failing presenter and service tests for healthy cold/warming/ready states, one-family incompatibility, cooldown, executor activity/saturation, and an intentionally unbound lease.
+- [x] 2.2 Implement the single compact public status projection with fixed binding/build/language/executor/issues keys, stable state values, bounded affected-family evidence, and no healthy debug-history leakage.
+- [x] 2.3 Prove runtime status remains off the semantic FIFO, does not start or warm adapters, preserves caller-local working subdirectories on shared roots, and remains responsive while another root or same-root transaction is blocked.
 
 ## 3. Static Guidance and Closed Recovery Actions
 

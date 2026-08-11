@@ -363,11 +363,10 @@ def test_real_wall_clock_block_keeps_production_heartbeats_status_and_second_roo
             status = await asyncio.wait_for(observer.call_tool("get_runtime_status"), timeout=2.0)
             status_payload = _payload(status)
             assert status_payload["ok"] is True
-            runtime = _mapping(_mapping(status_payload["data"])["runtime"])
-            executor = _mapping(runtime["executor"])
-            assert executor["active"] is True
-            assert executor["actual_worker_count"] == 1
-            assert executor["queue_capacity"] == 2
+            status_data = _mapping(status_payload["data"])
+            executor = _mapping(status_data["executor"])
+            assert executor == {"active": 1, "queued": 0, "capacity": 2}
+            assert status_data["issues"] == []
 
             other = await asyncio.wait_for(second.call_tool("find_symbol", {"name_path": "other-root"}), timeout=2.0)
             assert _payload(other)["ok"] is True
