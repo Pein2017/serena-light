@@ -402,7 +402,9 @@ def _prepare(
                 layout = _Layout.opened(logical_root, root_fd)
                 manifest = _read_manifest(layout)
                 if manifest is not None:
-                    return _verify_published_runtime(lock, request, layout, manifest, runner, root_fd)
+                    return _verify_published_runtime(
+                        lock, request, layout, manifest, runner, base_fd, root_fd
+                    )
                 # No published manifest under the lock means no runtime was ever completed here.
                 _purge_directory_contents(root_fd)
                 try:
@@ -866,14 +868,22 @@ def _verify_published_runtime(
     layout: _Layout,
     manifest: Mapping[str, Any],
     runner: CommandRunner,
+    base_fd: int,
     root_fd: int,
 ) -> CandidateRuntime:
     """Reuse a published runtime only after the manifest verifies against the disk.
 
     Everything that lives outside the runtime root -- the installed snapshot's digest,
     ``uv``, the base interpreter, and every declared environment interpreter -- is
-    re-measured now rather than trusted from the manifest.  Nothing here purges anything:
-    a verification failure leaves the published runtime exactly as it was.
+    re-measured now rather than trusted from the manifest.  Verification reads through the
+    open descriptor, but the returned :class:`CandidateRuntime` names *logical* paths, so the
+    logical root is re-checked once more immediately before it is returned: a root renamed
+    and symlinked during one of these probes would otherwise hand the caller a runtime whose
+    every path points at an attacker-controlled directory.
+
+    Nothing here purges or writes anything: a verification failure -- including that final
+    swap check -- leaves the already-published runtime exactly as it is under whatever
+    directory it now lives in, and never touches the swapped-in target.
     """
 
     root = layout.logical_root
@@ -908,6 +918,8 @@ def _verify_published_runtime(
     )
     _verify_published_environments(request, manifest, environments)
     service_configs = _verify_published_service_configs(layout, manifest)
+    # The returned runtime is expressed in logical paths, so they must still be ours.
+    _require_open_root(base_fd, root_fd, root, "before reuse return")
     return _runtime(lock, layout, executables, environments, service_configs)
 
 

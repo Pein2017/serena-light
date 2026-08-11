@@ -1048,6 +1048,36 @@ def test_runtime_reuse_runs_only_identity_revalidation_commands(
     assert reuse_runner.commands == _expected_probe_commands(request_)
 
 
+def test_runtime_reuse_fails_closed_when_the_root_is_swapped_mid_probe(
+    lock: CandidateLock, request_: RuntimeRequest, tmp_path: Path
+) -> None:
+    """A root swapped during a reuse probe must not yield a runtime naming attacker paths."""
+
+    runtime = prepare_candidate_runtime(lock, request_, runner=_FakeRunner())
+    manifest_bytes = (runtime.root / MANIFEST_FILE_NAME).read_bytes()
+    executable_bytes = runtime.ty.read_bytes()
+    attacker = tmp_path / "reuse-attacker-root"
+    attacker.mkdir()
+    runner = _FakeRunner(swap=("--version", runtime.root, attacker))
+
+    with pytest.raises(RuntimePreparationError, match=r"swapped during preparation \(before reuse return\)"):
+        prepare_candidate_runtime(lock, request_, runner=runner)
+
+    moved = request_.runtime_base / f"{lock.digest}-moved"
+    # The already-published runtime survives intact under its moved directory.
+    assert (moved / MANIFEST_FILE_NAME).read_bytes() == manifest_bytes
+    assert (moved / "venv" / "bin" / "ty").read_bytes() == executable_bytes
+    assert (moved / REQUIREMENTS_SNAPSHOT_NAME).read_bytes() == _LOCK_BODY
+    assert sorted(path.name for path in moved.iterdir()) == sorted(
+        (*RUNTIME_FILE_NAMES, *RUNTIME_DIRECTORY_NAMES)
+    )
+    # Nothing was written into the attacker's target and its entry was left alone.
+    assert sorted(path.name for path in attacker.iterdir()) == []
+    assert runtime.root.is_symlink()
+    # Every probe after the swap still read through the descriptor, not the swapped pathname.
+    assert runner.resolved_cwds[1:] == [moved] * (len(runner.calls) - 1)
+
+
 def test_runtime_reuse_refuses_changed_interpreter_bytes_at_the_same_path_and_version(
     lock: CandidateLock, request_: RuntimeRequest
 ) -> None:
