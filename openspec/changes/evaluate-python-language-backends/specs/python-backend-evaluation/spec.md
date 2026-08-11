@@ -5,7 +5,7 @@ Defines a reproducible, production-shaped evaluation that selects one fixed Pyth
 ## ADDED Requirements
 
 ### Requirement: Evaluation inputs are immutable and reproducible
-The evaluation SHALL bind every result to an immutable manifest containing the Serena Light source commit, candidate backend versions and executable hashes, selected Conda interpreter paths, service-owned configuration digests, workspace snapshot identities, task corpus version, model route, tool budget, and evaluation-contract version.
+The evaluation SHALL bind every result to an immutable manifest composed across phase receipts. Each phase receipt SHALL bind the fields produced by that phase, and the composed manifest SHALL contain the Serena Light source commit, candidate backend versions and executable hashes, selected Conda interpreter paths, service-owned configuration digests, workspace snapshot identities, task corpus version, model route, tool budget, and evaluation-contract version.
 
 #### Scenario: Candidate versions are frozen
 - **WHEN** an evaluation run begins
