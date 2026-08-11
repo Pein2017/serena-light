@@ -22,6 +22,7 @@ from scripts.backend_eval.candidate_lock import (
     RECEIPT_FILE_NAME,
     RECEIPT_ROLLBACK_NAME,
     REQUIREMENTS_IN_NAME,
+    RESOLUTION_LOCK_NAME,
     TRANSACTION_MARKER_NAME,
     CandidateLockError,
     CandidateLockRequest,
@@ -30,6 +31,7 @@ from scripts.backend_eval.candidate_lock import (
     subprocess_runner,
 )
 from scripts.backend_eval.models import CandidateLock, ProductionIdentity, canonical_json, sha256_bytes
+from scripts.backend_eval.process import CommandTimeout
 from scripts.backend_eval.production_identity import PRODUCTION_IDENTITY_FILES, ProductionIdentityChanged
 
 _RUNNER_EVENT = "<runner>"
@@ -55,7 +57,9 @@ class _FakeRunner:
     events: list[tuple[str, int]] | None = None
     calls: list[tuple[tuple[str, ...], Path, Mapping[str, str]]] = field(default_factory=list)
 
-    def __call__(self, command: Sequence[str], *, cwd: Path, env: Mapping[str, str]) -> CommandResult:
+    def __call__(
+        self, command: Sequence[str], *, cwd: Path, env: Mapping[str, str], timeout: float | None = None
+    ) -> CommandResult:
         tokens = tuple(command)
         if self.events is not None:
             self.events.append((_RUNNER_EVENT, 0))
@@ -73,7 +77,9 @@ class _DirectoryRunner:
     populate: bool = False
     calls: int = 0
 
-    def __call__(self, command: Sequence[str], *, cwd: Path, env: Mapping[str, str]) -> CommandResult:
+    def __call__(
+        self, command: Sequence[str], *, cwd: Path, env: Mapping[str, str], timeout: float | None = None
+    ) -> CommandResult:
         del cwd, env
         self.calls += 1
         tokens = tuple(command)
@@ -92,7 +98,9 @@ class _InspectingRunner:
 
     observed: dict[str, object] = field(default_factory=dict)
 
-    def __call__(self, command: Sequence[str], *, cwd: Path, env: Mapping[str, str]) -> CommandResult:
+    def __call__(
+        self, command: Sequence[str], *, cwd: Path, env: Mapping[str, str], timeout: float | None = None
+    ) -> CommandResult:
         del cwd, env
         tokens = tuple(command)
         output = Path(tokens[tokens.index("--output-file") + 1])
@@ -110,7 +118,9 @@ class _InspectingRunner:
 class _InterruptingRunner:
     calls: int = 0
 
-    def __call__(self, command: Sequence[str], *, cwd: Path, env: Mapping[str, str]) -> CommandResult:
+    def __call__(
+        self, command: Sequence[str], *, cwd: Path, env: Mapping[str, str], timeout: float | None = None
+    ) -> CommandResult:
         del command, cwd, env
         self.calls += 1
         raise KeyboardInterrupt
@@ -123,7 +133,9 @@ class _SymlinkRunner:
     target: Path
     calls: int = 0
 
-    def __call__(self, command: Sequence[str], *, cwd: Path, env: Mapping[str, str]) -> CommandResult:
+    def __call__(
+        self, command: Sequence[str], *, cwd: Path, env: Mapping[str, str], timeout: float | None = None
+    ) -> CommandResult:
         del cwd, env
         self.calls += 1
         tokens = tuple(command)
@@ -135,7 +147,9 @@ class _SymlinkRunner:
 class _RaisingRunner:
     calls: int = 0
 
-    def __call__(self, command: Sequence[str], *, cwd: Path, env: Mapping[str, str]) -> CommandResult:
+    def __call__(
+        self, command: Sequence[str], *, cwd: Path, env: Mapping[str, str], timeout: float | None = None
+    ) -> CommandResult:
         del command, cwd, env
         self.calls += 1
         raise PermissionError(13, "Permission denied")
@@ -358,15 +372,25 @@ def test_compile_uses_a_service_owned_cache_and_inherits_proxy_settings(
 ) -> None:
     monkeypatch.setenv("HTTPS_PROXY", "http://proxy.internal:8080")
     monkeypatch.setenv("NO_PROXY", "localhost")
+    monkeypatch.setenv("UV_INDEX_URL", "https://mirror.invalid/simple")
+    monkeypatch.setenv("PIP_INDEX_URL", "https://mirror.invalid/simple")
+    monkeypatch.setenv("PYTHONPATH", "/data/verl")
     runner = _FakeRunner()
     compile_candidate_lock(request_, runner=runner)
     _command, _cwd, env = runner.calls[0]
     cache_dir = request_.artifact_root / "uv-cache"
-    assert env["UV_CACHE_DIR"] == str(cache_dir)
+    assert env["UV_CACHE_DIR"] == str(cache_dir / "uv")
+    assert env["HOME"] == str(cache_dir / "home")
     assert cache_dir.is_dir()
     assert env["HTTPS_PROXY"] == "http://proxy.internal:8080"
     assert env["NO_PROXY"] == "localhost"
-    assert os.environ.get("UV_CACHE_DIR") != str(cache_dir)
+    # The freeze may never inherit an ambient package index, source, or module search path.
+    assert env["PATH"] == "/usr/bin:/bin"
+    assert env["UV_NO_CONFIG"] == "1"
+    assert "UV_INDEX_URL" not in env
+    assert "PIP_INDEX_URL" not in env
+    assert "PYTHONPATH" not in env
+    assert os.environ.get("UV_CACHE_DIR") != str(cache_dir / "uv")
 
 
 def test_compile_writes_only_below_the_artifact_root(
@@ -374,7 +398,18 @@ def test_compile_writes_only_below_the_artifact_root(
 ) -> None:
     compile_candidate_lock(request_, runner=_FakeRunner())
     written = {path.relative_to(request_.artifact_root).as_posix() for path in request_.artifact_root.rglob("*")}
-    assert written == {REQUIREMENTS_IN_NAME, LOCK_FILE_NAME, RECEIPT_FILE_NAME, "uv-cache"}
+    assert written == {
+        REQUIREMENTS_IN_NAME,
+        LOCK_FILE_NAME,
+        RECEIPT_FILE_NAME,
+        RESOLUTION_LOCK_NAME,
+        "uv-cache",
+        "uv-cache/home",
+        "uv-cache/tmp",
+        "uv-cache/uv",
+        "uv-cache/xdg-cache",
+        "uv-cache/xdg-config",
+    }
     assert {path.name for path in production_root.iterdir()} == {
         *PRODUCTION_IDENTITY_FILES,
         "src",
@@ -757,9 +792,33 @@ def test_subprocess_runner_reports_exit_status_and_streams(tmp_path: Path) -> No
     assert result == CommandResult(returncode=3, stdout="resolved", stderr="failed")
 
 
-def test_subprocess_runner_normalizes_a_start_failure(tmp_path: Path) -> None:
-    with pytest.raises(CandidateLockError, match="cannot start"):
+def test_a_missing_resolver_is_reported_as_a_candidate_lock_failure(
+    request_: CandidateLockRequest, tmp_path: Path
+) -> None:
+    """The shared runner raises the OS error; this module is what types it."""
+
+    with pytest.raises(OSError):
         subprocess_runner([str(tmp_path / "absent-uv"), "pip", "compile"], cwd=tmp_path, env={})
+
+    def missing_runner(
+        command: Sequence[str], *, cwd: Path, env: Mapping[str, str], timeout: float | None = None
+    ) -> CommandResult:
+        del command, cwd, env, timeout
+        raise FileNotFoundError("no such file or directory: uv")
+
+    with pytest.raises(CandidateLockError, match="cannot start"):
+        compile_candidate_lock(request_, runner=missing_runner)
+
+
+def test_a_hung_resolver_is_reported_as_a_candidate_lock_timeout(request_: CandidateLockRequest) -> None:
+    def hanging_runner(
+        command: Sequence[str], *, cwd: Path, env: Mapping[str, str], timeout: float | None = None
+    ) -> CommandResult:
+        del command, cwd, env, timeout
+        raise CommandTimeout("uv timed out after 1s and its process group was killed")
+
+    with pytest.raises(CandidateLockError, match="timed out"):
+        compile_candidate_lock(request_, runner=hanging_runner)
 
 
 # --- transactional artifact safety --------------------------------------------
@@ -1081,3 +1140,62 @@ def test_backups_survive_until_the_lock_is_durable(
         "marker_present": True,
     }
     _assert_transaction_clean(request_)
+
+
+# --- concurrency ---------------------------------------------------------------
+
+
+def test_a_live_concurrent_transaction_is_never_mistaken_for_an_interrupted_one(
+    request_: CandidateLockRequest,
+) -> None:
+    """The second caller waits for the first; it never rolls a live transaction back."""
+
+    import threading
+
+    inside_runner = threading.Event()
+    release_runner = threading.Event()
+    observed: dict[str, object] = {}
+
+    def blocking_runner(
+        command: Sequence[str], *, cwd: Path, env: Mapping[str, str], timeout: float | None = None
+    ) -> CommandResult:
+        del env, timeout
+        inside_runner.set()
+        release_runner.wait(30)
+        return _FakeRunner()(command, cwd=cwd, env={}, timeout=None)
+
+    results: dict[str, CandidateLock | BaseException] = {}
+
+    def first() -> None:
+        try:
+            results["first"] = compile_candidate_lock(request_, runner=blocking_runner)
+        except BaseException as error:  # pragma: no cover - surfaced by the assertions
+            results["first"] = error
+
+    def second() -> None:
+        try:
+            results["second"] = compile_candidate_lock(request_, runner=_FakeRunner())
+        except BaseException as error:  # pragma: no cover - surfaced by the assertions
+            results["second"] = error
+
+    first_thread = threading.Thread(target=first)
+    first_thread.start()
+    assert inside_runner.wait(30)
+    # The first caller is mid-transaction with its marker on disk.
+    observed["marker_exists"] = (request_.artifact_root / TRANSACTION_MARKER_NAME).exists()
+    second_thread = threading.Thread(target=second)
+    second_thread.start()
+    # The second caller must be blocked on the lock rather than rolling the first one back.
+    second_thread.join(0.5)
+    assert second_thread.is_alive()
+    release_runner.set()
+    first_thread.join(30)
+    second_thread.join(30)
+
+    assert observed["marker_exists"] is True
+    assert isinstance(results["first"], CandidateLock)
+    assert isinstance(results["second"], CandidateLock)
+    assert results["first"] == results["second"]
+    assert not (request_.artifact_root / TRANSACTION_MARKER_NAME).exists()
+    assert (request_.artifact_root / LOCK_FILE_NAME).is_file()
+    assert (request_.artifact_root / RECEIPT_FILE_NAME).is_file()

@@ -1,4 +1,4 @@
-"""Run the Phase 1 admission gate and publish one canonical admission receipt.
+"""Run the Phase 1 admission gate and publish one immutable admission receipt.
 
 Admission is the only phase that may freeze the candidate resolution and prepare the
 service-owned candidate runtime.  It launches no candidate language server, opens no
@@ -9,51 +9,47 @@ canonical production dependency slot.
 ``<artifact-root>/<evaluation-identity>/``; the runtime is then content addressed by that
 lock digest.  A second resolution inside one admission run is a structural error.
 
-**A strict monotonic ceiling.**  Every *external* step -- production-identity capture,
-candidate resolution, runtime preparation, and each bounded corpus capture -- is bracketed
-by a monotonic deadline check before it starts and after it returns, against the frozen
-30-minute ``admission`` budget.  Finalization (cleanup, artifact digest, receipt
-publication) is evaluation-owned local work that must complete so the run's own evidence
-stays trustworthy, so it is deliberately not abandoned at the ceiling.
+**The measurement window brackets every setup operation.**  The corpus is frozen *before*
+the candidate lock is compiled and the runtime is prepared, and again after runtime
+preparation and before cleanup and receipt publication.  Anything Phase 1 setup could have
+written into a corpus root therefore falls inside the delta rather than outside it.  The
+second capture is enriched by the two-stage remainder algorithm -- changed or created
+remainder files are hashed and the after manifest is rebuilt -- before any ``WriteDelta``
+is constructed, so every delta is bound to the two manifest digests it was derived from.
 
-**Bounded zero-write evidence.**  The corpus is frozen twice around the no-backend
-admission operation and *both* canonical manifest collections are retained.  Each root's
-before/after pair is compared by the Task 5 write guard, so every delta carries the two
-manifest digests it was derived from.  A changed manifest control (revision, inventory
-digest, inventory count) or a missing root is an unstable observation, not a clean result.
+**One ceiling for the whole gate.**  The frozen 1800-second admission budget covers
+resolution, runtime preparation, both corpus captures, cleanup, the final production
+identity, the artifact digest, and receipt publication.  Collection stops early enough to
+leave a reserved finalization window, so a run that reaches the ceiling can still publish a
+trustworthy timeout receipt; finalization itself is checked against the same absolute
+ceiling and fails closed, without a receipt, rather than publishing evidence it could not
+complete.  Every subprocess receives the remaining time and has its process group killed on
+expiry.
 
-**The production identity brackets cleanup too.**  Production identity is captured before
-any work, again after the last external step under the ceiling, and a third time *after*
-evaluation-owned cleanup has run.  The receipt records that final post-cleanup capture, so
-a cleanup that reports success while changing a production lock, digest, build identity, or
-runtime path cannot hide behind an earlier clean reading.  The final capture is mandatory:
-if it fails the run raises instead of publishing, because a receipt whose ``after`` side is
-older than the last thing that touched the filesystem would be a false clean bill.
+**Immutable per-execution receipts.**  Each execution has its own ``run_identity`` and
+publishes to ``receipts/<run-identity>.json`` with an exclusive link, so a repeated or
+concurrent run can never delete or replace another run's receipt.  Publication is
+serialized on a per-identity ``O_NOFOLLOW`` lock.
 
 **Fail-closed statuses.**  ``pass`` requires equal production identity before and after
-cleanup, one delta per root bound to both manifest digests, no unexpected path, and a
-cleanup that neither failed nor had to remove anything.  ``hold`` is a trustworthy
-observation of a violation -- unexpected writes, or production drift observed at any of the
-three captures.  ``incomplete`` is an untrustworthy or unfinished observation -- the
-deadline, a resolution or preparation failure, an unstable root, or a cleanup that failed or
-had to remove partial state; a dirty cleanup always ends ``incomplete``, whatever the run
-looked like before it, because the run can no longer describe its own side effects.  A
-receipt is published only when its evidence is trustworthy: without the production identity
-on both sides and the frozen candidate lock the run raises instead of publishing a receipt
-that would understate what is unknown.
-
-The receipt is serialized to canonical JSON, written to a same-directory temporary file,
-fsynced, ``os.replace``-d over the canonical name, and the directory is fsynced, so a
-reader never observes a partial receipt.
+cleanup, one delta per root bound to both manifest digests, no unexpected path, no changed
+manifest control, and a cleanup that neither failed nor had to remove anything -- plus the
+evaluator, host, bootstrap-environment, and candidate-runtime bindings the receipt model
+requires.  ``hold`` is a trustworthy observation of a violation.  ``incomplete`` is an
+untrustworthy or unfinished observation.  A receipt is published only when its evidence is
+trustworthy: without the production identity on both sides and the frozen candidate lock the
+run raises instead of publishing a receipt that would understate what is unknown.
 """
 
 from __future__ import annotations
 
 import argparse
+import fcntl
 import os
 import re
+import secrets
+import stat
 import sys
-import time
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -69,18 +65,34 @@ from scripts.backend_eval.candidate_lock import (
     CandidateLockRequest,
     compile_candidate_lock,
 )
+from scripts.backend_eval.identity import (
+    IdentityError,
+    bootstrap_environment_identity,
+    capture_evaluator_identity,
+)
 from scripts.backend_eval.manifests import ManifestError, default_corpus_requests, freeze_default_corpus
 from scripts.backend_eval.models import (
     ADMISSION_RECEIPT_SCHEMA_VERSION,
-    DEFAULT_PHASE_BUDGETS,
     EVALUATION_CONTRACT_VERSION,
+    NEXT_ACTION_HOLD,
+    NEXT_ACTION_PASS,
     AdmissionReceipt,
+    BootstrapEnvironmentIdentity,
     CandidateLock,
+    EvaluatorIdentity,
     ProductionIdentity,
     RootManifest,
+    RuntimeBinding,
     WriteDelta,
     canonical_json,
+    default_phase_budgets,
     sha256_bytes,
+)
+from scripts.backend_eval.process import (
+    Clock,
+    Deadline,
+    DeadlineExceeded,
+    monotonic_clock,
 )
 from scripts.backend_eval.production_identity import (
     ProductionIdentityChanged,
@@ -93,15 +105,24 @@ from scripts.backend_eval.runtime import (
     RuntimePreparationError,
     RuntimeRequest,
     prepare_candidate_runtime,
+    runtime_manifest_digest,
 )
-from scripts.backend_eval.write_guard import WriteGuardError, assert_no_unexpected_writes, compare_root_manifests
+from scripts.backend_eval.write_guard import (
+    WriteGuardError,
+    assert_no_unexpected_writes,
+    compare_root_manifests,
+    enrich_after_manifest,
+)
 
 __all__ = [
     "ADMISSION_BUDGET_NAME",
-    "ADMISSION_RECEIPT_FILE_NAME",
+    "ADMISSION_BUDGET_SECONDS",
+    "FINALIZATION_RESERVE_SECONDS",
     "MAX_ISSUES",
     "NEXT_ACTION_HOLD",
     "NEXT_ACTION_PASS",
+    "PUBLICATION_LOCK_NAME",
+    "RECEIPTS_DIR_NAME",
     "AdmissionError",
     "AdmissionFailure",
     "AdmissionRequest",
@@ -113,19 +134,24 @@ __all__ = [
     "evaluation_identity",
     "main",
     "monotonic_clock",
+    "new_run_identity",
     "run_admission",
 ]
 
 ADMISSION_BUDGET_NAME = "admission"
-ADMISSION_RECEIPT_FILE_NAME = "admission-receipt.json"
-NEXT_ACTION_PASS = "begin_protocol_probe_planning"
-NEXT_ACTION_HOLD = "retain_pyright_and_disposition_admission"
+ADMISSION_BUDGET_SECONDS = next(
+    budget.seconds for budget in default_phase_budgets() if budget.name == ADMISSION_BUDGET_NAME
+)
+# Collection stops this far before the ceiling so a timeout receipt can still be published.
+FINALIZATION_RESERVE_SECONDS = 300
+RECEIPTS_DIR_NAME = "receipts"
+PUBLICATION_LOCK_NAME = ".admission-publication.lock"
 MAX_ISSUES = 20
 
-_RECEIPT_TEMPORARY_NAME = f".{ADMISSION_RECEIPT_FILE_NAME}.tmp"
 # Volatile or self-referential artifacts are excluded: the resolver cache is a rebuildable
-# download store and the receipt cannot contain the digest of a tree that contains it.
-_ARTIFACT_DIGEST_EXCLUDED_NAMES = frozenset({CACHE_DIR_NAME, ADMISSION_RECEIPT_FILE_NAME, _RECEIPT_TEMPORARY_NAME})
+# download store, the publication lock is a control file, and no receipt can contain the
+# digest of a tree that contains it.
+_ARTIFACT_DIGEST_EXCLUDED_NAMES = frozenset({CACHE_DIR_NAME, RECEIPTS_DIR_NAME, PUBLICATION_LOCK_NAME})
 _EXCLUDE_NEWER_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
 _ABSOLUTE_PATH_RE = re.compile(r"/[^\s'\"]+")
 _REDACTED_PATH = "<redacted-path>"
@@ -134,9 +160,17 @@ _TRUNCATION_MARKER = "...(truncated)"
 _DIRECTORY_FLAGS = os.O_RDONLY | os.O_DIRECTORY
 _NOFOLLOW_DIRECTORY_FLAGS = _DIRECTORY_FLAGS | os.O_NOFOLLOW
 _CREATE_FLAGS = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
+_READ_FLAGS = os.O_RDONLY | os.O_NOFOLLOW
+_DIRECTORY_MODE = 0o700
+_FILE_MODE = 0o600
+# The digest traversal checks the ceiling this often rather than on every single file.
+_ARTIFACT_CHECK_INTERVAL = 64
 
-Clock = Callable[[], float]
-monotonic_clock: Clock = time.monotonic
+Check = Callable[[], None]
+
+
+def _noop_check() -> None:
+    return None
 
 
 # --- typed failures ---------------------------------------------------------------
@@ -215,12 +249,16 @@ def _require_declared_path(path: Path, label: str) -> None:
         raise ValueError(f"{label} must not contain parent references")
 
 
-def evaluation_identity(request: AdmissionRequest, production_identity: ProductionIdentity) -> str:
-    """The reproducible identity of one admission run, bound to production before any work.
+def evaluation_identity(
+    request: AdmissionRequest, production_identity: ProductionIdentity, evaluator: EvaluatorIdentity
+) -> str:
+    """The reproducible identity of one admission run, bound to code, host, and production.
 
     The identity is derived only from inputs that exist before the candidate resolution, so
-    the artifact directory can be named before anything is written into it, and a rerun with
-    the same declared roots, freeze timestamp, and production identity reuses the same freeze.
+    the artifact directory can be named before anything is written into it.  It binds the
+    evaluator source closure, the CLI host interpreter, and the artifact root, so changed
+    evaluator code or a changed host produces a new evaluation identity and therefore new
+    artifacts rather than overwriting an earlier run's evidence.
     """
 
     return sha256_bytes(
@@ -229,49 +267,35 @@ def evaluation_identity(request: AdmissionRequest, production_identity: Producti
                 "evaluation_contract_version": EVALUATION_CONTRACT_VERSION,
                 "schema_version": ADMISSION_RECEIPT_SCHEMA_VERSION,
                 "repo_root": str(request.repo_root),
+                "artifact_root": str(request.artifact_root),
                 "runtime_base": str(request.runtime_base),
                 "uv": str(request.uv),
                 "python": str(request.python),
                 "exclude_newer": request.exclude_newer,
                 "dependency_lock_digest": production_identity.dependency_lock_digest,
                 "build_identity": production_identity.build_identity,
+                "evaluator": evaluator.to_dict(),
             }
         )
     )
 
 
-def admission_receipt_path(artifact_root: Path, identity: str) -> Path:
-    """The canonical receipt location for one evaluation identity."""
+def new_run_identity(started_at: str) -> str:
+    """One immutable identity per execution; two runs never share a receipt path."""
 
-    return artifact_root / identity / ADMISSION_RECEIPT_FILE_NAME
+    return sha256_bytes(
+        canonical_json({"started_at": started_at, "pid": os.getpid(), "nonce": secrets.token_hex(32)})
+    )
 
 
-# --- the deadline ------------------------------------------------------------------
+def admission_receipt_path(artifact_root: Path, identity: str, run_identity: str) -> Path:
+    """The immutable receipt location of one execution of one evaluation identity."""
+
+    return artifact_root / identity / RECEIPTS_DIR_NAME / f"{run_identity}.json"
 
 
-@dataclass(frozen=True, slots=True)
-class _Deadline:
-    """A strict monotonic ceiling, checked before and after every external step."""
-
-    clock: Clock
-    seconds: int
-    started: float
-
-    @staticmethod
-    def start(clock: Clock, seconds: int) -> _Deadline:
-        return _Deadline(clock=clock, seconds=seconds, started=clock())
-
-    def elapsed(self) -> float:
-        return self.clock() - self.started
-
-    def check(self, step: str, phase: str) -> None:
-        elapsed = self.elapsed()
-        if elapsed >= self.seconds:
-            raise _fail(
-                "incomplete",
-                "admission_deadline_exceeded",
-                f"step={step} phase={phase} elapsed={elapsed:.3f}s budget={self.seconds}s",
-            )
+def _receipt_temporary_name(run_identity: str) -> str:
+    return f".{run_identity}.json.tmp"
 
 
 # --- the service seam ----------------------------------------------------------------
@@ -282,15 +306,23 @@ class AdmissionServices(Protocol):
 
     def capture_production_identity(self, repo_root: Path) -> ProductionIdentity: ...
 
-    def compile_candidate_lock(self, request: CandidateLockRequest) -> CandidateLock: ...
+    def capture_evaluator_identity(self, deadline: Deadline) -> EvaluatorIdentity: ...
 
-    def prepare_candidate_runtime(self, lock: CandidateLock, request: RuntimeRequest) -> CandidateRuntime: ...
+    def capture_bootstrap_environment(self) -> BootstrapEnvironmentIdentity: ...
 
-    def capture_corpus(self) -> tuple[RootManifest, ...]: ...
+    def compile_candidate_lock(self, request: CandidateLockRequest, deadline: Deadline) -> CandidateLock: ...
 
-    def artifact_tree_digest(self, artifact_root: Path) -> str: ...
+    def prepare_candidate_runtime(
+        self, lock: CandidateLock, request: RuntimeRequest, deadline: Deadline
+    ) -> CandidateRuntime: ...
 
-    def cleanup(self, evaluation_root: Path, stage: str) -> tuple[str, ...]: ...
+    def capture_corpus(self, deadline: Deadline) -> tuple[RootManifest, ...]: ...
+
+    def runtime_manifest_digest(self, root: Path) -> str: ...
+
+    def artifact_tree_digest(self, artifact_root: Path, deadline: Deadline) -> str: ...
+
+    def cleanup(self, evaluation_root: Path, run_identity: str, stage: str) -> tuple[str, ...]: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -300,40 +332,58 @@ class ProductionAdmissionServices:
     def capture_production_identity(self, repo_root: Path) -> ProductionIdentity:
         return capture_production_identity(repo_root)
 
-    def compile_candidate_lock(self, request: CandidateLockRequest) -> CandidateLock:
-        return compile_candidate_lock(request)
+    def capture_evaluator_identity(self, deadline: Deadline) -> EvaluatorIdentity:
+        return capture_evaluator_identity(deadline=deadline)
 
-    def prepare_candidate_runtime(self, lock: CandidateLock, request: RuntimeRequest) -> CandidateRuntime:
-        return prepare_candidate_runtime(lock, request)
+    def capture_bootstrap_environment(self) -> BootstrapEnvironmentIdentity:
+        return bootstrap_environment_identity()
 
-    def capture_corpus(self) -> tuple[RootManifest, ...]:
-        return freeze_default_corpus()
+    def compile_candidate_lock(self, request: CandidateLockRequest, deadline: Deadline) -> CandidateLock:
+        return compile_candidate_lock(request, deadline=deadline)
 
-    def artifact_tree_digest(self, artifact_root: Path) -> str:
-        return artifact_tree_digest(artifact_root)
+    def prepare_candidate_runtime(
+        self, lock: CandidateLock, request: RuntimeRequest, deadline: Deadline
+    ) -> CandidateRuntime:
+        return prepare_candidate_runtime(lock, request, deadline=deadline)
 
-    def cleanup(self, evaluation_root: Path, stage: str) -> tuple[str, ...]:
+    def capture_corpus(self, deadline: Deadline) -> tuple[RootManifest, ...]:
+        return freeze_default_corpus(deadline=deadline)
+
+    def runtime_manifest_digest(self, root: Path) -> str:
+        return runtime_manifest_digest(root)
+
+    def artifact_tree_digest(self, artifact_root: Path, deadline: Deadline) -> str:
+        return artifact_tree_digest(artifact_root, check=lambda: deadline.check("artifact_tree_digest"))
+
+    def cleanup(self, evaluation_root: Path, run_identity: str, stage: str) -> tuple[str, ...]:
         """Remove exactly the evaluation-owned partial state this module can create.
 
-        The frozen candidate lock and the prepared runtime are durable evidence owned by
-        their own transactional modules and are never removed here; the only partial state
-        admission itself can leave behind is an interrupted receipt temporary file.
+        The frozen candidate lock, the prepared runtime, and every *other* execution's
+        receipt are durable evidence owned elsewhere and are never removed here; the only
+        partial state admission itself can leave behind is this run's own interrupted
+        receipt temporary.
         """
 
+        del stage
         try:
-            dir_fd = os.open(evaluation_root, _NOFOLLOW_DIRECTORY_FLAGS)
+            dir_fd = os.open(evaluation_root / RECEIPTS_DIR_NAME, _NOFOLLOW_DIRECTORY_FLAGS)
         except FileNotFoundError:
             return ()
         except OSError as exc:
-            raise _fail("incomplete", "cleanup_failed", f"cannot open {evaluation_root}: {exc}") from exc
+            raise _fail(
+                "incomplete", "cleanup_failed", f"cannot open {evaluation_root / RECEIPTS_DIR_NAME}: {exc}"
+            ) from exc
+        temporary = _receipt_temporary_name(run_identity)
         try:
             try:
-                os.unlink(_RECEIPT_TEMPORARY_NAME, dir_fd=dir_fd)
+                os.unlink(temporary, dir_fd=dir_fd)
             except FileNotFoundError:
                 return ()
             except OSError as exc:
                 raise _fail(
-                    "incomplete", "cleanup_failed", f"cannot remove {evaluation_root / _RECEIPT_TEMPORARY_NAME}: {exc}"
+                    "incomplete",
+                    "cleanup_failed",
+                    f"cannot remove {evaluation_root / RECEIPTS_DIR_NAME / temporary}: {exc}",
                 ) from exc
             os.fsync(dir_fd)
         finally:
@@ -344,65 +394,104 @@ class ProductionAdmissionServices:
 # --- the artifact tree digest ----------------------------------------------------------
 
 
-def artifact_tree_digest(artifact_root: Path) -> str:
+def artifact_tree_digest(artifact_root: Path, *, check: Check = _noop_check) -> str:
     """Digest the evaluation-owned artifact tree by content, refusing anything unhashable.
 
-    Only regular files are recorded, by relative path, size, and SHA-256; the resolver
-    cache and the receipt itself are excluded.  A symlink or special file anywhere below the
-    root fails closed rather than being silently skipped.
+    The traversal is descriptor relative and ``O_NOFOLLOW`` throughout: every directory is
+    opened from its parent's descriptor, and every file is validated and read through *one*
+    descriptor, so no path is ever reopened after its type was checked.  Only regular files
+    are recorded, by relative path, size, and SHA-256; the resolver cache, the receipts
+    directory, and the publication lock are excluded.  A symlink or special file anywhere
+    below the root fails closed rather than being silently skipped.
     """
 
     entries: list[dict[str, object]] = []
     try:
-        dir_fd = os.open(artifact_root, _NOFOLLOW_DIRECTORY_FLAGS)
+        root_fd = os.open(artifact_root, _NOFOLLOW_DIRECTORY_FLAGS)
     except FileNotFoundError:
-        dir_fd = -1
+        return sha256_bytes(canonical_json({"entries": entries}))
     except OSError as exc:
         raise _fail("incomplete", "artifact_digest_failed", f"cannot open {artifact_root}: {exc}") from exc
-    if dir_fd >= 0:
-        try:
-            _collect_artifact_entries(artifact_root, Path("."), entries, top_level=True)
-        finally:
-            os.close(dir_fd)
+    try:
+        _collect_artifact_entries(root_fd, "", artifact_root, entries, check, top_level=True)
+    finally:
+        os.close(root_fd)
     entries.sort(key=lambda entry: str(entry["path"]))
     return sha256_bytes(canonical_json({"entries": entries}))
 
 
 def _collect_artifact_entries(
-    root: Path, relative: Path, entries: list[dict[str, object]], *, top_level: bool
+    dir_fd: int,
+    prefix: str,
+    artifact_root: Path,
+    entries: list[dict[str, object]],
+    check: Check,
+    *,
+    top_level: bool,
 ) -> None:
-    directory = root if top_level else root / relative
     try:
-        children = sorted(os.scandir(directory), key=lambda entry: entry.name)
+        with os.scandir(dir_fd) as scan:
+            names = sorted(entry.name for entry in scan)
     except OSError as exc:
-        raise _fail("incomplete", "artifact_digest_failed", f"cannot scan {directory}: {exc}") from exc
-    for child in children:
-        if top_level and child.name in _ARTIFACT_DIGEST_EXCLUDED_NAMES:
+        raise _fail(
+            "incomplete", "artifact_digest_failed", f"cannot scan {artifact_root / prefix}: {exc}"
+        ) from exc
+    for index, name in enumerate(names):
+        if index % _ARTIFACT_CHECK_INTERVAL == 0:
+            check()
+        if top_level and name in _ARTIFACT_DIGEST_EXCLUDED_NAMES:
             continue
-        child_relative = Path(child.name) if top_level else relative / child.name
-        if child.is_symlink():
+        relative = f"{prefix}{name}"
+        try:
+            observed = os.lstat(name, dir_fd=dir_fd)
+        except OSError as exc:
             raise _fail(
-                "incomplete", "artifact_digest_failed", f"artifact tree contains a symlink: {directory / child.name}"
+                "incomplete", "artifact_digest_failed", f"cannot inspect {artifact_root / relative}: {exc}"
+            ) from exc
+        if stat.S_ISLNK(observed.st_mode):
+            raise _fail(
+                "incomplete", "artifact_digest_failed", f"artifact tree contains a symlink: {artifact_root / relative}"
             )
-        if child.is_dir(follow_symlinks=False):
-            _collect_artifact_entries(root, child_relative, entries, top_level=False)
+        if stat.S_ISDIR(observed.st_mode):
+            try:
+                child_fd = os.open(name, _NOFOLLOW_DIRECTORY_FLAGS, dir_fd=dir_fd)
+            except OSError as exc:
+                raise _fail(
+                    "incomplete", "artifact_digest_failed", f"cannot open {artifact_root / relative}: {exc}"
+                ) from exc
+            try:
+                _collect_artifact_entries(
+                    child_fd, f"{relative}/", artifact_root, entries, check, top_level=False
+                )
+            finally:
+                os.close(child_fd)
             continue
-        if not child.is_file(follow_symlinks=False):
+        if not stat.S_ISREG(observed.st_mode):
             raise _fail(
                 "incomplete",
                 "artifact_digest_failed",
-                f"artifact tree contains a special file: {directory / child.name}",
+                f"artifact tree contains a special file: {artifact_root / relative}",
             )
-        payload = _read_artifact_bytes(Path(child.path))
-        entries.append({"path": str(child_relative), "size": len(payload), "sha256": sha256_bytes(payload)})
+        payload = _read_artifact_bytes(dir_fd, name, artifact_root / relative)
+        entries.append({"path": relative, "size": len(payload), "sha256": sha256_bytes(payload)})
 
 
-def _read_artifact_bytes(path: Path) -> bytes:
+def _read_artifact_bytes(dir_fd: int, name: str, label: Path) -> bytes:
+    """Open, validate, and read one artifact through a single descriptor -- never reopened."""
+
     try:
-        with path.open("rb") as handle:
+        fd = os.open(name, _READ_FLAGS, dir_fd=dir_fd)
+    except OSError as exc:
+        raise _fail("incomplete", "artifact_digest_failed", f"cannot read {label}: {exc}") from exc
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise _fail("incomplete", "artifact_digest_failed", f"artifact is not a regular file: {label}")
+        with os.fdopen(fd, "rb", closefd=False) as handle:
             return handle.read()
     except OSError as exc:
-        raise _fail("incomplete", "artifact_digest_failed", f"cannot read {path}: {exc}") from exc
+        raise _fail("incomplete", "artifact_digest_failed", f"cannot read {label}: {exc}") from exc
+    finally:
+        os.close(fd)
 
 
 # --- orchestration ------------------------------------------------------------------
@@ -412,6 +501,9 @@ def _read_artifact_bytes(path: Path) -> bytes:
 class _Evidence:
     """Everything one admission run has proven so far, in the order it was proven."""
 
+    run_identity: str = ""
+    evaluator: EvaluatorIdentity | None = None
+    bootstrap: BootstrapEnvironmentIdentity | None = None
     production_identity_before: ProductionIdentity | None = None
     production_identity_after: ProductionIdentity | None = None
     production_identity_final: ProductionIdentity | None = None
@@ -419,6 +511,7 @@ class _Evidence:
     evaluation_root: Path | None = None
     candidate_lock: CandidateLock | None = None
     runtime: CandidateRuntime | None = None
+    runtime_binding: RuntimeBinding | None = None
     manifests_before: tuple[RootManifest, ...] = ()
     manifests_after: tuple[RootManifest, ...] = ()
     write_deltas: tuple[WriteDelta, ...] = ()
@@ -438,12 +531,15 @@ def _translated(status: str, code: str) -> Iterator[None]:
         yield
     except AdmissionError:
         raise
+    except DeadlineExceeded as exc:
+        raise _fail("incomplete", "admission_deadline_exceeded", str(exc)) from exc
     except ProductionIdentityChanged as exc:
         raise _fail("hold", "production_identity_changed", str(exc)) from exc
     except ProductionIdentityError as exc:
         raise _fail("incomplete", "production_identity_capture_failed", str(exc)) from exc
     except (
         CandidateLockError,
+        IdentityError,
         ManifestError,
         RuntimePreparationError,
         WriteGuardError,
@@ -463,34 +559,56 @@ def run_admission(
 
     A receipt is returned for every disposition whose evidence is trustworthy enough to
     publish.  When the run cannot even establish the production identity on both sides and
-    the frozen candidate lock, :class:`AdmissionError` is raised instead, so no receipt ever
-    claims more than the run actually observed.
+    the frozen candidate lock, or when finalization itself cannot complete under the
+    ceiling, :class:`AdmissionError` is raised instead, so no receipt ever claims more than
+    the run actually observed.
     """
 
     active = ProductionAdmissionServices() if services is None else services
-    deadline = _Deadline.start(clock, DEFAULT_PHASE_BUDGETS[ADMISSION_BUDGET_NAME].seconds)
+    collect = Deadline.start(clock, ADMISSION_BUDGET_SECONDS, reserve=FINALIZATION_RESERVE_SECONDS)
+    finalize = collect.finalization()
     started_at = _utc_now()
-    evidence = _Evidence()
+    evidence = _Evidence(run_identity=new_run_identity(started_at))
     failure: AdmissionFailure | None = None
     try:
-        _collect(request, active, deadline, evidence)
+        _collect(request, active, collect, evidence)
     except AdmissionError as exc:
         failure = exc.failure
         evidence.issues.append(_issue(request, failure.code, failure.detail))
     status = "pass" if failure is None else failure.status
+    with _translated("incomplete", "admission_deadline_exceeded"):
+        finalize.check("cleanup")
     status = _cleanup(request, active, evidence, status)
     _capture_final_production_identity(request, active, evidence, failure)
     status = _bracket_cleanup(request, evidence, status)
-    receipt = _build_receipt(request, active, evidence, status=status, started_at=started_at, failure=failure)
+    receipt = _build_receipt(
+        request, active, evidence, status=status, started_at=started_at, failure=failure, deadline=finalize
+    )
+    with _translated("incomplete", "admission_deadline_exceeded"):
+        finalize.check("publish_receipt")
     _publish_receipt(request, evidence, receipt)
     return receipt
 
 
 def _collect(
-    request: AdmissionRequest, services: AdmissionServices, deadline: _Deadline, evidence: _Evidence
+    request: AdmissionRequest, services: AdmissionServices, deadline: Deadline, evidence: _Evidence
 ) -> None:
     """Perform every external step in canonical order under the monotonic ceiling."""
 
+    evidence.evaluator = _external(
+        deadline,
+        "capture_evaluator_identity",
+        "incomplete",
+        "evaluator_identity_capture_failed",
+        lambda: services.capture_evaluator_identity(deadline),
+    )
+    evidence.bootstrap = _external(
+        deadline,
+        "capture_bootstrap_environment",
+        "incomplete",
+        "bootstrap_environment_capture_failed",
+        services.capture_bootstrap_environment,
+    )
     evidence.production_identity_before = _external(
         deadline,
         "capture_production_identity_before",
@@ -498,8 +616,20 @@ def _collect(
         "production_identity_capture_failed",
         lambda: services.capture_production_identity(request.repo_root),
     )
-    evidence.identity = evaluation_identity(request, evidence.production_identity_before)
+    evidence.identity = evaluation_identity(
+        request, evidence.production_identity_before, evidence.evaluator
+    )
     evidence.evaluation_root = request.artifact_root / evidence.identity
+
+    # The first capture happens *before* any Phase 1 setup operation, so the delta brackets
+    # the candidate resolution and the runtime preparation as well as the quiet window.
+    evidence.manifests_before = _external(
+        deadline,
+        "capture_corpus_before",
+        "incomplete",
+        "corpus_capture_failed",
+        lambda: services.capture_corpus(deadline),
+    )
 
     if evidence.resolutions:  # pragma: no cover - structural guard
         raise _fail("incomplete", "repeated_candidate_resolution", "the candidate lock may be resolved only once")
@@ -510,7 +640,7 @@ def _collect(
         "compile_candidate_lock",
         "incomplete",
         "candidate_resolution_failed",
-        lambda: services.compile_candidate_lock(lock_request),
+        lambda: services.compile_candidate_lock(lock_request, deadline),
     )
 
     runtime_request = _runtime_request(request, evidence.evaluation_root)
@@ -520,18 +650,20 @@ def _collect(
         "prepare_candidate_runtime",
         "incomplete",
         "runtime_preparation_failed",
-        lambda: services.prepare_candidate_runtime(lock, runtime_request),
+        lambda: services.prepare_candidate_runtime(lock, runtime_request, deadline),
     )
+    evidence.runtime_binding = _bind_runtime(services, deadline, lock, evidence.runtime)
 
-    evidence.manifests_before = _external(
-        deadline, "capture_corpus_before", "incomplete", "corpus_capture_failed", services.capture_corpus
-    )
-    # Admission performs no backend operation between the two captures: the candidate
-    # runtime exists but nothing is launched against the corpus.
     evidence.manifests_after = _external(
-        deadline, "capture_corpus_after", "incomplete", "corpus_capture_failed", services.capture_corpus
+        deadline,
+        "capture_corpus_after",
+        "incomplete",
+        "corpus_capture_failed",
+        lambda: services.capture_corpus(deadline),
     )
-    evidence.write_deltas = _write_deltas(evidence.manifests_before, evidence.manifests_after)
+    evidence.manifests_after, evidence.write_deltas = _write_deltas(
+        evidence.manifests_before, evidence.manifests_after
+    )
     _require_no_unexpected_writes(evidence.write_deltas)
 
     evidence.production_identity_after = _external(
@@ -545,11 +677,41 @@ def _collect(
         assert_production_identity_unchanged(evidence.production_identity_before, evidence.production_identity_after)
 
 
-def _external[T](deadline: _Deadline, step: str, status: str, code: str, call: Callable[[], T]) -> T:
-    deadline.check(step, "before")
+def _bind_runtime(
+    services: AdmissionServices, deadline: Deadline, lock: CandidateLock, runtime: CandidateRuntime
+) -> RuntimeBinding:
+    """Recompute the candidate runtime manifest digest from disk and bind the receipt to it."""
+
+    observed = _external(
+        deadline,
+        "verify_runtime_manifest",
+        "incomplete",
+        "runtime_manifest_verification_failed",
+        lambda: services.runtime_manifest_digest(runtime.root),
+    )
+    if observed != runtime.manifest_sha256:
+        raise _fail(
+            "hold",
+            "runtime_manifest_changed",
+            f"the published runtime manifest below {runtime.root} is {observed}, "
+            f"not the prepared {runtime.manifest_sha256}",
+        )
+    with _translated("incomplete", "runtime_manifest_verification_failed"):
+        return RuntimeBinding(
+            root=str(runtime.root),
+            lock_digest=lock.digest,
+            manifest_path=str(runtime.manifest_path),
+            manifest_sha256=observed,
+        )
+
+
+def _external[T](deadline: Deadline, step: str, status: str, code: str, call: Callable[[], T]) -> T:
+    with _translated("incomplete", "admission_deadline_exceeded"):
+        deadline.check(f"{step}:before")
     with _translated(status, code):
         result = call()
-    deadline.check(step, "after")
+    with _translated("incomplete", "admission_deadline_exceeded"):
+        deadline.check(f"{step}:after")
     return result
 
 
@@ -577,8 +739,12 @@ def _runtime_request(request: AdmissionRequest, evaluation_root: Path) -> Runtim
 
 def _write_deltas(
     before: tuple[RootManifest, ...], after: tuple[RootManifest, ...]
-) -> tuple[WriteDelta, ...]:
-    """Pair the two canonical manifest collections root by root, refusing an unstable set."""
+) -> tuple[tuple[RootManifest, ...], tuple[WriteDelta, ...]]:
+    """Enrich, then pair, the two canonical manifest collections root by root.
+
+    The returned after manifests are the *enriched* ones, so each delta's
+    ``after_manifest_digest`` names exactly the evidence the receipt publishes.
+    """
 
     before_by_root = {manifest.root: manifest for manifest in before}
     after_by_root = {manifest.root: manifest for manifest in after}
@@ -588,11 +754,14 @@ def _write_deltas(
             "unstable_corpus_root",
             f"corpus roots changed between captures: before={sorted(before_by_root)} after={sorted(after_by_root)}",
         )
+    enriched: list[RootManifest] = []
     deltas: list[WriteDelta] = []
     for root in sorted(before_by_root):
         with _translated("incomplete", "unstable_corpus_root"):
-            deltas.append(compare_root_manifests(before_by_root[root], after_by_root[root]))
-    return tuple(deltas)
+            manifest = enrich_after_manifest(before_by_root[root], after_by_root[root])
+            enriched.append(manifest)
+            deltas.append(compare_root_manifests(before_by_root[root], manifest))
+    return tuple(enriched), tuple(deltas)
 
 
 def _require_no_unexpected_writes(deltas: tuple[WriteDelta, ...]) -> None:
@@ -610,7 +779,7 @@ def _cleanup(
     if evidence.evaluation_root is None:
         return status
     try:
-        summary = services.cleanup(evidence.evaluation_root, status)
+        summary = services.cleanup(evidence.evaluation_root, evidence.run_identity, status)
     except AdmissionError as exc:
         evidence.issues.append(_issue(request, "cleanup_failed", exc.failure.detail))
         return "incomplete"
@@ -631,9 +800,9 @@ def _capture_final_production_identity(
 ) -> None:
     """Capture the production identity the receipt publishes, after cleanup has run.
 
-    This capture is not optional and not deadline-gated: it is the only reading taken after
-    the last thing this run could have changed, so a run that cannot take it has no honest
-    ``after`` side to publish and fails closed instead.
+    This capture is not optional: it is the only reading taken after the last thing this run
+    could have changed, so a run that cannot take it has no honest ``after`` side to publish
+    and fails closed instead.
     """
 
     if evidence.production_identity_before is None:
@@ -650,12 +819,7 @@ def _capture_final_production_identity(
 
 
 def _bracket_cleanup(request: AdmissionRequest, evidence: _Evidence, status: str) -> str:
-    """Compare the pre-work identity with the post-cleanup one; drift can never pass.
-
-    Cleanup runs after every other check, so a cleanup that returned success while changing
-    production is only visible here.  A prior non-``pass`` disposition is preserved: it
-    already describes something the run could not establish.
-    """
+    """Compare the pre-work identity with the post-cleanup one; drift can never pass."""
 
     before = evidence.production_identity_before
     final = evidence.production_identity_final
@@ -677,6 +841,7 @@ def _build_receipt(
     status: str,
     started_at: str,
     failure: AdmissionFailure | None,
+    deadline: Deadline,
 ) -> AdmissionReceipt:
     before = evidence.production_identity_before
     # The published ``after`` side is the post-cleanup capture, never the mid-run one.
@@ -693,17 +858,25 @@ def _build_receipt(
             "no receipt can be published without production identity on both sides and the candidate lock",
         )
     assert evidence.evaluation_root is not None
-    digest = services.artifact_tree_digest(evidence.evaluation_root)
+    with _translated("incomplete", "admission_deadline_exceeded"):
+        deadline.check("artifact_tree_digest:before")
+    digest = services.artifact_tree_digest(evidence.evaluation_root, deadline)
+    with _translated("incomplete", "admission_deadline_exceeded"):
+        deadline.check("artifact_tree_digest:after")
     runtime = evidence.runtime
     with _translated("incomplete", "untrustworthy_admission_evidence"):
         return AdmissionReceipt(
             schema_version=ADMISSION_RECEIPT_SCHEMA_VERSION,
             evaluation_contract_version=EVALUATION_CONTRACT_VERSION,
             evaluation_identity=evidence.identity,
+            run_identity=evidence.run_identity,
             status=status,
             started_at=started_at,
             ended_at=_utc_now(),
-            budgets=tuple(sorted(DEFAULT_PHASE_BUDGETS.values(), key=lambda budget: budget.name)),
+            budgets=default_phase_budgets(),
+            evaluator=evidence.evaluator,
+            bootstrap_environment=evidence.bootstrap,
+            runtime_binding=evidence.runtime_binding,
             production_identity_before=before,
             production_identity_after=after,
             candidate_lock=lock,
@@ -726,38 +899,84 @@ def _sorted_manifests(manifests: tuple[RootManifest, ...]) -> tuple[RootManifest
 
 
 def _publish_receipt(request: AdmissionRequest, evidence: _Evidence, receipt: AdmissionReceipt) -> Path:
-    """Write the canonical receipt bytes atomically and durably, or fail closed."""
+    """Write this run's receipt exclusively and durably, never replacing another run's.
+
+    The temporary is created with ``O_EXCL`` and linked -- not renamed -- onto the canonical
+    per-run name, so an existing receipt is never overwritten even by an identical run
+    identity.  Publication holds the per-identity ``O_NOFOLLOW`` lock.
+    """
 
     assert evidence.evaluation_root is not None
     payload = canonical_json(receipt.to_dict())
-    dir_fd = _open_evaluation_directory(request.repo_root, evidence.evaluation_root)
+    temporary = _receipt_temporary_name(receipt.run_identity)
+    final = f"{receipt.run_identity}.json"
+    evaluation_fd = _open_evaluation_directory(request.repo_root, evidence.evaluation_root)
     try:
-        _replace_temporary(dir_fd, evidence.evaluation_root)
-        file_fd = os.open(_RECEIPT_TEMPORARY_NAME, _CREATE_FLAGS, 0o600, dir_fd=dir_fd)
-        try:
-            _write_all(file_fd, payload, evidence.evaluation_root)
-            os.fsync(file_fd)
-        finally:
-            os.close(file_fd)
-        try:
-            os.replace(
-                _RECEIPT_TEMPORARY_NAME, ADMISSION_RECEIPT_FILE_NAME, src_dir_fd=dir_fd, dst_dir_fd=dir_fd
-            )
-            os.fsync(dir_fd)
-        except OSError as exc:
-            raise _fail(
-                "incomplete",
-                "receipt_publication_failed",
-                f"cannot publish the receipt below {evidence.evaluation_root}: {exc}",
-            ) from exc
+        with _publication_lock(evaluation_fd, evidence.evaluation_root):
+            receipts_fd = _open_owned_child(evaluation_fd, RECEIPTS_DIR_NAME, evidence.evaluation_root)
+            try:
+                _replace_temporary(receipts_fd, evidence.evaluation_root, temporary)
+                file_fd = os.open(temporary, _CREATE_FLAGS, _FILE_MODE, dir_fd=receipts_fd)
+                try:
+                    os.fchmod(file_fd, _FILE_MODE)
+                    _write_all(file_fd, payload, evidence.evaluation_root)
+                    os.fsync(file_fd)
+                finally:
+                    os.close(file_fd)
+                try:
+                    os.link(temporary, final, src_dir_fd=receipts_fd, dst_dir_fd=receipts_fd, follow_symlinks=False)
+                except FileExistsError as exc:
+                    raise _fail(
+                        "incomplete",
+                        "receipt_publication_failed",
+                        f"a receipt for run {receipt.run_identity} already exists and is immutable",
+                    ) from exc
+                except OSError as exc:
+                    raise _fail(
+                        "incomplete",
+                        "receipt_publication_failed",
+                        f"cannot publish the receipt below {evidence.evaluation_root}: {exc}",
+                    ) from exc
+                os.fsync(receipts_fd)
+                _replace_temporary(receipts_fd, evidence.evaluation_root, temporary)
+                os.fsync(receipts_fd)
+            finally:
+                os.close(receipts_fd)
     finally:
-        os.close(dir_fd)
-    return evidence.evaluation_root / ADMISSION_RECEIPT_FILE_NAME
+        os.close(evaluation_fd)
+    return admission_receipt_path(request.artifact_root, receipt.evaluation_identity, receipt.run_identity)
 
 
-def _replace_temporary(dir_fd: int, evaluation_root: Path) -> None:
+@contextmanager
+def _publication_lock(evaluation_fd: int, evaluation_root: Path) -> Iterator[None]:
     try:
-        os.unlink(_RECEIPT_TEMPORARY_NAME, dir_fd=dir_fd)
+        fd = os.open(
+            PUBLICATION_LOCK_NAME,
+            os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC,
+            _FILE_MODE,
+            dir_fd=evaluation_fd,
+        )
+    except OSError as exc:
+        raise _fail(
+            "incomplete",
+            "receipt_publication_failed",
+            f"cannot open the publication lock below {evaluation_root}: {exc}",
+        ) from exc
+    try:
+        os.fchmod(fd, _FILE_MODE)
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    except OSError as exc:
+        raise _fail(
+            "incomplete", "receipt_publication_failed", f"cannot lock {evaluation_root}: {exc}"
+        ) from exc
+    finally:
+        os.close(fd)
+
+
+def _replace_temporary(dir_fd: int, evaluation_root: Path, temporary: str) -> None:
+    try:
+        os.unlink(temporary, dir_fd=dir_fd)
     except FileNotFoundError:
         return
     except OSError as exc:
@@ -789,28 +1008,43 @@ def _open_evaluation_directory(repo_root: Path, evaluation_root: Path) -> int:
         raise _fail("incomplete", "receipt_publication_failed", f"cannot open {repo_root}: {exc}") from exc
     try:
         for part in relative.parts:
-            try:
-                os.mkdir(part, 0o700, dir_fd=dir_fd)
-            except FileExistsError:
-                pass
-            except OSError as exc:
-                raise _fail(
-                    "incomplete", "receipt_publication_failed", f"cannot create artifact component {part!r}: {exc}"
-                ) from exc
-            try:
-                child = os.open(part, _NOFOLLOW_DIRECTORY_FLAGS, dir_fd=dir_fd)
-            except OSError as exc:
-                raise _fail(
-                    "incomplete",
-                    "receipt_publication_failed",
-                    f"artifact component {part!r} must be an evaluation-owned directory: {exc}",
-                ) from exc
+            child = _open_owned_child(dir_fd, part, evaluation_root)
             os.close(dir_fd)
             dir_fd = child
     except BaseException:
         os.close(dir_fd)
         raise
     return dir_fd
+
+
+def _open_owned_child(parent_fd: int, name: str, evaluation_root: Path) -> int:
+    try:
+        os.mkdir(name, _DIRECTORY_MODE, dir_fd=parent_fd)
+    except FileExistsError:
+        pass
+    except OSError as exc:
+        raise _fail(
+            "incomplete", "receipt_publication_failed", f"cannot create artifact component {name!r}: {exc}"
+        ) from exc
+    try:
+        child = os.open(name, _NOFOLLOW_DIRECTORY_FLAGS, dir_fd=parent_fd)
+    except OSError as exc:
+        raise _fail(
+            "incomplete",
+            "receipt_publication_failed",
+            f"artifact component {name!r} must be an evaluation-owned directory: {exc}",
+        ) from exc
+    # ``mkdir`` is masked by the ambient umask; a service-owned directory is always 0700.
+    try:
+        os.fchmod(child, _DIRECTORY_MODE)
+    except OSError as exc:
+        os.close(child)
+        raise _fail(
+            "incomplete",
+            "receipt_publication_failed",
+            f"cannot own artifact component {name!r} below {evaluation_root}: {exc}",
+        ) from exc
+    return child
 
 
 # --- issues -------------------------------------------------------------------------
@@ -821,11 +1055,16 @@ def _issue(request: AdmissionRequest, code: str, detail: str) -> str:
 
 
 def _sanitize(detail: str, declared_roots: tuple[str, ...]) -> str:
-    """Redact every absolute path outside the declared roots and bound the sample length."""
+    """Redact every absolute path outside the declared roots and bound the sample length.
+
+    Containment is by path *component*, not by string prefix, so an undeclared sibling such
+    as ``/data/ms-swift-secret`` is redacted even though ``/data/ms-swift`` is declared.
+    """
 
     def _replace(match: re.Match[str]) -> str:
         token = match.group(0)
-        return token if any(token.startswith(root) for root in declared_roots) else _REDACTED_PATH
+        declared = any(token == root or token.startswith(f"{root}/") for root in declared_roots)
+        return token if declared else _REDACTED_PATH
 
     redacted = _ABSOLUTE_PATH_RE.sub(_replace, " ".join(detail.split()))
     if len(redacted) > _MAX_DETAIL_CHARACTERS:
@@ -898,15 +1137,26 @@ def main(
 
 def _summary(request: AdmissionRequest, receipt: AdmissionReceipt) -> tuple[str, ...]:
     unexpected = sum(len(delta.unexpected) for delta in receipt.write_deltas)
+    controls = sum(len(delta.control_changes) for delta in receipt.write_deltas)
+    evaluator = receipt.evaluator
+    binding = receipt.runtime_binding
     lines = [
         f"status={receipt.status}",
         f"evaluation_contract_version={receipt.evaluation_contract_version}",
+        f"schema_version={receipt.schema_version}",
         f"evaluation_identity={receipt.evaluation_identity}",
-        f"receipt={admission_receipt_path(request.artifact_root, receipt.evaluation_identity)}",
+        f"run_identity={receipt.run_identity}",
+        f"receipt={admission_receipt_path(request.artifact_root, receipt.evaluation_identity, receipt.run_identity)}",
         f"started_at={receipt.started_at}",
         f"ended_at={receipt.ended_at}",
+        f"evaluator_source_digest={'-' if evaluator is None else evaluator.source_digest}",
+        f"evaluator_source_commit={'-' if evaluator is None else evaluator.source_commit}",
+        f"evaluator_source_clean={'-' if evaluator is None else evaluator.source_clean}",
+        f"host_python={'-' if evaluator is None else evaluator.host_python_realpath}",
         f"candidate_lock_digest={receipt.candidate_lock.digest}",
         f"candidate_versions={','.join(f'{p.name}=={p.version}' for p in receipt.candidate_lock.candidates)}",
+        f"runtime_root={'-' if binding is None else binding.root}",
+        f"runtime_manifest_sha256={'-' if binding is None else binding.manifest_sha256}",
         f"artifact_tree_digest={receipt.artifact_tree_digest}",
         f"production_build_identity_before={receipt.production_identity_before.build_identity}",
         f"production_build_identity_after={receipt.production_identity_after.build_identity}",
@@ -915,7 +1165,10 @@ def _summary(request: AdmissionRequest, receipt: AdmissionReceipt) -> tuple[str,
         f"environments={','.join(identity.name for identity in receipt.environments)}",
         f"service_configs={','.join(identity.backend for identity in receipt.service_configs)}",
         f"root_manifests={len(receipt.root_manifests_before)}",
+        f"corpus_in_scope_paths={sum(manifest.in_scope_count for manifest in receipt.root_manifests_before)}",
+        f"corpus_excluded_paths={sum(manifest.excluded_count for manifest in receipt.root_manifests_before)}",
         f"unexpected_write_paths={unexpected}",
+        f"manifest_control_changes={controls}",
         f"next_action={receipt.next_action}",
     ]
     lines.extend(f"issue={issue}" for issue in receipt.issues)

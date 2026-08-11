@@ -2,19 +2,18 @@
 
 from __future__ import annotations
 
-import hashlib
 import os
-from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
-from scripts.backend_eval.manifests import ManifestError, RootManifestRequest, capture_root_manifest
+from scripts.backend_eval.manifests import RootManifestRequest, capture_root_manifest
 from scripts.backend_eval.models import RootManifest, WriteDelta
 from scripts.backend_eval.write_guard import (
     WriteGuardError,
     assert_no_unexpected_writes,
     compare_root_manifests,
+    enrich_after_manifest,
 )
 
 
@@ -41,43 +40,34 @@ def _request(root: Path) -> RootManifestRequest:
     )
 
 
-def _with_after_content_hash(manifest: RootManifest, relative: str) -> RootManifest:
-    records = tuple(
-        replace(
-            record,
-            content_sha256=hashlib.sha256((Path(manifest.root) / relative).read_bytes()).hexdigest(),
-        )
-        if record.path == relative
-        else record
-        for record in manifest.metadata_paths
-    )
-    return replace(manifest, metadata_paths=records)
+def _after(before: RootManifest, root: Path) -> RootManifest:
+    """The second capture, enriched exactly as the admission gate enriches it."""
+
+    return enrich_after_manifest(before, capture_root_manifest(_request(root)))
 
 
-def _apply_mutation(root: Path, mutation: str) -> RootManifest:
+def _apply_mutation(before: RootManifest, root: Path, mutation: str) -> RootManifest:
     if mutation == "create":
         (root / "scratch" / "created.py").write_text("created = True\n", encoding="utf-8")
-        return _with_after_content_hash(capture_root_manifest(_request(root)), "scratch/created.py")
-    if mutation == "change":
+    elif mutation == "change":
         (root / "src" / "a.py").write_text("answer = 2\n", encoding="utf-8")
-        return capture_root_manifest(_request(root))
-    if mutation == "delete":
+    elif mutation == "delete":
         (root / "scratch" / "cache.bin").unlink()
-        return capture_root_manifest(_request(root))
-    if mutation == "symlink_retarget":
+    elif mutation == "symlink_retarget":
         link = root / "scratch" / "link"
         link.unlink()
         second_target = root / "second-target"
         second_target.write_text("second\n", encoding="utf-8")
         link.symlink_to(second_target)
-        return capture_root_manifest(_request(root))
-    raise AssertionError(f"unknown mutation: {mutation}")
+    else:
+        raise AssertionError(f"unknown mutation: {mutation}")
+    return _after(before, root)
 
 
 @pytest.mark.parametrize("mutation", ["create", "change", "delete", "symlink_retarget"])
 def test_write_guard_reports_unexpected_mutation(mutation: str, fixture_root: Path) -> None:
     before = capture_root_manifest(_request(fixture_root))
-    after = _apply_mutation(fixture_root, mutation)
+    after = _apply_mutation(before, fixture_root, mutation)
 
     delta = compare_root_manifests(before, after)
 
@@ -113,6 +103,8 @@ def test_guard_detects_same_size_mtime_rewrite_from_content_hash(fixture_root: P
 
 
 def test_guard_requires_content_hash_for_changed_metadata_record(fixture_root: Path) -> None:
+    """An unenriched second capture is an incomplete observation, never a clean one."""
+
     before = capture_root_manifest(_request(fixture_root))
     (fixture_root / "scratch" / "cache.bin").write_bytes(b"newer!")
     after = capture_root_manifest(_request(fixture_root))
@@ -123,16 +115,44 @@ def test_guard_requires_content_hash_for_changed_metadata_record(fixture_root: P
 
 def test_guard_accepts_changed_metadata_record_with_after_content_hash(fixture_root: Path) -> None:
     before = capture_root_manifest(_request(fixture_root))
-    (fixture_root / "scratch" / "cache.bin").write_bytes(b"newer")
-    after = _with_after_content_hash(capture_root_manifest(_request(fixture_root)), "scratch/cache.bin")
+    (fixture_root / "scratch" / "cache.bin").write_bytes(b"newer and longer")
+    after = _after(before, fixture_root)
 
+    record = next(item for item in after.metadata_paths if item.path == "scratch/cache.bin")
+    assert record.content_sha256 is not None
     assert compare_root_manifests(before, after).unexpected == ("scratch/cache.bin",)
+
+
+def test_remainder_metadata_binds_only_what_metadata_can_see(fixture_root: Path) -> None:
+    """The declared bound of the two-stage algorithm, stated as a test rather than assumed.
+
+    A remainder rewrite that keeps size, inode, *and* ``mtime_ns`` -- possible when two
+    writes land inside one filesystem timestamp tick -- is not observable from metadata, so
+    the second stage has nothing to hash.  The fully hashed trust-inventory closure and the
+    declared configuration paths are never subject to this bound; they are content hashed on
+    every capture.
+    """
+
+    before = capture_root_manifest(_request(fixture_root))
+    cache = fixture_root / "scratch" / "cache.bin"
+    recorded = next(item for item in before.metadata_paths if item.path == "scratch/cache.bin")
+    cache.write_bytes(b"newer")
+    os.utime(cache, ns=(recorded.mtime_ns, recorded.mtime_ns))
+    after = _after(before, fixture_root)
+    assert compare_root_manifests(before, after).unexpected == ()
+
+    # The same rewrite inside the fully hashed closure is always caught.
+    source = fixture_root / "src" / "a.py"
+    hashed = before.hashed_paths[0]
+    source.write_text("answer = 9\n", encoding="utf-8")
+    os.utime(source, ns=(hashed.mtime_ns, hashed.mtime_ns))
+    assert compare_root_manifests(before, _after(before, fixture_root)).unexpected == ("src/a.py",)
 
 
 def test_declared_parent_path_does_not_suppress_a_child(fixture_root: Path) -> None:
     before = capture_root_manifest(_request(fixture_root))
-    (fixture_root / "scratch" / "cache.bin").write_bytes(b"newer")
-    after = _with_after_content_hash(capture_root_manifest(_request(fixture_root)), "scratch/cache.bin")
+    (fixture_root / "scratch" / "cache.bin").write_bytes(b"newer and longer")
+    after = _after(before, fixture_root)
 
     delta = compare_root_manifests(before, after, declared_mutations=frozenset({"scratch"}))
 
@@ -159,24 +179,46 @@ def test_guard_rejects_root_or_kind_mismatch(fixture_root: Path) -> None:
     before = capture_root_manifest(_request(fixture_root))
     after = capture_root_manifest(_request(fixture_root))
 
+    elsewhere = fixture_root.parent / "elsewhere"
+    (elsewhere / "src").mkdir(parents=True)
+    (elsewhere / "src" / "a.py").write_text("answer = 1\n", encoding="utf-8")
+    (elsewhere / "scratch").mkdir()
+    other = capture_root_manifest(_request(elsewhere))
+
     with pytest.raises(WriteGuardError, match="root"):
-        compare_root_manifests(before, replace(after, root="/different"))
+        compare_root_manifests(before, other)
+    git_shaped = RootManifest.build(
+        root=before.root,
+        kind="git",
+        source_revision="a" * 40,
+        inventory_digest=before.inventory_digest,
+        inventory_paths=before.inventory_paths,
+        excluded_paths=before.excluded_paths,
+        hashed_paths=before.hashed_paths,
+        metadata_paths=before.metadata_paths,
+    )
     with pytest.raises(WriteGuardError, match="kind"):
-        compare_root_manifests(before, replace(after, kind="git", source_revision="a" * 40))
+        compare_root_manifests(git_shaped, after)
 
 
-def test_manifest_capture_rejects_special_file_in_metadata_root(fixture_root: Path) -> None:
+def test_manifest_capture_records_a_special_file_rather_than_hiding_it(fixture_root: Path) -> None:
+    """A special node is recorded and compared; it is never silently skipped."""
+
+    before = capture_root_manifest(_request(fixture_root))
     os.mkfifo(fixture_root / "scratch" / "named-pipe")
+    after = _after(before, fixture_root)
 
-    with pytest.raises(ManifestError, match="supported regular file or symlink"):
-        capture_root_manifest(_request(fixture_root))
+    record = next(item for item in after.metadata_paths if item.path == "scratch/named-pipe")
+    assert record.kind == "special"
+    assert record.content_sha256 is None
+    assert compare_root_manifests(before, after).unexpected == ("scratch/named-pipe",)
 
 
 def test_guard_canonicalizes_delta_path_order(fixture_root: Path) -> None:
     before = capture_root_manifest(_request(fixture_root))
     (fixture_root / "src" / "a.py").write_text("answer = 2\n", encoding="utf-8")
-    (fixture_root / "scratch" / "cache.bin").write_bytes(b"newer")
-    after = _with_after_content_hash(capture_root_manifest(_request(fixture_root)), "scratch/cache.bin")
+    (fixture_root / "scratch" / "cache.bin").write_bytes(b"newer and longer")
+    after = _after(before, fixture_root)
 
     assert compare_root_manifests(before, after).unexpected == ("scratch/cache.bin", "src/a.py")
 
@@ -190,6 +232,7 @@ def test_assertion_error_is_bounded_and_includes_counts_and_digests() -> None:
         after_manifest_digest="b" * 64,
         declared=(),
         unexpected=tuple(f"path-{index:03d}" for index in range(51)),
+        control_changes=(),
     )
 
     with pytest.raises(WriteGuardError) as raised:

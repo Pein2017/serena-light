@@ -70,7 +70,7 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Any, cast
 
-from scripts.backend_eval.candidate_lock import CommandResult, CommandRunner, subprocess_runner
+from scripts.backend_eval.identity import bootstrap_environment, bootstrap_service_values
 from scripts.backend_eval.manifests import (
     LLM_FRAMEWORK_STUDY_SITE_PACKAGES,
     MS_TRANSFORMERS_ROOT,
@@ -83,6 +83,13 @@ from scripts.backend_eval.models import (
     ServiceConfigIdentity,
     canonical_json,
     sha256_bytes,
+)
+from scripts.backend_eval.process import (
+    CommandResult,
+    CommandRunner,
+    CommandTimeout,
+    Deadline,
+    subprocess_runner,
 )
 from scripts.backend_eval.production_identity import (
     ProductionIdentityChanged,
@@ -112,6 +119,7 @@ __all__ = [
     "minimal_backend_environment",
     "prepare_candidate_runtime",
     "runtime_lock_path",
+    "runtime_manifest_digest",
 ]
 
 DEFAULT_RUNTIME_BASE = Path("/data/CoordExp/.codex/runtime/serena-light/backend-eval")
@@ -150,9 +158,11 @@ _VERSION_FLAG_ARGS = ("--version",)
 _IDENTITY_RECORD_KEYS = ["path", "realpath", "sha256", "version_output"]
 _EXECUTABLE_RECORD_KEYS = ["path", "sha256", "version_output"]
 _DIRECTORY_MODE = 0o700
+_FILE_MODE = 0o600
 _DIRECTORY_FLAGS = os.O_RDONLY | os.O_DIRECTORY
 _NOFOLLOW_DIRECTORY_FLAGS = _DIRECTORY_FLAGS | os.O_NOFOLLOW
 _READ_FLAGS = os.O_RDONLY | os.O_NOFOLLOW
+_WRITE_FLAGS = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW
 # memfd_create and file seals: the conda interpreter's os/fcntl modules omit these constants.
 _MFD_CLOEXEC = 0x0001
 _MFD_ALLOW_SEALING = 0x0002
@@ -239,9 +249,15 @@ class CandidateRuntime:
     config: Path
     environments: tuple[EnvironmentIdentity, ...]
     service_configs: tuple[ServiceConfigIdentity, ...]
+    manifest_path: Path
+    manifest_sha256: str
 
     def __post_init__(self) -> None:
         _require_absolute(self.root, "CandidateRuntime.root")
+        if self.manifest_path != self.root / MANIFEST_FILE_NAME:
+            raise ValueError(f"CandidateRuntime.manifest_path must be {self.root / MANIFEST_FILE_NAME}")
+        if len(self.manifest_sha256) != 64 or self.manifest_sha256 != self.manifest_sha256.lower().strip():
+            raise ValueError("CandidateRuntime.manifest_sha256 must be a canonical lowercase SHA-256 digest")
         layout = _Layout.from_root(self.root)
         for label, path, expected in (
             ("python", self.python, layout.bin_dir / "python"),
@@ -337,6 +353,7 @@ def prepare_candidate_runtime(
     request: RuntimeRequest,
     *,
     runner: CommandRunner = subprocess_runner,
+    deadline: Deadline | None = None,
 ) -> CandidateRuntime:
     """Return the service-owned runtime for ``lock``, preparing it at most once.
 
@@ -350,7 +367,7 @@ def prepare_candidate_runtime(
 
     before = capture_production_identity(request.repo_root)
     try:
-        runtime = _prepare(lock, request, runner, before)
+        runtime = _prepare(lock, request, runner, before, deadline)
     except BaseException as exc:
         # Drift raised inside the preparation is already the authoritative error.
         if not isinstance(exc, ProductionIdentityError):
@@ -386,6 +403,7 @@ def _prepare(
     request: RuntimeRequest,
     runner: CommandRunner,
     before: ProductionIdentity,
+    deadline: Deadline | None,
 ) -> CandidateRuntime:
     # The caller's lock is read and bound to the digest exactly once, through one descriptor.
     source = _read_requirements_source(lock, request)
@@ -400,15 +418,17 @@ def _prepare(
             try:
                 _require_open_root(base_fd, root_fd, logical_root, "at open")
                 layout = _Layout.opened(logical_root, root_fd)
-                manifest = _read_manifest(layout)
-                if manifest is not None:
+                published = _read_manifest(layout)
+                if published is not None:
                     return _verify_published_runtime(
-                        lock, request, layout, manifest, runner, base_fd, root_fd
+                        lock, request, layout, published, runner, base_fd, root_fd, deadline
                     )
                 # No published manifest under the lock means no runtime was ever completed here.
                 _purge_directory_contents(root_fd)
                 try:
-                    return _build_runtime(lock, request, runner, layout, before, source, base_fd, root_fd)
+                    return _build_runtime(
+                        lock, request, runner, layout, before, source, base_fd, root_fd, deadline
+                    )
                 except BaseException:
                     _purge_runtime_root(base_fd, root_fd, logical_root)
                     raise
@@ -427,38 +447,39 @@ def _build_runtime(
     source: bytes,
     base_fd: int,
     root_fd: int,
+    deadline: Deadline | None,
 ) -> CandidateRuntime:
     _create_runtime_directories(root_fd, layout)
     install_env = _install_environment(layout)
-    tools = _capture_tools(request, layout, runner)
+    tools = _capture_tools(request, layout, runner, deadline)
     # Durable evidence of the verified bytes; the sync itself reads a sealed image of them.
     _write_file(layout.requirements, source)
     _require_snapshot(layout, lock.digest)
     venv_command = _venv_command(request)
-    _run(runner, venv_command, layout, install_env)
+    _run(runner, venv_command, layout, install_env, deadline)
     _require_venv_interpreter(layout, request)
     with _sealed_requirements(source) as sealed:
         _require_snapshot(layout, lock.digest)
-        _run(runner, _sync_command(request, str(sealed)), layout, install_env)
+        _run(runner, _sync_command(request, str(sealed)), layout, install_env, deadline)
         _require_sealed_image(sealed, source)
         _require_snapshot(layout, lock.digest)
     sync_command = _sync_command(request, SEALED_REQUIREMENTS_ARGUMENT)
-    executables = _capture_executables(lock, layout, runner)
-    environments, environment_executables = _capture_environments(request, layout, runner)
+    executables = _capture_executables(lock, layout, runner, deadline)
+    environments, environment_executables = _capture_environments(request, layout, runner, deadline)
     service_configs = _write_service_configs(layout)
-    runtime = _runtime(lock, layout, executables, environments, service_configs)
+    payload = canonical_json(
+        _manifest_mapping(
+            lock, layout, (venv_command, sync_command), executables, tools, environment_executables,
+            environments, service_configs,
+        )
+    )
+    runtime = _runtime(lock, layout, executables, environments, service_configs, sha256_bytes(payload))
     _require_only_declared_entries(root_fd, layout.logical_root, published=False)
     # Publication happens only for a run whose root was never swapped and that provably left
     # production untouched.
     _require_open_root(base_fd, root_fd, layout.logical_root, "before publication")
     _assert_production_identity_unchanged(before, request.repo_root, cause=None)
-    _publish_manifest(
-        layout,
-        root_fd,
-        _manifest_mapping(
-            lock, runtime, (venv_command, sync_command), executables, tools, environment_executables
-        ),
-    )
+    _publish_manifest(layout, root_fd, payload)
     _require_open_root(base_fd, root_fd, layout.logical_root, "after publication")
     return runtime
 
@@ -469,6 +490,7 @@ def _runtime(
     executables: Mapping[str, Mapping[str, str]],
     environments: tuple[EnvironmentIdentity, ...],
     service_configs: tuple[ServiceConfigIdentity, ...],
+    manifest_sha256: str,
 ) -> CandidateRuntime:
     logical = layout.logical()
     return CandidateRuntime(
@@ -483,18 +505,22 @@ def _runtime(
         config=logical.config,
         environments=environments,
         service_configs=service_configs,
+        manifest_path=logical.root / MANIFEST_FILE_NAME,
+        manifest_sha256=manifest_sha256,
     )
 
 
 def _capture_tools(
-    request: RuntimeRequest, layout: _Layout, runner: CommandRunner
+    request: RuntimeRequest, layout: _Layout, runner: CommandRunner, deadline: Deadline | None
 ) -> dict[str, dict[str, str]]:
     """Bind the identity of the two tools that live outside the runtime root."""
 
     return {
-        "uv": _capture_executable_identity("uv", request.uv, _VERSION_FLAG_ARGS, request.python, layout, runner),
+        "uv": _capture_executable_identity(
+            "uv", request.uv, _VERSION_FLAG_ARGS, request.python, layout, runner, deadline
+        ),
         "python": _capture_executable_identity(
-            "python", request.python, _INTERPRETER_VERSION_ARGS, request.python, layout, runner
+            "python", request.python, _INTERPRETER_VERSION_ARGS, request.python, layout, runner, deadline
         ),
     }
 
@@ -506,12 +532,13 @@ def _capture_executable_identity(
     selected: Path,
     layout: _Layout,
     runner: CommandRunner,
+    deadline: Deadline | None,
 ) -> dict[str, str]:
     """Measure one executable that lives outside the runtime root, bytes included."""
 
     realpath = Path(os.path.realpath(path))
     _require_existing_regular_file(realpath, f"{name} executable")
-    result = _run(runner, (str(path), *version_args), layout, _minimal_environment(layout, selected))
+    result = _run(runner, (str(path), *version_args), layout, _minimal_environment(layout, selected), deadline)
     version_output = result.stdout.strip()
     if not version_output:
         raise RuntimePreparationError(f"{name} did not report a version: {path}")
@@ -524,7 +551,7 @@ def _capture_executable_identity(
 
 
 def _capture_executables(
-    lock: CandidateLock, layout: _Layout, runner: CommandRunner
+    lock: CandidateLock, layout: _Layout, runner: CommandRunner, deadline: Deadline | None
 ) -> dict[str, dict[str, str]]:
     """Verify and record every locked candidate executable inside the runtime root."""
 
@@ -533,7 +560,7 @@ def _capture_executables(
     for candidate in sorted(lock.candidates, key=lambda package: package.name):
         path = layout.venv / candidate.executable_relpath
         _require_regular_executable_inside(path, layout.root, f"candidate executable {candidate.name}")
-        version_output = _capture_version(path, candidate.name, candidate.version, layout, runner)
+        version_output = _capture_version(path, candidate.name, candidate.version, layout, runner, deadline)
         executables[candidate.name] = {
             "path": str(logical.venv / candidate.executable_relpath),
             "sha256": _file_digest(path, f"candidate executable {candidate.name}"),
@@ -543,10 +570,14 @@ def _capture_executables(
 
 
 def _capture_version(
-    path: Path, name: str, locked_version: str, layout: _Layout, runner: CommandRunner
+    path: Path, name: str, locked_version: str, layout: _Layout, runner: CommandRunner, deadline: Deadline | None
 ) -> str:
     result = _run(
-        runner, (str(path), *_VERSION_FLAG_ARGS), layout, _minimal_environment(layout, layout.bin_dir / "python")
+        runner,
+        (str(path), *_VERSION_FLAG_ARGS),
+        layout,
+        _minimal_environment(layout, layout.bin_dir / "python"),
+        deadline,
     )
     version_output = result.stdout.strip()
     if not version_output:
@@ -563,7 +594,7 @@ def _require_reported_version(version_output: str, locked_version: str, label: s
 
 
 def _capture_environments(
-    request: RuntimeRequest, layout: _Layout, runner: CommandRunner
+    request: RuntimeRequest, layout: _Layout, runner: CommandRunner, deadline: Deadline | None
 ) -> tuple[tuple[EnvironmentIdentity, ...], dict[str, dict[str, str]]]:
     """Measure every manifest-declared interpreter once, without any ambient PATH lookup.
 
@@ -576,7 +607,7 @@ def _capture_environments(
     records: dict[str, dict[str, str]] = {}
     for name, interpreter in request.environment_interpreters:
         record = _capture_executable_identity(
-            name, interpreter, _INTERPRETER_VERSION_ARGS, interpreter, layout, runner
+            name, interpreter, _INTERPRETER_VERSION_ARGS, interpreter, layout, runner, deadline
         )
         version = record["version_output"]
         if len(version.splitlines()) != 1:
@@ -688,20 +719,22 @@ def _sync_command(request: RuntimeRequest, requirements: str) -> tuple[str, ...]
 
 
 def _install_environment(layout: _Layout) -> dict[str, str]:
-    """Bootstrap downloads keep the ambient external-network proxy but own their state."""
+    """Bootstrap downloads keep the external-network proxy and nothing else ambient.
 
-    env = os.environ.copy()
-    env.update(
-        {
-            "HOME": str(layout.home),
-            "TMPDIR": str(layout.tmp),
-            "XDG_CACHE_HOME": str(layout.cache),
-            "XDG_CONFIG_HOME": str(layout.config),
-            "UV_CACHE_DIR": str(layout.cache / "uv"),
-            "UV_PYTHON_DOWNLOADS": "never",
-        }
+    The proxy, CA bundle, and locale come from the allowlist; ``HOME``, ``TMPDIR``, the XDG
+    directories, and the uv cache are service owned.  No ambient ``UV_*``, ``PIP_*``,
+    ``PYTHONPATH``, or ``PATH`` control is inherited.
+    """
+
+    return bootstrap_environment(
+        bootstrap_service_values(
+            home=layout.home,
+            tmp=layout.tmp,
+            cache=layout.cache,
+            config=layout.config,
+            uv_cache=layout.cache / "uv",
+        )
     )
-    return env
 
 
 def _minimal_environment(layout: _Layout, selected_interpreter: Path) -> dict[str, str]:
@@ -723,10 +756,17 @@ def _minimal_environment(layout: _Layout, selected_interpreter: Path) -> dict[st
 
 
 def _run(
-    runner: CommandRunner, command: Sequence[str], layout: _Layout, env: Mapping[str, str]
+    runner: CommandRunner,
+    command: Sequence[str],
+    layout: _Layout,
+    env: Mapping[str, str],
+    deadline: Deadline | None = None,
 ) -> CommandResult:
+    timeout = None if deadline is None else deadline.remaining()
     try:
-        result = runner(command, cwd=layout.root, env=env)
+        result = runner(command, cwd=layout.root, env=env, timeout=timeout)
+    except CommandTimeout as exc:
+        raise RuntimePreparationError(f"the runtime preparation command {command[0]} timed out: {exc}") from exc
     except OSError as exc:
         raise RuntimePreparationError(f"cannot start the runtime preparation command {command[0]}: {exc}") from exc
     if result.returncode != 0:
@@ -770,27 +810,30 @@ def _runtime_lock(base_fd: int, runtime_base: Path, digest: str) -> Iterator[Non
 
 def _manifest_mapping(
     lock: CandidateLock,
-    runtime: CandidateRuntime,
+    layout: _Layout,
     commands: Sequence[Sequence[str]],
     executables: Mapping[str, Mapping[str, str]],
     tools: Mapping[str, Mapping[str, str]],
     environment_executables: Mapping[str, Mapping[str, str]],
+    environments: Sequence[EnvironmentIdentity],
+    service_configs: Sequence[ServiceConfigIdentity],
 ) -> dict[str, object]:
+    logical = layout.logical()
     return {
         "schema_version": RUNTIME_MANIFEST_SCHEMA_VERSION,
         "candidate_lock_digest": lock.digest,
         "commands": [list(command) for command in commands],
-        "directories": {name: str(runtime.root / name) for name in RUNTIME_DIRECTORY_NAMES},
+        "directories": {name: str(logical.root / name) for name in RUNTIME_DIRECTORY_NAMES},
         "environment_executables": {name: dict(record) for name, record in environment_executables.items()},
-        "environments": [_record(identity) for identity in runtime.environments],
+        "environments": [_record(identity) for identity in environments],
         "executables": {name: dict(record) for name, record in executables.items()},
-        "python": str(runtime.python),
+        "python": str(logical.bin_dir / "python"),
         "requirements_snapshot": {
-            "path": str(runtime.root / REQUIREMENTS_SNAPSHOT_NAME),
+            "path": str(logical.root / REQUIREMENTS_SNAPSHOT_NAME),
             "sha256": lock.digest,
         },
-        "root": str(runtime.root),
-        "service_configs": [_record(identity) for identity in runtime.service_configs],
+        "root": str(logical.root),
+        "service_configs": [_record(identity) for identity in service_configs],
         "tools": {name: dict(record) for name, record in tools.items()},
     }
 
@@ -826,10 +869,10 @@ def _restore_fields(
     return cast("dict[str, str]", restored)
 
 
-def _publish_manifest(layout: _Layout, root_fd: int, manifest: Mapping[str, object]) -> None:
+def _publish_manifest(layout: _Layout, root_fd: int, payload: bytes) -> None:
     """Publish the manifest atomically and durably, last of all, relative to the descriptor."""
 
-    _write_file(layout.root / _MANIFEST_TEMPORARY_NAME, canonical_json(manifest))
+    _write_file(layout.root / _MANIFEST_TEMPORARY_NAME, payload)
     try:
         os.replace(
             _MANIFEST_TEMPORARY_NAME, MANIFEST_FILE_NAME, src_dir_fd=root_fd, dst_dir_fd=root_fd
@@ -841,15 +884,15 @@ def _publish_manifest(layout: _Layout, root_fd: int, manifest: Mapping[str, obje
     _fsync(root_fd, layout.logical_root)
 
 
-def _read_manifest(layout: _Layout) -> Mapping[str, Any] | None:
-    """Return the published manifest, or ``None`` when this runtime was never published."""
+def _read_manifest(layout: _Layout) -> tuple[Mapping[str, Any], bytes] | None:
+    """Return the published manifest and its exact bytes, or ``None`` when never published."""
 
     path = layout.root / MANIFEST_FILE_NAME
     if not path.exists():
         return None
     if path.is_symlink() or not path.is_file():
         raise RuntimePreparationError(f"published runtime manifest must be a regular file: {path}")
-    payload = path.read_bytes()
+    payload = _read_regular_file(path, "published runtime manifest")
     try:
         decoded = json.loads(payload.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
@@ -859,17 +902,28 @@ def _read_manifest(layout: _Layout) -> Mapping[str, Any] | None:
     manifest = cast("dict[str, Any]", decoded)
     if payload != canonical_json(manifest):
         raise RuntimePreparationError(f"published runtime manifest is not canonical: {path}")
-    return manifest
+    return manifest, payload
+
+
+def runtime_manifest_digest(root: Path) -> str:
+    """Recompute the canonical runtime-manifest digest from the bytes on disk.
+
+    The admission gate calls this independently of preparation, so the receipt's runtime
+    binding is verified against the file rather than against a value carried in memory.
+    """
+
+    return sha256_bytes(_read_regular_file(root / MANIFEST_FILE_NAME, "published runtime manifest"))
 
 
 def _verify_published_runtime(
     lock: CandidateLock,
     request: RuntimeRequest,
     layout: _Layout,
-    manifest: Mapping[str, Any],
+    published: tuple[Mapping[str, Any], bytes],
     runner: CommandRunner,
     base_fd: int,
     root_fd: int,
+    deadline: Deadline | None,
 ) -> CandidateRuntime:
     """Reuse a published runtime only after the manifest verifies against the disk.
 
@@ -886,6 +940,7 @@ def _verify_published_runtime(
     directory it now lives in, and never touches the swapped-in target.
     """
 
+    manifest, payload = published
     root = layout.logical_root
     logical = layout.logical()
     if manifest.get("schema_version") != RUNTIME_MANIFEST_SCHEMA_VERSION:
@@ -909,9 +964,9 @@ def _verify_published_runtime(
     _require_venv_interpreter(layout, request)
     executables = _verify_published_executables(lock, layout, manifest)
     _verify_published_identities(
-        _expect_mapping(manifest.get("tools"), "tools"), _capture_tools(request, layout, runner)
+        _expect_mapping(manifest.get("tools"), "tools"), _capture_tools(request, layout, runner, deadline)
     )
-    environments, environment_executables = _capture_environments(request, layout, runner)
+    environments, environment_executables = _capture_environments(request, layout, runner, deadline)
     _verify_published_identities(
         _expect_mapping(manifest.get("environment_executables"), "environment_executables"),
         environment_executables,
@@ -920,7 +975,7 @@ def _verify_published_runtime(
     service_configs = _verify_published_service_configs(layout, manifest)
     # The returned runtime is expressed in logical paths, so they must still be ours.
     _require_open_root(base_fd, root_fd, root, "before reuse return")
-    return _runtime(lock, layout, executables, environments, service_configs)
+    return _runtime(lock, layout, executables, environments, service_configs, sha256_bytes(payload))
 
 
 def _verify_published_executables(
@@ -1061,12 +1116,21 @@ def _open_confined_child(parent_fd: int, name: str, path: Path) -> int:
             f"cannot create the service-owned runtime path component {name!r} of {path}: {exc}"
         ) from exc
     try:
-        return os.open(name, _NOFOLLOW_DIRECTORY_FLAGS, dir_fd=parent_fd)
+        fd = os.open(name, _NOFOLLOW_DIRECTORY_FLAGS, dir_fd=parent_fd)
     except OSError as exc:
         raise RuntimePreparationError(
             f"service-owned runtime path component {name!r} of {path} must be a directory, "
             f"not a symlink or special file: {exc}"
         ) from exc
+    # ``mkdir`` is masked by the ambient umask; a service-owned directory is always 0700.
+    try:
+        os.fchmod(fd, _DIRECTORY_MODE)
+    except OSError as exc:
+        os.close(fd)
+        raise RuntimePreparationError(
+            f"cannot own the service-owned runtime path component {name!r} of {path}: {exc}"
+        ) from exc
+    return fd
 
 
 def _require_open_root(base_fd: int, root_fd: int, root: Path, stage: str) -> None:
@@ -1142,6 +1206,8 @@ def _require_owned_directory(path: Path, *, create: bool = True) -> None:
         raise RuntimePreparationError(
             f"{path} must be an evaluation-owned directory, not a symlink or special file"
         )
+    if create:
+        _own_directory_mode(path)
 
 
 def _require_venv_interpreter(layout: _Layout, request: RuntimeRequest) -> None:
@@ -1268,16 +1334,40 @@ def _file_digest(path: Path, label: str) -> str:
     return sha256_bytes(_read_regular_file(path, label))
 
 
+def _own_directory_mode(path: Path) -> None:
+    """Force ``0700`` on one service-owned directory, whatever the ambient umask was."""
+
+    try:
+        fd = os.open(path, _NOFOLLOW_DIRECTORY_FLAGS)
+    except OSError as exc:
+        raise RuntimePreparationError(f"cannot open the evaluation-owned directory {path}: {exc}") from exc
+    try:
+        os.fchmod(fd, _DIRECTORY_MODE)
+    except OSError as exc:
+        raise RuntimePreparationError(f"cannot own the evaluation-owned directory {path}: {exc}") from exc
+    finally:
+        os.close(fd)
+
+
 def _write_file(path: Path, payload: bytes) -> None:
+    """Write one service-owned regular file at mode ``0600``, never through a symlink."""
+
     if path.is_symlink():
         raise RuntimePreparationError(f"cannot write through a symlink: {path}")
     try:
-        with open(path, "wb") as handle:
+        fd = os.open(path, _WRITE_FLAGS, _FILE_MODE)
+    except OSError as exc:
+        raise RuntimePreparationError(f"cannot write {path}: {exc}") from exc
+    try:
+        os.fchmod(fd, _FILE_MODE)
+        with os.fdopen(fd, "wb", closefd=False) as handle:
             handle.write(payload)
             handle.flush()
             os.fsync(handle.fileno())
     except OSError as exc:
         raise RuntimePreparationError(f"cannot write {path}: {exc}") from exc
+    finally:
+        os.close(fd)
 
 
 def _fsync(fd: int, label: Path) -> None:

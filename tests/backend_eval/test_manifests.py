@@ -66,25 +66,21 @@ def _mutate_after_metadata_records(
 
     import scripts.backend_eval.manifests as manifests
 
-    original = manifests._metadata_records
+    original = manifests._scan_remainder
     mutated = False
 
-    def capture_then_mutate(
-        root: Path,
-        metadata_roots: tuple[str, ...],
-        disposition_for: Callable[[str], str],
-    ) -> tuple[PathRecord, ...]:
+    def capture_then_mutate(*args: object, **kwargs: object) -> tuple[tuple[PathRecord, ...], tuple[str, ...]]:
         nonlocal mutated
-        records = original(root, metadata_roots, disposition_for)
+        records = original(*args, **kwargs)  # type: ignore[arg-type]
         mutation()
         mutated = True
         return records
 
-    monkeypatch.setattr(manifests, "_metadata_records", capture_then_mutate)
+    monkeypatch.setattr(manifests, "_scan_remainder", capture_then_mutate)
     return lambda: mutated
 
 
-def test_git_manifest_hashes_trust_inventory_but_only_stats_declared_ignored_root(tmp_path: Path) -> None:
+def test_git_manifest_hashes_the_closure_and_metadata_scans_the_whole_remainder(tmp_path: Path) -> None:
     root = _repository(tmp_path)
     (root / ".gitignore").write_text("model_cache/\nother_cache/\n", encoding="utf-8")
     (root / "src").mkdir()
@@ -97,22 +93,31 @@ def test_git_manifest_hashes_trust_inventory_but_only_stats_declared_ignored_roo
     _git(root, "add", ".gitignore", "src/a.py")
     _git(root, "commit", "-m", "fixture")
 
-    request = _git_request(
-        root,
-        metadata_roots=("model_cache",),
-        required_config_paths=("pyrightconfig.json",),
-    )
+    request = _git_request(root, required_config_paths=("pyrightconfig.json",))
     manifest = capture_root_manifest(request)
 
     assert {record.path for record in manifest.hashed_paths} == {"src/a.py", "pyrightconfig.json"}
-    assert {record.path for record in manifest.metadata_paths} == {"model_cache/blob.bin"}
+    # Every remaining in-scope path is captured, including both ignored cache trees.
+    assert {record.path for record in manifest.metadata_paths} == {
+        ".gitignore",
+        "src",
+        "model_cache",
+        "model_cache/blob.bin",
+        "other_cache",
+        "other_cache/must-not-be-scanned.bin",
+    }
+    assert manifest.excluded_paths == (".git",)
     assert manifest.inventory_digest == git_trust_inventory(root).digest
     assert manifest.inventory_count == 1
+    assert manifest.inventory_paths == ("src/a.py",)
     assert {record.path: record.disposition for record in manifest.hashed_paths} == {
         "pyrightconfig.json": "untracked",
         "src/a.py": "tracked",
     }
-    assert manifest.metadata_paths[0].disposition == "ignored"
+    remainder = {record.path: record.disposition for record in manifest.metadata_paths}
+    assert remainder["model_cache/blob.bin"] == "ignored"
+    assert remainder[".gitignore"] == "tracked"
+    assert remainder["src"] == "tracked"
 
 
 def test_git_manifest_records_head_and_untracked_inventory_disposition(tmp_path: Path) -> None:
@@ -159,10 +164,11 @@ def test_manifest_does_not_follow_symlinked_directory(tmp_path: Path) -> None:
     (outside / "secret.bin").write_bytes(b"outside")
     (root / "model_cache").symlink_to(outside, target_is_directory=True)
 
-    request_with_symlinked_metadata_root = _git_request(root, metadata_roots=("model_cache",))
+    manifest = capture_root_manifest(_git_request(root))
 
-    with pytest.raises(ManifestError, match="symlink"):
-        capture_root_manifest(request_with_symlinked_metadata_root)
+    record = next(item for item in manifest.metadata_paths if item.path == "model_cache")
+    assert (record.kind, record.symlink_target) == ("symlink", str(outside))
+    assert not any(item.path.startswith("model_cache/") for item in manifest.metadata_paths)
 
 
 def test_metadata_leaf_symlink_is_recorded_without_reading_its_target(tmp_path: Path) -> None:
@@ -175,21 +181,21 @@ def test_metadata_leaf_symlink_is_recorded_without_reading_its_target(tmp_path: 
     outside.write_bytes(b"outside")
     (root / "model_cache" / "link.bin").symlink_to(outside)
 
-    manifest = capture_root_manifest(_git_request(root, metadata_roots=("model_cache",)))
+    manifest = capture_root_manifest(_git_request(root))
 
-    assert len(manifest.metadata_paths) == 1
-    record = manifest.metadata_paths[0]
-    assert (record.path, record.kind, record.symlink_target, record.content_sha256) == (
-        "model_cache/link.bin",
-        "symlink",
-        str(outside),
-        None,
-    )
+    record = next(item for item in manifest.metadata_paths if item.path == "model_cache/link.bin")
+    assert (record.kind, record.symlink_target, record.content_sha256) == ("symlink", str(outside), None)
+    assert any(item.path == "model_cache" and item.kind == "directory" for item in manifest.metadata_paths)
 
 
-def test_metadata_scan_refuses_nested_directory_swapped_to_a_symlink(
+def test_remainder_scan_refuses_a_directory_swapped_to_a_symlink_mid_walk(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """A directory replaced by a symlink between its ``lstat`` and its ``open`` fails closed.
+
+    The scan never follows the substituted link out of the root; it stops instead.
+    """
+
     root = _repository(tmp_path)
     (root / "README.md").write_text("fixture\n", encoding="utf-8")
     _git(root, "add", "README.md")
@@ -203,36 +209,22 @@ def test_metadata_scan_refuses_nested_directory_swapped_to_a_symlink(
 
     import scripts.backend_eval.manifests as manifests
 
-    real_lstat = manifests._lstat
-    real_os_lstat = manifests.os.lstat
+    original = manifests._metadata_record
     substituted = False
 
-    def substitute() -> None:
+    def racing_record(relative: str, kind: str, *args: object, **kwargs: object) -> PathRecord:
         nonlocal substituted
-        if not substituted:
+        record = original(relative, kind, *args, **kwargs)  # type: ignore[arg-type]
+        if relative == "model_cache/nested" and kind == "directory" and not substituted:
             substituted = True
             nested.rename(root / "model_cache" / "nested-old")
             nested.symlink_to(outside, target_is_directory=True)
+        return record
 
-    def racing_lstat(path: Path, relative: str) -> os.stat_result:
-        observed = real_lstat(path, relative)
-        if relative == "model_cache/nested":
-            substitute()
-        return observed
+    monkeypatch.setattr(manifests, "_metadata_record", racing_record)
 
-    def racing_os_lstat(
-        path: str | bytes | os.PathLike[str] | os.PathLike[bytes], *, dir_fd: int | None = None
-    ) -> os.stat_result:
-        observed = real_os_lstat(path, dir_fd=dir_fd)
-        if path == "nested" and dir_fd is not None:
-            substitute()
-        return observed
-
-    monkeypatch.setattr(manifests, "_lstat", racing_lstat)
-    monkeypatch.setattr(manifests.os, "lstat", racing_os_lstat)
-
-    with pytest.raises(ManifestError, match="symlink"):
-        capture_root_manifest(_git_request(root, metadata_roots=("model_cache",)))
+    with pytest.raises(ManifestError, match="cannot open corpus directory"):
+        capture_root_manifest(_git_request(root))
     assert substituted
 
 
@@ -378,7 +370,7 @@ def test_default_corpus_requests_are_fixed_and_do_not_capture_live_roots() -> No
     ms_swift_request = by_root[Path("/data/ms-swift")]
     assert ms_swift_request.required_config_paths == ("setup.cfg",)
     assert (ms_swift_request.root / ms_swift_request.required_config_paths[0]).is_file()
-    assert by_root[Path("/data/CoordExp/.worktrees/research-probes")].metadata_roots == ("model_cache",)
+    assert by_root[Path("/data/CoordExp/.worktrees/research-probes")].metadata_roots == ()
     assert by_root[LLM_FRAMEWORK_STUDY_SITE_PACKAGES].fully_hashed_paths == (
         "torchtune/__init__.py",
         "torchtune/config/__init__.py",

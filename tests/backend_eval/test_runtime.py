@@ -22,6 +22,7 @@ from scripts.backend_eval.models import (
     CandidateLock,
     CandidatePackage,
     EnvironmentIdentity,
+    LockEvidence,
     ResolvedPackage,
     ServiceConfigIdentity,
     canonical_json,
@@ -79,6 +80,7 @@ def _candidate_lock() -> CandidateLock:
         exclude_newer=_EXCLUDE_NEWER,
         resolved_packages=resolved,
         candidates=candidates,
+        lock_evidence=LockEvidence.build(raw_sha256=_LOCK_DIGEST, raw_size=64, resolved_packages=resolved),
     )
 
 
@@ -135,7 +137,9 @@ class _FakeRunner:
                 return index
         raise AssertionError(f"no recorded command containing {marker!r}")
 
-    def __call__(self, command: Sequence[str], *, cwd: Path, env: Mapping[str, str]) -> CommandResult:
+    def __call__(
+        self, command: Sequence[str], *, cwd: Path, env: Mapping[str, str], timeout: float | None = None
+    ) -> CommandResult:
         tokens = tuple(command)
         self.calls.append((tokens, cwd, dict(env)))
         # Both are captured while the descriptor is still open, as a child process would see them.
@@ -386,6 +390,8 @@ def _static_runtime() -> CandidateRuntime:
         home=root / "home",
         cache=root / "cache",
         config=root / "config",
+        manifest_path=root / "runtime-manifest.json",
+        manifest_sha256=_HASH_A,
         environments=(
             EnvironmentIdentity(
                 name="llm-framework-study",
@@ -980,22 +986,31 @@ def test_bootstrap_commands_keep_ambient_proxy_but_own_home_cache_and_config(
     lock: CandidateLock, request_: RuntimeRequest, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("HTTPS_PROXY", "http://proxy.internal:7890")
+    monkeypatch.setenv("UV_INDEX_URL", "https://mirror.invalid/simple")
+    monkeypatch.setenv("PIP_INDEX_URL", "https://mirror.invalid/simple")
+    monkeypatch.setenv("PYTHONPATH", "/data/verl")
     runner = _FakeRunner()
 
     runtime = prepare_candidate_runtime(lock, request_, runner=runner)
 
     install_env = runner.environment_for("venv")
     assert install_env["HTTPS_PROXY"] == "http://proxy.internal:7890"
-    # A bootstrap download keeps the ambient PATH; every runtime directory is service owned.
-    assert install_env["PATH"] == os.environ["PATH"]
+    # The external-network proxy survives; every ambient package-manager control does not.
+    assert install_env["PATH"] == "/usr/bin:/bin"
+    assert install_env["UV_NO_CONFIG"] == "1"
+    assert "UV_INDEX_URL" not in install_env
+    assert "PIP_INDEX_URL" not in install_env
+    assert "PYTHONPATH" not in install_env
     resolved = runner.resolved_environment_for("venv")
-    assert {key: value for key, value in resolved.items() if key != "PATH"} == {
+    ignored = {"PATH", "UV_NO_CONFIG", "UV_PYTHON_DOWNLOADS"}
+    assert {key: value for key, value in resolved.items() if key not in ignored} == {
         "HOME": runtime.home,
         "TMPDIR": runtime.root / "tmp",
         "UV_CACHE_DIR": runtime.cache / "uv",
         "XDG_CACHE_HOME": runtime.cache,
         "XDG_CONFIG_HOME": runtime.config,
     }
+    assert install_env["UV_PYTHON_DOWNLOADS"] == "never"
 
 
 def test_only_install_commands_receive_the_ambient_environment(

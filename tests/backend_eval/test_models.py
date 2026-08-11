@@ -2,25 +2,33 @@
 
 from __future__ import annotations
 
-from typing import cast
+from dataclasses import replace
+from typing import Any, cast
 
 import pytest
 
 from scripts.backend_eval.models import (
+    ADMISSION_RECEIPT_SCHEMA_VERSION,
     DEFAULT_PHASE_BUDGETS,
     EVALUATION_CONTRACT_VERSION,
+    NEXT_ACTION_PASS,
     AdmissionReceipt,
+    BootstrapEnvironmentIdentity,
     CandidateLock,
     CandidatePackage,
     EnvironmentIdentity,
+    EvaluatorIdentity,
+    LockEvidence,
     PathRecord,
     PhaseBudget,
     ProductionIdentity,
     ResolvedPackage,
     RootManifest,
+    RuntimeBinding,
     ServiceConfigIdentity,
     WriteDelta,
     canonical_json,
+    default_phase_budgets,
     sha256_bytes,
 )
 
@@ -103,7 +111,44 @@ def _candidate_lock(**overrides: object) -> CandidateLock:
         "candidates": (_candidate_package("pyrefly"), _candidate_package("ty")),
     }
     fields.update(overrides)
-    return CandidateLock(**fields)
+    if "lock_evidence" not in fields:
+        fields["lock_evidence"] = LockEvidence.build(
+            raw_sha256=cast("str", fields["digest"]),
+            raw_size=512,
+            resolved_packages=cast("tuple[ResolvedPackage, ...]", fields["resolved_packages"]),
+        )
+    return CandidateLock(**cast("dict[str, Any]", fields))
+
+
+def _evaluator_identity() -> EvaluatorIdentity:
+    return EvaluatorIdentity.build(
+        source_files=(("admission.py", _SHA_A), ("models.py", _SHA_B)),
+        source_commit=_GIT_REV,
+        source_clean=True,
+        host_python_path="/root/miniconda3/envs/ms/bin/python",
+        host_python_realpath="/root/miniconda3/envs/ms/bin/python3.12",
+        host_python_sha256=_SHA_C,
+        host_python_version="3.12.11",
+    )
+
+
+def _bootstrap_environment() -> BootstrapEnvironmentIdentity:
+    return BootstrapEnvironmentIdentity(
+        inherited_keys=("HTTPS_PROXY",),
+        inherited_value_digests=(("HTTPS_PROXY", _SHA_A),),
+        service_keys=("HOME", "PATH"),
+        refused_keys=("PIP_INDEX_URL",),
+    )
+
+
+def _runtime_binding() -> RuntimeBinding:
+    root = f"/data/CoordExp/.codex/runtime/serena-light/backend-eval/{_SHA_A}"
+    return RuntimeBinding(
+        root=root,
+        lock_digest=_SHA_A,
+        manifest_path=f"{root}/runtime-manifest.json",
+        manifest_sha256=_SHA_D,
+    )
 
 
 def _path_record(path: str = "src/a.py", **overrides: object) -> PathRecord:
@@ -121,29 +166,55 @@ def _path_record(path: str = "src/a.py", **overrides: object) -> PathRecord:
     return PathRecord(**fields)
 
 
+_BUILD_KEYS = frozenset(
+    {
+        "root",
+        "kind",
+        "source_revision",
+        "inventory_digest",
+        "inventory_paths",
+        "excluded_paths",
+        "hashed_paths",
+        "metadata_paths",
+    }
+)
+
+
 def _root_manifest(**overrides: object) -> RootManifest:
+    """Build a manifest whose digest is always recomputed from its own canonical fields.
+
+    Overrides of a *derived* field -- ``manifest_digest`` or ``inventory_count`` -- go
+    through :func:`dataclasses.replace`, so the recomputation guard sees them.
+    """
+
     fields: dict[str, object] = {
         "root": "/data/CoordExp/serena-light",
         "kind": "git",
         "source_revision": _GIT_REV,
         "inventory_digest": _SHA_A,
-        "inventory_count": 1,
+        "inventory_paths": ("src/a.py",),
+        "excluded_paths": (".git",),
         "hashed_paths": (_path_record("src/a.py"),),
         "metadata_paths": (_path_record("model_cache/blob.bin", disposition="declared", content_sha256=None),),
-        "manifest_digest": _SHA_B,
     }
-    fields.update(overrides)
-    return RootManifest(**fields)
+    derived = {name: value for name, value in overrides.items() if name not in _BUILD_KEYS}
+    fields.update({name: value for name, value in overrides.items() if name in _BUILD_KEYS})
+    manifest = RootManifest.build(**cast("dict[str, Any]", fields))
+    return replace(manifest, **derived) if derived else manifest
+
+
+_CORPUS_MANIFEST = _root_manifest()
 
 
 def _write_delta(**overrides: object) -> WriteDelta:
     fields: dict[str, object] = {
         "root": "/data/CoordExp/serena-light",
         "kind": "git",
-        "before_manifest_digest": _SHA_B,
-        "after_manifest_digest": _SHA_C,
-        "declared": ("src/a.py",),
+        "before_manifest_digest": _CORPUS_MANIFEST.manifest_digest,
+        "after_manifest_digest": _CORPUS_MANIFEST.manifest_digest,
+        "declared": (),
         "unexpected": (),
+        "control_changes": (),
     }
     fields.update(overrides)
     return WriteDelta(**fields)
@@ -154,13 +225,17 @@ def _admission_receipt(
 ) -> AdmissionReceipt:
     before = _production_identity()
     fields: dict[str, object] = {
-        "schema_version": 1,
+        "schema_version": ADMISSION_RECEIPT_SCHEMA_VERSION,
         "evaluation_contract_version": EVALUATION_CONTRACT_VERSION,
-        "evaluation_identity": "eval-2026-08-11-0001",
+        "evaluation_identity": _SHA_A,
+        "run_identity": _SHA_B,
         "status": status,
         "started_at": "2026-08-11T00:00:00Z",
         "ended_at": "2026-08-11T00:10:00Z",
-        "budgets": (DEFAULT_PHASE_BUDGETS["admission"],),
+        "budgets": default_phase_budgets(),
+        "evaluator": _evaluator_identity(),
+        "bootstrap_environment": _bootstrap_environment(),
+        "runtime_binding": _runtime_binding(),
         "production_identity_before": before,
         "production_identity_after": before if after is None else after,
         "candidate_lock": _candidate_lock(),
@@ -171,11 +246,11 @@ def _admission_receipt(
             _service_config_identity("ty"),
         ),
         "root_manifests_before": (_root_manifest(),),
-        "root_manifests_after": (_root_manifest(manifest_digest=_SHA_C),),
+        "root_manifests_after": (_root_manifest(),),
         "write_deltas": (_write_delta(),),
         "artifact_tree_digest": _SHA_C,
         "issues": (),
-        "next_action": "proceed to protocol phase",
+        "next_action": NEXT_ACTION_PASS,
     }
     fields.update(overrides)
     return AdmissionReceipt(**fields)
@@ -405,7 +480,14 @@ def test_path_record_rejects_symlink_target_for_file_kind() -> None:
 
 def test_path_record_rejects_unknown_kind() -> None:
     with pytest.raises(ValueError, match="kind"):
-        _path_record(kind="directory")
+        _path_record(kind="fifo")
+
+
+def test_path_record_accepts_a_directory_without_a_content_hash() -> None:
+    record = _path_record("model_cache/empty", kind="directory", content_sha256=None)
+    assert record.kind == "directory"
+    with pytest.raises(ValueError, match="content_sha256"):
+        _path_record("model_cache/empty", kind="directory")
 
 
 def test_path_record_rejects_unknown_disposition() -> None:
@@ -555,7 +637,7 @@ def test_admission_receipt_rejects_non_tuple_root_manifests_before() -> None:
 
 
 def test_admission_receipt_rejects_unsorted_root_manifests_before() -> None:
-    first = _root_manifest(root="/data/ms-swift", manifest_digest=_SHA_D)
+    first = _root_manifest(root="/data/ms-swift")
     second = _root_manifest()
     with pytest.raises(ValueError, match="sorted"):
         _admission_receipt(status="hold", root_manifests_before=(first, second))
@@ -564,18 +646,18 @@ def test_admission_receipt_rejects_unsorted_root_manifests_before() -> None:
 def test_admission_receipt_rejects_duplicate_root_manifest_before_roots() -> None:
     with pytest.raises(ValueError, match="duplicate"):
         _admission_receipt(
-            status="hold", root_manifests_before=(_root_manifest(), _root_manifest(manifest_digest=_SHA_D))
+            status="hold", root_manifests_before=(_root_manifest(), _root_manifest())
         )
 
 
 def test_admission_receipt_rejects_non_tuple_root_manifests_after() -> None:
     with pytest.raises(ValueError, match="tuple"):
-        _admission_receipt(status="hold", root_manifests_after=[_root_manifest(manifest_digest=_SHA_C)])
+        _admission_receipt(status="hold", root_manifests_after=[_root_manifest()])
 
 
 def test_admission_receipt_rejects_unsorted_root_manifests_after() -> None:
-    first = _root_manifest(root="/data/ms-swift", manifest_digest=_SHA_D)
-    second = _root_manifest(manifest_digest=_SHA_C)
+    first = _root_manifest(root="/data/ms-swift")
+    second = _root_manifest()
     with pytest.raises(ValueError, match="sorted"):
         _admission_receipt(status="hold", root_manifests_after=(first, second))
 
@@ -584,7 +666,7 @@ def test_admission_receipt_rejects_duplicate_root_manifest_after_roots() -> None
     with pytest.raises(ValueError, match="duplicate"):
         _admission_receipt(
             status="hold",
-            root_manifests_after=(_root_manifest(manifest_digest=_SHA_C), _root_manifest(manifest_digest=_SHA_D)),
+            root_manifests_after=(_root_manifest(), _root_manifest()),
         )
 
 
@@ -613,13 +695,13 @@ def test_admission_receipt_rejects_duplicate_issues() -> None:
 
 
 def test_admission_receipt_pass_requires_before_manifest_roots_match_write_delta_roots() -> None:
-    other_manifest = _root_manifest(root="/data/ms-swift", manifest_digest=_SHA_D)
+    other_manifest = _root_manifest(root="/data/ms-swift")
     with pytest.raises(ValueError, match="root manifest"):
         _admission_receipt(root_manifests_before=(other_manifest,))
 
 
 def test_admission_receipt_pass_requires_after_manifest_roots_match_write_delta_roots() -> None:
-    other_manifest = _root_manifest(root="/data/ms-swift", manifest_digest=_SHA_D)
+    other_manifest = _root_manifest(root="/data/ms-swift")
     with pytest.raises(ValueError, match="root manifest"):
         _admission_receipt(root_manifests_after=(other_manifest,))
 
@@ -642,13 +724,20 @@ def test_admission_receipt_pass_rejects_write_delta_with_unexpected_paths() -> N
         _admission_receipt(write_deltas=(_write_delta(unexpected=("evil/backdoor.py",)),))
 
 
-def test_admission_receipt_pass_allows_declared_mutations() -> None:
-    receipt = _admission_receipt(write_deltas=(_write_delta(declared=("src/a.py", "src/b.py")),))
-    assert receipt.status == "pass"
+def test_admission_receipt_pass_rejects_declared_mutations() -> None:
+    """Admission declares no mutation at all, so a declared path can never be a PASS."""
+
+    with pytest.raises(ValueError, match="declared"):
+        _admission_receipt(write_deltas=(_write_delta(declared=("src/a.py", "src/b.py")),))
+
+    receipt = _admission_receipt(
+        status="incomplete", write_deltas=(_write_delta(declared=("src/a.py", "src/b.py")),)
+    )
+    assert receipt.status == "incomplete"
 
 
 def test_admission_receipt_allows_incomplete_status_with_mismatched_manifest_roots() -> None:
-    other_manifest = _root_manifest(root="/data/ms-swift", manifest_digest=_SHA_D)
+    other_manifest = _root_manifest(root="/data/ms-swift")
     receipt = _admission_receipt(status="incomplete", root_manifests_before=(other_manifest,))
     assert receipt.status == "incomplete"
 

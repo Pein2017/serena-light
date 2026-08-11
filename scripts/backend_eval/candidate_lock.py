@@ -30,31 +30,53 @@ anything is purged, so the only durable copy is never deleted first.  The marker
 cleared only once the intended canonical state is durable, and the next call recovers
 any transaction interrupted at any point.
 
+A resolution is also serialized *between callers*.  The whole critical section --
+recovery, acceptance, resolution, and publication -- runs under an exclusive ``flock`` on a
+per-identity ``O_NOFOLLOW`` lock file inside the artifact directory, so a second caller
+never observes another caller's live transaction and mistakes it for an interrupted dead
+one.  Recovery therefore only ever sees a marker whose owner has already exited.
+
+The resolver receives :func:`scripts.backend_eval.identity.bootstrap_environment`: the
+user's external-network proxy, CA bundle, and locale, plus an exact service-owned
+``HOME``/``TMPDIR``/``XDG``/``UV_CACHE_DIR`` below the rebuildable resolver store.  No
+ambient ``UV_*``, ``PIP_*``, ``PYTHONPATH``, or ``PATH`` control is inherited, and
+``UV_NO_CONFIG`` keeps an ambient ``uv.toml`` or ``pip`` mirror out of the freeze.  Every
+resolver invocation is bounded by the caller's remaining time and its process group is
+killed on expiry.
+
 Subprocess execution is injected through :class:`CommandRunner`; this module has no
 other process seam.
 """
 
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import re
 import stat
-import subprocess
 import uuid
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol
 
+from scripts.backend_eval.identity import bootstrap_environment, bootstrap_service_values
 from scripts.backend_eval.models import (
     CandidateLock,
     CandidatePackage,
+    LockEvidence,
     ProductionIdentity,
     ResolvedPackage,
     canonical_json,
     sha256_bytes,
+)
+from scripts.backend_eval.process import (
+    CommandResult,
+    CommandRunner,
+    CommandTimeout,
+    Deadline,
+    subprocess_runner,
 )
 from scripts.backend_eval.production_identity import (
     ProductionIdentityChanged,
@@ -74,6 +96,7 @@ __all__ = [
     "RECEIPT_FILE_NAME",
     "RECEIPT_ROLLBACK_NAME",
     "REQUIREMENTS_IN_NAME",
+    "RESOLUTION_LOCK_NAME",
     "TRANSACTION_MARKER_NAME",
     "CandidateLockError",
     "CandidateLockRequest",
@@ -97,6 +120,9 @@ RECEIPT_ROLLBACK_NAME = f"{RECEIPT_FILE_NAME}.rollback"
 TRANSACTION_MARKER_NAME = ".candidate-lock-transaction.json"
 QUARANTINE_PREFIX = ".quarantine-"
 CACHE_DIR_NAME = "uv-cache"
+RESOLUTION_LOCK_NAME = ".candidate-lock.lock"
+# Every volatile resolver-owned directory lives below the one rebuildable cache tree.
+_CACHE_SUBDIRECTORY_NAMES = ("home", "tmp", "uv", "xdg-cache", "xdg-config")
 
 # (canonical name, durable rollback name, marker key) for every transactional artifact.
 _TRANSACTION_ENTRIES = (
@@ -119,33 +145,6 @@ _NOT_A_DIRECTORY = "must be an evaluation-owned directory, not a symlink or spec
 
 class CandidateLockError(RuntimeError):
     """Raised when the candidate resolution cannot be frozen reproducibly."""
-
-
-@dataclass(frozen=True, slots=True)
-class CommandResult:
-    returncode: int
-    stdout: str
-    stderr: str
-
-
-class CommandRunner(Protocol):
-    def __call__(self, command: Sequence[str], *, cwd: Path, env: Mapping[str, str]) -> CommandResult: ...
-
-
-def subprocess_runner(command: Sequence[str], *, cwd: Path, env: Mapping[str, str]) -> CommandResult:
-    try:
-        # Explicit absolute argv, never a shell string.
-        completed = subprocess.run(
-            list(command),
-            cwd=cwd,
-            env=dict(env),
-            check=False,
-            capture_output=True,
-            text=True,
-        )
-    except OSError as exc:
-        raise CandidateLockError(f"cannot start the candidate resolution command: {exc}") from exc
-    return CommandResult(returncode=completed.returncode, stdout=completed.stdout, stderr=completed.stderr)
 
 
 @dataclass(frozen=True, slots=True)
@@ -172,6 +171,7 @@ def compile_candidate_lock(
     *,
     runner: CommandRunner = subprocess_runner,
     recompile: bool = False,
+    deadline: Deadline | None = None,
 ) -> CandidateLock:
     """Return the frozen candidate lock, resolving at most once per artifact root.
 
@@ -185,7 +185,9 @@ def compile_candidate_lock(
 
     before = capture_production_identity(request.repo_root)
     try:
-        with _artifact_directory(request) as dir_fd:
+        with _artifact_directory(request) as dir_fd, _resolution_lock(dir_fd, request.artifact_root):
+            # Under the exclusive lock, any marker still present belongs to a caller that
+            # has already exited: a live concurrent transaction can never be rolled back.
             _recover_interrupted_transaction(dir_fd)
             command = _compile_command(request)
             frozen_lock = _read_artifact(dir_fd, LOCK_FILE_NAME)
@@ -194,7 +196,9 @@ def compile_candidate_lock(
                 lock = _accept_frozen_lock(request, command, dir_fd, frozen_lock, frozen_receipt)
                 _assert_production_identity_unchanged(before, request.repo_root, cause=None)
                 return lock
-            return _resolve_candidate_lock(request, runner, command, dir_fd, before, frozen_lock, frozen_receipt)
+            return _resolve_candidate_lock(
+                request, runner, command, dir_fd, before, frozen_lock, frozen_receipt, deadline
+            )
     except BaseException as exc:
         # Drift raised inside the transaction is already the authoritative error.
         if not isinstance(exc, ProductionIdentityError):
@@ -223,6 +227,7 @@ def _resolve_candidate_lock(
     before: ProductionIdentity,
     frozen_lock: bytes | None,
     frozen_receipt: bytes | None,
+    deadline: Deadline | None = None,
 ) -> CandidateLock:
     """Resolve once inside a durable transaction that publishes only a validated freeze."""
 
@@ -231,7 +236,7 @@ def _resolve_candidate_lock(
     try:
         _write_artifact(dir_fd, REQUIREMENTS_IN_NAME, CANONICAL_REQUIREMENTS_BYTES)
         _ensure_cache_directory(dir_fd)
-        result = _run(runner, command, request.artifact_root, request.artifact_root / CACHE_DIR_NAME)
+        result = _run(runner, command, request.artifact_root, deadline)
         if result.returncode != 0:
             detail = (result.stderr or result.stdout).strip()
             raise CandidateLockError(f"candidate resolution failed ({result.returncode}): {detail}")
@@ -365,11 +370,39 @@ def _decode_marker(marker_bytes: bytes) -> dict[str, bool]:
     return {key: bool(decoded.get(key, True)) for _canonical, _rollback, key in _TRANSACTION_ENTRIES}
 
 
-def _run(runner: CommandRunner, command: Sequence[str], artifact_root: Path, cache_dir: Path) -> CommandResult:
+def _run(
+    runner: CommandRunner, command: Sequence[str], artifact_root: Path, deadline: Deadline | None
+) -> CommandResult:
+    timeout = None if deadline is None else deadline.remaining()
     try:
-        return runner(command, cwd=artifact_root, env=_command_env(cache_dir))
+        return runner(command, cwd=artifact_root, env=_command_env(artifact_root), timeout=timeout)
+    except CommandTimeout as exc:
+        raise CandidateLockError(f"the candidate resolution command timed out: {exc}") from exc
     except OSError as exc:
         raise CandidateLockError(f"cannot start the candidate resolution command: {exc}") from exc
+
+
+@contextmanager
+def _resolution_lock(dir_fd: int, artifact_root: Path) -> Iterator[None]:
+    """Serialize every caller of one artifact identity on an ``O_NOFOLLOW`` lock file."""
+
+    try:
+        fd = os.open(
+            RESOLUTION_LOCK_NAME, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600, dir_fd=dir_fd
+        )
+    except OSError as exc:
+        raise CandidateLockError(
+            f"cannot open the candidate resolution lock {artifact_root / RESOLUTION_LOCK_NAME}: {exc}"
+        ) from exc
+    try:
+        os.fchmod(fd, 0o600)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+        except OSError as exc:
+            raise CandidateLockError(f"cannot lock {artifact_root / RESOLUTION_LOCK_NAME}: {exc}") from exc
+        yield
+    finally:
+        os.close(fd)
 
 
 # --- command and environment --------------------------------------------------
@@ -401,12 +434,19 @@ def _compile_command(request: CandidateLockRequest) -> tuple[str, ...]:
     )
 
 
-def _command_env(cache_dir: Path) -> dict[str, str]:
-    """Inherit bootstrap's ambient proxy behaviour and add a service-owned cache."""
+def _command_env(artifact_root: Path) -> dict[str, str]:
+    """Keep bootstrap's external-network proxy and nothing else ambient."""
 
-    env = os.environ.copy()
-    env["UV_CACHE_DIR"] = str(cache_dir)
-    return env
+    cache = artifact_root / CACHE_DIR_NAME
+    return bootstrap_environment(
+        bootstrap_service_values(
+            home=cache / "home",
+            tmp=cache / "tmp",
+            cache=cache / "xdg-cache",
+            config=cache / "xdg-config",
+            uv_cache=cache / "uv",
+        )
+    )
 
 
 # --- artifact directory and file handling -------------------------------------
@@ -444,13 +484,27 @@ def _open_owned_directory(parent_fd: int, name: str) -> int:
     except OSError as exc:
         raise CandidateLockError(f"cannot create artifact path component {name!r}: {exc}") from exc
     try:
-        return os.open(name, _DIRECTORY_FLAGS, dir_fd=parent_fd)
+        fd = os.open(name, _DIRECTORY_FLAGS, dir_fd=parent_fd)
     except OSError as exc:
         raise CandidateLockError(f"artifact path component {name!r} {_NOT_A_DIRECTORY}: {exc}") from exc
+    # ``mkdir`` is masked by the ambient umask; the service-owned mode is not negotiable.
+    try:
+        os.fchmod(fd, 0o700)
+    except OSError as exc:
+        os.close(fd)
+        raise CandidateLockError(f"cannot own artifact path component {name!r}: {exc}") from exc
+    return fd
 
 
 def _ensure_cache_directory(dir_fd: int) -> None:
-    os.close(_open_owned_directory(dir_fd, CACHE_DIR_NAME))
+    """Create the one rebuildable resolver store and every volatile directory below it."""
+
+    cache_fd = _open_owned_directory(dir_fd, CACHE_DIR_NAME)
+    try:
+        for name in _CACHE_SUBDIRECTORY_NAMES:
+            os.close(_open_owned_directory(cache_fd, name))
+    finally:
+        os.close(cache_fd)
 
 
 @contextmanager
@@ -526,6 +580,7 @@ def _write_artifact(dir_fd: int, name: str, data: bytes) -> None:
     try:
         fd = os.open(temporary, _CREATE_FLAGS, 0o600, dir_fd=dir_fd)
         with os.fdopen(fd, "wb") as handle:
+            os.fchmod(handle.fileno(), 0o600)
             handle.write(data)
             handle.flush()
             _fsync_file(handle.fileno(), temporary)
@@ -709,11 +764,16 @@ def _build_lock(request: CandidateLockRequest, lock_bytes: bytes) -> CandidateLo
         )
         for name in CANDIDATE_NAMES
     )
+    digest = sha256_bytes(lock_bytes)
     return CandidateLock(
-        digest=sha256_bytes(lock_bytes),
+        digest=digest,
         exclude_newer=request.exclude_newer,
         resolved_packages=resolved_packages,
         candidates=candidates,
+        # The structured fields cannot reproduce a raw file's bytes; the witness says so.
+        lock_evidence=LockEvidence.build(
+            raw_sha256=digest, raw_size=len(lock_bytes), resolved_packages=resolved_packages
+        ),
     )
 
 

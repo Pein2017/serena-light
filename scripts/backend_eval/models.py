@@ -3,6 +3,16 @@
 Every later task consumes these exact frozen dataclasses and the two module
 functions below; no later task may introduce a second receipt or manifest
 representation.
+
+The models are *structurally* strict rather than descriptive.  A
+:class:`RootManifest` recomputes its own ``manifest_digest`` from its canonical fields at
+construction and at parsing, so forged counts or records with a retained digest fail; a
+:class:`CandidateLock` carries an explicit raw-lock digest witness rather than pretending
+its structured fields recompute a raw file's bytes; and a ``pass``
+:class:`AdmissionReceipt` must carry the complete Phase 1 evidence set -- evaluator, host,
+bootstrap environment, candidate runtime binding, both corpus sides, and one delta per
+root -- with no issue, no unexpected path, no declared mutation, and no changed manifest
+control.
 """
 
 from __future__ import annotations
@@ -17,15 +27,22 @@ from typing import Any, cast
 
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _GIT_REVISION_RE = re.compile(r"^[0-9a-f]{40}$|^[0-9a-f]{64}$")
-_PATH_RECORD_KINDS = frozenset({"file", "symlink"})
+_UTC_TIMESTAMP_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T([01]\d|2[0-3]):[0-5]\d:[0-5]\dZ$")
+_ENVIRONMENT_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_PATH_RECORD_KINDS = frozenset({"directory", "file", "special", "symlink"})
 _PATH_RECORD_DISPOSITIONS = frozenset({"tracked", "untracked", "ignored", "declared"})
 _ROOT_MANIFEST_KINDS = frozenset({"git", "non_git"})
 _ADMISSION_STATUSES = frozenset({"pass", "hold", "incomplete", "fail"})
 _CANDIDATE_NAMES = frozenset({"ty", "pyrefly"})
 _SERVICE_CONFIG_BACKENDS = frozenset({"pyright", "ty", "pyrefly"})
+_REQUIRED_ENVIRONMENT_NAMES = frozenset({"ms", "llm-framework-study"})
 
-ADMISSION_RECEIPT_SCHEMA_VERSION = 1
+# Schema 2 adds the evaluator/host, bootstrap-environment, and candidate-runtime bindings,
+# the immutable per-execution run identity, and the two-stage corpus remainder evidence.
+ADMISSION_RECEIPT_SCHEMA_VERSION = 2
 EVALUATION_CONTRACT_VERSION = "python-backend-evaluation-v1"
+NEXT_ACTION_PASS = "begin_protocol_probe_planning"
+NEXT_ACTION_HOLD = "retain_pyright_and_disposition_admission"
 
 
 def canonical_json(value: Mapping[str, object]) -> bytes:
@@ -67,6 +84,13 @@ def _validate_relative_path(value: object, label: str) -> str:
     return text
 
 
+def _validate_utc_timestamp(value: object, label: str) -> str:
+    text = _validate_non_empty_str(value, label)
+    if _UTC_TIMESTAMP_RE.fullmatch(text) is None:
+        raise ValueError(f"{label} must be a UTC timestamp such as 2026-08-11T00:00:00Z")
+    return text
+
+
 def _validate_int(value: object, label: str, *, minimum: int | None = None) -> int:
     if isinstance(value, bool) or not isinstance(value, int):
         raise ValueError(f"{label} must be an integer")
@@ -97,6 +121,14 @@ def _validate_tuple(value: object, label: str) -> tuple[Any, ...]:
     if not isinstance(value, tuple):
         raise ValueError(f"{label} must be a tuple, not {type(value).__name__}")
     return value
+
+
+def _validate_string_tuple(value: object, label: str) -> tuple[str, ...]:
+    items = _validate_tuple(value, label)
+    for item in items:
+        _validate_non_empty_str(item, f"{label} item")
+    _validate_sorted_unique(cast("Sequence[str]", items), label)
+    return cast("tuple[str, ...]", items)
 
 
 def _validate_artifact_hashes(value: object, label: str) -> tuple[str, ...]:
@@ -144,10 +176,30 @@ def _expect_str(value: object, label: str) -> str:
     return value
 
 
+def _expect_bool(value: object, label: str) -> bool:
+    if not isinstance(value, bool):
+        raise ValueError(f"{label} must be a boolean")
+    return value
+
+
 def _expect_int(value: object, label: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int):
         raise ValueError(f"{label} must be an integer")
     return value
+
+
+def _expect_str_list(value: object, label: str) -> tuple[str, ...]:
+    return tuple(_expect_str(item, f"{label} item") for item in _expect_list(value, label))
+
+
+def _expect_pair_list(value: object, label: str) -> tuple[tuple[str, str], ...]:
+    pairs: list[tuple[str, str]] = []
+    for item in _expect_list(value, label):
+        entry = _expect_list(item, f"{label} entry")
+        if len(entry) != 2:
+            raise ValueError(f"{label} entries must be two-element arrays")
+        pairs.append((_expect_str(entry[0], f"{label} key"), _expect_str(entry[1], f"{label} value")))
+    return tuple(pairs)
 
 
 def _closed_fields(value: Mapping[str, object], required: frozenset[str], label: str) -> None:
@@ -198,6 +250,12 @@ DEFAULT_PHASE_BUDGETS: Mapping[str, PhaseBudget] = MappingProxyType(
         "total": PhaseBudget("total", 16 * 60 * 60),
     }
 )
+
+
+def default_phase_budgets() -> tuple[PhaseBudget, ...]:
+    """The frozen Phase 1 budget set in canonical sorted order."""
+
+    return tuple(sorted(DEFAULT_PHASE_BUDGETS.values(), key=lambda budget: budget.name))
 
 
 # --- ProductionIdentity --------------------------------------------------------
@@ -268,6 +326,255 @@ def _production_identity_from_dict(value: object) -> ProductionIdentity:
         ),
         build_identity=_expect_str(mapping["build_identity"], "ProductionIdentity.build_identity"),
         runtime_paths=runtime_paths,
+    )
+
+
+# --- EvaluatorIdentity ----------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class EvaluatorIdentity:
+    """The exact evaluator code and CLI host that produced one receipt.
+
+    ``source_digest`` is recomputed from ``source_files``, so a receipt cannot claim a
+    source closure it does not carry.  ``source_commit`` is recorded when the checkout is
+    a clean Git tree, as corroboration -- never instead of the executed bytes.
+    """
+
+    source_digest: str
+    source_files: tuple[tuple[str, str], ...]
+    source_commit: str | None
+    source_clean: bool
+    host_python_path: str
+    host_python_realpath: str
+    host_python_sha256: str
+    host_python_version: str
+
+    def __post_init__(self) -> None:
+        files = _validate_tuple(self.source_files, "EvaluatorIdentity.source_files")
+        if not files:
+            raise ValueError("EvaluatorIdentity.source_files must not be empty")
+        names: list[str] = []
+        for entry in files:
+            if not isinstance(entry, tuple) or len(entry) != 2:
+                raise ValueError("EvaluatorIdentity.source_files entries must be (relative path, digest) tuples")
+            name, digest = entry
+            _validate_relative_path(name, "EvaluatorIdentity.source_files path")
+            _validate_sha256(digest, f"EvaluatorIdentity.source_files[{name}]")
+            names.append(name)
+        _validate_sorted_unique(names, "EvaluatorIdentity.source_files")
+        _validate_sha256(self.source_digest, "EvaluatorIdentity.source_digest")
+        if self.source_digest != _evaluator_source_digest(self.source_files):
+            raise ValueError("EvaluatorIdentity.source_digest must be recomputable from source_files")
+        if self.source_commit is not None and _GIT_REVISION_RE.fullmatch(self.source_commit) is None:
+            raise ValueError("EvaluatorIdentity.source_commit must be a Git commit revision or None")
+        if not isinstance(self.source_clean, bool):
+            raise ValueError("EvaluatorIdentity.source_clean must be a boolean")
+        if self.source_commit is None and self.source_clean:
+            raise ValueError("EvaluatorIdentity.source_clean requires a recorded source_commit")
+        _validate_absolute_path(self.host_python_path, "EvaluatorIdentity.host_python_path")
+        _validate_absolute_path(self.host_python_realpath, "EvaluatorIdentity.host_python_realpath")
+        _validate_sha256(self.host_python_sha256, "EvaluatorIdentity.host_python_sha256")
+        _validate_non_empty_str(self.host_python_version, "EvaluatorIdentity.host_python_version")
+
+    @staticmethod
+    def build(
+        *,
+        source_files: tuple[tuple[str, str], ...],
+        source_commit: str | None,
+        source_clean: bool,
+        host_python_path: str,
+        host_python_realpath: str,
+        host_python_sha256: str,
+        host_python_version: str,
+    ) -> EvaluatorIdentity:
+        return EvaluatorIdentity(
+            source_digest=_evaluator_source_digest(source_files),
+            source_files=source_files,
+            source_commit=source_commit,
+            source_clean=source_clean,
+            host_python_path=host_python_path,
+            host_python_realpath=host_python_realpath,
+            host_python_sha256=host_python_sha256,
+            host_python_version=host_python_version,
+        )
+
+    def to_dict(self) -> dict[str, object]:
+        return _evaluator_identity_to_dict(self)
+
+
+def _evaluator_source_digest(source_files: tuple[tuple[str, str], ...]) -> str:
+    return sha256_bytes(canonical_json({"source_files": [list(entry) for entry in source_files]}))
+
+
+_EVALUATOR_IDENTITY_FIELDS = frozenset(
+    {
+        "source_digest",
+        "source_files",
+        "source_commit",
+        "source_clean",
+        "host_python_path",
+        "host_python_realpath",
+        "host_python_sha256",
+        "host_python_version",
+    }
+)
+
+
+def _evaluator_identity_to_dict(identity: EvaluatorIdentity) -> dict[str, object]:
+    return {
+        "source_digest": identity.source_digest,
+        "source_files": [list(entry) for entry in identity.source_files],
+        "source_commit": identity.source_commit,
+        "source_clean": identity.source_clean,
+        "host_python_path": identity.host_python_path,
+        "host_python_realpath": identity.host_python_realpath,
+        "host_python_sha256": identity.host_python_sha256,
+        "host_python_version": identity.host_python_version,
+    }
+
+
+def _evaluator_identity_from_dict(value: object) -> EvaluatorIdentity:
+    mapping = _expect_mapping(value, "EvaluatorIdentity")
+    _closed_fields(mapping, _EVALUATOR_IDENTITY_FIELDS, "EvaluatorIdentity")
+    return EvaluatorIdentity(
+        source_digest=_expect_str(mapping["source_digest"], "EvaluatorIdentity.source_digest"),
+        source_files=_expect_pair_list(mapping["source_files"], "EvaluatorIdentity.source_files"),
+        source_commit=_optional_str(mapping["source_commit"], "EvaluatorIdentity.source_commit"),
+        source_clean=_expect_bool(mapping["source_clean"], "EvaluatorIdentity.source_clean"),
+        host_python_path=_expect_str(mapping["host_python_path"], "EvaluatorIdentity.host_python_path"),
+        host_python_realpath=_expect_str(mapping["host_python_realpath"], "EvaluatorIdentity.host_python_realpath"),
+        host_python_sha256=_expect_str(mapping["host_python_sha256"], "EvaluatorIdentity.host_python_sha256"),
+        host_python_version=_expect_str(mapping["host_python_version"], "EvaluatorIdentity.host_python_version"),
+    )
+
+
+# --- BootstrapEnvironmentIdentity ------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class BootstrapEnvironmentIdentity:
+    """The exact environment the resolver and installer received.
+
+    Only key *names* and SHA-256 digests of values are recorded: a proxy URL with an
+    embedded credential is never published in plaintext.  ``refused_keys`` names the
+    ambient package-index, source, PATH, and ``PYTHONPATH`` controls that were present and
+    deliberately not inherited.
+    """
+
+    inherited_keys: tuple[str, ...]
+    inherited_value_digests: tuple[tuple[str, str], ...]
+    service_keys: tuple[str, ...]
+    refused_keys: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        keys = _validate_string_tuple(self.inherited_keys, "BootstrapEnvironmentIdentity.inherited_keys")
+        digests = _validate_tuple(
+            self.inherited_value_digests, "BootstrapEnvironmentIdentity.inherited_value_digests"
+        )
+        digest_keys: list[str] = []
+        for entry in digests:
+            if not isinstance(entry, tuple) or len(entry) != 2:
+                raise ValueError("BootstrapEnvironmentIdentity.inherited_value_digests entries must be pairs")
+            key, digest = entry
+            _validate_non_empty_str(key, "BootstrapEnvironmentIdentity.inherited_value_digests key")
+            _validate_sha256(digest, f"BootstrapEnvironmentIdentity.inherited_value_digests[{key}]")
+            digest_keys.append(key)
+        _validate_sorted_unique(digest_keys, "BootstrapEnvironmentIdentity.inherited_value_digests")
+        if tuple(digest_keys) != keys:
+            raise ValueError(
+                "BootstrapEnvironmentIdentity.inherited_keys must match inherited_value_digests exactly"
+            )
+        service = _validate_string_tuple(self.service_keys, "BootstrapEnvironmentIdentity.service_keys")
+        if not service:
+            raise ValueError("BootstrapEnvironmentIdentity.service_keys must not be empty")
+        refused = _validate_string_tuple(self.refused_keys, "BootstrapEnvironmentIdentity.refused_keys")
+        for name in (*keys, *service, *refused):
+            if _ENVIRONMENT_KEY_RE.fullmatch(name) is None:
+                raise ValueError(f"BootstrapEnvironmentIdentity key is not an environment name: {name!r}")
+        overlap = (set(keys) | set(service)) & set(refused)
+        if overlap:
+            raise ValueError(
+                f"BootstrapEnvironmentIdentity.refused_keys cannot also be inherited: {sorted(overlap)}"
+            )
+
+    def to_dict(self) -> dict[str, object]:
+        return _bootstrap_environment_to_dict(self)
+
+
+_BOOTSTRAP_ENVIRONMENT_FIELDS = frozenset(
+    {"inherited_keys", "inherited_value_digests", "service_keys", "refused_keys"}
+)
+
+
+def _bootstrap_environment_to_dict(identity: BootstrapEnvironmentIdentity) -> dict[str, object]:
+    return {
+        "inherited_keys": list(identity.inherited_keys),
+        "inherited_value_digests": [list(entry) for entry in identity.inherited_value_digests],
+        "service_keys": list(identity.service_keys),
+        "refused_keys": list(identity.refused_keys),
+    }
+
+
+def _bootstrap_environment_from_dict(value: object) -> BootstrapEnvironmentIdentity:
+    mapping = _expect_mapping(value, "BootstrapEnvironmentIdentity")
+    _closed_fields(mapping, _BOOTSTRAP_ENVIRONMENT_FIELDS, "BootstrapEnvironmentIdentity")
+    return BootstrapEnvironmentIdentity(
+        inherited_keys=_expect_str_list(mapping["inherited_keys"], "BootstrapEnvironmentIdentity.inherited_keys"),
+        inherited_value_digests=_expect_pair_list(
+            mapping["inherited_value_digests"], "BootstrapEnvironmentIdentity.inherited_value_digests"
+        ),
+        service_keys=_expect_str_list(mapping["service_keys"], "BootstrapEnvironmentIdentity.service_keys"),
+        refused_keys=_expect_str_list(mapping["refused_keys"], "BootstrapEnvironmentIdentity.refused_keys"),
+    )
+
+
+# --- RuntimeBinding ---------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class RuntimeBinding:
+    """The exact candidate runtime manifest one receipt is bound to."""
+
+    root: str
+    lock_digest: str
+    manifest_path: str
+    manifest_sha256: str
+
+    def __post_init__(self) -> None:
+        _validate_absolute_path(self.root, "RuntimeBinding.root")
+        _validate_sha256(self.lock_digest, "RuntimeBinding.lock_digest")
+        if self.root.rsplit("/", 1)[-1] != self.lock_digest:
+            raise ValueError("RuntimeBinding.root must be addressed by the candidate lock digest")
+        _validate_absolute_path(self.manifest_path, "RuntimeBinding.manifest_path")
+        if not self.manifest_path.startswith(f"{self.root}/"):
+            raise ValueError("RuntimeBinding.manifest_path must live inside the runtime root")
+        _validate_sha256(self.manifest_sha256, "RuntimeBinding.manifest_sha256")
+
+    def to_dict(self) -> dict[str, object]:
+        return _runtime_binding_to_dict(self)
+
+
+_RUNTIME_BINDING_FIELDS = frozenset({"root", "lock_digest", "manifest_path", "manifest_sha256"})
+
+
+def _runtime_binding_to_dict(binding: RuntimeBinding) -> dict[str, object]:
+    return {
+        "root": binding.root,
+        "lock_digest": binding.lock_digest,
+        "manifest_path": binding.manifest_path,
+        "manifest_sha256": binding.manifest_sha256,
+    }
+
+
+def _runtime_binding_from_dict(value: object) -> RuntimeBinding:
+    mapping = _expect_mapping(value, "RuntimeBinding")
+    _closed_fields(mapping, _RUNTIME_BINDING_FIELDS, "RuntimeBinding")
+    return RuntimeBinding(
+        root=_expect_str(mapping["root"], "RuntimeBinding.root"),
+        lock_digest=_expect_str(mapping["lock_digest"], "RuntimeBinding.lock_digest"),
+        manifest_path=_expect_str(mapping["manifest_path"], "RuntimeBinding.manifest_path"),
+        manifest_sha256=_expect_str(mapping["manifest_sha256"], "RuntimeBinding.manifest_sha256"),
     )
 
 
@@ -355,7 +662,7 @@ def _service_config_identity_from_dict(value: object) -> ServiceConfigIdentity:
     )
 
 
-# --- ResolvedPackage / CandidatePackage / CandidateLock ------------------------
+# --- ResolvedPackage / CandidatePackage / LockEvidence / CandidateLock ----------
 
 
 @dataclass(frozen=True, slots=True)
@@ -445,15 +752,79 @@ def _candidate_package_from_dict(value: object) -> CandidatePackage:
 
 
 @dataclass(frozen=True, slots=True)
+class LockEvidence:
+    """A bounded witness of the raw lock file the structured resolution was parsed from.
+
+    ``CandidateLock.digest`` is the digest of raw bytes that the structured fields cannot
+    reproduce.  This record states that explicitly: the raw digest and byte length are
+    carried as a witness, and ``requirement_lines`` binds the raw parse to the structured
+    resolution so a forged structure fails.
+    """
+
+    raw_sha256: str
+    raw_size: int
+    requirement_lines: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        _validate_sha256(self.raw_sha256, "LockEvidence.raw_sha256")
+        _validate_positive_int(self.raw_size, "LockEvidence.raw_size")
+        lines = _validate_tuple(self.requirement_lines, "LockEvidence.requirement_lines")
+        if not lines:
+            raise ValueError("LockEvidence.requirement_lines must not be empty")
+        for line in lines:
+            _validate_non_empty_str(line, "LockEvidence.requirement_lines item")
+        _validate_sorted_unique(cast("Sequence[str]", lines), "LockEvidence.requirement_lines")
+
+    @staticmethod
+    def derive_lines(resolved_packages: Sequence[ResolvedPackage]) -> tuple[str, ...]:
+        return tuple(
+            sorted(
+                f"{package.requirement} " + " ".join(f"sha256:{digest}" for digest in package.artifact_hashes)
+                for package in resolved_packages
+            )
+        )
+
+    @staticmethod
+    def build(*, raw_sha256: str, raw_size: int, resolved_packages: Sequence[ResolvedPackage]) -> LockEvidence:
+        return LockEvidence(
+            raw_sha256=raw_sha256,
+            raw_size=raw_size,
+            requirement_lines=LockEvidence.derive_lines(resolved_packages),
+        )
+
+
+_LOCK_EVIDENCE_FIELDS = frozenset({"raw_sha256", "raw_size", "requirement_lines"})
+
+
+def _lock_evidence_to_dict(evidence: LockEvidence) -> dict[str, object]:
+    return {
+        "raw_sha256": evidence.raw_sha256,
+        "raw_size": evidence.raw_size,
+        "requirement_lines": list(evidence.requirement_lines),
+    }
+
+
+def _lock_evidence_from_dict(value: object) -> LockEvidence:
+    mapping = _expect_mapping(value, "LockEvidence")
+    _closed_fields(mapping, _LOCK_EVIDENCE_FIELDS, "LockEvidence")
+    return LockEvidence(
+        raw_sha256=_expect_str(mapping["raw_sha256"], "LockEvidence.raw_sha256"),
+        raw_size=_expect_int(mapping["raw_size"], "LockEvidence.raw_size"),
+        requirement_lines=_expect_str_list(mapping["requirement_lines"], "LockEvidence.requirement_lines"),
+    )
+
+
+@dataclass(frozen=True, slots=True)
 class CandidateLock:
     digest: str
     exclude_newer: str
     resolved_packages: tuple[ResolvedPackage, ...]
     candidates: tuple[CandidatePackage, ...]
+    lock_evidence: LockEvidence
 
     def __post_init__(self) -> None:
         _validate_sha256(self.digest, "CandidateLock.digest")
-        _validate_non_empty_str(self.exclude_newer, "CandidateLock.exclude_newer")
+        _validate_utc_timestamp(self.exclude_newer, "CandidateLock.exclude_newer")
         resolved_packages = _validate_tuple(self.resolved_packages, "CandidateLock.resolved_packages")
         if not resolved_packages:
             raise ValueError("CandidateLock.resolved_packages must not be empty")
@@ -478,9 +849,17 @@ class CandidateLock:
                 raise ValueError(
                     f"CandidateLock.candidates[{candidate.name}] does not match its resolved_packages entry"
                 )
+            if candidate.requirement != f"{candidate.name}=={candidate.version}":
+                raise ValueError(f"CandidateLock.candidates[{candidate.name}] requirement is not an exact pin")
+        if not isinstance(self.lock_evidence, LockEvidence):
+            raise ValueError("CandidateLock.lock_evidence must be a LockEvidence record")
+        if self.lock_evidence.raw_sha256 != self.digest:
+            raise ValueError("CandidateLock.lock_evidence must witness the raw bytes CandidateLock.digest names")
+        if self.lock_evidence.requirement_lines != LockEvidence.derive_lines(resolved_packages):
+            raise ValueError("CandidateLock.lock_evidence requirement_lines contradict the resolved packages")
 
 
-_CANDIDATE_LOCK_FIELDS = frozenset({"digest", "exclude_newer", "resolved_packages", "candidates"})
+_CANDIDATE_LOCK_FIELDS = frozenset({"digest", "exclude_newer", "resolved_packages", "candidates", "lock_evidence"})
 
 
 def _candidate_lock_to_dict(lock: CandidateLock) -> dict[str, object]:
@@ -489,6 +868,7 @@ def _candidate_lock_to_dict(lock: CandidateLock) -> dict[str, object]:
         "exclude_newer": lock.exclude_newer,
         "resolved_packages": [_resolved_package_to_dict(package) for package in lock.resolved_packages],
         "candidates": [_candidate_package_to_dict(package) for package in lock.candidates],
+        "lock_evidence": _lock_evidence_to_dict(lock.lock_evidence),
     }
 
 
@@ -507,6 +887,7 @@ def _candidate_lock_from_dict(value: object) -> CandidateLock:
         exclude_newer=_expect_str(mapping["exclude_newer"], "CandidateLock.exclude_newer"),
         resolved_packages=resolved_packages,
         candidates=candidates,
+        lock_evidence=_lock_evidence_from_dict(mapping["lock_evidence"]),
     )
 
 
@@ -538,6 +919,8 @@ class PathRecord:
         elif self.symlink_target is not None:
             raise ValueError("PathRecord.symlink_target must be None unless kind is symlink")
         if self.content_sha256 is not None:
+            if self.kind != "file":
+                raise ValueError("PathRecord.content_sha256 must be None unless kind is file")
             _validate_sha256(self.content_sha256, "PathRecord.content_sha256")
 
 
@@ -580,6 +963,35 @@ def _path_record_from_dict(value: object) -> PathRecord:
     )
 
 
+def root_manifest_digest(
+    *,
+    root: str,
+    kind: str,
+    source_revision: str | None,
+    inventory_digest: str,
+    inventory_paths: tuple[str, ...],
+    excluded_paths: tuple[str, ...],
+    hashed_paths: tuple[PathRecord, ...],
+    metadata_paths: tuple[PathRecord, ...],
+) -> str:
+    """The canonical digest of one root manifest, recomputed from its own fields."""
+
+    return sha256_bytes(
+        canonical_json(
+            {
+                "root": root,
+                "kind": kind,
+                "source_revision": source_revision,
+                "inventory_digest": inventory_digest,
+                "inventory_paths": list(inventory_paths),
+                "excluded_paths": list(excluded_paths),
+                "hashed_paths": [_path_record_to_dict(record) for record in hashed_paths],
+                "metadata_paths": [_path_record_to_dict(record) for record in metadata_paths],
+            }
+        )
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class RootManifest:
     root: str
@@ -587,6 +999,8 @@ class RootManifest:
     source_revision: str | None
     inventory_digest: str
     inventory_count: int
+    inventory_paths: tuple[str, ...]
+    excluded_paths: tuple[str, ...]
     hashed_paths: tuple[PathRecord, ...]
     metadata_paths: tuple[PathRecord, ...]
     manifest_digest: str
@@ -603,6 +1017,14 @@ class RootManifest:
         _validate_sha256(self.inventory_digest, "RootManifest.inventory_digest")
         _validate_sha256(self.manifest_digest, "RootManifest.manifest_digest")
         _validate_int(self.inventory_count, "RootManifest.inventory_count", minimum=0)
+        inventory_paths = _validate_tuple(self.inventory_paths, "RootManifest.inventory_paths")
+        for path in inventory_paths:
+            _validate_relative_path(path, "RootManifest.inventory_paths item")
+        _validate_sorted_unique(cast("Sequence[str]", inventory_paths), "RootManifest.inventory_paths")
+        excluded_paths = _validate_tuple(self.excluded_paths, "RootManifest.excluded_paths")
+        for path in excluded_paths:
+            _validate_relative_path(path, "RootManifest.excluded_paths item")
+        _validate_sorted_unique(cast("Sequence[str]", excluded_paths), "RootManifest.excluded_paths")
         hashed_paths = _validate_tuple(self.hashed_paths, "RootManifest.hashed_paths")
         metadata_paths = _validate_tuple(self.metadata_paths, "RootManifest.metadata_paths")
         for record in hashed_paths:
@@ -612,6 +1034,77 @@ class RootManifest:
         _validate_sorted_unique([record.path for record in metadata_paths], "RootManifest.metadata_paths")
         all_paths = [record.path for record in (*hashed_paths, *metadata_paths)]
         _validate_unique_names(all_paths, "RootManifest paths")
+        if self.inventory_count != len(inventory_paths):
+            raise ValueError("RootManifest.inventory_count must equal the number of carried inventory_paths")
+        hashed_names = {record.path for record in hashed_paths}
+        missing = sorted(set(inventory_paths) - hashed_names)
+        if missing:
+            raise ValueError(f"RootManifest.inventory_paths must be fully hashed: {missing[:5]}")
+        expected = root_manifest_digest(
+            root=self.root,
+            kind=self.kind,
+            source_revision=self.source_revision,
+            inventory_digest=self.inventory_digest,
+            inventory_paths=self.inventory_paths,
+            excluded_paths=self.excluded_paths,
+            hashed_paths=self.hashed_paths,
+            metadata_paths=self.metadata_paths,
+        )
+        if self.manifest_digest != expected:
+            raise ValueError("RootManifest.manifest_digest must be recomputable from its canonical fields")
+
+    @staticmethod
+    def build(
+        *,
+        root: str,
+        kind: str,
+        source_revision: str | None,
+        inventory_digest: str,
+        inventory_paths: tuple[str, ...],
+        excluded_paths: tuple[str, ...],
+        hashed_paths: tuple[PathRecord, ...],
+        metadata_paths: tuple[PathRecord, ...],
+    ) -> RootManifest:
+        return RootManifest(
+            root=root,
+            kind=kind,
+            source_revision=source_revision,
+            inventory_digest=inventory_digest,
+            inventory_count=len(inventory_paths),
+            inventory_paths=inventory_paths,
+            excluded_paths=excluded_paths,
+            hashed_paths=hashed_paths,
+            metadata_paths=metadata_paths,
+            manifest_digest=root_manifest_digest(
+                root=root,
+                kind=kind,
+                source_revision=source_revision,
+                inventory_digest=inventory_digest,
+                inventory_paths=inventory_paths,
+                excluded_paths=excluded_paths,
+                hashed_paths=hashed_paths,
+                metadata_paths=metadata_paths,
+            ),
+        )
+
+    @property
+    def in_scope_count(self) -> int:
+        return len(self.hashed_paths) + len(self.metadata_paths)
+
+    @property
+    def excluded_count(self) -> int:
+        return len(self.excluded_paths)
+
+    @property
+    def observed_count(self) -> int:
+        return self.in_scope_count + self.excluded_count
+
+    def to_dict(self) -> dict[str, object]:
+        return _root_manifest_to_dict(self)
+
+    @staticmethod
+    def from_dict(value: Mapping[str, object]) -> RootManifest:
+        return _root_manifest_from_dict(value)
 
 
 _ROOT_MANIFEST_FIELDS = frozenset(
@@ -621,6 +1114,8 @@ _ROOT_MANIFEST_FIELDS = frozenset(
         "source_revision",
         "inventory_digest",
         "inventory_count",
+        "inventory_paths",
+        "excluded_paths",
         "hashed_paths",
         "metadata_paths",
         "manifest_digest",
@@ -635,6 +1130,8 @@ def _root_manifest_to_dict(manifest: RootManifest) -> dict[str, object]:
         "source_revision": manifest.source_revision,
         "inventory_digest": manifest.inventory_digest,
         "inventory_count": manifest.inventory_count,
+        "inventory_paths": list(manifest.inventory_paths),
+        "excluded_paths": list(manifest.excluded_paths),
         "hashed_paths": [_path_record_to_dict(record) for record in manifest.hashed_paths],
         "metadata_paths": [_path_record_to_dict(record) for record in manifest.metadata_paths],
         "manifest_digest": manifest.manifest_digest,
@@ -650,6 +1147,8 @@ def _root_manifest_from_dict(value: object) -> RootManifest:
         source_revision=_optional_str(mapping["source_revision"], "RootManifest.source_revision"),
         inventory_digest=_expect_str(mapping["inventory_digest"], "RootManifest.inventory_digest"),
         inventory_count=_expect_int(mapping["inventory_count"], "RootManifest.inventory_count"),
+        inventory_paths=_expect_str_list(mapping["inventory_paths"], "RootManifest.inventory_paths"),
+        excluded_paths=_expect_str_list(mapping["excluded_paths"], "RootManifest.excluded_paths"),
         hashed_paths=tuple(
             _path_record_from_dict(item) for item in _expect_list(mapping["hashed_paths"], "RootManifest.hashed_paths")
         ),
@@ -672,6 +1171,7 @@ class WriteDelta:
     after_manifest_digest: str
     declared: tuple[str, ...]
     unexpected: tuple[str, ...]
+    control_changes: tuple[str, ...]
 
     def __post_init__(self) -> None:
         _validate_absolute_path(self.root, "WriteDelta.root")
@@ -681,10 +1181,24 @@ class WriteDelta:
         _validate_sha256(self.after_manifest_digest, "WriteDelta.after_manifest_digest")
         _validate_sorted_unique(_validate_tuple(self.declared, "WriteDelta.declared"), "WriteDelta.declared")
         _validate_sorted_unique(_validate_tuple(self.unexpected, "WriteDelta.unexpected"), "WriteDelta.unexpected")
+        _validate_sorted_unique(
+            _validate_tuple(self.control_changes, "WriteDelta.control_changes"), "WriteDelta.control_changes"
+        )
+        overlap = set(self.declared) & set(self.unexpected)
+        if overlap:
+            raise ValueError(f"WriteDelta declared and unexpected paths overlap: {sorted(overlap)}")
 
 
 _WRITE_DELTA_FIELDS = frozenset(
-    {"root", "kind", "before_manifest_digest", "after_manifest_digest", "declared", "unexpected"}
+    {
+        "root",
+        "kind",
+        "before_manifest_digest",
+        "after_manifest_digest",
+        "declared",
+        "unexpected",
+        "control_changes",
+    }
 )
 
 
@@ -696,6 +1210,7 @@ def _write_delta_to_dict(delta: WriteDelta) -> dict[str, object]:
         "after_manifest_digest": delta.after_manifest_digest,
         "declared": list(delta.declared),
         "unexpected": list(delta.unexpected),
+        "control_changes": list(delta.control_changes),
     }
 
 
@@ -707,14 +1222,9 @@ def _write_delta_from_dict(value: object) -> WriteDelta:
         kind=_expect_str(mapping["kind"], "WriteDelta.kind"),
         before_manifest_digest=_expect_str(mapping["before_manifest_digest"], "WriteDelta.before_manifest_digest"),
         after_manifest_digest=_expect_str(mapping["after_manifest_digest"], "WriteDelta.after_manifest_digest"),
-        declared=tuple(
-            _expect_str(item, "WriteDelta.declared item")
-            for item in _expect_list(mapping["declared"], "WriteDelta.declared")
-        ),
-        unexpected=tuple(
-            _expect_str(item, "WriteDelta.unexpected item")
-            for item in _expect_list(mapping["unexpected"], "WriteDelta.unexpected")
-        ),
+        declared=_expect_str_list(mapping["declared"], "WriteDelta.declared"),
+        unexpected=_expect_str_list(mapping["unexpected"], "WriteDelta.unexpected"),
+        control_changes=_expect_str_list(mapping["control_changes"], "WriteDelta.control_changes"),
     )
 
 
@@ -726,10 +1236,14 @@ class AdmissionReceipt:
     schema_version: int
     evaluation_contract_version: str
     evaluation_identity: str
+    run_identity: str
     status: str
     started_at: str
     ended_at: str
     budgets: tuple[PhaseBudget, ...]
+    evaluator: EvaluatorIdentity | None
+    bootstrap_environment: BootstrapEnvironmentIdentity | None
+    runtime_binding: RuntimeBinding | None
     production_identity_before: ProductionIdentity
     production_identity_after: ProductionIdentity
     candidate_lock: CandidateLock
@@ -753,7 +1267,8 @@ class AdmissionReceipt:
                 f"AdmissionReceipt evaluation_contract_version must be {EVALUATION_CONTRACT_VERSION!r}, "
                 f"got {self.evaluation_contract_version!r}"
             )
-        _validate_non_empty_str(self.evaluation_identity, "AdmissionReceipt.evaluation_identity")
+        _validate_sha256(self.evaluation_identity, "AdmissionReceipt.evaluation_identity")
+        _validate_sha256(self.run_identity, "AdmissionReceipt.run_identity")
         if self.status not in _ADMISSION_STATUSES:
             raise ValueError(f"AdmissionReceipt.status must be one of {sorted(_ADMISSION_STATUSES)}")
         _validate_non_empty_str(self.started_at, "AdmissionReceipt.started_at")
@@ -781,44 +1296,112 @@ class AdmissionReceipt:
         _validate_sha256(self.artifact_tree_digest, "AdmissionReceipt.artifact_tree_digest")
         _validate_non_empty_str(self.next_action, "AdmissionReceipt.next_action")
         if self.status == "pass":
-            if self.production_identity_before != self.production_identity_after:
+            self._require_canonical_pass(
+                budgets, environments, service_configs, root_manifests_before, root_manifests_after, write_deltas
+            )
+
+    def _require_canonical_pass(
+        self,
+        budgets: tuple[PhaseBudget, ...],
+        environments: tuple[EnvironmentIdentity, ...],
+        service_configs: tuple[ServiceConfigIdentity, ...],
+        root_manifests_before: tuple[RootManifest, ...],
+        root_manifests_after: tuple[RootManifest, ...],
+        write_deltas: tuple[WriteDelta, ...],
+    ) -> None:
+        """A ``pass`` receipt must carry the complete Phase 1 evidence set."""
+
+        if self.issues:
+            raise ValueError("AdmissionReceipt status is pass but it carries issues")
+        if self.next_action != NEXT_ACTION_PASS:
+            raise ValueError(f"AdmissionReceipt status is pass but next_action is not {NEXT_ACTION_PASS!r}")
+        started = _validate_utc_timestamp(self.started_at, "AdmissionReceipt.started_at")
+        ended = _validate_utc_timestamp(self.ended_at, "AdmissionReceipt.ended_at")
+        if ended < started:
+            raise ValueError("AdmissionReceipt.ended_at must not precede started_at")
+        budget_names = {budget.name for budget in budgets}
+        if budget_names != set(DEFAULT_PHASE_BUDGETS):
+            raise ValueError(
+                f"AdmissionReceipt status is pass but budgets are not the frozen Phase 1 set: {sorted(budget_names)}"
+            )
+        admission = next(budget for budget in budgets if budget.name == "admission")
+        if admission.seconds <= 0:
+            raise ValueError("AdmissionReceipt status is pass but the admission budget is not positive")
+        if self.evaluator is None:
+            raise ValueError("AdmissionReceipt status is pass but no evaluator identity is bound")
+        if self.bootstrap_environment is None:
+            raise ValueError("AdmissionReceipt status is pass but no bootstrap_environment identity is bound")
+        if self.runtime_binding is None:
+            raise ValueError("AdmissionReceipt status is pass but no runtime_binding is recorded")
+        if self.runtime_binding.lock_digest != self.candidate_lock.digest:
+            raise ValueError("AdmissionReceipt status is pass but runtime_binding names another candidate lock")
+        if {identity.name for identity in environments} != _REQUIRED_ENVIRONMENT_NAMES:
+            raise ValueError(
+                f"AdmissionReceipt status is pass but environments are not {sorted(_REQUIRED_ENVIRONMENT_NAMES)}"
+            )
+        if {identity.backend for identity in service_configs} != _SERVICE_CONFIG_BACKENDS:
+            raise ValueError(
+                f"AdmissionReceipt status is pass but service_configs are not {sorted(_SERVICE_CONFIG_BACKENDS)}"
+            )
+        if self.production_identity_before != self.production_identity_after:
+            raise ValueError(
+                "AdmissionReceipt status is pass but production identity changed between before and after"
+            )
+        before_by_root = {manifest.root: manifest for manifest in root_manifests_before}
+        after_by_root = {manifest.root: manifest for manifest in root_manifests_after}
+        delta_roots = {delta.root for delta in write_deltas}
+        if not before_by_root:
+            raise ValueError("AdmissionReceipt status is pass but it carries no root manifest")
+        if set(before_by_root) != delta_roots or set(after_by_root) != delta_roots:
+            raise ValueError(
+                "AdmissionReceipt status is pass but root manifest roots do not match write_deltas roots"
+            )
+        for delta in write_deltas:
+            before_manifest = before_by_root[delta.root]
+            after_manifest = after_by_root[delta.root]
+            if delta.before_manifest_digest != before_manifest.manifest_digest:
                 raise ValueError(
-                    "AdmissionReceipt status is pass but production identity changed between before and after"
+                    f"AdmissionReceipt status is pass but write_deltas[{delta.root}]."
+                    "before_manifest_digest does not match its root_manifests_before entry"
                 )
-            before_by_root = {manifest.root: manifest for manifest in root_manifests_before}
-            after_by_root = {manifest.root: manifest for manifest in root_manifests_after}
-            delta_roots = {delta.root for delta in write_deltas}
-            if set(before_by_root) != delta_roots or set(after_by_root) != delta_roots:
+            if delta.after_manifest_digest != after_manifest.manifest_digest:
                 raise ValueError(
-                    "AdmissionReceipt status is pass but root manifest roots do not match write_deltas roots"
+                    f"AdmissionReceipt status is pass but write_deltas[{delta.root}]."
+                    "after_manifest_digest does not match its root_manifests_after entry"
                 )
-            for delta in write_deltas:
-                before_manifest = before_by_root[delta.root]
-                after_manifest = after_by_root[delta.root]
-                if delta.before_manifest_digest != before_manifest.manifest_digest:
-                    raise ValueError(
-                        f"AdmissionReceipt status is pass but write_deltas[{delta.root}]."
-                        "before_manifest_digest does not match its root_manifests_before entry"
-                    )
-                if delta.after_manifest_digest != after_manifest.manifest_digest:
-                    raise ValueError(
-                        f"AdmissionReceipt status is pass but write_deltas[{delta.root}]."
-                        "after_manifest_digest does not match its root_manifests_after entry"
-                    )
-                if delta.unexpected:
-                    raise ValueError(
-                        f"AdmissionReceipt status is pass but write_deltas[{delta.root}] has unexpected paths"
-                    )
+            if delta.unexpected:
+                raise ValueError(
+                    f"AdmissionReceipt status is pass but write_deltas[{delta.root}] has unexpected paths"
+                )
+            if delta.declared:
+                raise ValueError(
+                    f"AdmissionReceipt status is pass but write_deltas[{delta.root}] has declared mutations; "
+                    "admission declares none"
+                )
+            if delta.control_changes:
+                raise ValueError(
+                    f"AdmissionReceipt status is pass but write_deltas[{delta.root}] has control_changes"
+                )
 
     def to_dict(self) -> dict[str, object]:
         return {
             "schema_version": self.schema_version,
             "evaluation_contract_version": self.evaluation_contract_version,
             "evaluation_identity": self.evaluation_identity,
+            "run_identity": self.run_identity,
             "status": self.status,
             "started_at": self.started_at,
             "ended_at": self.ended_at,
             "budgets": [_phase_budget_to_dict(budget) for budget in self.budgets],
+            "evaluator": None if self.evaluator is None else _evaluator_identity_to_dict(self.evaluator),
+            "bootstrap_environment": (
+                None
+                if self.bootstrap_environment is None
+                else _bootstrap_environment_to_dict(self.bootstrap_environment)
+            ),
+            "runtime_binding": (
+                None if self.runtime_binding is None else _runtime_binding_to_dict(self.runtime_binding)
+            ),
             "production_identity_before": _production_identity_to_dict(self.production_identity_before),
             "production_identity_after": _production_identity_to_dict(self.production_identity_after),
             "candidate_lock": _candidate_lock_to_dict(self.candidate_lock),
@@ -840,18 +1423,25 @@ class AdmissionReceipt:
                 f"AdmissionReceipt schema_version must be {ADMISSION_RECEIPT_SCHEMA_VERSION}, got {schema_version!r}"
             )
         _closed_fields(value, _ADMISSION_RECEIPT_FIELDS, "AdmissionReceipt")
+        evaluator = value["evaluator"]
+        bootstrap = value["bootstrap_environment"]
+        binding = value["runtime_binding"]
         return AdmissionReceipt(
             schema_version=_expect_int(value["schema_version"], "AdmissionReceipt.schema_version"),
             evaluation_contract_version=_expect_str(
                 value["evaluation_contract_version"], "AdmissionReceipt.evaluation_contract_version"
             ),
             evaluation_identity=_expect_str(value["evaluation_identity"], "AdmissionReceipt.evaluation_identity"),
+            run_identity=_expect_str(value["run_identity"], "AdmissionReceipt.run_identity"),
             status=_expect_str(value["status"], "AdmissionReceipt.status"),
             started_at=_expect_str(value["started_at"], "AdmissionReceipt.started_at"),
             ended_at=_expect_str(value["ended_at"], "AdmissionReceipt.ended_at"),
             budgets=tuple(
                 _phase_budget_from_dict(item) for item in _expect_list(value["budgets"], "AdmissionReceipt.budgets")
             ),
+            evaluator=None if evaluator is None else _evaluator_identity_from_dict(evaluator),
+            bootstrap_environment=None if bootstrap is None else _bootstrap_environment_from_dict(bootstrap),
+            runtime_binding=None if binding is None else _runtime_binding_from_dict(binding),
             production_identity_before=_production_identity_from_dict(value["production_identity_before"]),
             production_identity_after=_production_identity_from_dict(value["production_identity_after"]),
             candidate_lock=_candidate_lock_from_dict(value["candidate_lock"]),
@@ -889,10 +1479,14 @@ _ADMISSION_RECEIPT_FIELDS = frozenset(
         "schema_version",
         "evaluation_contract_version",
         "evaluation_identity",
+        "run_identity",
         "status",
         "started_at",
         "ended_at",
         "budgets",
+        "evaluator",
+        "bootstrap_environment",
+        "runtime_binding",
         "production_identity_before",
         "production_identity_after",
         "candidate_lock",
