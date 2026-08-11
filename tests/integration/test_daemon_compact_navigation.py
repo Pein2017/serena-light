@@ -88,6 +88,40 @@ class _Service:
                     "adapter": {"name": "pyright", "language": "python"},
                     "generations": {"trust": 1, "program": 2, "document": 3, "index": 4},
                 }
+            body_fixture = {
+                "huge-container": ("class Huge:\n" + "    value = 1\n" * 80, True),
+                "large-leaf": ("def large():\n" + "    return 1\n" * 80, False),
+                "enormous-leaf": ("def enormous():\n" + "x" * 50_000, False),
+            }.get(cast(str, kwargs.get("name_path")))
+            if body_fixture is not None:
+                body, has_children = body_fixture
+                return {
+                    "ok": True,
+                    "data": {
+                        "relative_path": "src/huge.py",
+                        "sha256": "a" * 64,
+                        "symbol": {
+                            "name": cast(str, kwargs["name_path"]),
+                            "name_path": cast(str, kwargs["name_path"]),
+                            "kind": 5 if has_children else 12,
+                            "range": {
+                                "start": {"line": 0, "column": 0, "text_offset": 0, "byte_offset": 0},
+                                "end": {
+                                    "line": body.count("\n"),
+                                    "column": 0,
+                                    "text_offset": len(body),
+                                    "byte_offset": len(body),
+                                },
+                            },
+                            "body": body,
+                            "has_children": has_children,
+                        },
+                    },
+                    "workspace": workspace,
+                    "adapter": {"name": "pyright", "language": "python"},
+                    "generations": {"trust": 1, "program": 2, "document": 3, "index": 4},
+                    "truncation": {"truncated": False, "omitted_count": 0},
+                }
             return {
                 "ok": True,
                 "data": {
@@ -614,6 +648,57 @@ def test_real_fastmcp_diagnostics_rejects_a_first_finding_that_cannot_fit() -> N
     assert all(
         call[1]["max_answer_chars"] == 2_147_483_647 for call in service.semantic_calls
     )
+
+
+def test_real_fastmcp_exact_body_errors_select_all_three_closed_recoveries() -> None:
+    service = _Service()
+    token = "b" * 48
+    authorization = f"Bearer {token}"
+    app = create_daemon_app(
+        service=cast(DaemonService, service),
+        bearer=BearerSecret(token),
+        daemon_id=str(uuid4()),
+    )
+
+    with TestClient(app, base_url="http://127.0.0.1:8000", client=("127.0.0.1", 50108)) as client:
+        session_id = _initialize(client, authorization)
+        results = {
+            name: _tool_call(
+                client,
+                authorization,
+                session_id,
+                request_id,
+                "find_symbol",
+                {
+                    "relative_path": "src/huge.py",
+                    "name_path": name,
+                    "include_body": True,
+                    "max_answer_chars": 512,
+                },
+                service.lease_id,
+            )
+            for request_id, name in enumerate(
+                ("huge-container", "large-leaf", "enormous-leaf"),
+                start=2,
+            )
+        }
+
+    expected = {
+        "huge-container": "overview_then_find_child_symbol",
+        "large-leaf": "retry_with_minimum_answer_chars",
+        "enormous-leaf": "find_symbol_location_then_exact_file_read",
+    }
+    for name, result in results.items():
+        text = result["content"][0]["text"]
+        payload = result["structuredContent"]
+        assert text == json.dumps(payload, ensure_ascii=False, allow_nan=False, separators=(",", ":"))
+        assert len(text) <= 512
+        assert payload["ok"] is False
+        details = payload["error"]["details"]
+        assert details["field"] == "max_answer_chars"
+        assert details["minimum_required_chars"] > 512
+        assert details["next_action"] == expected[name]
+        assert "body" not in text and "has_children" not in text
 
 
 def test_real_fastmcp_diagnostics_types_malformed_internal_truncation() -> None:
