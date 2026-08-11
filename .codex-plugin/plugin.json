@@ -1,6 +1,6 @@
 {
   "name": "serena-light",
-  "version": "0.1.0+codex.20260811081625",
+  "version": "0.1.0+codex.20260811122708",
   "description": "Experimental shared semantic code navigation and diagnostics for coding agents.",
   "author": {
     "name": "Pein",
