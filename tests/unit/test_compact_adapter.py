@@ -528,6 +528,62 @@ def test_malformed_navigation_fallback_obeys_the_public_answer_budget() -> None:
     assert "workspace" not in payload
 
 
+def test_malformed_navigation_fallback_sheds_oversized_item_owned_authorities() -> None:
+    authority_name = "item-owned-authority-" + "a" * 700
+    authority = {
+        "adapter": {"name": authority_name, "language": "python"},
+        "generations": {"trust": 2, "program": 3, "document": 4, "index": 5},
+    }
+    without_authority_shedding = {
+        "ok": False,
+        "error": {
+            "code": "UNSUPPORTED",
+            "message": "operation is unsupported",
+            "retry": None,
+            "details": {
+                "tool": "find_symbol",
+                "reason": "malformed_navigation_success",
+                "authorities": [authority],
+            },
+        },
+    }
+    assert len(canonical_json(without_authority_shedding)) > 512
+
+    root = "/" + "/".join("r" * 200 for _ in range(5))
+    envelope = _envelope(
+        {
+            "scope": "configured_program",
+            "adapters": [],
+            "symbols": [
+                {
+                    "name_path": "Broken",
+                    "kind": 12,
+                    **authority,
+                }
+            ],
+        }
+    )
+    envelope.pop("adapter")
+    envelope.pop("generations")
+    envelope["workspace"] = {"root": root, "kind": "git", "working_subdirectory": root}
+
+    result = compact_navigation_result("find_symbol", envelope, max_answer_chars=512)
+    text = cast(types.TextContent, result.content[0]).text
+    payload = _payload(result)
+    details = payload["error"]["details"]
+
+    assert len(text) <= 512
+    assert json.loads(text) == result.structuredContent == payload
+    assert payload["ok"] is False
+    assert payload["error"]["code"] == "UNSUPPORTED"
+    assert payload["error"]["message"] == "operation is unsupported"
+    assert payload["error"]["retry"] is None
+    assert details["reason"] == "malformed_navigation_success"
+    assert "authorities" not in details
+    assert authority_name not in text
+    assert "workspace" not in payload
+
+
 def test_multi_adapter_minimum_budget_error_preserves_all_item_authorities() -> None:
     symbols = [
         {
