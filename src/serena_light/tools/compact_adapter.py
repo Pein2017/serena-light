@@ -23,6 +23,7 @@ from serena_light.tools.compact import (
     CompactTarget,
     ExactBodyRecovery,
     LocatedCompactRecord,
+    canonical_json,
     compact_range,
     compact_raw_lsp_range,
     ordered_records,
@@ -71,6 +72,7 @@ def compact_navigation_result(
 ) -> types.CallToolResult:
     """Convert one successful rich internal navigation envelope without leaks."""
 
+    budget = DEFAULT_MAX_ANSWER_CHARS
     authority_workspace: WorkspaceMetadata | None = None
     authority_adapter: AdapterMetadata | None = None
     authority_generations: GenerationMetadata | None = None
@@ -151,6 +153,7 @@ def compact_navigation_result(
             adapter=authority_adapter,
             generations=authority_generations,
             authorities=error_authorities,
+            max_answer_chars=budget,
         )
 
 
@@ -581,7 +584,9 @@ def _malformed_result(
     adapter: AdapterMetadata | None = None,
     generations: GenerationMetadata | None = None,
     authorities: Sequence[Mapping[str, Any]] = (),
+    max_answer_chars: int = DEFAULT_MAX_ANSWER_CHARS,
 ) -> types.CallToolResult:
+    budget = validate_max_answer_chars(max_answer_chars)
     details: dict[str, Any] = {"tool": operation, "reason": "malformed_navigation_success"}
     if authorities:
         details["authorities"] = list(authorities)
@@ -592,7 +597,29 @@ def _malformed_result(
         adapter=adapter,
         generations=generations,
     )
-    return render_payload(envelope.to_dict())
+    return render_payload(_bound_malformed_navigation_error(envelope.to_dict(), budget))
+
+
+def _bound_malformed_navigation_error(payload: dict[str, Any], budget: int) -> dict[str, Any]:
+    """Keep the closed malformed reason while dropping unbounded optional context."""
+
+    if len(canonical_json(payload)) <= budget:
+        return payload
+    for field in ("workspace", "adapter", "generations"):
+        payload.pop(field, None)
+        if len(canonical_json(payload)) <= budget:
+            return payload
+    error_value = payload.get("error")
+    if isinstance(error_value, dict):
+        details = error_value.get("details")
+        if isinstance(details, dict):
+            details.pop("authorities", None)
+            if len(canonical_json(payload)) <= budget:
+                return payload
+            details.pop("tool", None)
+            if len(canonical_json(payload)) <= budget:
+                return payload
+    raise ValueError("minimum malformed navigation error exceeds the public answer budget")
 
 
 __all__ = ("NAVIGATION_OPERATIONS", "compact_navigation_result")

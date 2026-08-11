@@ -14,6 +14,7 @@ import posixpath
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
+from hashlib import sha256
 from pathlib import PurePosixPath
 from types import MappingProxyType
 from typing import Any, Literal, cast
@@ -627,7 +628,7 @@ def _recovery_name_path(recovery: ExactBodyRecovery | None) -> str | None:
 
 
 def _bound_minimum_required_chars_error(payload: dict[str, Any], budget: int) -> dict[str, Any]:
-    """Shed whole optional authority fields while retaining the measured recovery."""
+    """Shed optional authority, then replace an oversized target with a location recovery."""
 
     if len(canonical_json(payload)) <= budget:
         return payload
@@ -642,7 +643,32 @@ def _bound_minimum_required_chars_error(payload: dict[str, Any], budget: int) ->
             details.pop("authorities", None)
             if len(canonical_json(payload)) <= budget:
                 return payload
+            if _replace_oversized_overview_target(details) and len(canonical_json(payload)) <= budget:
+                return payload
     raise ValueError("minimum required chars error exceeds the public answer budget")
+
+
+def _replace_oversized_overview_target(details: dict[str, Any]) -> bool:
+    """Keep a fixed-size target witness when exact strings cannot support an overview call."""
+
+    if details.get("next_action") != "overview_then_find_child_symbol":
+        return False
+    relative_path = details.get("relative_path")
+    name_path = details.get("name_path")
+    if not isinstance(relative_path, str) or not isinstance(name_path, str):
+        return False
+    details.pop("relative_path")
+    details.pop("name_path")
+    details["next_action"] = "find_symbol_location_then_exact_file_read"
+    details["target"] = {
+        "relative_path": _target_identity(relative_path),
+        "name_path": _target_identity(name_path),
+    }
+    return True
+
+
+def _target_identity(value: str) -> dict[str, Any]:
+    return {"length": len(value), "sha256": sha256(value.encode()).hexdigest()}
 
 
 def _validate_kind_filter(value: Sequence[str] | None, field: str) -> tuple[str, ...]:

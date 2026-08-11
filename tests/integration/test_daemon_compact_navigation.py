@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from collections.abc import Mapping
 from typing import Any, cast
@@ -13,6 +14,10 @@ from serena_light.lsp.positions import FileSnapshot, PositionEncoding
 from serena_light.runtime_files import BearerSecret
 from serena_light.tools.envelopes import WorkspaceMetadata
 from serena_light.tools.navigation import DocumentNavigation, DocumentSymbolInput, find_symbol
+
+_OVERFLOW_WORKSPACE_ROOT = "/" + "/".join("r" * 200 for _ in range(5))
+_OVERFLOW_TARGET_PATH = f"src/{'p' * 200}.py"
+_OVERFLOW_TARGET_NAME_PATH = "N" * 200
 
 
 class _Service:
@@ -131,6 +136,12 @@ class _Service:
                 "global-huge-container": ("global", "src/global_target.py", "Global/Huge"),
                 "directory-huge-container": ("directory", "src/nested/directory_target.py", "Directory/Huge"),
             }.get(cast(str, kwargs.get("name_path")))
+            if cast(str, kwargs.get("name_path")) == _OVERFLOW_TARGET_NAME_PATH:
+                scoped_container = (
+                    "directory" if kwargs.get("relative_path") is not None else "global",
+                    _OVERFLOW_TARGET_PATH,
+                    _OVERFLOW_TARGET_NAME_PATH,
+                )
             if scoped_container is not None:
                 scope, target_path, target_name_path = scoped_container
                 body = "class Huge:\n" + "    value = 1\n" * 80
@@ -805,6 +816,64 @@ def test_real_fastmcp_scoped_container_recovery_identifies_the_matched_target_fi
         assert details["next_action"] == "overview_then_find_child_symbol"
         assert (details["relative_path"], details["name_path"]) == expected_targets[scope]
         assert "body" not in text and "has_children" not in text
+
+
+def test_real_fastmcp_scoped_container_recovery_uses_bounded_location_action_when_target_will_not_fit() -> None:
+    assert (len(_OVERFLOW_WORKSPACE_ROOT), len(_OVERFLOW_TARGET_PATH), len(_OVERFLOW_TARGET_NAME_PATH)) == (
+        1005,
+        207,
+        200,
+    )
+    service = _Service(workspace_root=_OVERFLOW_WORKSPACE_ROOT)
+    token = "d" * 48
+    authorization = f"Bearer {token}"
+    app = create_daemon_app(
+        service=cast(DaemonService, service),
+        bearer=BearerSecret(token),
+        daemon_id=str(uuid4()),
+    )
+
+    with TestClient(app, base_url="http://127.0.0.1:8000", client=("127.0.0.1", 50110)) as client:
+        session_id = _initialize(client, authorization)
+        results = {
+            scope: _tool_call(
+                client,
+                authorization,
+                session_id,
+                request_id,
+                "find_symbol",
+                {
+                    "name_path": name,
+                    "include_body": True,
+                    "max_answer_chars": 512,
+                    **({"relative_path": "src"} if scope == "directory" else {}),
+                },
+                service.lease_id,
+            )
+            for request_id, (scope, name) in enumerate(
+                (("global", _OVERFLOW_TARGET_NAME_PATH), ("directory", _OVERFLOW_TARGET_NAME_PATH)),
+                start=2,
+            )
+        }
+
+    for result in results.values():
+        text = result["content"][0]["text"]
+        payload = result["structuredContent"]
+        details = payload["error"]["details"]
+        assert text == json.dumps(payload, ensure_ascii=False, allow_nan=False, separators=(",", ":"))
+        assert len(text) <= 512
+        assert payload["ok"] is False
+        assert payload["error"]["code"] == "INVALID_INPUT"
+        assert details["field"] == "max_answer_chars"
+        assert details["minimum_required_chars"] > 512
+        assert details["next_action"] == "find_symbol_location_then_exact_file_read"
+        assert "relative_path" not in details and "name_path" not in details
+        assert details["target"] == {
+            "relative_path": {"length": 207, "sha256": hashlib.sha256(_OVERFLOW_TARGET_PATH.encode()).hexdigest()},
+            "name_path": {"length": 200, "sha256": hashlib.sha256(_OVERFLOW_TARGET_NAME_PATH.encode()).hexdigest()},
+        }
+        assert "workspace" not in payload
+        assert _OVERFLOW_TARGET_PATH not in text and _OVERFLOW_TARGET_NAME_PATH not in text
 
 
 def test_real_fastmcp_diagnostics_types_malformed_internal_truncation() -> None:

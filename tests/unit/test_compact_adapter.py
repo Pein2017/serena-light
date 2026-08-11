@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from collections.abc import Mapping
 from typing import Any, cast
@@ -452,6 +453,79 @@ def test_exact_body_child_fact_selects_recovery_but_never_reaches_success() -> N
     assert fitting["ok"] is True
     assert "has_children" not in json.dumps(fitting, ensure_ascii=False)
     assert "next_action" not in json.dumps(fitting, ensure_ascii=False)
+
+
+def test_unrepresentable_scoped_container_target_uses_bounded_location_recovery() -> None:
+    root = "/" + "/".join("r" * 200 for _ in range(5))
+    target_path = f"src/{'p' * 200}.py"
+    target_name_path = "N" * 200
+    assert (len(root), len(target_path), len(target_name_path)) == (1005, 207, 200)
+    body = "class Huge:\n" + "    value = 1\n" * 80
+    symbol = {
+        "name_path": target_name_path,
+        "kind": 5,
+        "range": _range(0, 0, 4),
+        "body": body,
+        "has_children": True,
+    }
+    global_symbol = {
+        **symbol,
+        "relative_path": target_path,
+        "sha256": _SHA,
+        "location": {"uri": f"file:///repo/{target_path}", "range": _range(0, 0, 4)},
+        "adapter": {"name": "pyright", "language": "python"},
+        "generations": {"trust": 2, "program": 3, "document": 4, "index": 5},
+    }
+    envelopes = (
+        _envelope({"scope": "configured_program", "adapters": [], "symbols": [global_symbol]}),
+        _envelope(
+            {
+                "relative_path": "src",
+                "scope": "directory",
+                "name_path": "Huge",
+                "symbols": [{"relative_path": target_path, "sha256": _SHA, "symbol": symbol}],
+            }
+        ),
+    )
+
+    for envelope in envelopes:
+        envelope["workspace"] = {"root": root, "kind": "git", "working_subdirectory": root}
+        result = compact_navigation_result("find_symbol", envelope, max_answer_chars=512)
+        payload = _payload(result)
+        details = payload["error"]["details"]
+
+        assert len(cast(types.TextContent, result.content[0]).text) <= 512
+        assert payload["ok"] is False
+        assert payload["error"]["code"] == "INVALID_INPUT"
+        assert details["field"] == "max_answer_chars"
+        assert details["minimum_required_chars"] > 512
+        assert details["next_action"] == "find_symbol_location_then_exact_file_read"
+        assert "relative_path" not in details and "name_path" not in details
+        assert details["target"] == {
+            "relative_path": {"length": len(target_path), "sha256": hashlib.sha256(target_path.encode()).hexdigest()},
+            "name_path": {
+                "length": len(target_name_path),
+                "sha256": hashlib.sha256(target_name_path.encode()).hexdigest(),
+            },
+        }
+        assert "workspace" not in payload
+        assert target_path not in json.dumps(payload)
+        assert target_name_path not in json.dumps(payload)
+
+
+def test_malformed_navigation_fallback_obeys_the_public_answer_budget() -> None:
+    root = "/" + "/".join("r" * 200 for _ in range(5))
+    envelope = _envelope({"symbols": [{}]})
+    envelope["workspace"] = {"root": root, "kind": "git", "working_subdirectory": root}
+
+    result = compact_navigation_result("find_symbol", envelope, max_answer_chars=512)
+    payload = _payload(result)
+
+    assert len(cast(types.TextContent, result.content[0]).text) <= 512
+    assert payload["ok"] is False
+    assert payload["error"]["code"] == "UNSUPPORTED"
+    assert payload["error"]["details"] == {"tool": "find_symbol", "reason": "malformed_navigation_success"}
+    assert "workspace" not in payload
 
 
 def test_multi_adapter_minimum_budget_error_preserves_all_item_authorities() -> None:
