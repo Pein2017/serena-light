@@ -312,11 +312,9 @@ def _active_holders(build_root: Path, metadata: DiscoveryMetadata) -> int:
 
 
 def _assert_bound_to(status: Mapping[str, object], *, build_identity: str, workspace: Path) -> None:
-    assert status["build_identity"] == build_identity
-    binding = _mapping(status["binding"])
-    assert Path(cast(str, binding["identity"])).resolve() == workspace
-    runtime_identity = _mapping(_mapping(status["runtime"])["identity"])
-    assert Path(cast(str, runtime_identity["root"])).resolve() == workspace
+    assert _mapping(status["build"])["identity"] == build_identity
+    binding = _mapping(status["workspace"])
+    assert Path(cast(str, binding["root"])).resolve() == workspace
 
 
 async def _wait_until(predicate: Callable[[], bool], *, timeout: float, message: str) -> None:
@@ -388,15 +386,15 @@ def test_real_shared_daemon_serves_concurrent_roots_and_survives_partial_release
             status_c = await other_c.start()
 
             # 1) Concurrent clients lease the same daemon and the same workspace root.
-            assert status_a["daemon_id"] == metadata.daemon_id
-            assert status_b["daemon_id"] == metadata.daemon_id
             _assert_bound_to(status_a, build_identity=build_identity, workspace=shared_root)
             _assert_bound_to(status_b, build_identity=build_identity, workspace=shared_root)
-            assert Path(cast(str, _mapping(status_b["binding"])["working_subdirectory"])).resolve() == nested
+            assert status_a["issues"] == []
+            assert status_b["issues"] == []
+            assert Path(cast(str, _mapping(status_b["workspace"])["working_subdirectory"])).resolve() == nested
 
             # 2) A second root coexists on that same daemon.
-            assert status_c["daemon_id"] == metadata.daemon_id
             _assert_bound_to(status_c, build_identity=build_identity, workspace=other_root)
+            assert status_c["issues"] == []
             assert _active_holders(build_root, metadata) == 3
             assert _read_owned_daemon(build_root)[1] == daemon
 
@@ -422,12 +420,11 @@ def test_real_shared_daemon_serves_concurrent_roots_and_survives_partial_release
             )
             switched_status = await other_c.status()
             _assert_bound_to(switched_status, build_identity=build_identity, workspace=llm_site_packages)
-            switched_runtime_identity = _mapping(_mapping(switched_status["runtime"])["identity"])
+            switched_runtime_identity = _mapping(switched_status["workspace"])
             assert switched_runtime_identity["kind"] == "non_git_read_only"
             assert switched_runtime_identity["python_environment"] == "llm-framework-study"
-            assert switched_runtime_identity["python_interpreter"] == (
-                "/root/miniconda3/envs/llm-framework-study/bin/python"
-            )
+            switched_issues = cast(list[Mapping[str, object]], switched_status["issues"])
+            assert [issue["code"] for issue in switched_issues] == ["SCOPE_INCOMPATIBLE"]
             original = llm_read_only_target.read_bytes()
             denied = await other_c.call_tool(
                 "replace_symbol_body",
@@ -448,9 +445,17 @@ def test_real_shared_daemon_serves_concurrent_roots_and_survives_partial_release
             reactivated_workspace = _mapping(reactivated["workspace"])
             assert Path(cast(str, reactivated_workspace["identity"])).resolve() == llm_site_packages
             assert reactivated_workspace["python_environment"] == "ms"
+            assert reactivated["warnings"] == [
+                {
+                    "code": "PYTHON_ENVIRONMENT_PATH_MISMATCH",
+                    "selected_environment": "ms",
+                    "path_environment": "llm-framework-study",
+                    "next_action": "reactivate_with_path_environment",
+                }
+            ]
             reactivated_status = await other_c.status()
             _assert_bound_to(reactivated_status, build_identity=build_identity, workspace=llm_site_packages)
-            assert _mapping(_mapping(reactivated_status["runtime"])["identity"])["python_environment"] == "ms"
+            assert _mapping(reactivated_status["workspace"])["python_environment"] == "ms"
             assert _active_holders(build_root, metadata) == 3
             assert _read_owned_daemon(build_root)[1] == daemon, "activation must not replace the daemon"
             assert [entry.name for entry in layout.builds_root.iterdir()] == [build_identity]

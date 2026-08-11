@@ -207,13 +207,11 @@ def _migration_status(build_root: Path, metadata: DiscoveryMetadata) -> Mapping[
 
 
 def _assert_binding(status: Mapping[str, object], *, build_identity: str, workspace: Path) -> None:
-    assert status["build_identity"] == build_identity
-    binding = _mapping(status["binding"])
-    assert Path(cast(str, binding["identity"])).resolve() == workspace.resolve()
+    assert _mapping(status["build"])["identity"] == build_identity
+    binding = _mapping(status["workspace"])
+    assert Path(cast(str, binding["root"])).resolve() == workspace.resolve()
     assert Path(cast(str, binding["working_subdirectory"])).resolve() == workspace.resolve()
-    runtime = _mapping(status["runtime"])
-    runtime_identity = _mapping(runtime["identity"])
-    assert Path(cast(str, runtime_identity["root"])).resolve() == workspace.resolve()
+    assert status["issues"] == []
 
 
 async def _wait_for_retirement(

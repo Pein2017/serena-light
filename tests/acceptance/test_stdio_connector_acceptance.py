@@ -277,19 +277,19 @@ async def _run_fresh_stdio_client(
         assert "qualified name path" in descriptions["find_symbol"]
         assert "snippets are opt-in" in descriptions["find_referencing_symbols"]
         assert "meaningful edit group" in descriptions["get_diagnostics_for_file"]
-        assert "not routine preflight" in descriptions["get_runtime_status"]
+        assert "never warms adapters" in descriptions["get_runtime_status"]
 
         status = _data(await client.call_tool("get_runtime_status"))
-        assert status["build_identity"] == (
+        effective_build_identity = (
             compute_build_identity(REPOSITORY_ROOT)
             if expected_build_identity is None
             else expected_build_identity
         )
-        binding = _mapping(status["binding"])
+        assert _mapping(status["build"])["identity"] == effective_build_identity
+        binding = _mapping(status["workspace"])
         assert Path(cast(str, binding["working_subdirectory"])).resolve() == workspace
-        runtime = _mapping(status["runtime"])
-        identity = _mapping(runtime["identity"])
-        assert Path(cast(str, identity["root"])).resolve() == expected_workspace_root
+        assert Path(cast(str, binding["root"])).resolve() == expected_workspace_root
+        assert status["issues"] == []
         if edit_source is not None:
             original = edit_source.read_bytes()
             edited = _data(
@@ -305,8 +305,10 @@ async def _run_fresh_stdio_client(
             )
             assert edited["relative_path"] == edit_source.name
             assert edit_source.read_text() == "def target() -> int:\n    return 2\n"
-        daemon_id = status["daemon_id"]
-        assert isinstance(daemon_id, str)
+        runtime_root = Path(child_environment[cli.ACCEPTANCE_RUNTIME_ROOT_ENV])
+        metadata = _read_daemon(prepare_runtime_layout(runtime_root, effective_build_identity).build_root)
+        assert metadata is not None
+        daemon_id = metadata.daemon_id
         if release_workspace:
             arguments = {"immediate": True} if immediate_release else None
             released = _data(await client.call_tool("release_workspace", arguments))
@@ -397,9 +399,11 @@ async def _run_compact_navigation_stdio_client(
         initialized = await client.initialize()
         assert initialized.serverInfo.name == "serena-light"
         status = _data(await client.call_tool("get_runtime_status"))
-        assert status["build_identity"] == expected_build_identity
-        daemon_id = status["daemon_id"]
-        assert isinstance(daemon_id, str)
+        assert _mapping(status["build"])["identity"] == expected_build_identity
+        runtime_root = Path(child_environment[cli.ACCEPTANCE_RUNTIME_ROOT_ENV])
+        metadata = _read_daemon(prepare_runtime_layout(runtime_root, expected_build_identity).build_root)
+        assert metadata is not None
+        daemon_id = metadata.daemon_id
         observed: list[Mapping[str, object]] = []
         for tool, arguments in cases:
             result = await client.call_tool(tool, dict(arguments))
@@ -629,14 +633,17 @@ class _HeldStdioClient:
                 initialized = await client.initialize()
                 assert initialized.serverInfo.name == "serena-light"
                 status = _data(await client.call_tool("get_runtime_status"))
-                assert status["build_identity"] == self._expected_build_identity
-                binding = _mapping(status["binding"])
+                assert _mapping(status["build"])["identity"] == self._expected_build_identity
+                binding = _mapping(status["workspace"])
                 assert Path(cast(str, binding["working_subdirectory"])).resolve() == self._workspace
-                runtime = _mapping(status["runtime"])
-                identity = _mapping(runtime["identity"])
-                assert Path(cast(str, identity["root"])).resolve() == self._expected_workspace_root
-                daemon_id = status["daemon_id"]
-                assert isinstance(daemon_id, str)
+                assert Path(cast(str, binding["root"])).resolve() == self._expected_workspace_root
+                assert status["issues"] == []
+                runtime_root = Path(self._child_environment[cli.ACCEPTANCE_RUNTIME_ROOT_ENV])
+                metadata = _read_daemon(
+                    prepare_runtime_layout(runtime_root, self._expected_build_identity).build_root
+                )
+                assert metadata is not None
+                daemon_id = metadata.daemon_id
                 self._started.set_result(daemon_id)
                 await self._closed.get()
         except BaseException as exc:
