@@ -547,9 +547,21 @@ def _unsupported(
     operation: str,
     method: str,
 ) -> ErrorEnvelope:
+    details: dict[str, JsonValue] = {
+        "operation": operation,
+        "method": method,
+        "capabilities": cast(JsonValue, capabilities.to_dict()),
+    }
+    if operation == "find_implementations" and not capabilities.raw.implementation:
+        details.update(
+            {
+                "reason": "implementation_provider_unavailable",
+                "next_action": "find_referencing_symbols",
+            }
+        )
     return error(
         ErrorCode.UNSUPPORTED,
-        details={"operation": operation, "method": method, "capabilities": capabilities.to_dict()},
+        details=details,
         workspace=document.workspace,
         adapter=document.adapter,
         generations=document.generations,

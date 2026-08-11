@@ -221,7 +221,8 @@ def test_public_semantic_tools_bind_only_through_meta_and_preserve_envelopes() -
             },
             json={"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}},
         )
-        names = {tool["name"] for tool in listed.json()["result"]["tools"]}
+        tools = listed.json()["result"]["tools"]
+        names = {tool["name"] for tool in tools}
         assert {
             "activate_workspace",
             "release_workspace",
@@ -235,6 +236,18 @@ def test_public_semantic_tools_bind_only_through_meta_and_preserve_envelopes() -
             "get_diagnostics_for_symbol",
             "replace_symbol_body",
         } <= names
+        descriptions = {tool["name"]: tool.get("description", "") for tool in tools}
+        for name in (
+            "get_symbols_overview",
+            "find_symbol",
+            "find_declaration",
+            "find_implementations",
+            "find_referencing_symbols",
+        ):
+            description = " ".join(descriptions[name].split())
+            assert "0-based decoded-text" in description
+            assert "Unicode code-point" in description
+            assert "editor or nl -ba line is the returned line + 1" in description
 
         lease = _data(_call(client, authorization, session, "acquire_lease"))["lease_id"]
         assert isinstance(lease, str)

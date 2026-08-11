@@ -14,6 +14,7 @@ from serena_light.tools.compact import (
     CompactReference,
     CompactSymbolMatch,
     CompactTarget,
+    ExactBodyRecovery,
     LocatedCompactRecord,
     canonical_json,
     compact_range,
@@ -359,6 +360,93 @@ def test_indivisible_body_returns_measured_invalid_input_without_partial_body() 
     }
     assert body not in _text(result)
     assert "def enormous" not in _text(result)
+
+
+def test_oversized_container_recommends_child_navigation_without_partial_body() -> None:
+    body = "class Container:\n" + "    value = 1\n" * 80
+    record = LocatedCompactRecord(
+        "src/huge.py",
+        CompactSymbolMatch("Container", 5, ((0, 0), (81, 0)), body=body),
+        sha256=_SHA_A,
+    )
+
+    result = render_bounded_records(
+        "/repo",
+        [record],
+        max_answer_chars=512,
+        exact_body_recovery=ExactBodyRecovery(has_children=True),
+    )
+
+    details = _structured(result)["error"]["details"]
+    assert details["next_action"] == "overview_then_find_child_symbol"
+    assert details["minimum_required_chars"] > 512
+    assert len(_text(result)) <= 512
+    assert body not in _text(result)
+
+
+def test_oversized_leaf_with_legal_minimum_recommends_exact_budget_retry() -> None:
+    body = "def leaf():\n" + "    return 1\n" * 80
+    record = LocatedCompactRecord(
+        "src/huge.py",
+        CompactSymbolMatch("leaf", 12, ((0, 0), (81, 0)), body=body),
+        sha256=_SHA_A,
+    )
+
+    result = render_bounded_records(
+        "/repo",
+        [record],
+        max_answer_chars=512,
+        exact_body_recovery=ExactBodyRecovery(has_children=False),
+    )
+
+    details = _structured(result)["error"]["details"]
+    assert 512 < details["minimum_required_chars"] <= 50_000
+    assert details["next_action"] == "retry_with_minimum_answer_chars"
+    assert len(_text(result)) <= 512
+    assert body not in _text(result)
+
+
+def test_oversized_leaf_above_public_maximum_recommends_exact_range_read() -> None:
+    body = "def enormous():\n" + "x" * 50_000
+    record = LocatedCompactRecord(
+        "src/enormous.py",
+        CompactSymbolMatch("enormous", 12, ((0, 0), (1, 50_000)), body=body),
+        sha256=_SHA_A,
+    )
+
+    result = render_bounded_records(
+        "/repo",
+        [record],
+        max_answer_chars=512,
+        exact_body_recovery=ExactBodyRecovery(has_children=False),
+    )
+
+    details = _structured(result)["error"]["details"]
+    assert details["minimum_required_chars"] > 50_000
+    assert details["next_action"] == "find_symbol_location_then_exact_file_read"
+    assert len(_text(result)) <= 512
+    assert body not in _text(result)
+
+
+def test_fitting_exact_body_ignores_internal_recovery_fact() -> None:
+    body = "def leaf():\n    return 1\n"
+    record = LocatedCompactRecord(
+        "src/leaf.py",
+        CompactSymbolMatch("leaf", 12, ((0, 0), (2, 0)), body=body),
+        sha256=_SHA_A,
+    )
+
+    result = render_bounded_records(
+        "/repo",
+        [record],
+        max_answer_chars=512,
+        exact_body_recovery=ExactBodyRecovery(has_children=False),
+    )
+
+    assert _structured(result)["ok"] is True
+    assert _structured(result)["data"]["files"][0]["symbols"][0]["body"] == body
+    assert "has_children" not in _text(result)
+    assert "next_action" not in _text(result)
 
 
 def test_flat_minimum_budget_uses_the_first_stable_record_not_a_smaller_later_record() -> None:

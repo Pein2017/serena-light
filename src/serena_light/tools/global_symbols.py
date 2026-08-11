@@ -494,6 +494,7 @@ def _symbol_data(
             LspPosition(symbol.location.range.start.line, symbol.location.range.start.character),
             LspPosition(symbol.location.range.end.line, symbol.location.range.end.character),
         )
+        data["has_children"] = bool(symbol.children)
         data["sha256"] = hashlib.sha256(document.snapshot.raw_bytes).hexdigest()
     return data
 

@@ -118,6 +118,17 @@ def test_unknown_recovery_action_is_rejected_at_presentation_boundary() -> None:
         render_error_result(envelope.to_dict())
 
 
+def test_unknown_rich_error_recovery_action_is_also_rejected() -> None:
+    envelope = error(
+        ErrorCode.UNSUPPORTED,
+        details={"next_action": "pretend_references_are_implementations"},
+        workspace=WorkspaceMetadata("/data/example", "git", "/data/example"),
+    )
+
+    with pytest.raises(ValueError, match="recovery action"):
+        render_error_result(envelope.to_dict())
+
+
 def test_generic_invalid_path_does_not_invent_query_recovery() -> None:
     envelope = error(
         ErrorCode.INVALID_PATH,

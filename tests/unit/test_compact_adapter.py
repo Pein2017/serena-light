@@ -425,6 +425,33 @@ def test_oversized_navigation_results_preserve_rich_authority_only_on_error() ->
         assert payload["generations"] == {"trust": 2, "program": 3, "document": 4, "index": 5}
 
 
+def test_exact_body_child_fact_selects_recovery_but_never_reaches_success() -> None:
+    body = "class Huge:\n" + "    value = 1\n" * 80
+    data = {
+        "relative_path": "src/huge.py",
+        "symbol": {
+            "name_path": "Huge",
+            "kind": 5,
+            "range": _range(0, 0, 4),
+            "body": body,
+            "has_children": True,
+        },
+        "sha256": _SHA,
+    }
+
+    oversized = _payload(compact_navigation_result("find_symbol", _envelope(data), max_answer_chars=512))
+    minimum = oversized["error"]["details"]["minimum_required_chars"]
+    fitting = _payload(
+        compact_navigation_result("find_symbol", _envelope(data), max_answer_chars=minimum)
+    )
+
+    assert oversized["error"]["details"]["next_action"] == "overview_then_find_child_symbol"
+    assert body not in json.dumps(oversized, ensure_ascii=False)
+    assert fitting["ok"] is True
+    assert "has_children" not in json.dumps(fitting, ensure_ascii=False)
+    assert "next_action" not in json.dumps(fitting, ensure_ascii=False)
+
+
 def test_multi_adapter_minimum_budget_error_preserves_all_item_authorities() -> None:
     symbols = [
         {

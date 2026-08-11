@@ -89,6 +89,7 @@ def test_mjs_find_symbol_uses_utf16_astral_offsets_body_info_and_file_hash() -> 
     result = value["data"]
     assert len(result["sha256"]) == 64
     assert result["symbol"]["body"] == "launch🚀() { return 'ok'; }"
+    assert result["symbol"]["has_children"] is False
     assert result["symbol"]["info"]["detail"] == "method detail"
     # The LSP body end uses UTF-16 character 29 while source columns remain
     # decoded Unicode code-point columns; CRLF still has two raw bytes.

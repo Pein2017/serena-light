@@ -356,6 +356,8 @@ def test_pyright_implementations_are_unsupported_with_raw_and_derived_matrices()
 
     assert value["error"]["code"] == "UNSUPPORTED"
     matrices = value["error"]["details"]["capabilities"]
+    assert value["error"]["details"]["reason"] == "implementation_provider_unavailable"
+    assert value["error"]["details"]["next_action"] == "find_referencing_symbols"
     assert matrices["raw"]["implementationProvider"] is False
     assert matrices["derived"]["find_implementations"] is False
     assert matrices["raw"]["declarationProvider"] is True
@@ -405,6 +407,8 @@ def test_typescript_implementations_use_implementation_method_filters_and_determ
     assert adapter.normalization_calls == [(adapter.raw_result, False, True)]
     assert value["data"]["locations"] == [{"relative_path": "src/a.ts", "name_path": "ARunner", "kind": 6}]
     assert value["truncation"] == {"truncated": True, "omitted_count": 2}
+    assert "reason" not in value["data"]
+    assert "next_action" not in value["data"]
 
 
 def test_typescript_implementation_location_without_symbol_kind_is_preserved() -> None:

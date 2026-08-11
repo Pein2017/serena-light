@@ -43,6 +43,11 @@ class RecoveryAction(StrEnum):
     GET_SYMBOLS_OVERVIEW = "get_symbols_overview"
     ACTIVATE_WORKSPACE_IF_OTHER_ROOT = "activate_workspace_if_other_root"
     REACTIVATE_WITH_PATH_ENVIRONMENT = "reactivate_with_path_environment"
+    ACTIVATE_WORKSPACE = "activate_workspace"
+    FIND_REFERENCING_SYMBOLS = "find_referencing_symbols"
+    OVERVIEW_THEN_FIND_CHILD_SYMBOL = "overview_then_find_child_symbol"
+    RETRY_WITH_MINIMUM_ANSWER_CHARS = "retry_with_minimum_answer_chars"
+    FIND_SYMBOL_LOCATION_THEN_EXACT_FILE_READ = "find_symbol_location_then_exact_file_read"
 
 
 def render_error_result(
@@ -72,6 +77,9 @@ def render_error_result(
         )
 
     if code not in _DETERMINISTIC_COMPACT_ERRORS:
+        details = raw_error.get("details")
+        if isinstance(details, Mapping):
+            _validate_recovery_action(cast(Mapping[str, Any], details))
         return render_payload(_mapping_copy(envelope))
 
     compact_error: dict[str, Any] = {"code": code, "message": message}

@@ -38,6 +38,11 @@ MAX_MAX_MATCHES = 100
 type CompactPosition = tuple[int, int]
 type CompactRange = tuple[CompactPosition, CompactPosition]
 type RecordKey = Literal["symbols", "references", "targets"]
+type ExactBodyRecoveryAction = Literal[
+    "overview_then_find_child_symbol",
+    "retry_with_minimum_answer_chars",
+    "find_symbol_location_then_exact_file_read",
+]
 type JsonScalar = None | bool | int | float | str
 type JsonValue = JsonScalar | tuple["JsonValue", ...] | Mapping[str, "JsonValue"]
 
@@ -292,6 +297,17 @@ class LocatedCompactRecord:
 
 
 @dataclass(frozen=True, slots=True)
+class ExactBodyRecovery:
+    """Verified child fact used only when an exact body cannot fit."""
+
+    has_children: bool
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.has_children, bool):
+            raise TypeError("has_children must be a boolean")
+
+
+@dataclass(frozen=True, slots=True)
 class CompactFile:
     """One compact file group with exactly one tool-specific records array."""
 
@@ -442,6 +458,7 @@ def render_bounded_records(
     error_adapter: AdapterMetadata | None = None,
     error_generations: GenerationMetadata | None = None,
     error_authorities: Sequence[Mapping[str, Any]] = (),
+    exact_body_recovery: ExactBodyRecovery | None = None,
 ) -> types.CallToolResult:
     """Render a bounded stable prefix, removing trailing whole records only."""
 
@@ -459,6 +476,7 @@ def render_bounded_records(
                 adapter=error_adapter,
                 generations=error_generations,
                 authorities=error_authorities,
+                next_action=_exact_body_recovery_action(exact_body_recovery, minimum),
             )
         pruned = len(ordered) - len(retained)
         success = CompactNavigationSuccess(
@@ -532,6 +550,7 @@ def minimum_required_chars_result(
     adapter: AdapterMetadata | None = None,
     generations: GenerationMetadata | None = None,
     authorities: Sequence[Mapping[str, Any]] = (),
+    next_action: ExactBodyRecoveryAction | None = None,
 ) -> types.CallToolResult:
     """Return the bounded budget error without changing general error semantics."""
 
@@ -543,6 +562,14 @@ def minimum_required_chars_result(
         "field": "max_answer_chars",
         "minimum_required_chars": minimum_required_chars,
     }
+    if next_action is not None:
+        if next_action not in {
+            "overview_then_find_child_symbol",
+            "retry_with_minimum_answer_chars",
+            "find_symbol_location_then_exact_file_read",
+        }:
+            raise ValueError("next_action is not an exact-body recovery action")
+        details["next_action"] = next_action
     if authorities:
         details["authorities"] = list(authorities)
     envelope = error(
@@ -554,6 +581,19 @@ def minimum_required_chars_result(
     )
     payload = envelope.to_dict()
     return render_payload(payload)
+
+
+def _exact_body_recovery_action(
+    recovery: ExactBodyRecovery | None,
+    minimum_required_chars: int,
+) -> ExactBodyRecoveryAction | None:
+    if recovery is None:
+        return None
+    if recovery.has_children:
+        return "overview_then_find_child_symbol"
+    if minimum_required_chars <= MAX_MAX_ANSWER_CHARS:
+        return "retry_with_minimum_answer_chars"
+    return "find_symbol_location_then_exact_file_read"
 
 
 def _validate_kind_filter(value: Sequence[str] | None, field: str) -> tuple[str, ...]:

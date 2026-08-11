@@ -12,12 +12,12 @@
 
 ## 3. Static Guidance and Closed Recovery Actions
 
-- [ ] 3.1 Add failing inner/outer initialize and tool-schema tests for the 220-character bound, byte-identical guidance, normalized 0-based decoded-text/Unicode coordinates, editor-line conversion, and unchanged raw external `position_basis` behavior.
-- [ ] 3.2 Update source-owned initialization and owning tool descriptions without adding a public instructions call, position flag, or repeated success metadata.
-- [ ] 3.3 Add failing Pyright and TypeScript tests proving unavailable implementation lookup returns the closed reference fallback while a real implementation provider dispatches normally and never labels references as implementations.
-- [ ] 3.4 Extend the closed recovery-action vocabulary and implement capability-specific implementation failure guidance without automatic fallback dispatch.
-- [ ] 3.5 Add failing compact-renderer tests for an oversized container, a legal larger-budget leaf, an above-maximum leaf, a fitting body, and absence of internal child/recovery facts from successful responses.
-- [ ] 3.6 Carry only internal verified child evidence to final presentation and implement deterministic minimum-error recovery selection without partial source, pagination, body slicing, or a new tool.
+- [x] 3.1 Add failing inner/outer initialize and tool-schema tests for the 220-character bound, byte-identical guidance, normalized 0-based decoded-text/Unicode coordinates, editor-line conversion, and unchanged raw external `position_basis` behavior.
+- [x] 3.2 Update source-owned initialization and owning tool descriptions without adding a public instructions call, position flag, or repeated success metadata.
+- [x] 3.3 Add failing Pyright and TypeScript tests proving unavailable implementation lookup returns the closed reference fallback while a real implementation provider dispatches normally and never labels references as implementations.
+- [x] 3.4 Extend the closed recovery-action vocabulary and implement capability-specific implementation failure guidance without automatic fallback dispatch.
+- [x] 3.5 Add failing compact-renderer tests for an oversized container, a legal larger-budget leaf, an above-maximum leaf, a fitting body, and absence of internal child/recovery facts from successful responses.
+- [x] 3.6 Carry only internal verified child evidence to final presentation and implement deterministic minimum-error recovery selection without partial source, pagination, body slicing, or a new tool.
 
 ## 4. Schema, Compatibility, and Regression Coverage
 

@@ -214,6 +214,7 @@ def test_global_symbol_uses_exact_utf16_crlf_snapshot_for_ranges_body_and_info()
 
     symbol = result["data"]["symbols"][0]
     assert symbol["body"] == "def Target():\r\n    pass\r\n"
+    assert symbol["has_children"] is False
     assert symbol["location"]["range"] == {
         "start": {"line": 0, "column": 1, "text_offset": 1, "byte_offset": 4},
         "end": {"line": 2, "column": 0, "text_offset": 26, "byte_offset": 29},

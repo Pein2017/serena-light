@@ -555,7 +555,11 @@ def create_daemon_app(
             Field(description="Optional stable lowercase LSP kind names to remove after include filtering."),
         ] = None,
     ) -> dict[str, object]:
-        """Return a compact symbol tree; start depth 0 for unfamiliar files before exact lookup."""
+        """Return a compact symbol tree; start depth 0 for unfamiliar files before exact lookup.
+
+        Normalized ranges use 0-based decoded-text lines and Unicode code-point columns; an editor or nl -ba line is
+        the returned line + 1.
+        """
 
         return cast(
             dict[str, object],
@@ -609,7 +613,11 @@ def create_daemon_app(
             Field(description="Maximum semantic matches after filtering and deduplication: 1 through 100; default 20."),
         ] = DEFAULT_MAX_MATCHES,
     ) -> dict[str, object]:
-        """Find name paths. If name unknown, overview depth 0; retry ambiguity with a returned qualified name path."""
+        """Find name paths. If name unknown, overview depth 0; retry ambiguity with a returned qualified name path.
+
+        Normalized ranges use 0-based decoded-text lines and Unicode code-point columns; an editor or nl -ba line is
+        the returned line + 1.
+        """
 
         return cast(
             dict[str, object],
@@ -653,7 +661,11 @@ def create_daemon_app(
             Field(description="Final compact MCP text limit: 512 through 50000 characters; default 12000."),
         ] = 12_000,
     ) -> dict[str, object]:
-        """Resolve one declaration and return compact snapshot-owned locations."""
+        """Resolve one declaration and return compact snapshot-owned locations.
+
+        Normalized ranges use 0-based decoded-text lines and Unicode code-point columns; an editor or nl -ba line is
+        the returned line + 1.
+        """
 
         return cast(
             dict[str, object],
@@ -694,7 +706,11 @@ def create_daemon_app(
             Field(description="Final compact MCP text limit: 512 through 50000 characters; default 12000."),
         ] = 12_000,
     ) -> dict[str, object]:
-        """Find implementations and return normalized 0-based decoded-text locations."""
+        """Find implementations through the real provider and return compact locations.
+
+        Normalized ranges use 0-based decoded-text lines and Unicode code-point columns; an editor or nl -ba line is
+        the returned line + 1.
+        """
 
         return cast(
             dict[str, object],
@@ -736,7 +752,11 @@ def create_daemon_app(
             Field(description="Final compact MCP text limit: 512 through 50000 characters; default 12000."),
         ] = 12_000,
     ) -> dict[str, object]:
-        """Find references; snippets are opt-in via max_snippet_chars."""
+        """Find references; snippets are opt-in via max_snippet_chars.
+
+        Normalized ranges use 0-based decoded-text lines and Unicode code-point columns; an editor or nl -ba line is
+        the returned line + 1.
+        """
 
         return cast(
             dict[str, object],

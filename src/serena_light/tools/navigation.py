@@ -440,6 +440,7 @@ def _symbol_data(
             _lsp_position(symbol.location.range.start),
             _lsp_position(symbol.location.range.end),
         )
+        data["has_children"] = bool(symbol.children)
     return data
 
 

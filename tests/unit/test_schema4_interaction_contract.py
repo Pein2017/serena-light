@@ -30,13 +30,13 @@ def test_agent_instructions_are_concise_and_cover_the_fixed_workflow() -> None:
         "won't rebind",
         "activate_workspace",
         "absolute path",
-        "optional Conda env",
-        "default ms",
+        "Conda defaults to ms",
         "rg/find",
         "text",
-        "Serena Light",
+        "Light",
         "symbols/references/diagnostics",
-        "report friction",
+        "Ranges are 0-based",
+        "Report friction",
     ):
         assert required in AGENT_INSTRUCTIONS
     assert "hook" not in AGENT_INSTRUCTIONS.lower()

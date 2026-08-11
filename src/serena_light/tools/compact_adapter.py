@@ -21,6 +21,7 @@ from serena_light.tools.compact import (
     CompactReference,
     CompactSymbolMatch,
     CompactTarget,
+    ExactBodyRecovery,
     LocatedCompactRecord,
     compact_range,
     compact_raw_lsp_range,
@@ -74,6 +75,7 @@ def compact_navigation_result(
     authority_adapter: AdapterMetadata | None = None
     authority_generations: GenerationMetadata | None = None
     error_authorities: tuple[Mapping[str, Any], ...] = ()
+    exact_body_recovery: ExactBodyRecovery | None = None
     try:
         budget = validate_max_answer_chars(max_answer_chars)
         match_limit = validate_max_matches(max_matches)
@@ -121,7 +123,7 @@ def compact_navigation_result(
         if operation == "find_symbol":
             if authority_adapter is None or authority_generations is None:
                 error_authorities = _symbol_authorities(data)
-            records = _symbol_records(data, envelope)
+            records, exact_body_recovery = _symbol_records(data, envelope)
             ordered = ordered_records(records)
             omitted += max(0, len(ordered) - match_limit)
             records = ordered[:match_limit]
@@ -140,6 +142,7 @@ def compact_navigation_result(
             error_adapter=authority_adapter,
             error_generations=authority_generations,
             error_authorities=error_authorities,
+            exact_body_recovery=exact_body_recovery,
         )
     except (KeyError, TypeError, ValueError):
         return _malformed_result(
@@ -221,7 +224,7 @@ def _overview_symbol(
 def _symbol_records(
     data: Mapping[str, object],
     envelope: Mapping[str, object],
-) -> tuple[LocatedCompactRecord, ...]:
+) -> tuple[tuple[LocatedCompactRecord, ...], ExactBodyRecovery | None]:
     default_language = _adapter_language(envelope)
     raw_items: list[tuple[Mapping[str, object], str, str | None, str | None]] = []
     if "symbol" in data:
@@ -282,7 +285,19 @@ def _symbol_records(
                 sha256=sha256 if body is not None else None,
             )
         )
-    return tuple(records)
+    recovery: ExactBodyRecovery | None = None
+    if (
+        len(raw_items) == 1
+        and len(records) == 1
+        and isinstance(records[0].record, CompactSymbolMatch)
+        and records[0].record.body is not None
+    ):
+        child_fact = raw_items[0][0].get("has_children")
+        if child_fact is not None and not isinstance(child_fact, bool):
+            raise ValueError("symbol.has_children must be a boolean")
+        if isinstance(child_fact, bool):
+            recovery = ExactBodyRecovery(child_fact)
+    return tuple(records), recovery
 
 
 def _reference_records(data: Mapping[str, object], *, include_snippets: bool) -> tuple[LocatedCompactRecord, ...]:
