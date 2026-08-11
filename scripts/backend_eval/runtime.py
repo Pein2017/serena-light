@@ -2,39 +2,58 @@
 
 The runtime is content addressed by the candidate-lock digest: the same frozen lock
 always prepares ``<runtime-base>/<candidate-lock-digest>/`` and nothing else.  Only
-``venv``, ``home``, ``cache``, ``config``, and ``tmp`` are created there, the compiled
-lock is installed hash-locked into the evaluation venv through explicit ``uv`` and
-interpreter paths, and every candidate executable is verified as a regular file inside
-the runtime root before its SHA-256 and ``--version`` output are recorded.
+``venv``, ``home``, ``cache``, ``config``, ``tmp``, the installed requirements snapshot,
+and the published manifest exist there.
+
+**Physical confinement.**  A lexically outside runtime base can still resolve into the
+production repository or a corpus root through a symlinked ancestor, so the base is
+validated physically: the realpath of its deepest existing ancestor must not overlap the
+production repository or any declared corpus root in either direction, and the base must
+contain no symlinked path component.  Preparation then re-establishes that confinement
+atomically by creating and reopening every component of the runtime path with
+``O_NOFOLLOW``, so an ancestor swapped after validation cannot redirect a single write.
+
+**Requirements snapshot.**  The caller's lock file is read once through one ``O_NOFOLLOW``
+descriptor, bound to ``CandidateLock.digest``, and copied to an evaluation-owned snapshot
+inside the runtime root.  ``uv pip sync`` installs that snapshot, never the caller's
+mutable path, and the snapshot digest is re-checked immediately before and after the sync
+and again on every reuse, so a concurrent replacement of the source lock can never yield a
+successful runtime built from different bytes.
+
+**Serialization.**  Read, verify, purge, build, and publication run under an exclusive
+``flock`` on ``<runtime-base>/.<digest>.lock``, so a caller that observes "no manifest"
+cannot purge a runtime another caller published in the meantime, and every observation is
+made under the lock.  A published runtime is never purged by a later verification failure.
+
+**Identity.**  ``uv``, the base interpreter, and the manifest-declared ``ms`` and
+``llm-framework-study`` interpreters live outside the runtime root and can change
+independently, so their path, realpath, SHA-256, and version are bound into the manifest
+and re-measured on every reuse.  Candidate executables live inside the runtime root, so
+their recorded SHA-256 is recomputed from disk and their recorded version output is bound
+to those exact bytes -- fail-closed, without launching a candidate on reuse.
 
 Two environments are separated on purpose.  ``uv venv`` and ``uv pip sync`` are bootstrap
 downloads: they inherit the ambient environment -- including the user's external-network
 proxy -- and only redirect HOME, cache, config, temporary files, and the uv cache into the
-runtime.  Everything a candidate backend or interpreter ever sees comes from
-:func:`minimal_backend_environment`, which is an exact allowlist with no proxy variable,
-no ambient PATH, and no inherited ``PYTHONPATH``.
+runtime.  Every other command, and everything a candidate backend ever sees, comes from
+:func:`minimal_backend_environment`: an exact allowlist with no proxy variable, no ambient
+PATH, and no inherited ``PYTHONPATH``.
 
-Manifest-declared ``ms`` and ``llm-framework-study`` interpreters are resolved from their
-explicit absolute paths -- never an ambient PATH lookup -- retaining the configured path,
-its realpath, and the exact version reported by that interpreter.  Service-owned
-``pyright``, ``ty``, and ``pyrefly`` configuration is materialized below the runtime config
-directory from one shared declaration, never inside a corpus root.
-
-The runtime manifest is published with an atomic ``os.replace`` plus file and directory
-fsync only after every verification succeeds, so a published manifest always describes a
-complete runtime.  A published runtime is reused only after the manifest is verified in
-full against the on-disk state; a runtime without a published manifest is discarded and
-rebuilt, and any failure removes the partially created runtime.  Production identity is
-captured before the work and re-checked before publication and after every path.
+The manifest is published with an atomic ``os.replace`` plus file and directory fsync only
+after every verification succeeds, so a published manifest always describes a complete
+runtime.  Production identity is captured before the work and re-checked before publication
+and on every exit path.
 """
 
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import shutil
 import stat
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass, fields
 from pathlib import Path
 from types import MappingProxyType
@@ -66,7 +85,9 @@ __all__ = [
     "DEFAULT_ENVIRONMENT_INTERPRETERS",
     "DEFAULT_RUNTIME_BASE",
     "MANIFEST_FILE_NAME",
+    "REQUIREMENTS_SNAPSHOT_NAME",
     "RUNTIME_DIRECTORY_NAMES",
+    "RUNTIME_FILE_NAMES",
     "RUNTIME_MANIFEST_SCHEMA_VERSION",
     "SERVICE_CONFIG_EXCLUDES",
     "SERVICE_CONFIG_PYTHON_VERSION",
@@ -78,11 +99,14 @@ __all__ = [
     "RuntimeRequest",
     "minimal_backend_environment",
     "prepare_candidate_runtime",
+    "runtime_lock_path",
 ]
 
 DEFAULT_RUNTIME_BASE = Path("/data/CoordExp/.codex/runtime/serena-light/backend-eval")
 RUNTIME_DIRECTORY_NAMES = ("cache", "config", "home", "tmp", "venv")
 MANIFEST_FILE_NAME = "runtime-manifest.json"
+REQUIREMENTS_SNAPSHOT_NAME = "candidate-requirements.lock"
+RUNTIME_FILE_NAMES = (REQUIREMENTS_SNAPSHOT_NAME, MANIFEST_FILE_NAME)
 RUNTIME_MANIFEST_SCHEMA_VERSION = 1
 BACKEND_ENVIRONMENT_KEYS = (
     "HOME",
@@ -108,7 +132,14 @@ SERVICE_CONFIG_RELPATHS: Mapping[str, str] = MappingProxyType(
 
 _MANIFEST_TEMPORARY_NAME = f".{MANIFEST_FILE_NAME}.tmp"
 _INTERPRETER_VERSION_ARGS = ("-I", "-c", "import sys; print(sys.version.split()[0])")
+_VERSION_FLAG_ARGS = ("--version",)
+_TOOL_NAMES = ("python", "uv")
+_TOOL_RECORD_KEYS = ["path", "realpath", "sha256", "version_output"]
+_EXECUTABLE_RECORD_KEYS = ["path", "sha256", "version_output"]
 _DIRECTORY_MODE = 0o700
+_DIRECTORY_FLAGS = os.O_RDONLY | os.O_DIRECTORY
+_NOFOLLOW_DIRECTORY_FLAGS = _DIRECTORY_FLAGS | os.O_NOFOLLOW
+_READ_FLAGS = os.O_RDONLY | os.O_NOFOLLOW
 
 
 class RuntimePreparationError(RuntimeError):
@@ -135,12 +166,18 @@ DEFAULT_ENVIRONMENT_INTERPRETERS: tuple[tuple[str, Path], ...] = tuple(
 )
 
 
+def runtime_lock_path(runtime_base: Path, digest: str) -> Path:
+    """The per-digest serialization lock, kept beside -- never inside -- the runtime root."""
+
+    return runtime_base / f".{digest}.lock"
+
+
 @dataclass(frozen=True, slots=True)
 class RuntimeRequest:
     """The explicit inputs of one candidate runtime preparation.
 
     Every executable and interpreter is an absolute path: nothing is ever resolved
-    through an ambient PATH lookup.
+    through an ambient PATH lookup, and the runtime base is confined physically.
     """
 
     repo_root: Path
@@ -231,6 +268,7 @@ class _Layout:
     config: Path
     tmp: Path
     bin_dir: Path
+    requirements: Path
 
     @staticmethod
     def from_root(root: Path) -> _Layout:
@@ -243,6 +281,7 @@ class _Layout:
             config=root / "config",
             tmp=root / "tmp",
             bin_dir=venv / "bin",
+            requirements=root / REQUIREMENTS_SNAPSHOT_NAME,
         )
 
 
@@ -254,10 +293,12 @@ def prepare_candidate_runtime(
 ) -> CandidateRuntime:
     """Return the service-owned runtime for ``lock``, preparing it at most once.
 
-    A published runtime is reused only after its manifest verifies in full against the
-    on-disk executables, configuration, and interpreters; anything else is rebuilt from
-    the frozen lock.  Production identity must be unchanged before publication and on
-    every exit path.
+    Read, verify, purge, build, and publication are serialized per lock digest, so
+    concurrent callers never race.  A published runtime is reused only after its manifest
+    verifies in full against the on-disk state and the freshly re-measured identity of
+    ``uv``, the base interpreter, and every declared environment interpreter; anything else
+    fails closed.  Production identity must be unchanged before publication and on every
+    exit path.
     """
 
     before = capture_production_identity(request.repo_root)
@@ -299,18 +340,27 @@ def _prepare(
     runner: CommandRunner,
     before: ProductionIdentity,
 ) -> CandidateRuntime:
-    _require_lock_matches_requirements(lock, request)
+    # The caller's lock is read and bound to the digest exactly once, through one descriptor.
+    source = _read_requirements_source(lock, request)
     layout = _Layout.from_root(request.runtime_base / lock.digest)
-    manifest = _read_manifest(layout.root)
-    if manifest is not None:
-        return _verify_published_runtime(lock, request, layout, manifest)
-    # No published manifest means no runtime was ever completed here.
-    _purge_runtime_root(layout.root)
+    base_fd = _open_confined_directory(request.runtime_base)
     try:
-        return _build_runtime(lock, request, runner, layout, before)
-    except BaseException:
-        _purge_runtime_root(layout.root)
-        raise
+        _require_physical_identity(base_fd, request.runtime_base)
+        _require_outside_protected(request.runtime_base, request.repo_root, RuntimePreparationError)
+        with _runtime_lock(base_fd, request.runtime_base, lock.digest):
+            _require_unswapped_root(base_fd, layout.root)
+            manifest = _read_manifest(layout.root)
+            if manifest is not None:
+                return _verify_published_runtime(lock, request, layout, manifest, runner)
+            # No published manifest under the lock means no runtime was ever completed here.
+            _purge_runtime_root(layout.root)
+            try:
+                return _build_runtime(lock, request, runner, layout, before, source, base_fd)
+            except BaseException:
+                _purge_runtime_root(layout.root)
+                raise
+    finally:
+        os.close(base_fd)
 
 
 def _build_runtime(
@@ -319,14 +369,21 @@ def _build_runtime(
     runner: CommandRunner,
     layout: _Layout,
     before: ProductionIdentity,
+    source: bytes,
+    base_fd: int,
 ) -> CandidateRuntime:
-    _create_runtime_directories(layout)
+    _create_runtime_directories(layout, base_fd)
+    _write_file(layout.requirements, source)
     install_env = _install_environment(layout)
+    tools = _capture_tools(request, layout, runner)
     venv_command = _venv_command(request, layout)
     _run(runner, venv_command, layout, install_env)
     _require_venv_interpreter(layout, request)
+    # The installed bytes are re-bound to the digest immediately before and after the sync.
+    _require_snapshot(layout, lock.digest)
     sync_command = _sync_command(request, layout)
     _run(runner, sync_command, layout, install_env)
+    _require_snapshot(layout, lock.digest)
     executables = _capture_executables(lock, layout, runner)
     environments = tuple(
         _capture_environment(name, interpreter, layout, runner)
@@ -337,7 +394,9 @@ def _build_runtime(
     _require_only_declared_entries(layout.root, published=False)
     # Publication happens only for a preparation that provably left production untouched.
     _assert_production_identity_unchanged(before, request.repo_root, cause=None)
-    _publish_manifest(layout, _manifest_mapping(lock, runtime, (venv_command, sync_command), executables))
+    _publish_manifest(
+        layout, _manifest_mapping(lock, runtime, (venv_command, sync_command), executables, tools)
+    )
     return runtime
 
 
@@ -363,6 +422,39 @@ def _runtime(
     )
 
 
+def _capture_tools(
+    request: RuntimeRequest, layout: _Layout, runner: CommandRunner
+) -> dict[str, dict[str, str]]:
+    """Bind the identity of the two tools that live outside the runtime root."""
+
+    return {
+        "uv": _capture_tool("uv", request.uv, _VERSION_FLAG_ARGS, request, layout, runner),
+        "python": _capture_tool("python", request.python, _INTERPRETER_VERSION_ARGS, request, layout, runner),
+    }
+
+
+def _capture_tool(
+    name: str,
+    path: Path,
+    version_args: Sequence[str],
+    request: RuntimeRequest,
+    layout: _Layout,
+    runner: CommandRunner,
+) -> dict[str, str]:
+    realpath = Path(os.path.realpath(path))
+    _require_existing_regular_file(realpath, f"{name} executable")
+    result = _run(runner, (str(path), *version_args), layout, _minimal_environment(layout, request.python))
+    version_output = result.stdout.strip()
+    if not version_output:
+        raise RuntimePreparationError(f"{name} did not report a version: {path}")
+    return {
+        "path": str(path),
+        "realpath": str(realpath),
+        "sha256": _file_digest(realpath, f"{name} executable"),
+        "version_output": version_output,
+    }
+
+
 def _capture_executables(
     lock: CandidateLock, layout: _Layout, runner: CommandRunner
 ) -> dict[str, dict[str, str]]:
@@ -375,7 +467,7 @@ def _capture_executables(
         version_output = _capture_version(path, candidate.name, candidate.version, layout, runner)
         executables[candidate.name] = {
             "path": str(path),
-            "sha256": sha256_bytes(path.read_bytes()),
+            "sha256": _file_digest(path, f"candidate executable {candidate.name}"),
             "version_output": version_output,
         }
     return executables
@@ -384,15 +476,21 @@ def _capture_executables(
 def _capture_version(
     path: Path, name: str, locked_version: str, layout: _Layout, runner: CommandRunner
 ) -> str:
-    result = _run(runner, (str(path), "--version"), layout, _minimal_environment(layout, layout.bin_dir / "python"))
+    result = _run(
+        runner, (str(path), *_VERSION_FLAG_ARGS), layout, _minimal_environment(layout, layout.bin_dir / "python")
+    )
     version_output = result.stdout.strip()
     if not version_output:
         raise RuntimePreparationError(f"candidate executable {name} did not report a version: {path}")
+    _require_reported_version(version_output, locked_version, f"candidate executable {name}")
+    return version_output
+
+
+def _require_reported_version(version_output: str, locked_version: str, label: str) -> None:
     if locked_version not in version_output.splitlines()[0].split():
         raise RuntimePreparationError(
-            f"candidate executable {name} does not report the locked version {locked_version}: {version_output!r}"
+            f"{label} does not report the locked version {locked_version}: {version_output!r}"
         )
-    return version_output
 
 
 def _capture_environment(
@@ -401,7 +499,7 @@ def _capture_environment(
     """Record one manifest-declared interpreter without any ambient PATH lookup."""
 
     realpath = Path(os.path.realpath(interpreter))
-    _require_regular_file(realpath, f"environment interpreter {name}")
+    _require_existing_regular_file(realpath, f"environment interpreter {name}")
     command = (str(interpreter), *_INTERPRETER_VERSION_ARGS)
     result = _run(runner, command, layout, _minimal_environment(layout, interpreter))
     version = result.stdout.strip()
@@ -488,7 +586,7 @@ def _sync_command(request: RuntimeRequest, layout: _Layout) -> tuple[str, ...]:
         str(request.uv),
         "pip",
         "sync",
-        str(request.requirements_lock),
+        str(layout.requirements),
         "--require-hashes",
         "--only-binary",
         ":all:",
@@ -517,7 +615,7 @@ def _install_environment(layout: _Layout) -> dict[str, str]:
 
 
 def _minimal_environment(layout: _Layout, selected_interpreter: Path) -> dict[str, str]:
-    """Build the exact allowlist every candidate and interpreter process receives."""
+    """Build the exact allowlist every candidate, tool, and interpreter process receives."""
 
     env = {
         "HOME": str(layout.home),
@@ -549,6 +647,34 @@ def _run(
     return result
 
 
+# --- serialization -------------------------------------------------------------
+
+
+@contextmanager
+def _runtime_lock(base_fd: int, runtime_base: Path, digest: str) -> Iterator[None]:
+    """Hold the exclusive per-digest lock across read, verify, purge, build, and publish.
+
+    ``flock`` is held on an open file description, so two threads and two processes
+    contend identically; closing the descriptor releases it on every exit path.
+    """
+
+    name = runtime_lock_path(runtime_base, digest).name
+    try:
+        fd = os.open(name, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600, dir_fd=base_fd)
+    except OSError as exc:
+        raise RuntimePreparationError(
+            f"cannot open the runtime lock {runtime_base / name}: {exc}"
+        ) from exc
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+        except OSError as exc:
+            raise RuntimePreparationError(f"cannot lock {runtime_base / name}: {exc}") from exc
+        yield
+    finally:
+        os.close(fd)
+
+
 # --- published manifest --------------------------------------------------------
 
 
@@ -557,6 +683,7 @@ def _manifest_mapping(
     runtime: CandidateRuntime,
     commands: Sequence[Sequence[str]],
     executables: Mapping[str, Mapping[str, str]],
+    tools: Mapping[str, Mapping[str, str]],
 ) -> dict[str, object]:
     return {
         "schema_version": RUNTIME_MANIFEST_SCHEMA_VERSION,
@@ -566,8 +693,13 @@ def _manifest_mapping(
         "environments": [_record(identity) for identity in runtime.environments],
         "executables": {name: dict(record) for name, record in executables.items()},
         "python": str(runtime.python),
+        "requirements_snapshot": {
+            "path": str(runtime.root / REQUIREMENTS_SNAPSHOT_NAME),
+            "sha256": lock.digest,
+        },
         "root": str(runtime.root),
         "service_configs": [_record(identity) for identity in runtime.service_configs],
+        "tools": {name: dict(record) for name, record in tools.items()},
     }
 
 
@@ -605,9 +737,10 @@ def _restore_fields(
 def _publish_manifest(layout: _Layout, manifest: Mapping[str, object]) -> None:
     """Publish the manifest atomically and durably, last of all."""
 
-    _write_file(layout.root / _MANIFEST_TEMPORARY_NAME, canonical_json(manifest))
+    temporary = layout.root / _MANIFEST_TEMPORARY_NAME
+    _write_file(temporary, canonical_json(manifest))
     try:
-        os.replace(layout.root / _MANIFEST_TEMPORARY_NAME, layout.root / MANIFEST_FILE_NAME)
+        os.replace(temporary, layout.root / MANIFEST_FILE_NAME)
     except OSError as exc:
         raise RuntimePreparationError(f"cannot publish the runtime manifest below {layout.root}: {exc}") from exc
     _fsync_directory(layout.root)
@@ -635,9 +768,19 @@ def _read_manifest(root: Path) -> Mapping[str, Any] | None:
 
 
 def _verify_published_runtime(
-    lock: CandidateLock, request: RuntimeRequest, layout: _Layout, manifest: Mapping[str, Any]
+    lock: CandidateLock,
+    request: RuntimeRequest,
+    layout: _Layout,
+    manifest: Mapping[str, Any],
+    runner: CommandRunner,
 ) -> CandidateRuntime:
-    """Reuse a published runtime only after the manifest verifies against the disk."""
+    """Reuse a published runtime only after the manifest verifies against the disk.
+
+    Everything that lives outside the runtime root -- the installed snapshot's digest,
+    ``uv``, the base interpreter, and every declared environment interpreter -- is
+    re-measured now rather than trusted from the manifest.  Nothing here purges anything:
+    a verification failure leaves the published runtime exactly as it was.
+    """
 
     root = layout.root
     if manifest.get("schema_version") != RUNTIME_MANIFEST_SCHEMA_VERSION:
@@ -649,12 +792,16 @@ def _verify_published_runtime(
         raise RuntimePreparationError(f"published runtime {root} was prepared by a different command")
     if manifest.get("directories") != {name: str(root / name) for name in RUNTIME_DIRECTORY_NAMES}:
         raise RuntimePreparationError(f"published runtime manifest does not describe the layout of {root}")
+    if manifest.get("requirements_snapshot") != {"path": str(layout.requirements), "sha256": lock.digest}:
+        raise RuntimePreparationError(f"published runtime manifest does not describe the installed lock of {root}")
     _require_only_declared_entries(root, published=True)
     for name in RUNTIME_DIRECTORY_NAMES:
         _require_owned_directory(root / name, create=False)
+    _require_snapshot(layout, lock.digest)
     _require_venv_interpreter(layout, request)
     executables = _verify_published_executables(lock, layout, manifest)
-    environments = _verify_published_environments(request, manifest)
+    _verify_published_tools(request, layout, manifest, runner)
+    environments = _verify_published_environments(request, layout, manifest, runner)
     service_configs = _verify_published_service_configs(layout, manifest)
     return _runtime(lock, layout, executables, environments, service_configs)
 
@@ -662,6 +809,8 @@ def _verify_published_runtime(
 def _verify_published_executables(
     lock: CandidateLock, layout: _Layout, manifest: Mapping[str, Any]
 ) -> dict[str, dict[str, str]]:
+    """Fail closed on the candidate executables: recorded hash and version bind to bytes."""
+
     recorded = _expect_mapping(manifest.get("executables"), "executables")
     names = sorted(candidate.name for candidate in lock.candidates)
     if sorted(recorded) != names:
@@ -669,7 +818,7 @@ def _verify_published_executables(
     executables: dict[str, dict[str, str]] = {}
     for candidate in sorted(lock.candidates, key=lambda package: package.name):
         entry = _expect_mapping(recorded[candidate.name], f"{candidate.name} executable")
-        if sorted(entry) != ["path", "sha256", "version_output"] or any(
+        if sorted(entry) != _EXECUTABLE_RECORD_KEYS or any(
             not isinstance(item, str) for item in entry.values()
         ):
             raise RuntimePreparationError(
@@ -679,14 +828,10 @@ def _verify_published_executables(
         if entry["path"] != str(path):
             raise RuntimePreparationError(f"published runtime executable {candidate.name} moved: {path}")
         _require_regular_executable_inside(path, layout.root, f"candidate executable {candidate.name}")
-        if sha256_bytes(path.read_bytes()) != entry["sha256"]:
+        if _file_digest(path, f"candidate executable {candidate.name}") != entry["sha256"]:
             raise RuntimePreparationError(f"published runtime executable {candidate.name} changed: {path}")
         version_output: str = entry["version_output"]
-        if candidate.version not in version_output.splitlines()[0].split():
-            raise RuntimePreparationError(
-                f"published runtime executable {candidate.name} does not report the locked version "
-                f"{candidate.version}"
-            )
+        _require_reported_version(version_output, candidate.version, f"candidate executable {candidate.name}")
         executables[candidate.name] = {
             "path": str(path),
             "sha256": entry["sha256"],
@@ -695,9 +840,30 @@ def _verify_published_executables(
     return executables
 
 
+def _verify_published_tools(
+    request: RuntimeRequest, layout: _Layout, manifest: Mapping[str, Any], runner: CommandRunner
+) -> None:
+    """Re-measure uv and the base interpreter: both live outside the runtime root."""
+
+    recorded = _expect_mapping(manifest.get("tools"), "tools")
+    if sorted(recorded) != sorted(_TOOL_NAMES):
+        raise RuntimePreparationError(f"published runtime manifest does not record {sorted(_TOOL_NAMES)}")
+    observed = _capture_tools(request, layout, runner)
+    for name in sorted(_TOOL_NAMES):
+        entry = _expect_mapping(recorded[name], f"{name} tool")
+        if sorted(entry) != _TOOL_RECORD_KEYS:
+            raise RuntimePreparationError(f"published runtime manifest has a malformed {name} tool entry")
+        if dict(entry) != observed[name]:
+            raise RuntimePreparationError(
+                f"published runtime {name} identity changed: recorded {dict(entry)}, now {observed[name]}"
+            )
+
+
 def _verify_published_environments(
-    request: RuntimeRequest, manifest: Mapping[str, Any]
+    request: RuntimeRequest, layout: _Layout, manifest: Mapping[str, Any], runner: CommandRunner
 ) -> tuple[EnvironmentIdentity, ...]:
+    """Re-run every declared interpreter and compare path, realpath, and version exactly."""
+
     recorded = manifest.get("environments")
     if not isinstance(recorded, list):
         raise RuntimePreparationError("published runtime manifest does not record its environments")
@@ -705,13 +871,17 @@ def _verify_published_environments(
     declared = tuple((name, str(interpreter)) for name, interpreter in request.environment_interpreters)
     if tuple((identity.name, identity.interpreter_path) for identity in environments) != declared:
         raise RuntimePreparationError("published runtime manifest declares different evaluation interpreters")
-    for identity in environments:
-        interpreter = Path(identity.interpreter_path)
-        realpath = Path(os.path.realpath(interpreter))
-        _require_regular_file(realpath, f"environment interpreter {identity.name}")
-        if str(realpath) != identity.interpreter_realpath:
+    for identity, (name, interpreter) in zip(environments, request.environment_interpreters, strict=True):
+        observed = _capture_environment(name, interpreter, layout, runner)
+        if observed.interpreter_realpath != identity.interpreter_realpath:
             raise RuntimePreparationError(
-                f"published runtime environment {identity.name} now resolves to {realpath}"
+                f"published runtime environment {name} now resolves to {observed.interpreter_realpath}, "
+                f"recorded {identity.interpreter_realpath}"
+            )
+        if observed.version != identity.version:
+            raise RuntimePreparationError(
+                f"published runtime environment {name} now reports version {observed.version}, "
+                f"recorded {identity.version}"
             )
     return environments
 
@@ -732,7 +902,7 @@ def _verify_published_service_configs(
             raise RuntimePreparationError(
                 f"published runtime service configuration for {identity.backend} is not the declared one: {path}"
             )
-        _require_regular_file(path, f"service configuration {identity.backend}")
+        _require_existing_regular_file(path, f"service configuration {identity.backend}")
         if path.read_bytes() != expected:
             raise RuntimePreparationError(
                 f"published runtime service configuration for {identity.backend} changed: {path}"
@@ -740,20 +910,95 @@ def _verify_published_service_configs(
     return identities
 
 
-# --- filesystem ----------------------------------------------------------------
+# --- confined filesystem -------------------------------------------------------
 
 
-def _create_runtime_directories(layout: _Layout) -> None:
-    _require_owned_directory(layout.root.parent)
-    _require_owned_directory(layout.root)
-    for name in RUNTIME_DIRECTORY_NAMES:
-        _require_owned_directory(layout.root / name)
+def _open_confined_directory(path: Path) -> int:
+    """Create and open ``path`` one component at a time, refusing any symlinked component.
+
+    Every component below ``/`` is opened with ``O_NOFOLLOW`` from its parent descriptor, so
+    an ancestor swapped after validation can never redirect a write below this descriptor.
+    """
+
+    try:
+        fd = os.open("/", _DIRECTORY_FLAGS)
+    except OSError as exc:
+        raise RuntimePreparationError(f"cannot open the filesystem root: {exc}") from exc
+    try:
+        for part in path.parts[1:]:
+            child = _open_confined_child(fd, part, path)
+            os.close(fd)
+            fd = child
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
+
+
+def _open_confined_child(parent_fd: int, name: str, path: Path) -> int:
+    try:
+        os.mkdir(name, _DIRECTORY_MODE, dir_fd=parent_fd)
+    except FileExistsError:
+        pass
+    except OSError as exc:
+        raise RuntimePreparationError(
+            f"cannot create the service-owned runtime path component {name!r} of {path}: {exc}"
+        ) from exc
+    try:
+        return os.open(name, _NOFOLLOW_DIRECTORY_FLAGS, dir_fd=parent_fd)
+    except OSError as exc:
+        raise RuntimePreparationError(
+            f"service-owned runtime path component {name!r} of {path} must be a directory, "
+            f"not a symlink or special file: {exc}"
+        ) from exc
+
+
+def _require_unswapped_root(base_fd: int, root: Path) -> None:
+    """Refuse an existing runtime root that is a symlink or otherwise not our directory."""
+
+    try:
+        mode = os.lstat(root.name, dir_fd=base_fd).st_mode
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        raise RuntimePreparationError(f"cannot inspect the runtime root {root}: {exc}") from exc
+    if not stat.S_ISDIR(mode):
+        raise RuntimePreparationError(
+            f"the runtime root {root} must be an evaluation-owned directory, not a symlink or special file"
+        )
+    fd = _open_confined_child(base_fd, root.name, root)
+    try:
+        _require_physical_identity(fd, root)
+    finally:
+        os.close(fd)
+
+
+def _physical_path(fd: int) -> Path:
+    try:
+        return Path(os.readlink(f"/proc/self/fd/{fd}"))
+    except OSError as exc:
+        raise RuntimePreparationError(f"cannot resolve the physical path of an open directory: {exc}") from exc
+
+
+def _require_physical_identity(fd: int, path: Path) -> None:
+    observed = _physical_path(fd)
+    if observed != path:
+        raise RuntimePreparationError(f"{path} physically resolves to {observed}")
+
+
+def _create_runtime_directories(layout: _Layout, base_fd: int) -> None:
+    root_fd = _open_confined_child(base_fd, layout.root.name, layout.root)
+    try:
+        _require_physical_identity(root_fd, layout.root)
+        for name in RUNTIME_DIRECTORY_NAMES:
+            os.close(_open_confined_child(root_fd, name, layout.root / name))
+    finally:
+        os.close(root_fd)
 
 
 def _require_only_declared_entries(root: Path, *, published: bool) -> None:
-    declared = sorted((MANIFEST_FILE_NAME, *RUNTIME_DIRECTORY_NAMES)) if published else sorted(
-        RUNTIME_DIRECTORY_NAMES
-    )
+    files = RUNTIME_FILE_NAMES if published else (REQUIREMENTS_SNAPSHOT_NAME,)
+    declared = sorted((*files, *RUNTIME_DIRECTORY_NAMES))
     observed = sorted(entry.name for entry in root.iterdir())
     if observed != declared:
         unexpected = sorted(set(observed) - set(declared))
@@ -805,6 +1050,58 @@ def _require_regular_executable_inside(path: Path, root: Path, label: str) -> No
         raise RuntimePreparationError(f"{label} must be executable: {path}")
 
 
+def _read_requirements_source(lock: CandidateLock, request: RuntimeRequest) -> bytes:
+    """Read the caller's lock once through one verified descriptor and bind it to the digest.
+
+    The bytes that are hashed are the bytes that are installed: the caller's mutable path is
+    never handed to ``uv``.
+    """
+
+    payload = _read_regular_file(request.requirements_lock, "candidate requirements lock")
+    _require_digest(payload, lock.digest, request.requirements_lock)
+    return payload
+
+
+def _require_snapshot(layout: _Layout, digest: str) -> None:
+    """Re-bind the installed snapshot to the candidate lock digest."""
+
+    _require_digest(
+        _read_regular_file(layout.requirements, "installed candidate requirements lock"),
+        digest,
+        layout.requirements,
+    )
+
+
+def _require_digest(payload: bytes, digest: str, path: Path) -> None:
+    observed = sha256_bytes(payload)
+    if observed != digest:
+        raise RuntimePreparationError(
+            f"{path} does not match the candidate lock digest {digest}: {observed}"
+        )
+
+
+def _read_regular_file(path: Path, label: str) -> bytes:
+    """Read one verified regular file through a single ``O_NOFOLLOW`` descriptor."""
+
+    try:
+        fd = os.open(path, _READ_FLAGS)
+    except OSError as exc:
+        raise RuntimePreparationError(f"cannot open {label} {path}: {exc}") from exc
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise RuntimePreparationError(f"{label} must be a regular file: {path}")
+        with os.fdopen(fd, "rb", closefd=False) as handle:
+            return handle.read()
+    except OSError as exc:
+        raise RuntimePreparationError(f"cannot read {label} {path}: {exc}") from exc
+    finally:
+        os.close(fd)
+
+
+def _file_digest(path: Path, label: str) -> str:
+    return sha256_bytes(_read_regular_file(path, label))
+
+
 def _write_file(path: Path, payload: bytes) -> None:
     if path.is_symlink():
         raise RuntimePreparationError(f"cannot write through a symlink: {path}")
@@ -819,7 +1116,7 @@ def _write_file(path: Path, payload: bytes) -> None:
 
 def _fsync_directory(path: Path) -> None:
     try:
-        fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
+        fd = os.open(path, _DIRECTORY_FLAGS)
     except OSError as exc:
         raise RuntimePreparationError(f"cannot open the runtime directory {path}: {exc}") from exc
     try:
@@ -831,7 +1128,12 @@ def _fsync_directory(path: Path) -> None:
 
 
 def _purge_runtime_root(root: Path) -> None:
-    """Remove an unpublished or failed runtime without ever deleting through a symlink."""
+    """Remove an unpublished or failed runtime.
+
+    Only reachable under the per-digest lock and after physical confinement has been
+    established, so no other caller's publication and nothing outside the runtime base can
+    be reached from here.
+    """
 
     if root.is_symlink():
         raise RuntimePreparationError(f"the runtime root must not be a symlink: {root}")
@@ -847,15 +1149,6 @@ def _purge_runtime_root(root: Path) -> None:
 
 
 # --- request validation --------------------------------------------------------
-
-
-def _require_lock_matches_requirements(lock: CandidateLock, request: RuntimeRequest) -> None:
-    _require_regular_file(request.requirements_lock, "candidate requirements lock")
-    digest = sha256_bytes(request.requirements_lock.read_bytes())
-    if digest != lock.digest:
-        raise RuntimePreparationError(
-            f"{request.requirements_lock} does not match the candidate lock digest {lock.digest}: {digest}"
-        )
 
 
 def _require_absolute(path: Path, label: str) -> None:
@@ -884,18 +1177,60 @@ def _require_regular_file(path: Path, label: str) -> None:
         raise ValueError(f"{label} must be an existing regular file: {path}")
 
 
+def _require_existing_regular_file(path: Path, label: str) -> None:
+    if path.is_symlink() or not path.is_file():
+        raise RuntimePreparationError(f"{label} must be an existing regular file: {path}")
+
+
+def _physical_prefix(path: Path) -> Path:
+    """Resolve the deepest existing ancestor of ``path`` and re-append the missing tail."""
+
+    anchor = path
+    remainder: list[str] = []
+    while not os.path.lexists(anchor) and anchor != anchor.parent:
+        remainder.append(anchor.name)
+        anchor = anchor.parent
+    return Path(os.path.realpath(anchor)).joinpath(*reversed(remainder))
+
+
+def _protected_roots(repo_root: Path) -> tuple[tuple[str, Path], ...]:
+    return (
+        ("production repository", repo_root),
+        *(("corpus root", corpus.root) for corpus in default_corpus_requests()),
+    )
+
+
+def _require_outside_protected(
+    runtime_base: Path, repo_root: Path, error: type[Exception] = ValueError
+) -> None:
+    """Refuse a runtime base that physically overlaps production or corpus state."""
+
+    physical_base = _physical_prefix(runtime_base)
+    for label, root in _protected_roots(repo_root):
+        physical_root = _physical_prefix(root)
+        if (
+            physical_base == physical_root
+            or physical_base.is_relative_to(physical_root)
+            or physical_root.is_relative_to(physical_base)
+        ):
+            raise error(
+                f"RuntimeRequest.runtime_base must stay physically outside the {label} {root}: "
+                f"{runtime_base} resolves to {physical_base}"
+            )
+
+
 def _require_runtime_base(runtime_base: Path, repo_root: Path) -> None:
     if not runtime_base.is_absolute():
         raise ValueError("RuntimeRequest.runtime_base must be an absolute path")
     if ".." in runtime_base.parts:
         raise ValueError("RuntimeRequest.runtime_base must not contain parent references")
-    if runtime_base == repo_root or runtime_base.is_relative_to(repo_root):
+    _require_outside_protected(runtime_base, repo_root)
+    physical_base = _physical_prefix(runtime_base)
+    if physical_base != runtime_base:
         raise ValueError(
-            f"RuntimeRequest.runtime_base must stay outside the production repository {repo_root}"
+            f"RuntimeRequest.runtime_base must not contain a symlinked path component: "
+            f"{runtime_base} resolves to {physical_base}"
         )
-    for corpus in default_corpus_requests():
-        if runtime_base == corpus.root or runtime_base.is_relative_to(corpus.root):
-            raise ValueError(f"RuntimeRequest.runtime_base must stay outside the corpus root {corpus.root}")
 
 
 def _assert_production_identity_unchanged(
