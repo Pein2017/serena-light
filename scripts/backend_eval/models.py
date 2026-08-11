@@ -22,8 +22,10 @@ _PATH_RECORD_DISPOSITIONS = frozenset({"tracked", "untracked", "ignored", "decla
 _ROOT_MANIFEST_KINDS = frozenset({"git", "non_git"})
 _ADMISSION_STATUSES = frozenset({"pass", "hold", "incomplete", "fail"})
 _CANDIDATE_NAMES = frozenset({"ty", "pyrefly"})
+_SERVICE_CONFIG_BACKENDS = frozenset({"pyright", "ty", "pyrefly"})
 
 ADMISSION_RECEIPT_SCHEMA_VERSION = 1
+EVALUATION_CONTRACT_VERSION = "python-backend-evaluation-v1"
 
 
 def canonical_json(value: Mapping[str, object]) -> bytes:
@@ -270,6 +272,90 @@ def _production_identity_from_dict(value: object) -> ProductionIdentity:
         ),
         build_identity=_expect_str(mapping["build_identity"], "ProductionIdentity.build_identity"),
         runtime_paths=runtime_paths,
+    )
+
+
+# --- EnvironmentIdentity / ServiceConfigIdentity -------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class EnvironmentIdentity:
+    name: str
+    interpreter_path: str
+    interpreter_realpath: str
+    version: str
+
+    def __post_init__(self) -> None:
+        _validate_non_empty_str(self.name, "EnvironmentIdentity.name")
+        _validate_absolute_path(self.interpreter_path, "EnvironmentIdentity.interpreter_path")
+        _validate_absolute_path(self.interpreter_realpath, "EnvironmentIdentity.interpreter_realpath")
+        _validate_non_empty_str(self.version, "EnvironmentIdentity.version")
+
+
+_ENVIRONMENT_IDENTITY_FIELDS = frozenset({"name", "interpreter_path", "interpreter_realpath", "version"})
+
+
+def _environment_identity_to_dict(identity: EnvironmentIdentity) -> dict[str, object]:
+    return {
+        "name": identity.name,
+        "interpreter_path": identity.interpreter_path,
+        "interpreter_realpath": identity.interpreter_realpath,
+        "version": identity.version,
+    }
+
+
+def _environment_identity_from_dict(value: object) -> EnvironmentIdentity:
+    mapping = _expect_mapping(value, "EnvironmentIdentity")
+    _closed_fields(mapping, _ENVIRONMENT_IDENTITY_FIELDS, "EnvironmentIdentity")
+    return EnvironmentIdentity(
+        name=_expect_str(mapping["name"], "EnvironmentIdentity.name"),
+        interpreter_path=_expect_str(mapping["interpreter_path"], "EnvironmentIdentity.interpreter_path"),
+        interpreter_realpath=_expect_str(
+            mapping["interpreter_realpath"], "EnvironmentIdentity.interpreter_realpath"
+        ),
+        version=_expect_str(mapping["version"], "EnvironmentIdentity.version"),
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class ServiceConfigIdentity:
+    backend: str
+    config_path: str
+    config_sha256: str
+    home_path: str
+    cache_path: str
+
+    def __post_init__(self) -> None:
+        if self.backend not in _SERVICE_CONFIG_BACKENDS:
+            raise ValueError(f"ServiceConfigIdentity.backend must be one of {sorted(_SERVICE_CONFIG_BACKENDS)}")
+        _validate_absolute_path(self.config_path, "ServiceConfigIdentity.config_path")
+        _validate_sha256(self.config_sha256, "ServiceConfigIdentity.config_sha256")
+        _validate_absolute_path(self.home_path, "ServiceConfigIdentity.home_path")
+        _validate_absolute_path(self.cache_path, "ServiceConfigIdentity.cache_path")
+
+
+_SERVICE_CONFIG_IDENTITY_FIELDS = frozenset({"backend", "config_path", "config_sha256", "home_path", "cache_path"})
+
+
+def _service_config_identity_to_dict(identity: ServiceConfigIdentity) -> dict[str, object]:
+    return {
+        "backend": identity.backend,
+        "config_path": identity.config_path,
+        "config_sha256": identity.config_sha256,
+        "home_path": identity.home_path,
+        "cache_path": identity.cache_path,
+    }
+
+
+def _service_config_identity_from_dict(value: object) -> ServiceConfigIdentity:
+    mapping = _expect_mapping(value, "ServiceConfigIdentity")
+    _closed_fields(mapping, _SERVICE_CONFIG_IDENTITY_FIELDS, "ServiceConfigIdentity")
+    return ServiceConfigIdentity(
+        backend=_expect_str(mapping["backend"], "ServiceConfigIdentity.backend"),
+        config_path=_expect_str(mapping["config_path"], "ServiceConfigIdentity.config_path"),
+        config_sha256=_expect_str(mapping["config_sha256"], "ServiceConfigIdentity.config_sha256"),
+        home_path=_expect_str(mapping["home_path"], "ServiceConfigIdentity.home_path"),
+        cache_path=_expect_str(mapping["cache_path"], "ServiceConfigIdentity.cache_path"),
     )
 
 
@@ -598,6 +684,8 @@ def _root_manifest_from_dict(value: object) -> RootManifest:
 class WriteDelta:
     root: str
     kind: str
+    before_manifest_digest: str
+    after_manifest_digest: str
     declared: tuple[str, ...]
     unexpected: tuple[str, ...]
 
@@ -605,17 +693,23 @@ class WriteDelta:
         _validate_absolute_path(self.root, "WriteDelta.root")
         if self.kind not in _ROOT_MANIFEST_KINDS:
             raise ValueError(f"WriteDelta.kind must be one of {sorted(_ROOT_MANIFEST_KINDS)}")
+        _validate_sha256(self.before_manifest_digest, "WriteDelta.before_manifest_digest")
+        _validate_sha256(self.after_manifest_digest, "WriteDelta.after_manifest_digest")
         _validate_sorted_unique(_validate_tuple(self.declared, "WriteDelta.declared"), "WriteDelta.declared")
         _validate_sorted_unique(_validate_tuple(self.unexpected, "WriteDelta.unexpected"), "WriteDelta.unexpected")
 
 
-_WRITE_DELTA_FIELDS = frozenset({"root", "kind", "declared", "unexpected"})
+_WRITE_DELTA_FIELDS = frozenset(
+    {"root", "kind", "before_manifest_digest", "after_manifest_digest", "declared", "unexpected"}
+)
 
 
 def _write_delta_to_dict(delta: WriteDelta) -> dict[str, object]:
     return {
         "root": delta.root,
         "kind": delta.kind,
+        "before_manifest_digest": delta.before_manifest_digest,
+        "after_manifest_digest": delta.after_manifest_digest,
         "declared": list(delta.declared),
         "unexpected": list(delta.unexpected),
     }
@@ -627,6 +721,8 @@ def _write_delta_from_dict(value: object) -> WriteDelta:
     return WriteDelta(
         root=_expect_str(mapping["root"], "WriteDelta.root"),
         kind=_expect_str(mapping["kind"], "WriteDelta.kind"),
+        before_manifest_digest=_expect_str(mapping["before_manifest_digest"], "WriteDelta.before_manifest_digest"),
+        after_manifest_digest=_expect_str(mapping["after_manifest_digest"], "WriteDelta.after_manifest_digest"),
         declared=tuple(
             _expect_str(item, "WriteDelta.declared item")
             for item in _expect_list(mapping["declared"], "WriteDelta.declared")
@@ -644,6 +740,7 @@ def _write_delta_from_dict(value: object) -> WriteDelta:
 @dataclass(frozen=True, slots=True)
 class AdmissionReceipt:
     schema_version: int
+    evaluation_contract_version: str
     evaluation_identity: str
     status: str
     started_at: str
@@ -652,10 +749,12 @@ class AdmissionReceipt:
     production_identity_before: ProductionIdentity
     production_identity_after: ProductionIdentity
     candidate_lock: CandidateLock
+    environments: tuple[EnvironmentIdentity, ...]
+    service_configs: tuple[ServiceConfigIdentity, ...]
     root_manifests: tuple[RootManifest, ...]
     write_deltas: tuple[WriteDelta, ...]
-    artifact_tree_digest: str
     issues: tuple[str, ...]
+    artifact_tree_digest: str
     next_action: str
 
     def __post_init__(self) -> None:
@@ -664,24 +763,55 @@ class AdmissionReceipt:
                 f"AdmissionReceipt schema_version must be {ADMISSION_RECEIPT_SCHEMA_VERSION}, "
                 f"got {self.schema_version!r}"
             )
+        if self.evaluation_contract_version != EVALUATION_CONTRACT_VERSION:
+            raise ValueError(
+                f"AdmissionReceipt evaluation_contract_version must be {EVALUATION_CONTRACT_VERSION!r}, "
+                f"got {self.evaluation_contract_version!r}"
+            )
         _validate_non_empty_str(self.evaluation_identity, "AdmissionReceipt.evaluation_identity")
         if self.status not in _ADMISSION_STATUSES:
             raise ValueError(f"AdmissionReceipt.status must be one of {sorted(_ADMISSION_STATUSES)}")
         _validate_non_empty_str(self.started_at, "AdmissionReceipt.started_at")
         _validate_non_empty_str(self.ended_at, "AdmissionReceipt.ended_at")
         budgets = _validate_tuple(self.budgets, "AdmissionReceipt.budgets")
-        _validate_unique_names([budget.name for budget in budgets], "AdmissionReceipt.budgets")
-        _validate_tuple(self.root_manifests, "AdmissionReceipt.root_manifests")
-        _validate_tuple(self.write_deltas, "AdmissionReceipt.write_deltas")
-        _validate_tuple(self.issues, "AdmissionReceipt.issues")
+        _validate_sorted_unique([budget.name for budget in budgets], "AdmissionReceipt.budgets")
+        environments = _validate_tuple(self.environments, "AdmissionReceipt.environments")
+        _validate_sorted_unique([identity.name for identity in environments], "AdmissionReceipt.environments")
+        service_configs = _validate_tuple(self.service_configs, "AdmissionReceipt.service_configs")
+        _validate_sorted_unique(
+            [identity.backend for identity in service_configs], "AdmissionReceipt.service_configs"
+        )
+        root_manifests = _validate_tuple(self.root_manifests, "AdmissionReceipt.root_manifests")
+        _validate_sorted_unique([manifest.root for manifest in root_manifests], "AdmissionReceipt.root_manifests")
+        write_deltas = _validate_tuple(self.write_deltas, "AdmissionReceipt.write_deltas")
+        _validate_sorted_unique([delta.root for delta in write_deltas], "AdmissionReceipt.write_deltas")
+        issues = _validate_tuple(self.issues, "AdmissionReceipt.issues")
+        _validate_sorted_unique(issues, "AdmissionReceipt.issues")
         _validate_sha256(self.artifact_tree_digest, "AdmissionReceipt.artifact_tree_digest")
         _validate_non_empty_str(self.next_action, "AdmissionReceipt.next_action")
-        if self.status == "pass" and self.production_identity_before != self.production_identity_after:
-            raise ValueError("AdmissionReceipt status is pass but production identity changed between before and after")
+        if self.status == "pass":
+            if self.production_identity_before != self.production_identity_after:
+                raise ValueError(
+                    "AdmissionReceipt status is pass but production identity changed between before and after"
+                )
+            manifests_by_root = {manifest.root: manifest for manifest in root_manifests}
+            delta_roots = {delta.root for delta in write_deltas}
+            if set(manifests_by_root) != delta_roots:
+                raise ValueError(
+                    "AdmissionReceipt status is pass but root_manifests roots do not match write_deltas roots"
+                )
+            for delta in write_deltas:
+                manifest = manifests_by_root[delta.root]
+                if delta.before_manifest_digest != manifest.manifest_digest:
+                    raise ValueError(
+                        f"AdmissionReceipt status is pass but write_deltas[{delta.root}]."
+                        "before_manifest_digest does not match its root_manifests entry"
+                    )
 
     def to_dict(self) -> dict[str, object]:
         return {
             "schema_version": self.schema_version,
+            "evaluation_contract_version": self.evaluation_contract_version,
             "evaluation_identity": self.evaluation_identity,
             "status": self.status,
             "started_at": self.started_at,
@@ -690,10 +820,12 @@ class AdmissionReceipt:
             "production_identity_before": _production_identity_to_dict(self.production_identity_before),
             "production_identity_after": _production_identity_to_dict(self.production_identity_after),
             "candidate_lock": _candidate_lock_to_dict(self.candidate_lock),
+            "environments": [_environment_identity_to_dict(identity) for identity in self.environments],
+            "service_configs": [_service_config_identity_to_dict(identity) for identity in self.service_configs],
             "root_manifests": [_root_manifest_to_dict(manifest) for manifest in self.root_manifests],
             "write_deltas": [_write_delta_to_dict(delta) for delta in self.write_deltas],
-            "artifact_tree_digest": self.artifact_tree_digest,
             "issues": list(self.issues),
+            "artifact_tree_digest": self.artifact_tree_digest,
             "next_action": self.next_action,
         }
 
@@ -707,6 +839,9 @@ class AdmissionReceipt:
         _closed_fields(value, _ADMISSION_RECEIPT_FIELDS, "AdmissionReceipt")
         return AdmissionReceipt(
             schema_version=_expect_int(value["schema_version"], "AdmissionReceipt.schema_version"),
+            evaluation_contract_version=_expect_str(
+                value["evaluation_contract_version"], "AdmissionReceipt.evaluation_contract_version"
+            ),
             evaluation_identity=_expect_str(value["evaluation_identity"], "AdmissionReceipt.evaluation_identity"),
             status=_expect_str(value["status"], "AdmissionReceipt.status"),
             started_at=_expect_str(value["started_at"], "AdmissionReceipt.started_at"),
@@ -717,6 +852,14 @@ class AdmissionReceipt:
             production_identity_before=_production_identity_from_dict(value["production_identity_before"]),
             production_identity_after=_production_identity_from_dict(value["production_identity_after"]),
             candidate_lock=_candidate_lock_from_dict(value["candidate_lock"]),
+            environments=tuple(
+                _environment_identity_from_dict(item)
+                for item in _expect_list(value["environments"], "AdmissionReceipt.environments")
+            ),
+            service_configs=tuple(
+                _service_config_identity_from_dict(item)
+                for item in _expect_list(value["service_configs"], "AdmissionReceipt.service_configs")
+            ),
             root_manifests=tuple(
                 _root_manifest_from_dict(item)
                 for item in _expect_list(value["root_manifests"], "AdmissionReceipt.root_manifests")
@@ -725,11 +868,11 @@ class AdmissionReceipt:
                 _write_delta_from_dict(item)
                 for item in _expect_list(value["write_deltas"], "AdmissionReceipt.write_deltas")
             ),
-            artifact_tree_digest=_expect_str(value["artifact_tree_digest"], "AdmissionReceipt.artifact_tree_digest"),
             issues=tuple(
                 _expect_str(item, "AdmissionReceipt.issues item")
                 for item in _expect_list(value["issues"], "AdmissionReceipt.issues")
             ),
+            artifact_tree_digest=_expect_str(value["artifact_tree_digest"], "AdmissionReceipt.artifact_tree_digest"),
             next_action=_expect_str(value["next_action"], "AdmissionReceipt.next_action"),
         )
 
@@ -737,6 +880,7 @@ class AdmissionReceipt:
 _ADMISSION_RECEIPT_FIELDS = frozenset(
     {
         "schema_version",
+        "evaluation_contract_version",
         "evaluation_identity",
         "status",
         "started_at",
@@ -745,10 +889,12 @@ _ADMISSION_RECEIPT_FIELDS = frozenset(
         "production_identity_before",
         "production_identity_after",
         "candidate_lock",
+        "environments",
+        "service_configs",
         "root_manifests",
         "write_deltas",
-        "artifact_tree_digest",
         "issues",
+        "artifact_tree_digest",
         "next_action",
     }
 )

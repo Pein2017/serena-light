@@ -6,14 +6,17 @@ import pytest
 
 from scripts.backend_eval.models import (
     DEFAULT_PHASE_BUDGETS,
+    EVALUATION_CONTRACT_VERSION,
     AdmissionReceipt,
     CandidateLock,
     CandidatePackage,
+    EnvironmentIdentity,
     PathRecord,
     PhaseBudget,
     ProductionIdentity,
     ResolvedPackage,
     RootManifest,
+    ServiceConfigIdentity,
     WriteDelta,
     canonical_json,
     sha256_bytes,
@@ -38,6 +41,29 @@ def _production_identity(**overrides: object) -> ProductionIdentity:
     }
     fields.update(overrides)
     return ProductionIdentity(**fields)
+
+
+def _environment_identity(name: str = "ms", **overrides: object) -> EnvironmentIdentity:
+    fields: dict[str, object] = {
+        "name": name,
+        "interpreter_path": f"/root/miniconda3/envs/{name}/bin/python",
+        "interpreter_realpath": f"/root/miniconda3/envs/{name}/bin/python3.12",
+        "version": "3.12.11",
+    }
+    fields.update(overrides)
+    return EnvironmentIdentity(**fields)
+
+
+def _service_config_identity(backend: str = "ty", **overrides: object) -> ServiceConfigIdentity:
+    fields: dict[str, object] = {
+        "backend": backend,
+        "config_path": f"/data/CoordExp/.codex/runtime/serena-light/backend-eval/{backend}/config.json",
+        "config_sha256": _SHA_A,
+        "home_path": f"/data/CoordExp/.codex/runtime/serena-light/backend-eval/{backend}/home",
+        "cache_path": f"/data/CoordExp/.codex/runtime/serena-light/backend-eval/{backend}/cache",
+    }
+    fields.update(overrides)
+    return ServiceConfigIdentity(**fields)
 
 
 def _resolved_package(name: str, **overrides: object) -> ResolvedPackage:
@@ -112,6 +138,8 @@ def _write_delta(**overrides: object) -> WriteDelta:
     fields: dict[str, object] = {
         "root": "/data/CoordExp/serena-light",
         "kind": "git",
+        "before_manifest_digest": _SHA_B,
+        "after_manifest_digest": _SHA_C,
         "declared": ("src/a.py",),
         "unexpected": (),
     }
@@ -119,24 +147,35 @@ def _write_delta(**overrides: object) -> WriteDelta:
     return WriteDelta(**fields)
 
 
-def _admission_receipt(*, status: str = "pass", after: ProductionIdentity | None = None) -> AdmissionReceipt:
+def _admission_receipt(
+    *, status: str = "pass", after: ProductionIdentity | None = None, **overrides: object
+) -> AdmissionReceipt:
     before = _production_identity()
-    return AdmissionReceipt(
-        schema_version=1,
-        evaluation_identity="eval-2026-08-11-0001",
-        status=status,
-        started_at="2026-08-11T00:00:00Z",
-        ended_at="2026-08-11T00:10:00Z",
-        budgets=(DEFAULT_PHASE_BUDGETS["admission"],),
-        production_identity_before=before,
-        production_identity_after=before if after is None else after,
-        candidate_lock=_candidate_lock(),
-        root_manifests=(_root_manifest(),),
-        write_deltas=(_write_delta(),),
-        artifact_tree_digest=_SHA_C,
-        issues=(),
-        next_action="proceed to protocol phase",
-    )
+    fields: dict[str, object] = {
+        "schema_version": 1,
+        "evaluation_contract_version": EVALUATION_CONTRACT_VERSION,
+        "evaluation_identity": "eval-2026-08-11-0001",
+        "status": status,
+        "started_at": "2026-08-11T00:00:00Z",
+        "ended_at": "2026-08-11T00:10:00Z",
+        "budgets": (DEFAULT_PHASE_BUDGETS["admission"],),
+        "production_identity_before": before,
+        "production_identity_after": before if after is None else after,
+        "candidate_lock": _candidate_lock(),
+        "environments": (_environment_identity("llm-framework-study"), _environment_identity("ms")),
+        "service_configs": (
+            _service_config_identity("pyrefly"),
+            _service_config_identity("pyright"),
+            _service_config_identity("ty"),
+        ),
+        "root_manifests": (_root_manifest(),),
+        "write_deltas": (_write_delta(),),
+        "artifact_tree_digest": _SHA_C,
+        "issues": (),
+        "next_action": "proceed to protocol phase",
+    }
+    fields.update(overrides)
+    return AdmissionReceipt(**fields)
 
 
 def test_canonical_json_is_sorted_utf8_and_newline_terminated() -> None:
@@ -163,6 +202,10 @@ def test_phase_budgets_match_openspec() -> None:
         "agent": PhaseBudget("agent", 8 * 60 * 60),
         "total": PhaseBudget("total", 16 * 60 * 60),
     }
+
+
+def test_evaluation_contract_version_is_pinned() -> None:
+    assert EVALUATION_CONTRACT_VERSION == "python-backend-evaluation-v1"
 
 
 def test_phase_budget_rejects_non_positive_seconds() -> None:
@@ -197,6 +240,46 @@ def test_production_identity_rejects_unsorted_runtime_paths() -> None:
 def test_production_identity_rejects_non_tuple_runtime_paths() -> None:
     with pytest.raises(ValueError, match="tuple"):
         _production_identity(runtime_paths=[("cli", "/data/x/cli.py")])
+
+
+def test_environment_identity_rejects_relative_interpreter_path() -> None:
+    with pytest.raises(ValueError, match="absolute"):
+        _environment_identity(interpreter_path="relative/python")
+
+
+def test_environment_identity_rejects_relative_interpreter_realpath() -> None:
+    with pytest.raises(ValueError, match="absolute"):
+        _environment_identity(interpreter_realpath="relative/python3.12")
+
+
+def test_environment_identity_rejects_empty_name() -> None:
+    with pytest.raises(ValueError, match="non-empty"):
+        _environment_identity(name="")
+
+
+def test_environment_identity_rejects_empty_version() -> None:
+    with pytest.raises(ValueError, match="non-empty"):
+        _environment_identity(version="")
+
+
+def test_service_config_identity_rejects_unknown_backend() -> None:
+    with pytest.raises(ValueError, match="backend"):
+        _service_config_identity(backend="mypy")
+
+
+def test_service_config_identity_rejects_noncanonical_config_sha256() -> None:
+    with pytest.raises(ValueError, match="SHA-256"):
+        _service_config_identity(config_sha256="deadbeef")
+
+
+def test_service_config_identity_rejects_relative_config_path() -> None:
+    with pytest.raises(ValueError, match="absolute"):
+        _service_config_identity(config_path="relative/config.json")
+
+
+def test_service_config_identity_rejects_relative_home_path() -> None:
+    with pytest.raises(ValueError, match="absolute"):
+        _service_config_identity(home_path="relative/home")
 
 
 def test_resolved_package_rejects_noncanonical_artifact_hash() -> None:
@@ -382,6 +465,16 @@ def test_write_delta_rejects_non_tuple_declared() -> None:
         _write_delta(declared=["src/a.py"])
 
 
+def test_write_delta_rejects_noncanonical_before_manifest_digest() -> None:
+    with pytest.raises(ValueError, match="SHA-256"):
+        _write_delta(before_manifest_digest="deadbeef")
+
+
+def test_write_delta_rejects_noncanonical_after_manifest_digest() -> None:
+    with pytest.raises(ValueError, match="SHA-256"):
+        _write_delta(after_manifest_digest="deadbeef")
+
+
 def test_admission_receipt_rejects_pass_status_with_changed_production_identity() -> None:
     with pytest.raises(ValueError, match="production identity"):
         _admission_receipt(status="pass", after=_production_identity(build_identity=_SHA_C))
@@ -392,24 +485,110 @@ def test_admission_receipt_allows_hold_status_with_changed_production_identity()
     assert receipt.status == "hold"
 
 
+def test_admission_receipt_rejects_wrong_evaluation_contract_version() -> None:
+    with pytest.raises(ValueError, match="evaluation_contract_version"):
+        _admission_receipt(evaluation_contract_version="python-backend-evaluation-v2")
+
+
 def test_admission_receipt_rejects_non_tuple_budgets() -> None:
     with pytest.raises(ValueError, match="tuple"):
-        AdmissionReceipt(
-            schema_version=1,
-            evaluation_identity="eval-2026-08-11-0001",
-            status="pass",
-            started_at="2026-08-11T00:00:00Z",
-            ended_at="2026-08-11T00:10:00Z",
-            budgets=[DEFAULT_PHASE_BUDGETS["admission"]],  # type: ignore[arg-type]
-            production_identity_before=_production_identity(),
-            production_identity_after=_production_identity(),
-            candidate_lock=_candidate_lock(),
-            root_manifests=(_root_manifest(),),
-            write_deltas=(_write_delta(),),
-            artifact_tree_digest=_SHA_C,
-            issues=(),
-            next_action="proceed to protocol phase",
+        _admission_receipt(budgets=[DEFAULT_PHASE_BUDGETS["admission"]])
+
+
+def test_admission_receipt_rejects_unsorted_budgets() -> None:
+    with pytest.raises(ValueError, match="sorted"):
+        _admission_receipt(budgets=(DEFAULT_PHASE_BUDGETS["protocol"], DEFAULT_PHASE_BUDGETS["admission"]))
+
+
+def test_admission_receipt_rejects_non_tuple_environments() -> None:
+    with pytest.raises(ValueError, match="tuple"):
+        _admission_receipt(environments=[_environment_identity("ms"), _environment_identity("llm-framework-study")])
+
+
+def test_admission_receipt_rejects_unsorted_environments() -> None:
+    with pytest.raises(ValueError, match="sorted"):
+        _admission_receipt(environments=(_environment_identity("ms"), _environment_identity("llm-framework-study")))
+
+
+def test_admission_receipt_rejects_duplicate_environment_names() -> None:
+    with pytest.raises(ValueError, match="duplicate"):
+        _admission_receipt(environments=(_environment_identity("ms"), _environment_identity("ms")))
+
+
+def test_admission_receipt_rejects_non_tuple_service_configs() -> None:
+    with pytest.raises(ValueError, match="tuple"):
+        _admission_receipt(service_configs=[_service_config_identity("ty")])
+
+
+def test_admission_receipt_rejects_unsorted_service_configs() -> None:
+    with pytest.raises(ValueError, match="sorted"):
+        _admission_receipt(
+            service_configs=(
+                _service_config_identity("ty"),
+                _service_config_identity("pyright"),
+                _service_config_identity("pyrefly"),
+            )
         )
+
+
+def test_admission_receipt_rejects_duplicate_service_config_backends() -> None:
+    with pytest.raises(ValueError, match="duplicate"):
+        _admission_receipt(service_configs=(_service_config_identity("ty"), _service_config_identity("ty")))
+
+
+def test_admission_receipt_rejects_unsorted_root_manifests() -> None:
+    first = _root_manifest(root="/data/ms-swift", manifest_digest=_SHA_D)
+    second = _root_manifest()
+    with pytest.raises(ValueError, match="sorted"):
+        _admission_receipt(status="hold", root_manifests=(first, second))
+
+
+def test_admission_receipt_rejects_duplicate_root_manifest_roots() -> None:
+    with pytest.raises(ValueError, match="duplicate"):
+        _admission_receipt(
+            status="hold", root_manifests=(_root_manifest(), _root_manifest(manifest_digest=_SHA_D))
+        )
+
+
+def test_admission_receipt_rejects_unsorted_write_deltas() -> None:
+    first = _write_delta(root="/data/ms-swift")
+    second = _write_delta()
+    with pytest.raises(ValueError, match="sorted"):
+        _admission_receipt(status="hold", write_deltas=(first, second))
+
+
+def test_admission_receipt_rejects_duplicate_write_delta_roots() -> None:
+    with pytest.raises(ValueError, match="duplicate"):
+        _admission_receipt(
+            status="hold", write_deltas=(_write_delta(), _write_delta(after_manifest_digest=_SHA_D))
+        )
+
+
+def test_admission_receipt_rejects_unsorted_issues() -> None:
+    with pytest.raises(ValueError, match="sorted"):
+        _admission_receipt(issues=("zeta issue", "alpha issue"))
+
+
+def test_admission_receipt_rejects_duplicate_issues() -> None:
+    with pytest.raises(ValueError, match="duplicate"):
+        _admission_receipt(issues=("same issue", "same issue"))
+
+
+def test_admission_receipt_pass_requires_root_manifest_roots_match_write_delta_roots() -> None:
+    other_manifest = _root_manifest(root="/data/ms-swift", manifest_digest=_SHA_D)
+    with pytest.raises(ValueError, match="root_manifests"):
+        _admission_receipt(root_manifests=(other_manifest,))
+
+
+def test_admission_receipt_pass_requires_before_manifest_digest_matches_root_manifest() -> None:
+    with pytest.raises(ValueError, match="before_manifest_digest"):
+        _admission_receipt(write_deltas=(_write_delta(before_manifest_digest=_SHA_D),))
+
+
+def test_admission_receipt_allows_incomplete_status_with_mismatched_manifest_roots() -> None:
+    other_manifest = _root_manifest(root="/data/ms-swift", manifest_digest=_SHA_D)
+    receipt = _admission_receipt(status="incomplete", root_manifests=(other_manifest,))
+    assert receipt.status == "incomplete"
 
 
 def test_admission_receipt_round_trips_through_to_dict_and_from_dict() -> None:
