@@ -56,7 +56,7 @@ Task 1: shared schemas
 **Interfaces:**
 - Produces: `canonical_json(value: Mapping[str, object]) -> bytes`
 - Produces: `sha256_bytes(value: bytes) -> str`
-- Produces frozen dataclasses `PhaseBudget`, `ProductionIdentity`, `ResolvedPackage`, `CandidatePackage`, `CandidateLock`, `PathRecord`, `RootManifest`, `WriteDelta`, `AdmissionReceipt`
+- Produces frozen dataclasses `PhaseBudget`, `ProductionIdentity`, `EnvironmentIdentity`, `ServiceConfigIdentity`, `ResolvedPackage`, `CandidatePackage`, `CandidateLock`, `PathRecord`, `RootManifest`, `WriteDelta`, `AdmissionReceipt`
 - Produces: `AdmissionReceipt.to_dict() -> dict[str, object]`
 - Produces: `AdmissionReceipt.from_dict(value: Mapping[str, object]) -> AdmissionReceipt`
 - All later tasks consume these exact names; no later task may introduce a second receipt/manifest representation.
@@ -92,9 +92,9 @@ Expected: FAIL during import because `scripts.backend_eval.models` does not exis
 
 - [ ] **Step 3: Implement minimal frozen models with strict closed fields**
 
-Use `@dataclass(frozen=True, slots=True)` for every record. `ResolvedPackage` contains `name`, `version`, `requirement`, and `artifact_hashes` for every package in the compiled lock. `CandidatePackage` contains those same fields plus `executable_relpath`, and is used only for the direct `ty` and `pyrefly` candidates. `CandidateLock` contains the lock digest, resolution cutoff, all resolved packages, and exactly the two direct candidates. `ProductionIdentity` contains all three lockfile SHA-256 values, `dependency_lock_digest`, `build_identity`, and sorted production runtime paths. `PathRecord` includes its lexical disposition (`tracked`, `untracked`, `ignored`, or `declared`). `RootManifest` contains root, kind, Git source revision when applicable, inventory digest/count, fully hashed `PathRecord`s, metadata-only `PathRecord`s, and a manifest digest. A fully hashed record must have `content_sha256`; a metadata record normally omits it but may carry the required after-change digest when the write guard detects changed metadata. `AdmissionReceipt` contains schema version `1`, evaluation identity, status, timestamps, budgets, production identity before/after, candidate lock, root manifests, write deltas, artifact-tree digest, issues, and next action.
+Use `@dataclass(frozen=True, slots=True)` for every record. `EnvironmentIdentity` contains environment name, configured interpreter path, resolved interpreter realpath, and interpreter version. `ServiceConfigIdentity` contains backend name, absolute service-owned config path and digest, HOME, and cache path. `ResolvedPackage` contains `name`, `version`, `requirement`, and `artifact_hashes` for every package in the compiled lock. `CandidatePackage` contains those same fields plus `executable_relpath`, and is used only for the direct `ty` and `pyrefly` candidates. `CandidateLock` contains the lock digest, resolution cutoff, all resolved packages, and exactly the two direct candidates. `ProductionIdentity` contains all three lockfile SHA-256 values, `dependency_lock_digest`, `build_identity`, and sorted production runtime paths. `PathRecord` includes its lexical disposition (`tracked`, `untracked`, `ignored`, or `declared`). `RootManifest` contains root, kind, Git source revision when applicable, inventory digest/count, fully hashed `PathRecord`s, metadata-only `PathRecord`s, and a manifest digest. A fully hashed record must have `content_sha256`; a metadata record normally omits it but may carry the required after-change digest when the write guard detects changed metadata. `WriteDelta` binds its result to exact before/after manifest digests. `AdmissionReceipt` contains schema version `1`, evaluation-contract version `python-backend-evaluation-v1`, evaluation identity, status, timestamps, canonically ordered budgets, production identity before/after, candidate lock, environment identities, service-config identities, canonically ordered root manifests/write deltas/issues, artifact-tree digest, and next action.
 
-Reject unknown or missing fields, mutable/non-tuple sequence inputs to frozen records, noncanonical SHA-256 values, duplicate or noncanonical package/path ordering, non-absolute roots, missing or malformed Git source revisions, invalid per-path dispositions, fully hashed records without content digests, non-positive budgets, and a successful receipt whose before/after production identities differ.
+Reject unknown or missing fields, mutable/non-tuple sequence inputs to frozen records, noncanonical SHA-256 values, duplicate or noncanonical package/path/receipt ordering, non-absolute roots, missing or malformed Git source revisions, invalid per-path dispositions, fully hashed records without content digests, unbound write deltas, non-positive budgets, and a successful receipt whose before/after production identities differ.
 
 - [ ] **Step 4: Run focused tests**
 
@@ -208,7 +208,7 @@ git commit -m "Lock backend evaluation candidates safely"
 
 **Interfaces:**
 - Consumes: Task 1 models and Task 2 `capture_production_identity`, `assert_production_identity_unchanged`
-- Produces frozen `CandidateRuntime(root, python, ty, pyrefly, lock_digest, executable_hashes, home, cache, config)`
+- Produces frozen `CandidateRuntime(root, python, ty, pyrefly, lock_digest, executable_hashes, home, cache, config, environments, service_configs)`
 - Produces: `prepare_candidate_runtime(lock: CandidateLock, request: RuntimeRequest, *, runner: CommandRunner = subprocess_runner) -> CandidateRuntime`
 - Produces: `minimal_backend_environment(runtime: CandidateRuntime, selected_interpreter: Path) -> dict[str, str]`
 
@@ -226,7 +226,7 @@ def test_backend_environment_is_minimal_and_proxy_free() -> None:
     assert not any(key.upper().endswith("_PROXY") for key in env)
 ```
 
-Also assert exact `uv venv` and `uv pip sync --require-hashes` commands, executable hash verification, no ambient PATH lookup, idempotent reuse only after full manifest verification, cleanup of a partially created runtime on failure, and unchanged production identity.
+Also assert exact `uv venv` and `uv pip sync --require-hashes` commands, executable hash verification, configured interpreter versus realpath capture for `ms` and `llm-framework-study`, version capture through each explicit interpreter, service-owned config files and digests for `pyright`, `ty`, and `pyrefly`, no ambient PATH lookup, idempotent reuse only after full manifest verification, cleanup of a partially created runtime on failure, and unchanged production identity.
 
 - [ ] **Step 2: Run tests and verify the missing module failure**
 
@@ -236,7 +236,7 @@ Expected: FAIL because `scripts.backend_eval.runtime` does not exist.
 
 - [ ] **Step 3: Implement runtime preparation**
 
-Use the explicit `uv` and Python paths from `RuntimeRequest`. Create `<runtime-base>/<lock-digest>/venv`, `home`, `cache`, `config`, and `tmp` only. Install the compiled lock with hashes into the evaluation venv; validate `bin/ty` and `bin/pyrefly` are regular files within the runtime root and record their SHA-256 values and `--version` outputs. Publish the runtime manifest with atomic `os.replace` plus directory fsync only after all verification succeeds.
+Use the explicit `uv` and Python paths from `RuntimeRequest`. Create `<runtime-base>/<lock-digest>/venv`, `home`, `cache`, `config`, and `tmp` only. Install the compiled lock with hashes into the evaluation venv; validate `bin/ty` and `bin/pyrefly` are regular files within the runtime root and record their SHA-256 values and `--version` outputs. Resolve the manifest-declared `ms` and `llm-framework-study` interpreters without ambient PATH, retaining both configured path and realpath plus exact version. Materialize deterministic service-owned configuration files for `pyright`, `ty`, and `pyrefly` below the runtime config directory, record their digests and HOME/cache ownership as `ServiceConfigIdentity`, and never write configuration into a corpus root. Publish the runtime manifest with atomic `os.replace` plus directory fsync only after all verification succeeds.
 
 - [ ] **Step 4: Run focused and production-identity tests**
 
@@ -344,6 +344,8 @@ def test_declared_disposable_edit_is_not_backend_write() -> None:
     delta = compare_root_manifests(before, after, declared_mutations=frozenset({"src/a.py"}))
     assert not delta.unexpected
     assert delta.declared == ("src/a.py",)
+    assert delta.before_manifest_digest == before.manifest_digest
+    assert delta.after_manifest_digest == after.manifest_digest
 ```
 
 Cover same-size/mtime replacement on fully hashed paths, metadata change followed by content hash on remainder paths, unexpected new paths, root/kind mismatch, special-file failure, and canonical delta ordering.
@@ -356,7 +358,7 @@ Expected: FAIL because `scripts.backend_eval.write_guard` does not exist.
 
 - [ ] **Step 3: Implement fail-closed comparison**
 
-Compare path membership and every recorded field. A declared mutation suppresses only the exact named path, never its parent, sibling, or symlink target. When a metadata-only record changes, require `after.content_sha256` before classification; absence is an incomplete observation and must fail closed. `assert_no_unexpected_writes` raises one bounded error containing counts, digest, and at most 50 sample paths.
+Compare path membership and every recorded field, and bind every `WriteDelta` to `before.manifest_digest` and `after.manifest_digest`. A declared mutation suppresses only the exact named path, never its parent, sibling, or symlink target. When a metadata-only record changes, require `after.content_sha256` before classification; absence is an incomplete observation and must fail closed. `assert_no_unexpected_writes` raises one bounded error containing counts, digest, and at most 50 sample paths.
 
 - [ ] **Step 4: Run focused and manifest regression tests**
 
@@ -399,7 +401,10 @@ Use fake lock/runtime/manifest functions to cover PASS, 30-minute deadline, unst
 def test_admission_pass_requires_equal_production_identity() -> None:
     receipt = run_admission(request, services=passing_services)
     assert receipt.status == "pass"
-    assert receipt.production_before == receipt.production_after
+    assert receipt.production_identity_before == receipt.production_identity_after
+    assert receipt.evaluation_contract_version == "python-backend-evaluation-v1"
+    assert {identity.name for identity in receipt.environments} == {"llm-framework-study", "ms"}
+    assert {identity.backend for identity in receipt.service_configs} == {"pyrefly", "pyright", "ty"}
     assert receipt.next_action == "begin_protocol_probe_planning"
 
 
@@ -418,7 +423,7 @@ Expected: FAIL because `scripts.backend_eval.admission` does not exist.
 
 - [ ] **Step 3: Implement orchestration and atomic receipt publication**
 
-Capture production identity; enforce the monotonic deadline before and after every external step; compile/freeze the candidate lock once; prepare/verify runtime; capture the bounded corpus twice around the no-backend admission operation; compare zero-write evidence; capture production identity again; write canonical JSON to a temporary file, fsync, `os.replace`, and fsync the artifact directory. On failure, publish an incomplete receipt only when its evidence is trustworthy and perform exact evaluation-owned partial cleanup.
+Capture production identity; enforce the monotonic deadline before and after every external step; compile/freeze the candidate lock once; prepare/verify runtime; capture the exact environment and service-config identities from that runtime; capture the bounded corpus twice around the no-backend admission operation; compare zero-write evidence with bound before/after manifest digests; capture production identity again; construct all receipt-level arrays in their canonical order; write canonical JSON to a temporary file, fsync, `os.replace`, and fsync the artifact directory. On failure, publish an incomplete receipt only when its evidence is trustworthy and perform exact evaluation-owned partial cleanup.
 
 - [ ] **Step 4: Run Phase 1 focused suite and static checks**
 
@@ -459,7 +464,7 @@ Compare both digests with the receipt's pre-evaluation values. Verify no evaluat
 
 - [ ] **Step 7: Record bounded acceptance and check OpenSpec Phase 1 tasks**
 
-Write `phase-1-acceptance.md` with exact command, evaluation identity, candidate lock digest, artifact-tree digest, production identity before/after, root manifest digests/counts, elapsed time, write-delta summary, cleanup summary, and PASS/HOLD disposition. Do not embed raw transcripts or source.
+Write `phase-1-acceptance.md` with exact command, evaluation identity and contract version, candidate lock digest, interpreter configured/real paths and versions, service-config paths/digests, artifact-tree digest, production identity before/after, root manifest digests/counts, bound before/after write-delta digests, elapsed time, cleanup summary, and PASS/HOLD disposition. Do not embed raw transcripts or source.
 
 Change only OpenSpec checkboxes 1.1–1.8 to `[x]` when the real receipt passes. Leave every Phase 2–6 checkbox unchecked.
 
