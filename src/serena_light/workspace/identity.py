@@ -141,6 +141,23 @@ class CondaEnvironmentResolver:
         # this value owns Pyright configuration and runtime identity.
         return CondaEnvironment(name=selected, interpreter=configured)
 
+    def environment_for_path(self, path: Path) -> str | None:
+        """Classify an already-resolved path below one installed environment."""
+
+        try:
+            relative = path.relative_to(self._envs_root)
+        except ValueError:
+            return None
+        if not relative.parts:
+            return None
+        name = relative.parts[0]
+        if _CONDA_ENVIRONMENT_NAME.fullmatch(name) is None:
+            return None
+        try:
+            return self.resolve(name).name
+        except WorkspaceError:
+            return None
+
 
 class WorkspacePolicy:
     """Resolve workspace identities and enforce the read/write path boundary."""
@@ -184,6 +201,11 @@ class WorkspacePolicy:
             python_environment=environment.name,
             python_interpreter=environment.interpreter,
         )
+
+    def environment_for_path(self, path: Path) -> str | None:
+        """Return the evident installed environment for one resolved path."""
+
+        return self._environments.environment_for_path(path)
 
     def classify_semantic_location(self, identity: WorkspaceIdentity, path: str | Path) -> SemanticLocation:
         """Classify an LSP-returned location without changing workspace inventory."""

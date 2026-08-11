@@ -20,6 +20,7 @@ from serena_light.workspace.identity import (
     WorkspaceErrorData,
     WorkspaceIdentity,
     WorkspaceKind,
+    WorkspacePolicy,
 )
 from serena_light.workspace.registry import ResolvedWorkspace, WorkspaceRuntimeRegistry
 
@@ -192,6 +193,33 @@ def make_service(
     return service, registry, service_clock, stopped, stop_threads
 
 
+def make_policy_service(
+    tmp_path: Path,
+) -> tuple[
+    WorkspaceDaemonService[tuple[WorkspaceKind, Path, str, Path], Runtime],
+    Path,
+]:
+    envs_root = tmp_path / "conda" / "envs"
+    for name in ("ms", "llm-framework-study"):
+        interpreter = envs_root / name / "bin" / "python"
+        interpreter.parent.mkdir(parents=True)
+        interpreter.write_text("#!/bin/sh\n", encoding="utf-8")
+        interpreter.chmod(0o755)
+    data_root = tmp_path / "data"
+    data_root.mkdir()
+    policy = WorkspacePolicy(conda_envs_root=envs_root, data_root=data_root)
+    registry = WorkspaceRuntimeRegistry[tuple[WorkspaceKind, Path, str, Path], Runtime, UUID](
+        lambda identity: Runtime(repr(identity))
+    )
+    service = WorkspaceDaemonService[tuple[WorkspaceKind, Path, str, Path], Runtime](
+        lifecycle=LeaseLifecycle[tuple[WorkspaceKind, Path, str, Path], Runtime](clock=FakeClock()),
+        registry=registry,
+        resolver=policy,
+        runtime_stopper=lambda _runtime: None,
+    )
+    return service, envs_root
+
+
 def test_debug_reporting_contains_only_bounded_lease_and_cleanup_summaries() -> None:
     events: list[tuple[str, str]] = []
     service, _registry, clock, _stopped, _threads = make_service(
@@ -331,6 +359,79 @@ def test_environment_selection_is_lease_bound_and_failed_switch_keeps_old_bindin
             (Path("/data/shared"), "llm-framework-study"),
             (Path("/data/shared"), "missing"),
         ]
+
+    run(scenario())
+
+
+def test_activation_warns_about_path_environment_mismatch_without_rebinding(tmp_path: Path) -> None:
+    service, envs_root = make_policy_service(tmp_path)
+    target = envs_root / "llm-framework-study" / "lib" / "python3.12" / "site-packages"
+    target.mkdir(parents=True)
+
+    async def scenario() -> None:
+        lease_id = cast(str, (await service.acquire_lease(mcp_session_id="mismatch"))["lease_id"])
+        activation = await service.activate_workspace(lease_id=lease_id, absolute_path=str(target))
+
+        workspace = cast(Mapping[str, object], activation["workspace"])
+        assert workspace["python_environment"] == "ms"
+        assert activation["warnings"] == [
+            {
+                "code": "PYTHON_ENVIRONMENT_PATH_MISMATCH",
+                "selected_environment": "ms",
+                "path_environment": "llm-framework-study",
+                "next_action": "reactivate_with_path_environment",
+            }
+        ]
+        binding = await service.binding_for(lease_id=lease_id)
+        assert binding.identity[2] == "ms"
+
+    run(scenario())
+
+
+def test_activation_path_warning_is_absent_for_match_and_ordinary_path(tmp_path: Path) -> None:
+    service, envs_root = make_policy_service(tmp_path)
+    target = envs_root / "llm-framework-study" / "lib" / "python3.12" / "site-packages"
+    target.mkdir(parents=True)
+    ordinary = tmp_path / "ordinary"
+    ordinary.mkdir()
+
+    async def scenario() -> None:
+        matching_lease = cast(str, (await service.acquire_lease(mcp_session_id="matching"))["lease_id"])
+        matching = await service.activate_workspace(
+            lease_id=matching_lease,
+            absolute_path=str(target),
+            python_environment="llm-framework-study",
+        )
+        assert "warnings" not in matching
+
+        ordinary_lease = cast(str, (await service.acquire_lease(mcp_session_id="ordinary"))["lease_id"])
+        normal = await service.activate_workspace(lease_id=ordinary_lease, absolute_path=str(ordinary))
+        assert "warnings" not in normal
+
+    run(scenario())
+
+
+def test_failed_environment_switch_preserves_binding_and_emits_no_warning(tmp_path: Path) -> None:
+    service, envs_root = make_policy_service(tmp_path)
+    target = envs_root / "llm-framework-study" / "lib" / "python3.12" / "site-packages"
+    target.mkdir(parents=True)
+    ordinary = tmp_path / "ordinary"
+    ordinary.mkdir()
+
+    async def scenario() -> None:
+        lease_id = cast(str, (await service.acquire_lease(mcp_session_id="failed-switch"))["lease_id"])
+        await service.activate_workspace(lease_id=lease_id, absolute_path=str(ordinary))
+        before = await service.binding_for(lease_id=lease_id)
+
+        failed = await service.activate_workspace(
+            lease_id=lease_id,
+            absolute_path=str(target),
+            python_environment="missing",
+        )
+
+        assert failed["ok"] is False
+        assert "warnings" not in failed
+        assert await service.binding_for(lease_id=lease_id) == before
 
     run(scenario())
 

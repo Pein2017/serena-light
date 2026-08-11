@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable, Hashable, Mapping
+from dataclasses import dataclass
 from inspect import isawaitable
 from pathlib import Path
 from typing import Any, Protocol, cast
@@ -93,6 +94,12 @@ class WorkspaceResolver[IdentityT](Protocol):
         python_environment: str,
         /,
     ) -> ResolvedWorkspace[IdentityT] | WorkspaceIdentity: ...
+
+
+@dataclass(frozen=True, slots=True)
+class _ResolvedActivation[IdentityT]:
+    workspace: ResolvedWorkspace[IdentityT]
+    warnings: tuple[Mapping[str, JsonValue], ...] = ()
 
 
 class WorkspaceDaemonService[IdentityT: Hashable, RuntimeT]:
@@ -235,7 +242,7 @@ class WorkspaceDaemonService[IdentityT: Hashable, RuntimeT]:
                     prepared = await asyncio.to_thread(
                         self._registry.prepare_activation,
                         daemon_lease_id,
-                        resolved,
+                        resolved.workspace,
                     )
                     await self._ensure_runtime_fresh(prepared.binding.runtime)
                     # Refresh runs off-loop and can outlive lease authority.
@@ -272,10 +279,13 @@ class WorkspaceDaemonService[IdentityT: Hashable, RuntimeT]:
         if activation_error is not None:
             return activation_error
         assert binding is not None
-        return {
+        result: dict[str, object] = {
             "lease_id": str(daemon_lease_id),
             "workspace": _binding_data(binding),
         }
+        if resolved.warnings:
+            result["warnings"] = list(resolved.warnings)
+        return result
 
     async def binding_for(self, *, lease_id: str) -> WorkspaceBinding[IdentityT, RuntimeT]:
         """Resolve workspace state only through a currently live daemon UUID."""
@@ -352,24 +362,38 @@ class WorkspaceDaemonService[IdentityT: Hashable, RuntimeT]:
         self,
         activation_path: Path,
         python_environment: str,
-    ) -> ResolvedWorkspace[IdentityT]:
+    ) -> _ResolvedActivation[IdentityT]:
+        warnings: tuple[Mapping[str, JsonValue], ...] = ()
         if isinstance(self._resolver, WorkspacePolicy):
             result: ResolvedWorkspace[IdentityT] | WorkspaceIdentity = self._resolver.resolve_activation(
                 activation_path,
                 python_environment=python_environment,
             )
+            path_environment = self._resolver.environment_for_path(result.working_subdirectory)
+            if path_environment is not None and path_environment != python_environment:
+                warnings = (
+                    {
+                        "code": "PYTHON_ENVIRONMENT_PATH_MISMATCH",
+                        "selected_environment": python_environment,
+                        "path_environment": path_environment,
+                        "next_action": RecoveryAction.REACTIVATE_WITH_PATH_ENVIRONMENT.value,
+                    },
+                )
         else:
             result = self._resolver(activation_path, python_environment)
         if isinstance(result, WorkspaceIdentity):
             # Working-subdirectory metadata is connection-local, so only the
             # physical root key participates in runtime reuse.
-            return ResolvedWorkspace(
-                identity=cast(IdentityT, result.registry_key),
-                working_subdirectory=result.working_subdirectory,
+            return _ResolvedActivation(
+                workspace=ResolvedWorkspace(
+                    identity=cast(IdentityT, result.registry_key),
+                    working_subdirectory=result.working_subdirectory,
+                ),
+                warnings=warnings,
             )
         if not isinstance(result, ResolvedWorkspace):
             raise TypeError("workspace resolver must return ResolvedWorkspace or WorkspaceIdentity")
-        return result
+        return _ResolvedActivation(workspace=result)
 
     async def _clean_expired(self, error: LifecycleLeaseExpiredError[IdentityT, RuntimeT]) -> None:
         async with self._binding_lock:

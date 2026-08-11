@@ -364,8 +364,18 @@ class _ObservedService:
     async def release_lease(self, *, lease_id: str, immediate: bool) -> Mapping[str, object]:
         return await self._service.release_lease(lease_id=lease_id, immediate=immediate)
 
-    async def activate_workspace(self, *, lease_id: str, absolute_path: str) -> Mapping[str, object]:
-        return await self._service.activate_workspace(lease_id=lease_id, absolute_path=absolute_path)
+    async def activate_workspace(
+        self,
+        *,
+        lease_id: str,
+        absolute_path: str,
+        python_environment: str | None = None,
+    ) -> Mapping[str, object]:
+        return await self._service.activate_workspace(
+            lease_id=lease_id,
+            absolute_path=absolute_path,
+            python_environment=python_environment,
+        )
 
     async def release_workspace(self, *, lease_id: str, immediate: bool = False) -> Mapping[str, object]:
         return await self._service.release_workspace(lease_id=lease_id, immediate=immediate)
@@ -725,6 +735,60 @@ def _permit_edits(monkeypatch: pytest.MonkeyPatch) -> None:
     """Lift only the public reacceptance withholding, restored by the fixture."""
 
     monkeypatch.setattr(connector_module, "WITHHELD_TOOLS", frozenset())
+
+
+def test_connector_activation_environment_warning_is_advisory_and_correctable(tmp_path: Path) -> None:
+    environment = "llm-framework-study"
+    interpreter = tmp_path / environment / "bin" / "python"
+    interpreter.parent.mkdir(parents=True)
+    interpreter.write_text("#!/bin/sh\n", encoding="utf-8")
+    interpreter.chmod(0o755)
+    target = tmp_path / environment / "lib" / "python3.12" / "site-packages"
+    target.mkdir(parents=True)
+    (target / "module.py").write_bytes(_SOURCE)
+
+    with _acceptance(tmp_path) as harness:
+
+        async def scenario() -> None:
+            async with _connected(harness) as connector:
+                default_result, default = await _call_content(
+                    connector,
+                    "activate_workspace",
+                    absolute_path=str(target),
+                )
+                assert default_result.structuredContent == default
+                default_data = cast(Mapping[str, object], default["data"])
+                assert default_data["warnings"] == [
+                    {
+                        "code": "PYTHON_ENVIRONMENT_PATH_MISMATCH",
+                        "selected_environment": "ms",
+                        "path_environment": environment,
+                        "next_action": "reactivate_with_path_environment",
+                    }
+                ]
+                default_workspace = cast(Mapping[str, object], default_data["workspace"])
+                assert default_workspace["python_environment"] == "ms"
+                semantic = await _call(
+                    connector,
+                    "get_symbols_overview",
+                    relative_path="module.py",
+                )
+                assert semantic["ok"] is True
+                assert "warnings" not in semantic
+                assert "warnings" not in cast(Mapping[str, object], semantic["data"])
+
+                explicit = await _call(
+                    connector,
+                    "activate_workspace",
+                    absolute_path=str(target),
+                    python_environment=environment,
+                )
+                explicit_data = cast(Mapping[str, object], explicit["data"])
+                assert "warnings" not in explicit_data
+                explicit_workspace = cast(Mapping[str, object], explicit_data["workspace"])
+                assert explicit_workspace["python_environment"] == environment
+
+        asyncio.run(scenario())
 
 
 def test_connector_scan_reports_create_change_delete_and_python_native_config(tmp_path: Path) -> None:

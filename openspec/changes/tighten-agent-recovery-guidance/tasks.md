@@ -1,8 +1,8 @@
 ## 1. Activation Environment Warning
 
-- [ ] 1.1 Add failing identity/service tests for default mismatch, explicit match, ordinary paths, invalid environments, symlink-resolved paths, advisory-only behavior, and failed-switch preservation.
-- [ ] 1.2 Implement bounded installed-environment path classification and carry zero-or-one warning through successful activation presentation without changing registry keys, runtime selection, or lease behavior.
-- [ ] 1.3 Run the focused workspace identity, daemon service, connector contract, and activation schema tests; verify warning records never enter semantic success or runtime identity.
+- [x] 1.1 Add failing identity/service tests for default mismatch, explicit match, ordinary paths, invalid environments, symlink-resolved paths, advisory-only behavior, and failed-switch preservation.
+- [x] 1.2 Implement bounded installed-environment path classification and carry zero-or-one warning through successful activation presentation without changing registry keys, runtime selection, or lease behavior.
+- [x] 1.3 Run the focused workspace identity, daemon service, connector contract, and activation schema tests; verify warning records never enter semantic success or runtime identity.
 
 ## 2. Compact Runtime Status
 

@@ -42,6 +42,7 @@ class RecoveryAction(StrEnum):
 
     GET_SYMBOLS_OVERVIEW = "get_symbols_overview"
     ACTIVATE_WORKSPACE_IF_OTHER_ROOT = "activate_workspace_if_other_root"
+    REACTIVATE_WITH_PATH_ENVIRONMENT = "reactivate_with_path_environment"
 
 
 def render_error_result(

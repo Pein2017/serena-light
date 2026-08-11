@@ -140,6 +140,31 @@ def test_entire_site_packages_directory_is_a_valid_non_git_root(tmp_path: Path) 
     assert identity.python_interpreter == envs_root / "llm-framework-study" / "bin" / "python"
 
 
+def test_path_environment_is_reported_only_for_an_installed_environment_prefix(tmp_path: Path) -> None:
+    policy, envs_root = _flexible_policy(tmp_path)
+    target = envs_root / "llm-framework-study" / "lib" / "python3.12" / "site-packages"
+    target.mkdir(parents=True)
+    uninstalled = envs_root / "not-installed" / "lib" / "python3.12" / "site-packages"
+    uninstalled.mkdir(parents=True)
+    ordinary = tmp_path / "external"
+    ordinary.mkdir()
+
+    assert policy.environment_for_path(target.resolve()) == "llm-framework-study"
+    assert policy.environment_for_path(uninstalled.resolve()) is None
+    assert policy.environment_for_path(ordinary.resolve()) is None
+    assert policy.environment_for_path(envs_root.resolve()) is None
+
+
+def test_path_environment_uses_the_resolved_symlink_target(tmp_path: Path) -> None:
+    policy, envs_root = _flexible_policy(tmp_path)
+    target = envs_root / "llm-framework-study" / "lib" / "python3.12" / "site-packages"
+    target.mkdir(parents=True)
+    alias = tmp_path / "environment-alias"
+    alias.symlink_to(target, target_is_directory=True)
+
+    assert policy.environment_for_path(alias.resolve()) == "llm-framework-study"
+
+
 def test_environment_selection_is_part_of_registry_identity(tmp_path: Path) -> None:
     policy, envs_root = _flexible_policy(tmp_path)
     root = tmp_path / "data" / "repo"
