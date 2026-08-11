@@ -5,12 +5,14 @@ from __future__ import annotations
 import fcntl
 import json
 import os
+import re
 import shutil
 import stat
 import threading
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field, fields, replace
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -34,6 +36,7 @@ from scripts.backend_eval.runtime import (
     REQUIREMENTS_SNAPSHOT_NAME,
     RUNTIME_DIRECTORY_NAMES,
     RUNTIME_FILE_NAMES,
+    SEALED_REQUIREMENTS_ARGUMENT,
     SERVICE_CONFIG_RELPATHS,
     CandidateRuntime,
     RuntimePreparationError,
@@ -54,9 +57,12 @@ _LOCK_BODY = (
     f"pyrefly=={_PYREFLY_VERSION} \\\n    --hash=sha256:{_HASH_A}\n"
     f"ty=={_TY_VERSION} \\\n    --hash=sha256:{_HASH_B}\n"
 ).encode()
+_OTHER_BODY = _LOCK_BODY + b"attrs==25.1.0\n"
 _LOCK_DIGEST = sha256_bytes(_LOCK_BODY)
 _ENVIRONMENT_NAMES = ("llm-framework-study", "ms")
 _INTERPRETER_ARGS = ("-I", "-c", "import sys; print(sys.version.split()[0])")
+_DESCRIPTOR_RE = re.compile(r"/proc/\d+/fd/\d+")
+_RUNTIME_ENV_KEYS = ("HOME", "PATH", "TMPDIR", "UV_CACHE_DIR", "XDG_CACHE_HOME", "XDG_CONFIG_HOME")
 
 
 def _candidate_lock() -> CandidateLock:
@@ -78,7 +84,7 @@ def _candidate_lock() -> CandidateLock:
 
 @dataclass
 class _FakeRunner:
-    """A runner that materializes exactly what `uv` and the probed executables would."""
+    """A runner that behaves like a child process: relative arguments resolve against cwd."""
 
     versions: Mapping[str, str] = field(
         default_factory=lambda: {"pyrefly": f"pyrefly {_PYREFLY_VERSION}", "ty": f"ty {_TY_VERSION}"}
@@ -96,8 +102,16 @@ class _FakeRunner:
     mutate: Path | None = None
     rewrite_source: tuple[str, Path, bytes] | None = None
     rewrite_snapshot: tuple[str, bytes] | None = None
+    transient_snapshot: bytes | None = None
+    swap: tuple[str, Path, Path] | None = None
+    probe_sync_input: bool = False
     gate: tuple[threading.Event, threading.Event] | None = None
     calls: list[tuple[tuple[str, ...], Path, Mapping[str, str]]] = field(default_factory=list)
+    resolved_commands: list[tuple[str, ...]] = field(default_factory=list)
+    resolved_cwds: list[Path] = field(default_factory=list)
+    resolved_envs: list[dict[str, Path]] = field(default_factory=list)
+    observed_sync_input: bytes | None = None
+    sync_input_write_error: OSError | None = None
 
     @property
     def commands(self) -> list[tuple[str, ...]]:
@@ -108,14 +122,30 @@ class _FakeRunner:
         return [command for command in self.commands if command[1:2] == ("venv",) or command[1:3] == ("pip", "sync")]
 
     def environment_for(self, marker: str) -> Mapping[str, str]:
-        for command, _cwd, env in self.calls:
+        return self.calls[self._index_of(marker)][2]
+
+    def resolved_environment_for(self, marker: str) -> dict[str, Path]:
+        """The runtime directories the command's environment named, resolved while it ran."""
+
+        return self.resolved_envs[self._index_of(marker)]
+
+    def _index_of(self, marker: str) -> int:
+        for index, (command, _cwd, _env) in enumerate(self.calls):
             if marker in command:
-                return env
+                return index
         raise AssertionError(f"no recorded command containing {marker!r}")
 
     def __call__(self, command: Sequence[str], *, cwd: Path, env: Mapping[str, str]) -> CommandResult:
         tokens = tuple(command)
         self.calls.append((tokens, cwd, dict(env)))
+        # Both are captured while the descriptor is still open, as a child process would see them.
+        self.resolved_cwds.append(Path(cwd).resolve())
+        self.resolved_commands.append(
+            (str(Path(tokens[0]).resolve()), *tokens[1:]) if tokens[0].startswith("/proc/") else tokens
+        )
+        self.resolved_envs.append(
+            {key: Path(env[key]).resolve() for key in _RUNTIME_ENV_KEYS if key in env}
+        )
         self._release_gate()
         self._apply_mutations(tokens)
         if tokens[1:2] == ("venv",):
@@ -151,35 +181,73 @@ class _FakeRunner:
         if self.rewrite_snapshot is not None and self.rewrite_snapshot[0] in tokens:
             _marker, payload = self.rewrite_snapshot
             self.rewrite_snapshot = None
-            snapshot = next(token for token in tokens if token.endswith(REQUIREMENTS_SNAPSHOT_NAME))
-            Path(snapshot).write_bytes(payload)
+            self._snapshot().write_bytes(payload)
+        if self.swap is not None and self.swap[0] in tokens:
+            _marker, logical, attacker = self.swap
+            self.swap = None
+            logical.rename(logical.parent / f"{logical.name}-moved")
+            logical.symlink_to(attacker)
+
+    def _snapshot(self) -> Path:
+        return self.resolved_cwds[-1] / REQUIREMENTS_SNAPSHOT_NAME
+
+    def _cwd_path(self, token: str) -> Path:
+        """Resolve a command argument the way a child process with this cwd would."""
+
+        return Path(token) if token.startswith("/") else self.resolved_cwds[-1] / token
 
     def _venv(self, tokens: tuple[str, ...]) -> CommandResult:
         if self.fail_command == "venv":
             return CommandResult(returncode=1, stdout="", stderr="uv venv refused")
-        bin_dir = Path(tokens[2]) / "bin"
+        bin_dir = self._cwd_path(tokens[2]) / "bin"
         bin_dir.mkdir(parents=True, exist_ok=True)
         if not self.skip_venv_interpreter:
             (bin_dir / "python").symlink_to(tokens[tokens.index("--python") + 1])
         return CommandResult(returncode=0, stdout="", stderr="")
 
     def _sync(self, tokens: tuple[str, ...]) -> CommandResult:
-        if self.fail_command == "sync":
-            return CommandResult(returncode=1, stdout="", stderr="hash mismatch")
-        bin_dir = Path(tokens[tokens.index("--python") + 1]).parent
-        for name, body in sorted(self.bodies.items()):
-            if name in self.omit_executables:
-                continue
-            path = bin_dir / name
-            if name in self.symlink_executables:
-                outside = bin_dir.parent.parent.parent / f"{name}-outside"
-                outside.write_bytes(body)
-                outside.chmod(0o700)
-                path.symlink_to(outside)
-                continue
-            path.write_bytes(body)
-            path.chmod(0o700)
-        return CommandResult(returncode=0, stdout="", stderr="")
+        if self.probe_sync_input:
+            self._probe_input(tokens[3])
+        restore = None
+        if self.transient_snapshot is not None:
+            # Change the durable snapshot and put it back before this command returns.
+            restore = self._snapshot().read_bytes()
+            self._snapshot().write_bytes(self.transient_snapshot)
+            self.transient_snapshot = None
+            if self.probe_sync_input:
+                self._probe_input(tokens[3])
+        try:
+            if self.fail_command == "sync":
+                return CommandResult(returncode=1, stdout="", stderr="hash mismatch")
+            bin_dir = self._cwd_path(tokens[tokens.index("--python") + 1]).parent
+            for name, body in sorted(self.bodies.items()):
+                if name in self.omit_executables:
+                    continue
+                path = bin_dir / name
+                if name in self.symlink_executables:
+                    outside = bin_dir.parent.parent.parent / f"{name}-outside"
+                    outside.write_bytes(body)
+                    outside.chmod(0o700)
+                    path.symlink_to(outside)
+                    continue
+                path.write_bytes(body)
+                path.chmod(0o700)
+            return CommandResult(returncode=0, stdout="", stderr="")
+        finally:
+            if restore is not None:
+                self._snapshot().write_bytes(restore)
+
+    def _probe_input(self, argument: str) -> None:
+        """Read the bytes uv is given, then try to change them underneath it."""
+
+        self.observed_sync_input = Path(argument).read_bytes()
+        fd = os.open(argument, os.O_WRONLY)
+        try:
+            os.pwrite(fd, b"attrs==25.1.0\n", 0)
+        except OSError as exc:
+            self.sync_input_write_error = exc
+        finally:
+            os.close(fd)
 
     def _version(self, tokens: tuple[str, ...]) -> CommandResult:
         name = Path(tokens[0]).name
@@ -263,11 +331,13 @@ def lock() -> CandidateLock:
     return _candidate_lock()
 
 
-def _expected_venv_command(request: RuntimeRequest, root: Path) -> tuple[str, ...]:
+def _expected_venv_command(request: RuntimeRequest) -> tuple[str, ...]:
+    """The venv target is cwd-relative, so it binds to the open runtime descriptor."""
+
     return (
         str(request.uv),
         "venv",
-        str(root / "venv"),
+        "venv",
         "--python",
         str(request.python),
         "--no-python-downloads",
@@ -276,39 +346,23 @@ def _expected_venv_command(request: RuntimeRequest, root: Path) -> tuple[str, ..
     )
 
 
-def _expected_sync_command(request: RuntimeRequest, root: Path) -> tuple[str, ...]:
+def _expected_sync_command(request: RuntimeRequest, requirements: str) -> tuple[str, ...]:
     return (
         str(request.uv),
         "pip",
         "sync",
-        str(root / REQUIREMENTS_SNAPSHOT_NAME),
+        requirements,
         "--require-hashes",
         "--only-binary",
         ":all:",
         "--no-sources",
         "--no-python-downloads",
         "--python",
-        str(root / "venv" / "bin" / "python"),
+        "venv/bin/python",
     )
 
 
-def _expected_build_commands(request: RuntimeRequest, root: Path) -> list[tuple[str, ...]]:
-    venv_bin = root / "venv" / "bin"
-    return [
-        (str(request.uv), "--version"),
-        (str(request.python), *_INTERPRETER_ARGS),
-        _expected_venv_command(request, root),
-        _expected_sync_command(request, root),
-        (str(venv_bin / "pyrefly"), "--version"),
-        (str(venv_bin / "ty"), "--version"),
-        *[
-            (str(interpreter), *_INTERPRETER_ARGS)
-            for _name, interpreter in request.environment_interpreters
-        ],
-    ]
-
-
-def _expected_reuse_commands(request: RuntimeRequest) -> list[tuple[str, ...]]:
+def _expected_probe_commands(request: RuntimeRequest) -> list[tuple[str, ...]]:
     return [
         (str(request.uv), "--version"),
         (str(request.python), *_INTERPRETER_ARGS),
@@ -359,8 +413,9 @@ def _static_runtime() -> CandidateRuntime:
     )
 
 
-def _manifest(root: Path) -> Mapping[str, object]:
-    return json.loads((root / MANIFEST_FILE_NAME).read_bytes())
+def _manifest(root: Path) -> dict[str, Any]:
+    decoded: dict[str, Any] = json.loads((root / MANIFEST_FILE_NAME).read_bytes())
+    return decoded
 
 
 # --- content-addressed layout -------------------------------------------------
@@ -432,10 +487,17 @@ def test_runtime_request_refuses_a_symlinked_runtime_base_component(
 
 
 def test_runtime_request_refuses_a_runtime_base_that_contains_a_protected_root(
-    request_: RuntimeRequest
+    request_: RuntimeRequest,
 ) -> None:
     with pytest.raises(ValueError, match="production repository"):
         replace(request_, runtime_base=request_.repo_root.parent)
+
+
+def test_runtime_request_refuses_a_lexically_nested_runtime_base(request_: RuntimeRequest) -> None:
+    with pytest.raises(ValueError, match="corpus root"):
+        replace(request_, runtime_base=Path("/data/CoordExp/serena-light/.backend-eval-runtime"))
+    with pytest.raises(ValueError, match="production repository"):
+        replace(request_, runtime_base=request_.repo_root / "runtime")
 
 
 def test_runtime_preparation_refuses_an_ancestor_swapped_after_validation(
@@ -471,20 +533,54 @@ def test_runtime_preparation_refuses_a_symlinked_runtime_root(
     assert sorted(path.name for path in elsewhere.iterdir()) == []
 
 
-def test_runtime_request_refuses_a_lexically_nested_runtime_base(request_: RuntimeRequest) -> None:
-    with pytest.raises(ValueError, match="corpus root"):
-        replace(request_, runtime_base=Path("/data/CoordExp/serena-light/.backend-eval-runtime"))
-    with pytest.raises(ValueError, match="production repository"):
-        replace(request_, runtime_base=request_.repo_root / "runtime")
+def test_runtime_preparation_fails_closed_when_the_root_is_swapped_mid_probe(
+    lock: CandidateLock, request_: RuntimeRequest, tmp_path: Path
+) -> None:
+    """Rename plus symlink during the first tool probe: no later write may escape."""
+
+    logical = request_.runtime_base / lock.digest
+    attacker = tmp_path / "attacker-root"
+    attacker.mkdir()
+    runner = _FakeRunner(swap=("--version", logical, attacker))
+
+    with pytest.raises(RuntimePreparationError, match=r"swapped during preparation \(before publication\)"):
+        prepare_candidate_runtime(lock, request_, runner=runner)
+
+    moved = request_.runtime_base / f"{lock.digest}-moved"
+    # Every later command, write, and read followed the open descriptor to the real root.
+    assert runner.resolved_cwds[1:] == [moved] * (len(runner.calls) - 1)
+    assert runner.resolved_cwds[0] == logical
+    # Nothing was written into the attacker's target and no manifest exists anywhere.
+    assert sorted(path.name for path in attacker.iterdir()) == []
+    assert not (attacker / MANIFEST_FILE_NAME).exists()
+    assert not (moved / MANIFEST_FILE_NAME).exists()
+    # The real root was emptied, and the attacker-controlled entry was not unlinked for us.
+    assert sorted(path.name for path in moved.iterdir()) == []
+    assert logical.is_symlink()
 
 
-# --- requirements-lock snapshot ------------------------------------------------
+def test_runtime_preparation_fails_closed_when_the_root_is_swapped_before_publication(
+    lock: CandidateLock, request_: RuntimeRequest, tmp_path: Path
+) -> None:
+    logical = request_.runtime_base / lock.digest
+    attacker = tmp_path / "late-attacker-root"
+    attacker.mkdir()
+    runner = _FakeRunner(swap=(str(request_.environment_interpreters[-1][1]), logical, attacker))
+
+    with pytest.raises(RuntimePreparationError, match=r"swapped during preparation \(before publication\)"):
+        prepare_candidate_runtime(lock, request_, runner=runner)
+
+    assert sorted(path.name for path in attacker.iterdir()) == []
+    assert sorted(path.name for path in (request_.runtime_base / f"{lock.digest}-moved").iterdir()) == []
+
+
+# --- requirements: verified source, sealed sync input, durable evidence --------
 
 
 def test_runtime_refuses_a_requirements_lock_that_is_not_the_candidate_lock(
     lock: CandidateLock, request_: RuntimeRequest
 ) -> None:
-    request_.requirements_lock.write_bytes(_LOCK_BODY + b"attrs==25.1.0\n")
+    request_.requirements_lock.write_bytes(_OTHER_BODY)
 
     with pytest.raises(RuntimePreparationError, match="does not match the candidate lock digest"):
         prepare_candidate_runtime(lock, request_, runner=_FakeRunner())
@@ -493,6 +589,8 @@ def test_runtime_refuses_a_requirements_lock_that_is_not_the_candidate_lock(
 def test_runtime_installs_a_durable_evaluation_owned_snapshot_of_the_lock(
     lock: CandidateLock, request_: RuntimeRequest
 ) -> None:
+    """The durable snapshot is evidence; the sync input is a sealed image of the same bytes."""
+
     runner = _FakeRunner()
 
     runtime = prepare_candidate_runtime(lock, request_, runner=runner)
@@ -500,12 +598,41 @@ def test_runtime_installs_a_durable_evaluation_owned_snapshot_of_the_lock(
     snapshot = runtime.root / REQUIREMENTS_SNAPSHOT_NAME
     assert snapshot.read_bytes() == _LOCK_BODY
     assert sha256_bytes(snapshot.read_bytes()) == lock.digest
-    assert str(snapshot) in runner.install_commands[1]
-    assert str(request_.requirements_lock) not in runner.install_commands[1]
+    sync_input = runner.install_commands[1][3]
+    assert _DESCRIPTOR_RE.fullmatch(sync_input)
+    assert sync_input not in {str(snapshot), str(request_.requirements_lock)}
     assert _manifest(runtime.root)["requirements_snapshot"] == {
         "path": str(snapshot),
         "sha256": lock.digest,
     }
+
+
+def test_runtime_syncs_a_sealed_immutable_image_of_the_verified_bytes(
+    lock: CandidateLock, request_: RuntimeRequest
+) -> None:
+    runner = _FakeRunner(probe_sync_input=True)
+
+    runtime = prepare_candidate_runtime(lock, request_, runner=runner)
+
+    assert runner.observed_sync_input == _LOCK_BODY
+    assert runner.sync_input_write_error is not None
+    assert _manifest(runtime.root)["commands"][1] == list(
+        _expected_sync_command(request_, SEALED_REQUIREMENTS_ARGUMENT)
+    )
+
+
+def test_runtime_sync_input_is_immutable_across_a_transient_snapshot_mutation(
+    lock: CandidateLock, request_: RuntimeRequest
+) -> None:
+    """The reviewer's transient change-then-restore cannot alter what uv actually read."""
+
+    runner = _FakeRunner(probe_sync_input=True, transient_snapshot=_OTHER_BODY)
+
+    runtime = prepare_candidate_runtime(lock, request_, runner=runner)
+
+    assert runner.observed_sync_input == _LOCK_BODY
+    assert runner.sync_input_write_error is not None
+    assert (runtime.root / REQUIREMENTS_SNAPSHOT_NAME).read_bytes() == _LOCK_BODY
 
 
 def test_runtime_ignores_a_concurrent_replacement_of_the_source_lock(
@@ -513,12 +640,11 @@ def test_runtime_ignores_a_concurrent_replacement_of_the_source_lock(
 ) -> None:
     """A legitimate source-lock replacement mid-run cannot install different bytes."""
 
-    other = _LOCK_BODY + b"attrs==25.1.0 \\\n    --hash=sha256:" + b"c" * 64 + b"\n"
-    runner = _FakeRunner(rewrite_source=("venv", request_.requirements_lock, other))
+    runner = _FakeRunner(rewrite_source=("venv", request_.requirements_lock, _OTHER_BODY))
 
     runtime = prepare_candidate_runtime(lock, request_, runner=runner)
 
-    assert request_.requirements_lock.read_bytes() == other
+    assert request_.requirements_lock.read_bytes() == _OTHER_BODY
     snapshot = runtime.root / REQUIREMENTS_SNAPSHOT_NAME
     assert snapshot.read_bytes() == _LOCK_BODY
     assert sha256_bytes(snapshot.read_bytes()) == lock.digest
@@ -527,8 +653,7 @@ def test_runtime_ignores_a_concurrent_replacement_of_the_source_lock(
 def test_runtime_fails_closed_when_the_installed_snapshot_changes_during_sync(
     lock: CandidateLock, request_: RuntimeRequest
 ) -> None:
-    other = _LOCK_BODY + b"attrs==25.1.0\n"
-    runner = _FakeRunner(rewrite_snapshot=("sync", other))
+    runner = _FakeRunner(rewrite_snapshot=("sync", _OTHER_BODY))
 
     with pytest.raises(RuntimePreparationError, match="does not match the candidate lock digest"):
         prepare_candidate_runtime(lock, request_, runner=runner)
@@ -552,13 +677,13 @@ def test_runtime_reuse_refuses_a_changed_requirements_snapshot(
     lock: CandidateLock, request_: RuntimeRequest
 ) -> None:
     runtime = prepare_candidate_runtime(lock, request_, runner=_FakeRunner())
-    (runtime.root / REQUIREMENTS_SNAPSHOT_NAME).write_bytes(_LOCK_BODY + b"attrs==25.1.0\n")
+    (runtime.root / REQUIREMENTS_SNAPSHOT_NAME).write_bytes(_OTHER_BODY)
 
     with pytest.raises(RuntimePreparationError, match="does not match the candidate lock digest"):
         prepare_candidate_runtime(lock, request_, runner=_FakeRunner())
 
 
-# --- exact commands -----------------------------------------------------------
+# --- exact commands, bound to the open descriptor -----------------------------
 
 
 def test_runtime_runs_the_exact_uv_venv_and_hash_locked_sync_commands(
@@ -568,11 +693,30 @@ def test_runtime_runs_the_exact_uv_venv_and_hash_locked_sync_commands(
 
     runtime = prepare_candidate_runtime(lock, request_, runner=runner)
 
-    assert runner.install_commands == [
-        _expected_venv_command(request_, runtime.root),
-        _expected_sync_command(request_, runtime.root),
+    venv_command, sync_command = runner.install_commands
+    assert venv_command == _expected_venv_command(request_)
+    assert sync_command == _expected_sync_command(request_, sync_command[3])
+    assert "--require-hashes" in sync_command
+    assert _manifest(runtime.root)["commands"] == [
+        list(_expected_venv_command(request_)),
+        list(_expected_sync_command(request_, SEALED_REQUIREMENTS_ARGUMENT)),
     ]
-    assert "--require-hashes" in runner.install_commands[1]
+
+
+def test_runtime_targets_every_command_through_the_open_runtime_descriptor(
+    lock: CandidateLock, request_: RuntimeRequest
+) -> None:
+    runner = _FakeRunner()
+
+    runtime = prepare_candidate_runtime(lock, request_, runner=runner)
+
+    assert runner.resolved_cwds == [runtime.root] * len(runner.calls)
+    for _command, cwd, _env in runner.calls:
+        assert _DESCRIPTOR_RE.fullmatch(str(cwd))
+    candidate_probes = [command for command in runner.commands if command[1:] == ("--version",)][1:]
+    assert [Path(command[0]).name for command in candidate_probes] == ["pyrefly", "ty"]
+    for command in candidate_probes:
+        assert _DESCRIPTOR_RE.match(command[0])
 
 
 def test_runtime_probes_every_tool_candidate_and_interpreter_version(
@@ -582,7 +726,19 @@ def test_runtime_probes_every_tool_candidate_and_interpreter_version(
 
     runtime = prepare_candidate_runtime(lock, request_, runner=runner)
 
-    assert runner.commands == _expected_build_commands(request_, runtime.root)
+    venv_bin = runtime.root / "venv" / "bin"
+    assert runner.resolved_commands == [
+        (str(request_.uv), "--version"),
+        (str(request_.python), *_INTERPRETER_ARGS),
+        _expected_venv_command(request_),
+        _expected_sync_command(request_, runner.install_commands[1][3]),
+        (str(venv_bin / "pyrefly"), "--version"),
+        (str(venv_bin / "ty"), "--version"),
+        *[
+            (str(interpreter), *_INTERPRETER_ARGS)
+            for _name, interpreter in request_.environment_interpreters
+        ],
+    ]
 
 
 def test_runtime_reports_a_failed_install_command(lock: CandidateLock, request_: RuntimeRequest) -> None:
@@ -641,26 +797,44 @@ def test_runtime_refuses_a_venv_interpreter_that_is_not_the_requested_interprete
 # --- tool and interpreter identity ---------------------------------------------
 
 
+def _expected_executable_record(path: Path, version: str) -> dict[str, str]:
+    realpath = Path(os.path.realpath(path))
+    return {
+        "path": str(path),
+        "realpath": str(realpath),
+        "sha256": sha256_bytes(realpath.read_bytes()),
+        "version_output": version,
+    }
+
+
 def test_runtime_binds_the_uv_and_base_python_identity(
     lock: CandidateLock, request_: RuntimeRequest
 ) -> None:
     runtime = prepare_candidate_runtime(lock, request_, runner=_FakeRunner())
 
-    tools = _manifest(runtime.root)["tools"]
-    assert tools == {
-        "python": {
-            "path": str(request_.python),
-            "realpath": os.path.realpath(request_.python),
-            "sha256": sha256_bytes(request_.python.read_bytes()),
-            "version_output": _INTERPRETER_VERSION,
-        },
-        "uv": {
-            "path": str(request_.uv),
-            "realpath": os.path.realpath(request_.uv),
-            "sha256": sha256_bytes(request_.uv.read_bytes()),
-            "version_output": _UV_VERSION,
-        },
+    assert _manifest(runtime.root)["tools"] == {
+        "python": _expected_executable_record(request_.python, _INTERPRETER_VERSION),
+        "uv": _expected_executable_record(request_.uv, _UV_VERSION),
     }
+
+
+def test_runtime_binds_the_environment_interpreter_executable_identity(
+    lock: CandidateLock, request_: RuntimeRequest
+) -> None:
+    """EnvironmentIdentity is unchanged; the executable bytes are bound manifest-side."""
+
+    runtime = prepare_candidate_runtime(lock, request_, runner=_FakeRunner())
+
+    assert _manifest(runtime.root)["environment_executables"] == {
+        name: _expected_executable_record(interpreter, _INTERPRETER_VERSION)
+        for name, interpreter in request_.environment_interpreters
+    }
+    assert [field.name for field in fields(EnvironmentIdentity)] == [
+        "name",
+        "interpreter_path",
+        "interpreter_realpath",
+        "version",
+    ]
 
 
 def test_runtime_records_configured_path_realpath_and_version_for_each_environment(
@@ -812,11 +986,16 @@ def test_bootstrap_commands_keep_ambient_proxy_but_own_home_cache_and_config(
 
     install_env = runner.environment_for("venv")
     assert install_env["HTTPS_PROXY"] == "http://proxy.internal:7890"
-    assert install_env["HOME"] == str(runtime.home)
-    assert install_env["TMPDIR"] == str(runtime.root / "tmp")
-    assert install_env["XDG_CACHE_HOME"] == str(runtime.cache)
-    assert install_env["XDG_CONFIG_HOME"] == str(runtime.config)
-    assert install_env["UV_CACHE_DIR"] == str(runtime.cache / "uv")
+    # A bootstrap download keeps the ambient PATH; every runtime directory is service owned.
+    assert install_env["PATH"] == os.environ["PATH"]
+    resolved = runner.resolved_environment_for("venv")
+    assert {key: value for key, value in resolved.items() if key != "PATH"} == {
+        "HOME": runtime.home,
+        "TMPDIR": runtime.root / "tmp",
+        "UV_CACHE_DIR": runtime.cache / "uv",
+        "XDG_CACHE_HOME": runtime.cache,
+        "XDG_CONFIG_HOME": runtime.config,
+    }
 
 
 def test_only_install_commands_receive_the_ambient_environment(
@@ -829,13 +1008,28 @@ def test_only_install_commands_receive_the_ambient_environment(
     runtime = prepare_candidate_runtime(lock, request_, runner=runner)
 
     install = set(runner.install_commands)
-    for command, _cwd, env in runner.calls:
+    for index, (command, _cwd, env) in enumerate(runner.calls):
         if command in install:
             assert env["HTTPS_PROXY"] == "http://proxy.internal:7890"
             continue
         assert set(env) == set(BACKEND_ENVIRONMENT_KEYS)
         assert not any(key.upper().endswith("_PROXY") for key in env)
-        assert env["PATH"] == str(runtime.python.parent)
+        assert runner.resolved_envs[index]["PATH"] == runtime.python.parent
+
+
+def test_every_environment_path_stays_inside_the_runtime(
+    lock: CandidateLock, request_: RuntimeRequest
+) -> None:
+    """Even the install environment points only at descriptor-bound runtime directories."""
+
+    runner = _FakeRunner()
+
+    runtime = prepare_candidate_runtime(lock, request_, runner=runner)
+
+    for index, (_command, _cwd, env) in enumerate(runner.calls):
+        for key in ("HOME", "TMPDIR", "XDG_CACHE_HOME", "XDG_CONFIG_HOME"):
+            assert _DESCRIPTOR_RE.match(env[key])
+            assert runner.resolved_envs[index][key].is_relative_to(runtime.root)
 
 
 # --- idempotent reuse ---------------------------------------------------------
@@ -851,7 +1045,26 @@ def test_runtime_reuse_runs_only_identity_revalidation_commands(
 
     assert second == first
     assert reuse_runner.install_commands == []
-    assert reuse_runner.commands == _expected_reuse_commands(request_)
+    assert reuse_runner.commands == _expected_probe_commands(request_)
+
+
+def test_runtime_reuse_refuses_changed_interpreter_bytes_at_the_same_path_and_version(
+    lock: CandidateLock, request_: RuntimeRequest
+) -> None:
+    """Same configured path, same realpath, same version, different bytes: fail closed."""
+
+    prepare_candidate_runtime(lock, request_, runner=_FakeRunner())
+    _name, interpreter = request_.environment_interpreters[1]
+    realpath = Path(os.path.realpath(interpreter))
+    realpath.write_text("#!/bin/sh\nexit 0\n# tampered\n", encoding="utf-8")
+    realpath.chmod(0o700)
+    unchanged = _FakeRunner()
+
+    with pytest.raises(RuntimePreparationError, match="ms identity changed"):
+        prepare_candidate_runtime(lock, request_, runner=unchanged)
+
+    assert str(interpreter) == str(request_.environment_interpreters[1][1])
+    assert os.path.realpath(interpreter) == str(realpath)
 
 
 def test_runtime_reuse_refuses_a_changed_interpreter_version(
@@ -861,7 +1074,7 @@ def test_runtime_reuse_refuses_a_changed_interpreter_version(
     _name, interpreter = request_.environment_interpreters[1]
     drifted = _FakeRunner(interpreter_versions={str(interpreter): "3.12.12"})
 
-    with pytest.raises(RuntimePreparationError, match="now reports"):
+    with pytest.raises(RuntimePreparationError, match="ms identity changed"):
         prepare_candidate_runtime(lock, request_, runner=drifted)
 
 
@@ -875,7 +1088,7 @@ def test_runtime_reuse_refuses_a_changed_interpreter_realpath(
     interpreter.unlink()
     interpreter.symlink_to(moved)
 
-    with pytest.raises(RuntimePreparationError, match="now resolves to"):
+    with pytest.raises(RuntimePreparationError, match="ms identity changed"):
         prepare_candidate_runtime(lock, request_, runner=_FakeRunner())
 
 
@@ -965,6 +1178,8 @@ def test_runtime_manifest_is_canonical_and_records_the_published_identity(
     assert decoded["candidate_lock_digest"] == lock.digest
     assert decoded["executables"]["ty"]["version_output"] == f"ty {_TY_VERSION}"
     assert decoded["executables"]["pyrefly"]["sha256"] == dict(runtime.executable_hashes)["pyrefly"]
+    assert decoded["root"] == str(runtime.root)
+    assert decoded["executables"]["ty"]["path"] == str(runtime.ty)
 
 
 # --- concurrency ---------------------------------------------------------------
@@ -1008,10 +1223,8 @@ def test_concurrent_preparations_serialize_and_never_purge_a_publication(
     assert not first.is_alive() and not second.is_alive()
     assert isinstance(sink["first"], CandidateRuntime)
     assert sink["second"] == sink["first"]
-    assert builder.install_commands == [
-        _expected_venv_command(request_, request_.runtime_base / lock.digest),
-        _expected_sync_command(request_, request_.runtime_base / lock.digest),
-    ]
+    assert builder.install_commands[0] == _expected_venv_command(request_)
+    assert builder.install_commands[1][:3] == (str(request_.uv), "pip", "sync")
     assert follower.install_commands == []
     assert (request_.runtime_base / lock.digest / MANIFEST_FILE_NAME).is_file()
 
