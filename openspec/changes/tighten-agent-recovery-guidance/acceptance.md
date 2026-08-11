@@ -21,8 +21,9 @@ All commands ran from `/data/CoordExp/serena-light` through either the `ms`
 Conda environment or the repository service virtual environment, unless the
 command is a host-level OpenSpec or plugin command.
 
-- Full suite: `rtk run '.venv/bin/python -m pytest -q'` — 940 passed, 35
-  skipped, one Starlette/httpx deprecation warning, 238.06 seconds.
+- Full suite: `rtk run '.venv/bin/python -m pytest -q'` — 941 passed, 35
+  skipped, one Starlette/httpx deprecation warning. The final independent
+  current-tree rerun completed in 237.15 seconds.
 - Static checks: Ruff passed for `src`, `tests`, and `scripts`; Ty passed for
   `src/serena_light`.
 - Bootstrap check passed with runtime-owned CPython, Node 22.22, npm 11.13,

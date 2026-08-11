@@ -918,7 +918,7 @@
       "dependency_digest": "eff6ebdf252faff7f77cb3a2f3894d17b9a0dfc89b46bd193fafdaa9e9ab4941",
       "public_tool_count": 11,
       "fresh_client_required": true,
-      "full_gate_suite": "940_passed_35_skipped_1_warning",
+      "full_gate_suite": "941_passed_35_skipped_1_warning",
       "real_connector_acceptance": "pass_clean_and_poisoned_proxy",
       "fresh_client_smokes": "pass_codex_agent_native_claude_code_and_claude_sonnet_5_cc_agent",
       "archived_change": null,
