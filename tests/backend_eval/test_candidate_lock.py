@@ -17,15 +17,19 @@ from scripts.backend_eval.candidate_lock import (
     CANDIDATE_NAMES,
     CANONICAL_REQUIREMENTS_BYTES,
     LOCK_FILE_NAME,
+    LOCK_ROLLBACK_NAME,
+    QUARANTINE_PREFIX,
     RECEIPT_FILE_NAME,
+    RECEIPT_ROLLBACK_NAME,
     REQUIREMENTS_IN_NAME,
+    TRANSACTION_MARKER_NAME,
     CandidateLockError,
     CandidateLockRequest,
     CommandResult,
     compile_candidate_lock,
     subprocess_runner,
 )
-from scripts.backend_eval.models import CandidateLock, ProductionIdentity, sha256_bytes
+from scripts.backend_eval.models import CandidateLock, ProductionIdentity, canonical_json, sha256_bytes
 from scripts.backend_eval.production_identity import PRODUCTION_IDENTITY_FILES, ProductionIdentityChanged
 
 _EXCLUDE_NEWER = "2026-08-11T00:00:00Z"
@@ -56,6 +60,46 @@ class _FakeRunner:
             body = self.bodies[min(len(self.calls) - 1, len(self.bodies) - 1)]
             Path(tokens[tokens.index("--output-file") + 1]).write_text(body, encoding="utf-8")
         return CommandResult(returncode=self.returncode, stdout=self.stdout, stderr=self.stderr)
+
+
+@dataclass
+class _DirectoryRunner:
+    """A runner whose declared output is a directory rather than a lock file."""
+
+    populate: bool = False
+    calls: int = 0
+
+    def __call__(self, command: Sequence[str], *, cwd: Path, env: Mapping[str, str]) -> CommandResult:
+        del cwd, env
+        self.calls += 1
+        tokens = tuple(command)
+        output = Path(tokens[tokens.index("--output-file") + 1])
+        output.mkdir()
+        if self.populate:
+            (output / "top.txt").write_text("junk\n", encoding="utf-8")
+            (output / "nested").mkdir()
+            (output / "nested" / "deep.txt").write_text("junk\n", encoding="utf-8")
+        return CommandResult(returncode=0, stdout="", stderr="")
+
+
+@dataclass
+class _InspectingRunner:
+    """A runner that records the artifact state it observes while running."""
+
+    observed: dict[str, object] = field(default_factory=dict)
+
+    def __call__(self, command: Sequence[str], *, cwd: Path, env: Mapping[str, str]) -> CommandResult:
+        del cwd, env
+        tokens = tuple(command)
+        output = Path(tokens[tokens.index("--output-file") + 1])
+        root = output.parent
+        self.observed["canonical_lock_exists"] = output.exists()
+        self.observed["marker_exists"] = (root / TRANSACTION_MARKER_NAME).is_file()
+        for name, key in ((LOCK_ROLLBACK_NAME, "lock_rollback"), (RECEIPT_ROLLBACK_NAME, "receipt_rollback")):
+            path = root / name
+            self.observed[key] = path.read_bytes() if path.is_file() else None
+        output.write_text(_LOCK_BODY, encoding="utf-8")
+        return CommandResult(returncode=0, stdout="", stderr="")
 
 
 @dataclass
@@ -173,6 +217,33 @@ def _freeze(request: CandidateLockRequest) -> tuple[CandidateLock, bytes, bytes]
 def _assert_freeze_intact(request: CandidateLockRequest, lock_bytes: bytes, receipt_bytes: bytes) -> None:
     assert (request.artifact_root / LOCK_FILE_NAME).read_bytes() == lock_bytes
     assert (request.artifact_root / RECEIPT_FILE_NAME).read_bytes() == receipt_bytes
+
+
+def _assert_transaction_clean(request: CandidateLockRequest) -> None:
+    root = request.artifact_root
+    assert not (root / TRANSACTION_MARKER_NAME).exists()
+    assert not (root / LOCK_ROLLBACK_NAME).exists()
+    assert not (root / RECEIPT_ROLLBACK_NAME).exists()
+    assert [path.name for path in root.iterdir() if path.name.startswith(QUARANTINE_PREFIX)] == []
+
+
+def _assert_no_reusable_freeze(request: CandidateLockRequest) -> None:
+    root = request.artifact_root
+    assert not (root / LOCK_FILE_NAME).exists()
+    assert not (root / LOCK_FILE_NAME).is_symlink()
+    assert not (root / RECEIPT_FILE_NAME).exists()
+    _assert_transaction_clean(request)
+
+
+def _interrupt_rename(monkeypatch: pytest.MonkeyPatch, *, source: str | None, target: str | None) -> None:
+    real = candidate_lock_module._rename_artifact
+
+    def patched(dir_fd: int, src: str, dst: str) -> None:
+        if (source is None or src == source) and (target is None or dst == target):
+            raise KeyboardInterrupt
+        real(dir_fd, src, dst)
+
+    monkeypatch.setattr(candidate_lock_module, "_rename_artifact", patched)
 
 
 # --- request validation -------------------------------------------------------
@@ -658,3 +729,205 @@ def test_subprocess_runner_reports_exit_status_and_streams(tmp_path: Path) -> No
 def test_subprocess_runner_normalizes_a_start_failure(tmp_path: Path) -> None:
     with pytest.raises(CandidateLockError, match="cannot start"):
         subprocess_runner([str(tmp_path / "absent-uv"), "pip", "compile"], cwd=tmp_path, env={})
+
+
+# --- transactional artifact safety --------------------------------------------
+
+
+def test_the_prior_freeze_is_durably_backed_up_before_the_runner_runs(request_: CandidateLockRequest) -> None:
+    _frozen, lock_bytes, receipt_bytes = _freeze(request_)
+    runner = _InspectingRunner()
+    compile_candidate_lock(request_, runner=runner, recompile=True)
+    assert runner.observed["canonical_lock_exists"] is False
+    assert runner.observed["marker_exists"] is True
+    assert runner.observed["lock_rollback"] == lock_bytes
+    assert runner.observed["receipt_rollback"] == receipt_bytes
+    _assert_freeze_intact(request_, lock_bytes, receipt_bytes)
+    _assert_transaction_clean(request_)
+
+
+def test_a_fresh_resolution_that_drifts_production_leaves_no_reusable_freeze(
+    request_: CandidateLockRequest, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _drifting_capture(monkeypatch)
+    with pytest.raises(ProductionIdentityChanged, match="uv.lock"):
+        compile_candidate_lock(request_, runner=_FakeRunner())
+    _assert_no_reusable_freeze(request_)
+    monkeypatch.undo()
+    lock = compile_candidate_lock(request_, runner=_FakeRunner())
+    assert lock.digest == sha256_bytes(_LOCK_BODY.encode("utf-8"))
+
+
+def test_a_recompilation_that_drifts_production_restores_the_prior_freeze(
+    request_: CandidateLockRequest, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    frozen, lock_bytes, receipt_bytes = _freeze(request_)
+    rebound = replace(request_, exclude_newer="2026-08-10T00:00:00Z")
+    _drifting_capture(monkeypatch)
+    with pytest.raises(ProductionIdentityChanged, match="uv.lock"):
+        compile_candidate_lock(rebound, runner=_FakeRunner(), recompile=True)
+    # The receipt still binds the original request, so the drifting run never published one.
+    _assert_freeze_intact(request_, lock_bytes, receipt_bytes)
+    _assert_transaction_clean(request_)
+    monkeypatch.undo()
+    assert compile_candidate_lock(request_, runner=_FakeRunner()) == frozen
+
+
+@pytest.mark.parametrize("populate", [False, True])
+def test_a_directory_resolution_output_is_purged_without_a_freeze(
+    request_: CandidateLockRequest, populate: bool
+) -> None:
+    runner = _DirectoryRunner(populate=populate)
+    with pytest.raises(CandidateLockError, match="regular file"):
+        compile_candidate_lock(request_, runner=runner)
+    assert runner.calls == 1
+    _assert_no_reusable_freeze(request_)
+    lock = compile_candidate_lock(request_, runner=_FakeRunner())
+    assert lock.digest == sha256_bytes(_LOCK_BODY.encode("utf-8"))
+
+
+@pytest.mark.parametrize("populate", [False, True])
+def test_a_directory_resolution_output_restores_the_prior_freeze(
+    request_: CandidateLockRequest, populate: bool
+) -> None:
+    frozen, lock_bytes, receipt_bytes = _freeze(request_)
+    with pytest.raises(CandidateLockError, match="regular file"):
+        compile_candidate_lock(request_, runner=_DirectoryRunner(populate=populate), recompile=True)
+    _assert_freeze_intact(request_, lock_bytes, receipt_bytes)
+    _assert_transaction_clean(request_)
+    assert compile_candidate_lock(request_, runner=_FakeRunner()) == frozen
+
+
+def test_an_interrupted_restore_keeps_the_durable_copy_and_the_next_call_recovers(
+    request_: CandidateLockRequest, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    frozen, lock_bytes, receipt_bytes = _freeze(request_)
+    _interrupt_rename(monkeypatch, source=LOCK_ROLLBACK_NAME, target=LOCK_FILE_NAME)
+    with pytest.raises(KeyboardInterrupt):
+        compile_candidate_lock(request_, runner=_FakeRunner(write_output=False), recompile=True)
+    root = request_.artifact_root
+    assert (root / LOCK_ROLLBACK_NAME).read_bytes() == lock_bytes
+    assert (root / TRANSACTION_MARKER_NAME).is_file()
+    monkeypatch.undo()
+    assert compile_candidate_lock(request_, runner=_FakeRunner()) == frozen
+    _assert_freeze_intact(request_, lock_bytes, receipt_bytes)
+    _assert_transaction_clean(request_)
+
+
+def test_an_interrupted_restore_leaves_the_quarantined_output_recoverable(
+    request_: CandidateLockRequest, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    frozen, lock_bytes, receipt_bytes = _freeze(request_)
+    changed = _LOCK_BODY.replace("0.0.24", "0.0.25")
+    _interrupt_rename(monkeypatch, source=LOCK_ROLLBACK_NAME, target=LOCK_FILE_NAME)
+    with pytest.raises(KeyboardInterrupt):
+        compile_candidate_lock(request_, runner=_FakeRunner(bodies=(changed,)), recompile=True)
+    root = request_.artifact_root
+    quarantined = [path for path in root.iterdir() if path.name.startswith(QUARANTINE_PREFIX)]
+    assert [path.read_bytes() for path in quarantined] == [changed.encode("utf-8")]
+    assert (root / LOCK_ROLLBACK_NAME).read_bytes() == lock_bytes
+    monkeypatch.undo()
+    assert compile_candidate_lock(request_, runner=_FakeRunner()) == frozen
+    _assert_freeze_intact(request_, lock_bytes, receipt_bytes)
+    _assert_transaction_clean(request_)
+
+
+def test_an_interrupted_backup_is_recovered_on_the_next_call(
+    request_: CandidateLockRequest, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    frozen, lock_bytes, receipt_bytes = _freeze(request_)
+    _interrupt_rename(monkeypatch, source=RECEIPT_FILE_NAME, target=RECEIPT_ROLLBACK_NAME)
+    runner = _FakeRunner()
+    with pytest.raises(KeyboardInterrupt):
+        compile_candidate_lock(request_, runner=runner, recompile=True)
+    root = request_.artifact_root
+    assert runner.calls == []
+    assert not (root / LOCK_FILE_NAME).exists()
+    assert (root / LOCK_ROLLBACK_NAME).read_bytes() == lock_bytes
+    assert (root / RECEIPT_FILE_NAME).read_bytes() == receipt_bytes
+    assert (root / TRANSACTION_MARKER_NAME).is_file()
+    monkeypatch.undo()
+    assert compile_candidate_lock(request_, runner=_FakeRunner()) == frozen
+    _assert_freeze_intact(request_, lock_bytes, receipt_bytes)
+    _assert_transaction_clean(request_)
+
+
+def test_recovery_rolls_back_an_interrupted_commit_consistently(request_: CandidateLockRequest) -> None:
+    frozen, lock_bytes, receipt_bytes = _freeze(request_)
+    root = request_.artifact_root
+    # An interrupt inside the commit window: canonical holds the new freeze while the
+    # durable rollback entries and the marker still describe the previous one.
+    (root / LOCK_ROLLBACK_NAME).write_bytes(lock_bytes)
+    (root / RECEIPT_ROLLBACK_NAME).write_bytes(receipt_bytes)
+    (root / LOCK_FILE_NAME).write_text(_LOCK_BODY.replace("0.0.24", "0.0.25"), encoding="utf-8")
+    (root / RECEIPT_FILE_NAME).write_bytes(b'{"tampered":true}\n')
+    (root / TRANSACTION_MARKER_NAME).write_bytes(canonical_json({"lock": True, "receipt": True}))
+    assert compile_candidate_lock(request_, runner=_FakeRunner()) == frozen
+    _assert_freeze_intact(request_, lock_bytes, receipt_bytes)
+    _assert_transaction_clean(request_)
+
+
+def test_recovery_removes_a_partial_output_from_an_interrupted_fresh_resolution(
+    request_: CandidateLockRequest,
+) -> None:
+    root = request_.artifact_root
+    root.mkdir(parents=True)
+    (root / LOCK_FILE_NAME).write_text("pyrefly==0.30.0 \\\n", encoding="utf-8")
+    (root / TRANSACTION_MARKER_NAME).write_bytes(canonical_json({"lock": False, "receipt": False}))
+    lock = compile_candidate_lock(request_, runner=_FakeRunner())
+    assert lock.digest == sha256_bytes(_LOCK_BODY.encode("utf-8"))
+    _assert_transaction_clean(request_)
+
+
+def test_recovery_restores_a_rollback_entry_left_without_a_canonical_file(
+    request_: CandidateLockRequest,
+) -> None:
+    frozen, lock_bytes, receipt_bytes = _freeze(request_)
+    root = request_.artifact_root
+    (root / LOCK_FILE_NAME).rename(root / LOCK_ROLLBACK_NAME)
+    (root / RECEIPT_FILE_NAME).rename(root / RECEIPT_ROLLBACK_NAME)
+    (root / TRANSACTION_MARKER_NAME).write_bytes(canonical_json({"lock": True, "receipt": True}))
+    runner = _FakeRunner()
+    assert compile_candidate_lock(request_, runner=runner) == frozen
+    assert runner.calls == []
+    _assert_freeze_intact(request_, lock_bytes, receipt_bytes)
+    _assert_transaction_clean(request_)
+
+
+def test_stray_rollback_entries_without_a_marker_are_purged(request_: CandidateLockRequest) -> None:
+    frozen, lock_bytes, receipt_bytes = _freeze(request_)
+    root = request_.artifact_root
+    (root / LOCK_ROLLBACK_NAME).write_bytes(b"stale\n")
+    (root / RECEIPT_ROLLBACK_NAME).write_bytes(b"stale\n")
+    assert compile_candidate_lock(request_, runner=_FakeRunner()) == frozen
+    _assert_freeze_intact(request_, lock_bytes, receipt_bytes)
+    _assert_transaction_clean(request_)
+
+
+def test_stray_quarantined_nodes_are_purged_on_the_next_call(request_: CandidateLockRequest) -> None:
+    frozen, lock_bytes, receipt_bytes = _freeze(request_)
+    root = request_.artifact_root
+    (root / f"{QUARANTINE_PREFIX}{LOCK_FILE_NAME}-abc123").write_text("stale\n", encoding="utf-8")
+    stale_directory = root / f"{QUARANTINE_PREFIX}{RECEIPT_FILE_NAME}-def456"
+    stale_directory.mkdir()
+    (stale_directory / "nested").mkdir()
+    (stale_directory / "nested" / "deep.txt").write_text("stale\n", encoding="utf-8")
+    assert compile_candidate_lock(request_, runner=_FakeRunner()) == frozen
+    _assert_freeze_intact(request_, lock_bytes, receipt_bytes)
+    _assert_transaction_clean(request_)
+
+
+def test_recovery_quarantines_an_unexpected_canonical_node_before_restoring(
+    request_: CandidateLockRequest,
+) -> None:
+    frozen, lock_bytes, receipt_bytes = _freeze(request_)
+    root = request_.artifact_root
+    (root / LOCK_FILE_NAME).rename(root / LOCK_ROLLBACK_NAME)
+    (root / RECEIPT_FILE_NAME).rename(root / RECEIPT_ROLLBACK_NAME)
+    (root / LOCK_FILE_NAME).mkdir()
+    (root / LOCK_FILE_NAME / "junk.txt").write_text("junk\n", encoding="utf-8")
+    os.mkfifo(root / RECEIPT_FILE_NAME)
+    (root / TRANSACTION_MARKER_NAME).write_bytes(canonical_json({"lock": True, "receipt": True}))
+    assert compile_candidate_lock(request_, runner=_FakeRunner()) == frozen
+    _assert_freeze_intact(request_, lock_bytes, receipt_bytes)
+    _assert_transaction_clean(request_)

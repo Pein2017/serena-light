@@ -10,10 +10,19 @@ requirements, environment markers, duplicates, pre-release or local versions).
 Every artifact path component and every artifact file is opened relative to a
 directory descriptor with ``O_NOFOLLOW`` and must be a real directory or regular
 file, and every write is an atomic same-directory replacement, so no symlink or
-special file can redirect a write out of the artifact root.  A failed resolution
-never leaves a partial artifact behind and never destroys an existing freeze, and
-the production identity is asserted byte-identical after success and after every
-failure, taking precedence over the failure it chains.
+special file can redirect a write out of the artifact root.
+
+A resolution runs as a durable, recoverable transaction.  Before the runner starts,
+a marker records which canonical artifacts existed and the existing lock and receipt
+are *moved* (never copied or deleted) to same-directory ``.rollback`` entries, and the
+directory is fsynced.  The production identity is re-validated inside the transaction
+and the new receipt is published only after that check passes, so a run that drifts
+production can never leave a reusable freeze behind.  Any failure quarantines the
+canonical nodes -- of any type, including a non-empty directory -- descriptor-relatively
+without following links, atomically renames the durable copies back, and fsyncs before
+anything is purged, so the only durable copy is never deleted first.  The marker is
+cleared only once the intended canonical state is durable, and the next call recovers
+any transaction interrupted at any point.
 
 Subprocess execution is injected through :class:`CommandRunner`; this module has no
 other process seam.
@@ -21,10 +30,12 @@ other process seam.
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import stat
 import subprocess
+import uuid
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -52,8 +63,12 @@ __all__ = [
     "CANDIDATE_NAMES",
     "CANONICAL_REQUIREMENTS_BYTES",
     "LOCK_FILE_NAME",
+    "LOCK_ROLLBACK_NAME",
+    "QUARANTINE_PREFIX",
     "RECEIPT_FILE_NAME",
+    "RECEIPT_ROLLBACK_NAME",
     "REQUIREMENTS_IN_NAME",
+    "TRANSACTION_MARKER_NAME",
     "CandidateLockError",
     "CandidateLockRequest",
     "CommandResult",
@@ -71,7 +86,17 @@ ARTIFACT_ROOT_BASE_PARTS = (".admission-artifacts", "backend-eval")
 REQUIREMENTS_IN_NAME = "candidate-requirements.in"
 LOCK_FILE_NAME = "candidate-requirements.lock"
 RECEIPT_FILE_NAME = "candidate-lock-receipt.json"
+LOCK_ROLLBACK_NAME = f"{LOCK_FILE_NAME}.rollback"
+RECEIPT_ROLLBACK_NAME = f"{RECEIPT_FILE_NAME}.rollback"
+TRANSACTION_MARKER_NAME = ".candidate-lock-transaction.json"
+QUARANTINE_PREFIX = ".quarantine-"
 CACHE_DIR_NAME = "uv-cache"
+
+# (canonical name, durable rollback name, marker key) for every transactional artifact.
+_TRANSACTION_ENTRIES = (
+    (LOCK_FILE_NAME, LOCK_ROLLBACK_NAME, "lock"),
+    (RECEIPT_FILE_NAME, RECEIPT_ROLLBACK_NAME, "receipt"),
+)
 
 _EXCLUDE_NEWER_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
 _REQUIREMENT_RE = re.compile(r"^([A-Za-z0-9][A-Za-z0-9._-]*)==(\S+)$")
@@ -144,22 +169,31 @@ def compile_candidate_lock(
 ) -> CandidateLock:
     """Return the frozen candidate lock, resolving at most once per artifact root.
 
-    An existing lock is accepted without a second resolution when recompilation is not
-    requested and its canonical receipt matches this request exactly.  A requested
-    recompilation must reproduce the frozen bytes exactly; any failure restores the
-    original lock and receipt, including when the caller is interrupted.  Production
-    identity is re-checked on success and on every failure, and drift takes precedence
-    over the failure it chains.
+    Any transaction left behind by an interrupted call is recovered first.  An existing
+    lock is then accepted without a second resolution when recompilation is not requested
+    and its canonical receipt matches this request exactly.  A requested recompilation
+    must reproduce the frozen bytes exactly and must leave production identity unchanged;
+    every failure -- including production drift and an interrupted caller -- either restores
+    the prior freeze or leaves no reusable freeze at all.
     """
 
     before = capture_production_identity(request.repo_root)
     try:
-        lock = _freeze_candidate_lock(request, runner, recompile=recompile)
+        with _artifact_directory(request) as dir_fd:
+            _recover_interrupted_transaction(dir_fd)
+            command = _compile_command(request)
+            frozen_lock = _read_artifact(dir_fd, LOCK_FILE_NAME)
+            frozen_receipt = _read_artifact(dir_fd, RECEIPT_FILE_NAME)
+            if frozen_lock is not None and not recompile:
+                lock = _accept_frozen_lock(request, command, dir_fd, frozen_lock, frozen_receipt)
+                _assert_production_identity_unchanged(before, request.repo_root, cause=None)
+                return lock
+            return _resolve_candidate_lock(request, runner, command, dir_fd, before, frozen_lock, frozen_receipt)
     except BaseException as exc:
-        _assert_production_identity_unchanged(before, request.repo_root, cause=exc)
+        # Drift raised inside the transaction is already the authoritative error.
+        if not isinstance(exc, ProductionIdentityError):
+            _assert_production_identity_unchanged(before, request.repo_root, cause=exc)
         raise
-    _assert_production_identity_unchanged(before, request.repo_root, cause=None)
-    return lock
 
 
 def _assert_production_identity_unchanged(
@@ -175,36 +209,28 @@ def _assert_production_identity_unchanged(
         raise identity_error from cause
 
 
-def _freeze_candidate_lock(
-    request: CandidateLockRequest, runner: CommandRunner, *, recompile: bool
-) -> CandidateLock:
-    command = _compile_command(request)
-    with _artifact_directory(request) as dir_fd:
-        frozen_lock = _read_artifact(dir_fd, LOCK_FILE_NAME)
-        frozen_receipt = _read_artifact(dir_fd, RECEIPT_FILE_NAME)
-        if frozen_lock is not None and not recompile:
-            return _accept_frozen_lock(request, command, dir_fd, frozen_lock, frozen_receipt)
-        return _resolve_candidate_lock(request, runner, command, dir_fd, frozen_lock, frozen_receipt)
-
-
 def _resolve_candidate_lock(
     request: CandidateLockRequest,
     runner: CommandRunner,
     command: Sequence[str],
     dir_fd: int,
+    before: ProductionIdentity,
     frozen_lock: bytes | None,
     frozen_receipt: bytes | None,
 ) -> CandidateLock:
+    """Resolve once inside a durable transaction that publishes only a validated freeze."""
+
+    marker = {"lock": frozen_lock is not None, "receipt": frozen_receipt is not None}
+    _begin_transaction(dir_fd, marker)
     try:
         _write_artifact(dir_fd, REQUIREMENTS_IN_NAME, CANONICAL_REQUIREMENTS_BYTES)
         _ensure_cache_directory(dir_fd)
-        # The canonical output is removed first so a stale or partial file can never be
-        # mistaken for a fresh resolution.
-        _remove_artifact(dir_fd, LOCK_FILE_NAME)
         result = _run(runner, command, request.artifact_root, request.artifact_root / CACHE_DIR_NAME)
         if result.returncode != 0:
             detail = (result.stderr or result.stdout).strip()
             raise CandidateLockError(f"candidate resolution failed ({result.returncode}): {detail}")
+        # The canonical output was moved aside before the runner, so anything present now
+        # was produced by this resolution and must be a plain regular file.
         lock_bytes = _read_artifact(dir_fd, LOCK_FILE_NAME)
         if lock_bytes is None:
             raise CandidateLockError(
@@ -215,29 +241,110 @@ def _resolve_candidate_lock(
                 f"candidate resolution changed after the freeze recorded in {request.artifact_root / LOCK_FILE_NAME}"
             )
         lock = _build_lock(request, lock_bytes)
+        # Production identity is validated inside the transaction: the receipt is published
+        # only for a resolution that provably left production untouched.
+        _assert_production_identity_unchanged(before, request.repo_root, cause=None)
         _write_artifact(dir_fd, RECEIPT_FILE_NAME, _receipt_bytes(command, CANONICAL_REQUIREMENTS_BYTES, lock))
     except BaseException as exc:
-        _restore_artifacts(dir_fd, frozen_lock, frozen_receipt, cause=exc)
+        _rollback_or_report(dir_fd, marker, cause=exc)
         raise
+    _commit_transaction(dir_fd)
     return lock
 
 
-def _restore_artifacts(
-    dir_fd: int, frozen_lock: bytes | None, frozen_receipt: bytes | None, *, cause: BaseException
-) -> None:
-    """Return the lock and receipt to their pre-resolution state, or fail loudly."""
+def _rollback_or_report(dir_fd: int, marker: Mapping[str, bool], *, cause: BaseException) -> None:
+    try:
+        _rollback_transaction(dir_fd, marker)
+    except CandidateLockError as rollback_error:
+        raise CandidateLockError(
+            f"candidate resolution failed and its frozen artifacts could not be restored: {rollback_error}"
+        ) from cause
+
+
+# --- durable artifact transaction ---------------------------------------------
+
+
+def _begin_transaction(dir_fd: int, marker: Mapping[str, bool]) -> None:
+    """Record the prior state, then move the existing artifacts to durable rollback entries."""
+
+    _write_artifact(dir_fd, TRANSACTION_MARKER_NAME, canonical_json(dict(marker)))
+    _fsync_directory(dir_fd)
+    for canonical, rollback, key in _TRANSACTION_ENTRIES:
+        if marker[key]:
+            _purge_node(dir_fd, rollback)
+            _rename_artifact(dir_fd, canonical, rollback)
+    _fsync_directory(dir_fd)
+
+
+def _commit_transaction(dir_fd: int) -> None:
+    """Make the new canonical state durable, clear the marker, then drop the backups."""
+
+    _fsync_directory(dir_fd)
+    _remove_artifact(dir_fd, TRANSACTION_MARKER_NAME)
+    _fsync_directory(dir_fd)
+    for _canonical, rollback, _key in _TRANSACTION_ENTRIES:
+        _purge_node(dir_fd, rollback)
+
+
+def _rollback_transaction(dir_fd: int, marker: Mapping[str, bool]) -> None:
+    """Restore the recorded prior state without ever deleting the only durable copy."""
+
+    quarantined: list[str] = []
+    for canonical, rollback, key in _TRANSACTION_ENTRIES:
+        if not marker[key]:
+            # The artifact did not exist before this transaction; nothing may survive it.
+            quarantined.extend(_quarantine_nodes(dir_fd, canonical, rollback))
+        elif _node_exists(dir_fd, rollback):
+            quarantined.extend(_quarantine_nodes(dir_fd, canonical))
+            _rename_artifact(dir_fd, rollback, canonical)
+        # A missing rollback entry with marker[key] set means the move has not happened yet
+        # or has already been undone: the canonical artifact is the original one.
+    _fsync_directory(dir_fd)
+    _remove_artifact(dir_fd, TRANSACTION_MARKER_NAME)
+    _fsync_directory(dir_fd)
+    for name in quarantined:
+        _purge_node(dir_fd, name)
+
+
+def _recover_interrupted_transaction(dir_fd: int) -> None:
+    """Recover a transaction left behind by an interrupted prior call."""
+
+    _purge_quarantined_nodes(dir_fd)
+    marker_bytes = _read_artifact(dir_fd, TRANSACTION_MARKER_NAME)
+    if marker_bytes is None:
+        # Without a marker the canonical state is authoritative and any rollback entry is
+        # a leftover of a completed commit.
+        for _canonical, rollback, _key in _TRANSACTION_ENTRIES:
+            _purge_node(dir_fd, rollback)
+        return
+    _rollback_transaction(dir_fd, _decode_marker(marker_bytes))
+
+
+def _purge_quarantined_nodes(dir_fd: int) -> None:
+    """Drop quarantined nodes left behind by a call interrupted mid-rollback."""
 
     try:
-        for name, frozen in ((LOCK_FILE_NAME, frozen_lock), (RECEIPT_FILE_NAME, frozen_receipt)):
-            # Unlink first: whatever the failed resolution left behind may be a symlink or
-            # special file, and unlink removes the entry itself rather than following it.
-            _remove_artifact(dir_fd, name)
-            if frozen is not None:
-                _write_artifact(dir_fd, name, frozen)
-    except CandidateLockError as restore_error:
-        raise CandidateLockError(
-            f"candidate resolution failed and its frozen artifacts could not be restored: {restore_error}"
-        ) from cause
+        with os.scandir(dir_fd) as entries:
+            stale = [entry.name for entry in entries if entry.name.startswith(QUARANTINE_PREFIX)]
+    except OSError as exc:
+        raise CandidateLockError(f"cannot scan the artifact directory: {exc}") from exc
+    for name in stale:
+        _purge_node(dir_fd, name)
+
+
+def _decode_marker(marker_bytes: bytes) -> dict[str, bool]:
+    """Decode the transaction marker, defaulting unknown entries to "existed before".
+
+    The conservative default never deletes a canonical artifact the marker cannot vouch for.
+    """
+
+    try:
+        decoded = json.loads(marker_bytes.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        decoded = {}
+    if not isinstance(decoded, Mapping):
+        decoded = {}
+    return {key: bool(decoded.get(key, True)) for _canonical, _rollback, key in _TRANSACTION_ENTRIES}
 
 
 def _run(runner: CommandRunner, command: Sequence[str], artifact_root: Path, cache_dir: Path) -> CommandResult:
@@ -338,12 +445,23 @@ def _read_artifact(dir_fd: int, name: str) -> bytes | None:
     except OSError as exc:
         raise CandidateLockError(f"artifact {name!r} {_NOT_A_REGULAR_FILE}: {exc}") from exc
     try:
-        with os.fdopen(fd, "rb") as handle:
-            if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
-                raise CandidateLockError(f"artifact {name!r} {_NOT_A_REGULAR_FILE}")
+        mode = os.fstat(fd).st_mode
+        if not stat.S_ISREG(mode):
+            raise CandidateLockError(f"artifact {name!r} must be a regular file, not a {_node_kind(mode)}")
+        with os.fdopen(fd, "rb", closefd=False) as handle:
             return handle.read()
     except OSError as exc:
         raise CandidateLockError(f"cannot read artifact {name!r}: {exc}") from exc
+    finally:
+        os.close(fd)
+
+
+def _node_kind(mode: int) -> str:
+    if stat.S_ISDIR(mode):
+        return "directory"
+    if stat.S_ISLNK(mode):
+        return "symlink"
+    return "special file"
 
 
 def _write_artifact(dir_fd: int, name: str, data: bytes) -> None:
@@ -371,7 +489,7 @@ def _reject_non_regular(dir_fd: int, name: str) -> None:
     except OSError as exc:
         raise CandidateLockError(f"cannot inspect artifact {name!r}: {exc}") from exc
     if not stat.S_ISREG(mode):
-        raise CandidateLockError(f"artifact {name!r} {_NOT_A_REGULAR_FILE}")
+        raise CandidateLockError(f"artifact {name!r} must be a regular file, not a {_node_kind(mode)}")
 
 
 def _remove_artifact(dir_fd: int, name: str) -> None:
@@ -381,6 +499,93 @@ def _remove_artifact(dir_fd: int, name: str) -> None:
         return
     except OSError as exc:
         raise CandidateLockError(f"cannot remove artifact {name!r}: {exc}") from exc
+
+
+def _rename_artifact(dir_fd: int, source: str, target: str) -> None:
+    """Atomically move ``source`` onto ``target`` inside the artifact directory."""
+
+    try:
+        os.rename(source, target, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
+    except OSError as exc:
+        raise CandidateLockError(f"cannot move artifact {source!r} to {target!r}: {exc}") from exc
+
+
+def _node_exists(dir_fd: int, name: str) -> bool:
+    try:
+        os.lstat(name, dir_fd=dir_fd)
+    except FileNotFoundError:
+        return False
+    except OSError as exc:
+        raise CandidateLockError(f"cannot inspect artifact {name!r}: {exc}") from exc
+    return True
+
+
+def _quarantine_nodes(dir_fd: int, *names: str) -> list[str]:
+    quarantined: list[str] = []
+    for name in names:
+        moved = _quarantine_node(dir_fd, name)
+        if moved is not None:
+            quarantined.append(moved)
+    return quarantined
+
+
+def _quarantine_node(dir_fd: int, name: str) -> str | None:
+    """Rename any node -- file, symlink, special file, or directory -- out of the way.
+
+    Renaming rather than deleting keeps the durable copy intact until the restored
+    canonical state has been fsynced, and never follows the node it moves.
+    """
+
+    if not _node_exists(dir_fd, name):
+        return None
+    quarantine = f"{QUARANTINE_PREFIX}{name}-{uuid.uuid4().hex}"
+    _rename_artifact(dir_fd, name, quarantine)
+    return quarantine
+
+
+def _purge_node(dir_fd: int, name: str) -> None:
+    """Remove a node of any type relative to ``dir_fd`` without following links."""
+
+    try:
+        mode = os.lstat(name, dir_fd=dir_fd).st_mode
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        raise CandidateLockError(f"cannot inspect artifact {name!r}: {exc}") from exc
+    if stat.S_ISDIR(mode):
+        _purge_directory(dir_fd, name)
+        return
+    _remove_artifact(dir_fd, name)
+
+
+def _purge_directory(parent_fd: int, name: str) -> None:
+    try:
+        fd = os.open(name, _DIRECTORY_FLAGS, dir_fd=parent_fd)
+    except OSError as exc:
+        raise CandidateLockError(f"cannot open artifact directory {name!r}: {exc}") from exc
+    try:
+        with os.scandir(fd) as entries:
+            children = [(entry.name, entry.is_dir(follow_symlinks=False)) for entry in entries]
+        for child, is_directory in children:
+            if is_directory:
+                _purge_directory(fd, child)
+            else:
+                _remove_artifact(fd, child)
+    except OSError as exc:
+        raise CandidateLockError(f"cannot clear artifact directory {name!r}: {exc}") from exc
+    finally:
+        os.close(fd)
+    try:
+        os.rmdir(name, dir_fd=parent_fd)
+    except OSError as exc:
+        raise CandidateLockError(f"cannot remove artifact directory {name!r}: {exc}") from exc
+
+
+def _fsync_directory(dir_fd: int) -> None:
+    try:
+        os.fsync(dir_fd)
+    except OSError as exc:
+        raise CandidateLockError(f"cannot fsync the artifact directory: {exc}") from exc
 
 
 # --- artifact-root inputs and receipts ----------------------------------------
