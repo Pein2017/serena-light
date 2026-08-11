@@ -41,8 +41,8 @@ command is a host-level OpenSpec or plugin command.
   with three observation-only performance/latency cases excluded (deselected in
   the recorded command and marker-skipped in the independent audit), in 182.63
   seconds.
-- The final long-root/path/name recovery regressions passed in the 107-test
-  compact/navigation slice. Independent Sol-xhigh reproduction measured 435
+- The final long-root/path/name and authority-shedding regressions passed in the
+  108-test compact/navigation slice. Independent Sol-xhigh reproduction measured 435
   characters at a 512-character budget, verified bounded path/name witnesses,
   followed the exact no-body recovery, retried the measured legal budget, and
   measured the malformed fallback at 276 characters.
