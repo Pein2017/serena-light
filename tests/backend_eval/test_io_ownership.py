@@ -220,6 +220,7 @@ OWNERSHIP: frozenset[tuple[str, str, str, str]] = frozenset(
         ("admission.py", "__post_init__", "Path.is_dir", DECLARED),
         ("admission.py", "<module>", "stream.write", DESCRIPTOR),
         ("admission.py", "_bootstrap_command", "stream.write", DESCRIPTOR),
+        ("admission.py", "_require_outer_bootstrap", "stream.write", DESCRIPTOR),
         ("admission.py", "_build_evaluator_source_image", "os.close", DESCRIPTOR),
         ("admission.py", "_build_evaluator_source_image", "os.scandir", DESCRIPTOR),
         ("admission.py", "_collect_artifact_entries", "os.close", DESCRIPTOR),

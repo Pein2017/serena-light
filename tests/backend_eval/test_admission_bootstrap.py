@@ -141,6 +141,81 @@ def test_package_module_entrypoint_is_not_receipt_producing(tmp_path: Path) -> N
     assert b"not a receipt-producing entrypoint" in result.stderr
 
 
+@pytest.mark.parametrize(
+    "flags",
+    [
+        ("-S", "-B"),
+        ("-I", "-B"),
+        ("-I", "-S"),
+    ],
+)
+def test_outer_bootstrap_refuses_when_any_closed_startup_flag_is_missing(
+    tmp_path: Path, flags: tuple[str, ...]
+) -> None:
+    owner = _copy_evaluator(tmp_path)
+    result = subprocess.run(
+        [sys.executable, *flags, "scripts/backend_eval_bootstrap.py", "--help"],
+        cwd=owner,
+        capture_output=True,
+        timeout=10,
+        check=False,
+    )
+    assert result.returncode == 2
+    assert b"closed CPython startup" in result.stderr
+    assert b"usage:" not in result.stdout
+
+
+@pytest.mark.parametrize("mode", ["direct", "runpy"])
+def test_admission_transport_refuses_without_direct_shim_provenance(
+    tmp_path: Path, mode: str
+) -> None:
+    owner = _copy_evaluator(tmp_path)
+    admission_path = owner / "scripts" / "backend_eval" / "admission.py"
+    command = (
+        [sys.executable, "-I", "-S", "-B", str(admission_path), "--help"]
+        if mode == "direct"
+        else [
+            sys.executable,
+            "-I",
+            "-S",
+            "-B",
+            "-c",
+            f"import runpy; runpy.run_path({str(admission_path)!r}, run_name='__main__')",
+        ]
+    )
+    result = subprocess.run(
+        command,
+        cwd=owner,
+        capture_output=True,
+        timeout=10,
+        check=False,
+    )
+    assert result.returncode == 2
+    assert b"direct bootstrap provenance" in result.stderr
+    assert b"usage:" not in result.stdout
+
+
+def test_closed_outer_startup_ignores_hostile_site_and_python_paths(tmp_path: Path) -> None:
+    owner = _copy_evaluator(tmp_path)
+    marker = tmp_path / "outer-startup-marker"
+    hostile = tmp_path / "hostile-site"
+    hostile.mkdir()
+    payload = f"import pathlib; pathlib.Path({str(marker)!r}).write_text('executed')\n"
+    (hostile / "sitecustomize.py").write_text(payload, encoding="utf-8")
+    (hostile / "hostile.pth").write_text(payload, encoding="utf-8")
+    result = subprocess.run(
+        [sys.executable, "-I", "-S", "-B", "scripts/backend_eval_bootstrap.py", "--help"],
+        cwd=owner,
+        env={**os.environ, "PYTHONPATH": str(hostile), "PYTHONUSERBASE": str(hostile)},
+        capture_output=True,
+        timeout=10,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr.decode("utf-8", "replace")
+    assert result.stdout.startswith(b"usage: python -I -S -B scripts/backend_eval_bootstrap.py")
+    assert not marker.exists()
+
+
 def test_source_image_contains_the_complete_evaluator_package(tmp_path: Path) -> None:
     owner = _copy_evaluator(tmp_path)
     builder = getattr(admission, "_build_evaluator_source_image", None)

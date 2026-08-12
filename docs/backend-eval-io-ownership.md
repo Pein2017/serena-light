@@ -287,7 +287,9 @@ claiming a guarantee the kernel does not offer.
    the same process, and that a late change is caught by the pre-publication identity
    re-capture rather than published as a `pass`.
 9. **The original command process is a transport root of trust.** The closed direct bootstrap
-   runs no package initializer; the image's inert initializers are bound as sealed entries. Python then compiles enough
+   verifies `-I -S -B`, the effective no-bytecode setting, and the standard-library-only path,
+   then passes one process-local exact-shim provenance context to admission. It runs no package
+   initializer; the image's inert initializers are bound as sealed entries. Python then compiles enough
    code to create the first immutable source image. That process imports no evaluator semantic
    module: it only confines and reads the closure, creates and seals the image, starts the
    isolated child, relays bytes and exit status, enforces an outer bound, and kills/reaps the

@@ -246,7 +246,11 @@ before/after disk hash can identify Python source that was already compiled.
 
 That package `-m` form is no longer receipt-producing. The canonical
 `python -I -S -B scripts/backend_eval_bootstrap.py` direct shim executes no package initializer
-before reaching the transport guard. Both sealed parent-package initializers are inert -- no
+before reaching the transport guard. The shim verifies all three CPython flags, the effective
+no-bytecode setting, and an exact standard-library-only `sys.path`, then installs a process-local
+provenance context bound to its exact path, loader, arguments, and admission path. Admission
+consumes that context before any image action, so direct execution and generic `runpy` refuse.
+Both sealed parent-package initializers are inert -- no
 imports, environment reads, or path mutation -- and their exact bytes are included in the
 image identity and cleanliness witness. The command module then reaches a standard-library-only guard before any semantic
 import. That transport bootstrap opens the checkout component by component without following

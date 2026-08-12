@@ -75,6 +75,7 @@ from contextlib import suppress as _bootstrap_suppress
 from pathlib import Path as _BootstrapPath
 
 _EVALUATOR_BOOTSTRAP_SECONDS = 1800.0
+_OUTER_BOOTSTRAP_CONTEXT = "_serena_light_backend_eval_outer_bootstrap"
 _EVALUATOR_BOOTSTRAP_REAP_SECONDS = 20.0
 _EVALUATOR_BOOTSTRAP_GRACE_SECONDS = 5.0
 _BOOTSTRAP_DIRECTORY_FLAGS = _bootstrap_os.O_RDONLY | _bootstrap_os.O_DIRECTORY
@@ -374,6 +375,30 @@ def _bootstrap_command() -> int:
     return returncode
 
 
+def _require_outer_bootstrap() -> None:
+    """Consume the direct shim's process-local provenance before any image action."""
+
+    context = _bootstrap_sys.modules.pop(_OUTER_BOOTSTRAP_CONTEXT, None)
+    expected_admission = _bootstrap_os.path.realpath(__file__)
+    expected_shim = _bootstrap_os.path.realpath(
+        _BootstrapPath(expected_admission).parent.parent / "backend_eval_bootstrap.py"
+    )
+    valid = (
+        isinstance(context, type(_bootstrap_sys))
+        and getattr(context, "shim_path", None) == expected_shim
+        and getattr(context, "admission_path", None) == expected_admission
+        and getattr(context, "loader_path", None) == expected_shim
+        and getattr(context, "argv_tail", None) == tuple(_bootstrap_sys.argv[1:])
+        and type(getattr(context, "capability", None)) is object
+    )
+    if not valid:
+        _bootstrap_sys.stderr.write(
+            "backend evaluation requires direct bootstrap provenance from "
+            "python -I -S -B scripts/backend_eval_bootstrap.py\n"
+        )
+        raise SystemExit(2)
+
+
 if __name__ == "__main__":
     if __spec__ is not None:
         _bootstrap_sys.stderr.write(
@@ -381,6 +406,7 @@ if __name__ == "__main__":
             "use python -I -S -B scripts/backend_eval_bootstrap.py\n"
         )
         raise SystemExit(2)
+    _require_outer_bootstrap()
     raise SystemExit(_bootstrap_command())
 
 import argparse
