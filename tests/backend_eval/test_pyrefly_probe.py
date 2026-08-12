@@ -10,7 +10,7 @@ from typing import Any, cast
 import pytest
 
 from scripts.backend_eval.models import EnvironmentIdentity, ServiceConfigIdentity
-from scripts.backend_eval.process import Deadline
+from scripts.backend_eval.process import Deadline, DeadlineExceeded
 from scripts.backend_eval.protocol import ProtocolSession
 from scripts.backend_eval.pyrefly_probe import (
     PyreflyWorkspaceMutation,
@@ -165,6 +165,7 @@ def _install_fake_runner(
     diagnostic_provider: bool = False,
     exit_status: int | None = 0,
     manifests: tuple[object, object] = ("stable", "stable"),
+    after_protocol_advance: float = 0.0,
 ) -> None:
     import scripts.backend_eval.pyrefly_probe as module
 
@@ -173,7 +174,11 @@ def _install_fake_runner(
     def fake_capture(workspace_root: Path, deadline: Deadline) -> object:
         captured.setdefault("manifest_roots", []).append(workspace_root)  # type: ignore[union-attr]
         captured.setdefault("manifest_deadlines", []).append(deadline)  # type: ignore[union-attr]
-        return next(manifest_values)
+        deadline.check("fake Pyrefly workspace manifest")
+        value = next(manifest_values)
+        if isinstance(value, BaseException):
+            raise value
+        return value
 
     def fake_run_protocol_probe(
         spec: object,
@@ -190,6 +195,8 @@ def _install_fake_runner(
             deadline=deadline,
         )
         typed_spec = cast(Any, spec)
+        result = session(client)
+        client.clock.advance(after_protocol_advance)
         return ProtocolSession(
             raw_providers=providers or _providers(),
             diagnostic_provider=diagnostic_provider,
@@ -199,7 +206,7 @@ def _install_fake_runner(
             terminal_errors=(),
             cleanup_errors=(),
             exit_status=exit_status,
-            result=session(client),
+            result=result,
         )
 
     monkeypatch.setattr(module, "_capture_workspace_manifest", fake_capture)
@@ -215,6 +222,8 @@ def _run_fake(
     diagnostic_provider: bool = False,
     close_error: BaseException | None = None,
     manifests: tuple[object, object] = ("stable", "stable"),
+    reserve: float = 1.0,
+    after_protocol_advance: float = 0.0,
 ) -> tuple[object, _FakeClient, CandidateRuntime, ServiceConfigIdentity, dict[str, object]]:
     target = tmp_path / "known.py"
     target.write_text("Known = 1\n", encoding="utf-8")
@@ -229,13 +238,14 @@ def _run_fake(
         providers=providers,
         diagnostic_provider=diagnostic_provider,
         manifests=manifests,
+        after_protocol_advance=after_protocol_advance,
     )
     outcome = run_pyrefly_capability_probe(
         runtime,
         tmp_path,
         target,
         (0, 0),
-        deadline=Deadline.start(clock, 10.0),
+        deadline=Deadline.start(clock, 10.0, reserve=reserve),
     )
     return outcome, client, runtime, config, captured
 
@@ -275,6 +285,9 @@ def test_pyrefly_protocol_spec_binds_locked_command_external_config_and_ms_inter
     assert params["rootPath"] == str(tmp_path)
     assert params["rootUri"] == tmp_path.as_uri()
     assert params["initializationOptions"] == expected_options
+    text_document = cast(Any, params)["capabilities"]["textDocument"]
+    assert "linkSupport" not in text_document["definition"]
+    assert "linkSupport" not in text_document["implementation"]
     assert spec.request_handlers["workspace/configuration"](
         {"items": [{"scopeUri": tmp_path.as_uri()}, {"section": "python.pyrefly"}]}
     ) == [expected_options, expected_options]
@@ -360,6 +373,98 @@ def test_pyrefly_probe_raises_typed_workspace_mutation_for_any_manifest_change(
 
     assert raised.value.before_manifest == "before"
     assert raised.value.after_manifest == "after"
+
+
+def test_pyrefly_probe_requires_manifest_reserve_before_capture_or_launch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = tmp_path / "known.py"
+    target.write_text("Known = 1\n", encoding="utf-8")
+    runtime, _config, _interpreter = _runtime(tmp_path)
+
+    def forbidden(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("zero reserve must be rejected before probe side effects")
+
+    import scripts.backend_eval.pyrefly_probe as module
+
+    monkeypatch.setattr(module, "_capture_workspace_manifest", forbidden)
+    monkeypatch.setattr(module, "run_protocol_probe", forbidden)
+    with pytest.raises(ValueError, match="positive.*reserve"):
+        run_pyrefly_capability_probe(
+            runtime,
+            tmp_path,
+            target,
+            (0, 0),
+            deadline=Deadline.start(_FakeClock(), 10.0),
+        )
+
+
+def test_pyrefly_after_manifest_uses_released_reserve_at_collection_boundary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    outcome, _client, _runtime_value, _config, captured = _run_fake(
+        tmp_path,
+        monkeypatch,
+        reserve=2.0,
+        after_protocol_advance=7.5,
+    )
+
+    assert cast(Any, outcome).gate_disposition == "pass"
+    before_deadline, after_deadline = cast(list[Deadline], captured["manifest_deadlines"])
+    assert captured["deadline"] is before_deadline
+    assert before_deadline.reserve == 2.0
+    assert after_deadline.reserve == 0.0
+    assert after_deadline.started == before_deadline.started
+    assert after_deadline.seconds == before_deadline.seconds
+
+
+def test_pyrefly_detects_mutation_in_released_reserve(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    with pytest.raises(PyreflyWorkspaceMutation) as raised:
+        _run_fake(
+            tmp_path,
+            monkeypatch,
+            manifests=("before", "after"),
+            reserve=2.0,
+            after_protocol_advance=7.5,
+        )
+
+    assert raised.value.before_manifest == "before"
+    assert raised.value.after_manifest == "after"
+
+
+def test_pyrefly_finalization_exhaustion_fails_closed_with_computed_outcome(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    with pytest.raises(DeadlineExceeded) as raised:
+        _run_fake(
+            tmp_path,
+            monkeypatch,
+            reserve=2.0,
+            after_protocol_advance=9.5,
+        )
+
+    outcome = cast(Any, raised.value).pyrefly_capability_outcome
+    assert outcome.gate_disposition == "pass"
+
+
+def test_primary_protocol_error_precedes_after_manifest_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = tmp_path / "known.py"
+    responses = _responses(target)
+    responses["textDocument/definition"] = TimeoutError("semantic-timeout")
+
+    with pytest.raises(TimeoutError, match="semantic-timeout") as raised:
+        _run_fake(
+            tmp_path,
+            monkeypatch,
+            responses=responses,
+            manifests=("before", DeadlineExceeded("after-manifest-timeout")),
+        )
+
+    assert any("after-manifest-timeout" in note for note in raised.value.__notes__)
 
 
 def test_workspace_mutation_remains_typed_when_protocol_also_fails(
@@ -565,7 +670,7 @@ def test_primary_semantic_error_precedes_did_close_failure(
             tmp_path,
             target,
             (0, 0),
-            deadline=Deadline.start(clock, 10.0),
+            deadline=Deadline.start(clock, 10.0, reserve=1.0),
         )
 
     assert any("didClose-failure" in note for note in raised.value.__notes__)

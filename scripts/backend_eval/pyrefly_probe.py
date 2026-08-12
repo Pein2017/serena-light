@@ -137,6 +137,8 @@ def run_pyrefly_capability_probe(
         or character < 0
     ):
         raise ValueError("Pyrefly probe symbol_position must contain two non-negative integers")
+    if deadline.reserve <= 0:
+        raise ValueError("Pyrefly probe requires a positive Deadline reserve for manifest proof")
 
     before_manifest = _capture_workspace_manifest(workspace_root, deadline)
     try:
@@ -150,7 +152,7 @@ def run_pyrefly_capability_probe(
         )
     except BaseException as primary:
         try:
-            after_manifest = _capture_workspace_manifest(workspace_root, deadline)
+            after_manifest = _capture_workspace_manifest(workspace_root, deadline.finalization())
         except BaseException as after_error:
             primary.add_note(
                 "Pyrefly after-manifest capture also failed: "
@@ -161,7 +163,15 @@ def run_pyrefly_capability_probe(
             raise PyreflyWorkspaceMutation(before_manifest, after_manifest) from primary
         raise
 
-    after_manifest = _capture_workspace_manifest(workspace_root, deadline)
+    try:
+        after_manifest = _capture_workspace_manifest(workspace_root, deadline.finalization())
+    except BaseException as after_error:
+        cast("Any", after_error).pyrefly_capability_outcome = outcome
+        after_error.add_note(
+            "Pyrefly capability outcome completed before after-manifest proof failed: "
+            f"gate_disposition={outcome.gate_disposition}"
+        )
+        raise
     if after_manifest != before_manifest:
         raise PyreflyWorkspaceMutation(before_manifest, after_manifest)
     return outcome
@@ -420,9 +430,9 @@ def _initialize_params(
             "window": {"workDoneProgress": True},
             "textDocument": {
                 "synchronization": {"dynamicRegistration": True, "didSave": True},
-                "definition": {"dynamicRegistration": True, "linkSupport": True},
+                "definition": {"dynamicRegistration": True},
                 "references": {"dynamicRegistration": True},
-                "implementation": {"dynamicRegistration": True, "linkSupport": True},
+                "implementation": {"dynamicRegistration": True},
                 "documentSymbol": {
                     "dynamicRegistration": True,
                     "hierarchicalDocumentSymbolSupport": True,
