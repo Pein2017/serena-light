@@ -9,6 +9,7 @@ import threading
 import time
 from collections.abc import Callable, Sequence
 from pathlib import Path
+from unittest import SkipTest
 
 import pytest
 
@@ -24,7 +25,7 @@ from scripts.backend_eval.manifests import (
     default_corpus_requests,
 )
 from scripts.backend_eval.models import PathRecord
-from scripts.backend_eval.process import Deadline, DeadlineExceeded, monotonic_clock
+from scripts.backend_eval.process import CommandBytesResult, Deadline, DeadlineExceeded, monotonic_clock
 from scripts.backend_eval.production_helper import (
     ProductionHelperError,
     ProductionHelperTimeout,
@@ -46,6 +47,65 @@ class _FakeClock:
 
     def advance(self, seconds: float) -> None:
         self.now += seconds
+
+
+def test_git_child_uses_only_exact_root_trust_and_config_free_environment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import scripts.backend_eval.manifests as manifests
+
+    root = _repository(tmp_path)
+    observed: dict[str, object] = {}
+
+    def capture(
+        command: Sequence[str],
+        *,
+        cwd: Path,
+        env: dict[str, str],
+        timeout: float | None,
+        pass_fds: Sequence[int],
+    ) -> CommandBytesResult:
+        observed.update(
+            command=tuple(command), cwd=cwd, env=dict(env), timeout=timeout,
+            pass_fds=tuple(pass_fds), config=os.pread(pass_fds[0], 4096, 0),
+            global_config=env["GIT_CONFIG_GLOBAL"],
+        )
+        return CommandBytesResult(0, b"ok\n", b"")
+
+    monkeypatch.setattr(manifests, "run_bounded_bytes", capture)
+    monkeypatch.setenv("HOME", "/root")
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", "/root/.gitconfig")
+    assert manifests._git_bytes(root, ("rev-parse", "HEAD"), None) == b"ok\n"
+    assert observed["command"] == (
+        "/usr/bin/git", "-c", f"safe.directory={root}", "rev-parse", "HEAD"
+    )
+    assert observed["cwd"] == root
+    assert observed["env"] == {
+        "GIT_CONFIG_GLOBAL": observed["global_config"],
+        "GIT_CONFIG_NOSYSTEM": "1", "LANG": "C.UTF-8", "PATH": "/usr/bin:/bin",
+    }
+    assert str(observed["global_config"]).startswith("/proc/")
+    assert observed["config"] == f'[safe]\n\tdirectory = "{root}"\n'.encode()
+    assert len(observed["pass_fds"]) == 1  # type: ignore[arg-type]
+
+
+@pytest.mark.skipif(os.geteuid() != 0, reason="requires ownership mismatch creation")
+def test_exact_dubious_ownership_worktree_is_accepted_without_user_config(tmp_path: Path) -> None:
+    import scripts.backend_eval.manifests as manifests
+
+    repository = _repository(tmp_path)
+    (repository / "tracked.py").write_text("tracked = True\n", encoding="utf-8")
+    _git(repository, "add", "tracked.py")
+    _git(repository, "commit", "-m", "fixture")
+    worktree = tmp_path / "owned-by-another-user"
+    _git(repository, "worktree", "add", "--detach", str(worktree), "HEAD")
+    try:
+        os.chown(worktree, 1000, 1000)
+    except (OSError, PermissionError) as error:
+        raise SkipTest(f"cannot create a dubious-ownership worktree: {error}") from error
+    assert manifests._git_bytes(worktree, ("rev-parse", "--show-toplevel"), None).strip() == str(
+        worktree
+    ).encode()
 
 
 def _git(root: Path, *args: str) -> subprocess.CompletedProcess[bytes]:

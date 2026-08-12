@@ -212,6 +212,13 @@ program. That binding is `guarded`, not `confined`: `/usr/bin` is outside every 
 evaluation owns. The receipt contract names the CLI host interpreter and the candidate
 executables, not this one, so no receipt field changed.
 
+Every Git child receives no `HOME` and disables system config. Its `GIT_CONFIG_GLOBAL` names
+a sealed inherited descriptor containing exactly one protected `safe.directory` value for
+the declared checkout or corpus root; argv repeats that exact root with `-c
+safe.directory=...`. No parent or wildcard is trusted, and no user credentials, identity,
+includes, or global excludes are read from ambient system or user config. Repository-local
+ignore semantics, including `.gitignore` and `.git/info/exclude`, remain authoritative.
+
 ## Audited modules
 
 | Module | What it owns |

@@ -18,6 +18,11 @@ scope.
 **Every Git child is bounded, with no exception.**  Every Git invocation runs through the
 shared bounded runner with an explicit remaining-time budget, an explicit minimal
 environment with no ambient ``GIT_*`` control, and process-group termination on expiry.
+``HOME`` is absent, system config is disabled, and the only protected global config is a
+sealed one-entry image naming the exact declared root as ``safe.directory``; the same exact
+root is also present as a ``-c`` argument.  Ambient system and user credentials, identity,
+includes, and global exclude files therefore cannot steer the scan.  Repository-local ignore
+semantics such as ``.gitignore`` and ``.git/info/exclude`` remain active.
 That includes the trust inventory: rather than calling
 ``serena_light.workspace.inventory.git_trust_inventory``, which would start its own
 unbounded ``git ls-files``, this module reads the *same* combined
@@ -65,8 +70,11 @@ from scripts.backend_eval.process import (
     CommandTimeout,
     Deadline,
     ExecutableBindingError,
+    SealedImageError,
     bound_executable,
+    descriptor_path,
     run_bounded_bytes,
+    sealed_image,
 )
 from scripts.backend_eval.production_helper import ProductionHelperError, run_production_helper
 from scripts.backend_eval.source_binding import HelperExpectation, SourceBindingError
@@ -727,14 +735,22 @@ def _require_git_root(root: Path, deadline: Deadline | None) -> None:
 
 
 def _git_environment() -> dict[str, str]:
-    """An explicit Git environment: no ambient ``GIT_*`` may steer the corpus scan."""
+    """An explicit Git environment with no system, global, user, or credential config."""
 
-    env = {"PATH": _GIT_ENVIRONMENT_PATH, "LANG": "C.UTF-8"}
-    home = os.environ.get("HOME")
-    if home:
-        # HOME is kept because the user's global excludes file defines untracked disposition.
-        env["HOME"] = home
-    return env
+    return {
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "LANG": "C.UTF-8",
+        "PATH": _GIT_ENVIRONMENT_PATH,
+    }
+
+
+def _git_safe_directory_config(root: Path) -> bytes:
+    """One protected global-scope value, with no includes, credentials, or user settings."""
+
+    value = os.fspath(root)
+    if any(character in value for character in ('"', "\\", "\n", "\r", "\0")):
+        raise ManifestError(f"Git root cannot be represented safely in the trust config: {root}")
+    return f'[safe]\n\tdirectory = "{value}"\n'.encode()
 
 
 def _git_bytes(root: Path, args: tuple[str, ...], deadline: Deadline | None) -> bytes:
@@ -744,13 +760,22 @@ def _git_bytes(root: Path, args: tuple[str, ...], deadline: Deadline | None) -> 
     except ExecutableBindingError as error:
         raise ManifestError(f"the declared Git executable cannot be bound for {root}: {error}") from error
     try:
-        result = run_bounded_bytes(
-            [str(executable), *args], cwd=root, env=_git_environment(), timeout=timeout
-        )
+        with sealed_image("backend-eval-git-config", _git_safe_directory_config(root)) as config_fd:
+            environment = _git_environment()
+            environment["GIT_CONFIG_GLOBAL"] = str(descriptor_path(config_fd))
+            result = run_bounded_bytes(
+                [str(executable), "-c", f"safe.directory={root}", *args],
+                cwd=root,
+                env=environment,
+                timeout=timeout,
+                pass_fds=(config_fd,),
+            )
     except CommandTimeout as error:
         raise ManifestError(f"Git command timed out for {root}: {' '.join(args)}: {error}") from error
     except OSError as error:
         raise ManifestError(f"Git command failed for {root}: {error}") from error
+    except SealedImageError as error:
+        raise ManifestError(f"cannot build the explicit Git trust config for {root}: {error}") from error
     if result.returncode != 0:
         detail = result.stderr.decode("utf-8", "replace").strip()
         raise ManifestError(f"Git command failed for {root} ({result.returncode}): {' '.join(args)}: {detail}")

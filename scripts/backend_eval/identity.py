@@ -40,8 +40,11 @@ from scripts.backend_eval.process import (
     CommandTimeout,
     Deadline,
     ExecutableBindingError,
+    SealedImageError,
     bound_executable,
+    descriptor_path,
     run_bounded_bytes,
+    sealed_image,
 )
 from scripts.backend_eval.source_binding import (
     EVALUATION_OWNER_ROOT,
@@ -275,22 +278,37 @@ def _is_clean(subtree: Path, deadline: Deadline | None) -> bool:
 
 def _git(args: tuple[str, ...], deadline: Deadline | None) -> bytes | None:
     timeout = None if deadline is None else deadline.remaining()
-    env = {"PATH": BOOTSTRAP_SERVICE_PATH, "LANG": "C.UTF-8"}
-    home = os.environ.get("HOME")
-    if home:
-        env["HOME"] = home
+    env = {
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "LANG": "C.UTF-8",
+        "PATH": BOOTSTRAP_SERVICE_PATH,
+    }
     try:
         executable = bound_executable(GIT_EXECUTABLE)
     except ExecutableBindingError as error:
         raise IdentityError(f"the declared Git executable cannot be bound: {error}") from error
     try:
-        result = run_bounded_bytes(
-            [str(executable), *args], cwd=EVALUATOR_PACKAGE, env=env, timeout=timeout
-        )
+        config = f'[safe]\n\tdirectory = "{EVALUATION_OWNER_ROOT}"\n'.encode()
+        with sealed_image("backend-eval-identity-git-config", config) as config_fd:
+            env["GIT_CONFIG_GLOBAL"] = str(descriptor_path(config_fd))
+            result = run_bounded_bytes(
+                [
+                    str(executable),
+                    "-c",
+                    f"safe.directory={EVALUATION_OWNER_ROOT}",
+                    *args,
+                ],
+                cwd=EVALUATOR_PACKAGE,
+                env=env,
+                timeout=timeout,
+                pass_fds=(config_fd,),
+            )
     except CommandTimeout as error:
         raise IdentityError(f"evaluator source Git probe timed out: {' '.join(args)}: {error}") from error
     except OSError:
         return None
+    except SealedImageError as error:
+        raise IdentityError(f"cannot build the explicit evaluator Git trust config: {error}") from error
     return result.stdout if result.returncode == 0 else None
 
 

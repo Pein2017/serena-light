@@ -229,10 +229,15 @@ def test_every_child_of_a_capture_comes_through_the_bounded_runner(
     real_popen = subprocess.Popen
 
     def recording_bounded(
-        command: Sequence[str], *, cwd: Path, env: Mapping[str, str], timeout: float | None = None
+        command: Sequence[str],
+        *,
+        cwd: Path,
+        env: Mapping[str, str],
+        timeout: float | None = None,
+        pass_fds: Sequence[int] = (),
     ) -> CommandBytesResult:
         bounded.append((tuple(command), timeout))
-        return real_bounded(command, cwd=cwd, env=env, timeout=timeout)
+        return real_bounded(command, cwd=cwd, env=env, timeout=timeout, pass_fds=pass_fds)
 
     def recording_helper_bounded(
         command: Sequence[str],
@@ -270,14 +275,15 @@ def test_every_child_of_a_capture_comes_through_the_bounded_runner(
     assert sessions == [True] * len(spawned)
     git_commands = [command for command, _timeout in bounded if command[0] == str(manifests.GIT_EXECUTABLE)]
     # One `--show-toplevel` guard, then four bounded Git children per freeze state, twice.
+    git_trust = ("-c", f"safe.directory={root}")
     assert [command[1:] for command in git_commands] == [
-        ("rev-parse", "--show-toplevel"),
+        (*git_trust, "rev-parse", "--show-toplevel"),
         *2
         * [
-            ("rev-parse", "HEAD"),
-            ("ls-files", "--cached", "-z"),
-            ("ls-files", "--others", "--exclude-standard", "-z"),
-            COMBINED_LS_FILES,
+            (*git_trust, "rev-parse", "HEAD"),
+            (*git_trust, "ls-files", "--cached", "-z"),
+            (*git_trust, "ls-files", "--others", "--exclude-standard", "-z"),
+            (*git_trust, *COMBINED_LS_FILES),
         ],
     ]
     # Three bounded production-helper children, each executing the sealed program under -I:
@@ -303,10 +309,15 @@ def test_a_capture_without_a_deadline_still_only_uses_the_bounded_runner(
     real_bounded = manifests.run_bounded_bytes
 
     def recording_bounded(
-        command: Sequence[str], *, cwd: Path, env: Mapping[str, str], timeout: float | None = None
+        command: Sequence[str],
+        *,
+        cwd: Path,
+        env: Mapping[str, str],
+        timeout: float | None = None,
+        pass_fds: Sequence[int] = (),
     ) -> CommandBytesResult:
         calls.append(timeout)
-        return real_bounded(command, cwd=cwd, env=env, timeout=timeout)
+        return real_bounded(command, cwd=cwd, env=env, timeout=timeout, pass_fds=pass_fds)
 
     monkeypatch.setattr(manifests, "run_bounded_bytes", recording_bounded)
     monkeypatch.setattr(subprocess, "run", lambda *a, **k: (_ for _ in ()).throw(AssertionError("unbounded run")))
@@ -321,9 +332,14 @@ def test_a_hung_git_child_stops_the_capture(tmp_path: Path, monkeypatch: pytest.
     from scripts.backend_eval.process import CommandTimeout
 
     def hanging_bounded(
-        command: Sequence[str], *, cwd: Path, env: Mapping[str, str], timeout: float | None = None
+        command: Sequence[str],
+        *,
+        cwd: Path,
+        env: Mapping[str, str],
+        timeout: float | None = None,
+        pass_fds: Sequence[int] = (),
     ) -> CommandBytesResult:
-        del command, cwd, env, timeout
+        del command, cwd, env, timeout, pass_fds
         raise CommandTimeout("git timed out after 1s and its process group was killed")
 
     monkeypatch.setattr(manifests, "run_bounded_bytes", hanging_bounded)

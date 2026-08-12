@@ -21,8 +21,53 @@ from scripts.backend_eval.identity import (
     capture_evaluator_identity,
 )
 from scripts.backend_eval.models import sha256_bytes
+from scripts.backend_eval.process import CommandBytesResult
 
 # --- evaluator identity --------------------------------------------------------------
+
+
+def test_identity_git_child_trusts_only_the_exact_evaluator_root(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import scripts.backend_eval.identity as identity_module
+
+    observed: dict[str, object] = {}
+
+    def capture(
+        command: tuple[str, ...] | list[str],
+        *,
+        cwd: Path,
+        env: dict[str, str],
+        timeout: float | None,
+        pass_fds: tuple[int, ...],
+    ) -> CommandBytesResult:
+        observed.update(
+            command=tuple(command), cwd=cwd, env=dict(env), timeout=timeout,
+            pass_fds=pass_fds, config=os.pread(pass_fds[0], 4096, 0),
+            global_config=env["GIT_CONFIG_GLOBAL"],
+        )
+        return CommandBytesResult(0, b"commit\n", b"")
+
+    monkeypatch.setattr(identity_module, "run_bounded_bytes", capture)
+    monkeypatch.setenv("HOME", "/root")
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", "/root/.gitconfig")
+    assert identity_module._git(("rev-parse", "HEAD"), None) == b"commit\n"
+    assert observed["command"] == (
+        "/usr/bin/git",
+        "-c",
+        f"safe.directory={identity_module.EVALUATION_OWNER_ROOT}",
+        "rev-parse",
+        "HEAD",
+    )
+    assert observed["cwd"] == EVALUATOR_PACKAGE
+    assert observed["env"] == {
+        "GIT_CONFIG_GLOBAL": observed["global_config"],
+        "GIT_CONFIG_NOSYSTEM": "1", "LANG": "C.UTF-8", "PATH": "/usr/bin:/bin",
+    }
+    assert str(observed["global_config"]).startswith("/proc/")
+    assert observed["config"] == (
+        f'[safe]\n\tdirectory = "{identity_module.EVALUATION_OWNER_ROOT}"\n'.encode()
+    )
 
 
 def test_evaluator_identity_binds_the_executed_source_closure_and_host() -> None:

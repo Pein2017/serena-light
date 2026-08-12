@@ -124,6 +124,10 @@ Every phase receipt SHALL be bound to the exact evaluator source closure that pr
 - **WHEN** a bootstrap download runs
 - **THEN** it inherits only the allowlisted external-network proxy, CA, and locale values plus service-owned state, refuses ambient package-index, source, `PATH`, and `PYTHONPATH` controls, and the receipt records only key names and SHA-256 digests of values
 
+#### Scenario: Git observes an evaluator checkout or declared corpus root
+- **WHEN** the evaluator runs bounded Git for its own identity or a Git-backed corpus manifest
+- **THEN** the child uses the declared absolute Git executable, has no `HOME`, disables system and ambient global/user config, receives one sealed protected config and one `-c` argument that trust only the exact declared Git root as `safe.directory`, and retains repository-local ignore semantics without accepting a parent or wildcard or reading a credential helper, user identity, include, or global excludes file from ambient system or user config
+
 ### Requirement: Hard gates precede feature and efficiency comparison
 Every candidate SHALL pass correctness, workspace freshness, selected-environment import resolution, zero-write, current-surface compatibility, bounded-response, and lifecycle gates before candidate-specific features or efficiency can influence selection.
 

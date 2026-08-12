@@ -73,6 +73,15 @@ digest, and the query tree are unchanged production code, and an equivalence tes
 result to `git_trust_inventory` field by field, so every Git child of a capture is bounded
 with no exception.
 
+Git ownership trust is explicit per declared root. Every evaluator and corpus Git child has
+no `HOME`, disables system config, and receives a sealed protected global config containing
+only `safe.directory = <exact-root>` plus the same exact `-c safe.directory=<exact-root>`
+argument. No parent or wildcard is trusted, and no ambient system or user credential helper,
+identity, include, or global exclude file is read. Repository-local ignore semantics remain
+active, so the bounded inventory stays equivalent to production for the declared checkout
+itself; the current host has no global `core.excludesFile`, but that ambient fact is not an
+evaluator input.
+
 Each phase captures the corpus *before* its first setup operation and again *after* the last one and before cleanup and receipt publication, so the delta brackets everything the phase did rather than only its expensive middle. A created, deleted, or changed inventory member between captures is a write delta with an unexpected path, not an unstable-root error; a freeze that moves *while one capture is running* stays fail-closed. Controlled diagnostics, concurrent-change, and guarded-edit tasks use disposable copies under a temporary evaluation root. The manifest distinguishes declared fixture mutations from unexpected backend writes. Missing roots or an inability to freeze dirty state stops the run.
 
 ### Decision 4: Separate backend program ownership from test trust
