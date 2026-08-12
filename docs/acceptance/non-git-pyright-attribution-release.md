@@ -65,3 +65,18 @@ No dependency lock, public schema, tool census, build-identity algorithm,
 daemon protocol, marketplace source, or canonical Serena code changed. Existing
 leased daemon slots are not terminated; fresh clients select the repaired
 versioned build.
+
+## Installed fresh-client smoke
+
+After the feature branch was fast-forwarded into `main`, bootstrap was rerun
+from `/data/CoordExp/serena-light`; the locked service environment imported
+`serena_light` from `/data/CoordExp/serena-light/src`. The local plugin was then
+installed as `0.1.0+codex.20260812101430`.
+
+A new MCP stdio client started with the exact site-packages root as its process
+cwd and no ambient proxy variables. It observed server `serena-light`, exactly
+11 tools, `kind=non_git_read_only`, `python_environment=llm-framework-study`,
+and an empty issue list. Overview returned
+`torchtune/config/_parse.py`; exact lookup returned `parse`. Immediate release
+reported `active_holders=0`, `runtime_stop_pending=false`, and
+`runtime_stopped=true`.

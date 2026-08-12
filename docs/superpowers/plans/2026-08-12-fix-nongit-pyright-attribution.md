@@ -109,7 +109,7 @@ configuration.
 Stage only acceptance, documentation, and plugin manifest paths; inspect the
 staged diff and commit `release: publish non-Git Pyright attribution fix`.
 
-- [ ] **Step 6: Reinstall and run fresh-client smoke**
+- [x] **Step 6: Reinstall and run fresh-client smoke**
 
 Verify `/data/CoordExp/.agents/plugins/marketplace.json` still points to this
 repository's intended source, install `serena-light@coordexp-local`, start a
