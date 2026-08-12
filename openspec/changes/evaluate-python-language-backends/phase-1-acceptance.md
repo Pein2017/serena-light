@@ -1,12 +1,11 @@
 # Phase 1 acceptance: admission gate
 
-**Admission gate disposition: one current admitting receipt exists, but Task 1.8 remains on
-HOLD and unchecked.** The clean final evaluator target is
-`2a06e1671c8f66cbe1bd4ece9d79e428e57b8896`. Scoped review passed the sealed evaluator
-transport at `79c35d5` and the explicit Git trust correction at `2a06e167`; those reviews
-approve the code surfaces they examined, not the receipt. Task 1.8 may be checked only after
-independent Sol-xhigh static/correctness and Opus-max runtime/evidence reviews approve the
-exact receipt below.
+**Admission gate disposition: admitted PASS; Task 1.8 is complete.** The clean executed
+evaluator target is `2a06e1671c8f66cbe1bd4ece9d79e428e57b8896`, and the admitted evidence
+is exactly evaluation `ce005e27…961fa`, run `442851b1…a39a2`. Scoped review had already passed
+the sealed evaluator transport at `79c35d5` and the explicit Git trust correction at
+`2a06e167`. The required final Sol-xhigh static/correctness and Opus-max runtime/evidence
+reviews now both PASS the exact receipt and permit Task 1.8 closure.
 
 ## Current admitting run: `ce005e27…961fa` / `442851b1…a39a2`
 
@@ -135,9 +134,30 @@ whole-repository test count:
 - production `src/serena_light`, `pyproject.toml`, `uv.lock`, and `package-lock.json`:
   unchanged by the evaluator repair.
 
-The scoped evaluator-transport and Git-trust reviews returned PASS at their exact code
-targets. The final Sol-xhigh and Opus-max reviews of the exact `ce005e27…` /
-`442851b1…` receipt remain the only Task 1.8 acceptance work.
+### Final exact-receipt review dispositions
+
+- **Sol-xhigh: PASS**, with no P0, P1, or P2 finding, against the exact receipt and evidence
+  record at `992734ba8b2561c3e87c6e67de746500a7fcc0d4`. It explicitly permits Task 1.8 closure
+  after the Opus review.
+- **Opus-max: PASS** on runtime and evidence. It began against documentation HEAD
+  `2d20adc15fe90c20c0df63be1a244c2baaf922a6`; the receipt and executed evaluator bytes did
+  not change, and the reviewer re-read the corrected current acceptance text at `992734b`
+  during the audit. It independently matched the receipt metadata and SHA-256, canonical and
+  strict parse, 15-file evaluator and 6-file production closures, evaluation/artifact/runtime
+  and before/after/live production identities, exact budgets, all five roots (68,075 in scope
+  plus 31 exclusions) with zero deltas, candidate lock and runtime, all ten receipt files, and
+  process cleanup. It explicitly permits Task 1.8 closure after the Sol review.
+
+**Deferred nonblocking Low.** `identity.py` constructs the fixed evaluator-owner
+`safe.directory` config without the unsafe-character guard that `manifests.py` applies to a
+caller-declared corpus root. The current owner path is a fixed constant with none of those
+characters, so this cannot affect this receipt, admit a different root, or produce a false
+PASS. Changing evaluator bytes now would invalidate the receipt. The guard is therefore
+deferred as static hardening for a future evaluator revision, not a Phase 1 blocker.
+
+Both required final reviews approve the exact current receipt. The scoped evaluator-transport
+and Git-trust reviews also remain PASS at their exact code targets; no acceptance work remains
+for Task 1.8.
 
 ## Historical evidence retained below
 
