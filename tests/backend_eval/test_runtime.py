@@ -570,6 +570,80 @@ def test_read_only_loader_refuses_candidate_replaced_after_later_verification(
     assert runtime.ty.read_bytes() == replacement
 
 
+def _runtime_with_multihop_external_identity(
+    request: RuntimeRequest,
+    tmp_path: Path,
+    identity_kind: str,
+) -> tuple[RuntimeRequest, Path, Path]:
+    chain = tmp_path / f"{identity_kind}-chain"
+    chain.mkdir()
+    executable_a = chain / "executable-a"
+    executable_b = chain / "executable-b"
+    for path, status in ((executable_a, 0), (executable_b, 23)):
+        path.write_text(f"#!/bin/sh\nexit {status}\n", encoding="utf-8")
+        path.chmod(0o700)
+    intermediate = chain / "current"
+    intermediate.symlink_to(executable_a.name)
+    configured = chain / ("uv" if identity_kind == "tool" else "python")
+    configured.symlink_to(intermediate.name)
+    if identity_kind == "tool":
+        return replace(request, uv=configured), intermediate, executable_b
+    environments = ((request.environment_interpreters[0][0], configured), *request.environment_interpreters[1:])
+    return replace(request, environment_interpreters=environments), intermediate, executable_b
+
+
+@pytest.mark.parametrize("identity_kind", ["tool", "environment"])
+def test_read_only_loader_accepts_stable_multihop_external_resolution(
+    lock: CandidateLock,
+    request_: RuntimeRequest,
+    tmp_path: Path,
+    identity_kind: str,
+) -> None:
+    request, _intermediate, _executable_b = _runtime_with_multihop_external_identity(
+        request_, tmp_path, identity_kind
+    )
+    runtime = prepare_candidate_runtime(
+        lock, request, runner=_FakeRunner(), expectation=real_expectation()
+    )
+
+    assert _load_prepared(runtime) == runtime
+
+
+@pytest.mark.parametrize("identity_kind", ["tool", "environment"])
+def test_read_only_loader_refuses_multihop_external_resolution_retargeted_after_verification(
+    lock: CandidateLock,
+    request_: RuntimeRequest,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    identity_kind: str,
+) -> None:
+    request, intermediate, executable_b = _runtime_with_multihop_external_identity(
+        request_, tmp_path, identity_kind
+    )
+    runtime = prepare_candidate_runtime(
+        lock, request, runner=_FakeRunner(), expectation=real_expectation()
+    )
+    original_verify = runtime_module._verify_published_service_configs
+    retargeted = False
+
+    def verify_then_retarget(
+        layout: runtime_module._Layout, manifest: Mapping[str, Any]
+    ) -> tuple[ServiceConfigIdentity, ...]:
+        nonlocal retargeted
+        identities = original_verify(layout, manifest)
+        intermediate.unlink()
+        intermediate.symlink_to(executable_b.name)
+        retargeted = True
+        return identities
+
+    monkeypatch.setattr(runtime_module, "_verify_published_service_configs", verify_then_retarget)
+
+    with pytest.raises(RuntimePreparationError, match="resolution|identity|changed"):
+        _load_prepared(runtime)
+    assert retargeted
+    assert intermediate.resolve() == executable_b
+
+
 def test_read_only_loader_never_writes_or_repairs_the_runtime(
     lock: CandidateLock, request_: RuntimeRequest
 ) -> None:

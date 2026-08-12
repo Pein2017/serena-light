@@ -67,8 +67,12 @@ opens every workspace and target component from its parent descriptor, opens the
 `O_RDONLY | O_NOFOLLOW | O_NONBLOCK`, bounds every chunk by the phase deadline and byte ceiling,
 and re-proves the leaf entry, open descriptor, and retained workspace-root identity after the
 read. The prepared-runtime loader likewise walks and retains the exact runtime root while it
-parses and verifies the canonical manifest and every runtime-owned byte; its external
-interpreter/tool path and realpath observations remain honestly `declared-path` below.
+parses and verifies the canonical manifest and every runtime-owned byte. For each external
+tool and interpreter it starts one `guarded` filesystem-root open, then resolves the configured
+absolute path component by component in this class, retaining and re-proving every directory
+and symlink entry. The final node is opened `O_NONBLOCK`, proven executable and regular, and
+its path and digest must equal the manifest-declared endpoint. Both sides of the whole-pass
+bracket perform that complete bounded resolution independently; no ambient `PATH` participates.
 
 ### `guarded`
 
@@ -339,3 +343,9 @@ claiming a guarantee the kernel does not offer.
    child group on failure. The receipt exact-byte claim begins at the sealed evaluator image,
    not at self-authentication of the shim's own disk bytes. Receipt construction, helper execution, corpus capture, cleanup,
    and publication all run in the image child whose bytes the identity names.
+10. **External resolution stability is observational, not preemptive.** Each side of the
+    read-only loader's whole-pass bracket independently resolves and re-proves the complete
+    bounded tool/interpreter chain, so a persistent intermediate-link retarget across the
+    semantic pass is refused. A party that changes and restores every affected entry wholly
+    between those observations may remain unobservable; the loader does not claim to prevent
+    filesystem mutation or to preempt a syscall already in flight.

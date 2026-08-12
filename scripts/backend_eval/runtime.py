@@ -167,6 +167,8 @@ _DIRECTORY_MODE = 0o700
 _FILE_MODE = 0o600
 _DIRECTORY_FLAGS = os.O_RDONLY | os.O_DIRECTORY
 _NOFOLLOW_DIRECTORY_FLAGS = _DIRECTORY_FLAGS | os.O_NOFOLLOW
+_MAX_EXTERNAL_RESOLUTION_COMPONENTS = 256
+_MAX_EXTERNAL_RESOLUTION_SYMLINKS = 40
 # O_NONBLOCK keeps a FIFO or other blocking special node from hanging the open; the fstat
 # regular-file check below then refuses it promptly rather than reading empty bytes or, for
 # the owned-descendant walk, hanging the mode repair on a special node opened for fchmod.
@@ -1040,6 +1042,15 @@ class _RuntimeEntryObservation:
 class _PreparedRuntimeObservation:
     root_entries: tuple[str, ...]
     entries: tuple[_RuntimeEntryObservation, ...]
+    external_resolutions: tuple[_ExternalResolutionObservation, ...]
+
+
+@dataclass(frozen=True)
+class _ExternalResolutionObservation:
+    label: str
+    configured_path: str
+    resolved_path: str
+    chain: tuple[_RuntimeEntryObservation, ...]
 
 
 def _observe_prepared_runtime_identity(
@@ -1050,6 +1061,7 @@ def _observe_prepared_runtime_identity(
     root_fd = layout.bound_root_fd()
     root = layout.logical_root
     entries: list[_RuntimeEntryObservation] = []
+    external_resolutions: list[_ExternalResolutionObservation] = []
     directory_relpaths = set(owned_runtime_directory_relpaths())
     directory_relpaths.add("venv/bin")
     for relpath in sorted(directory_relpaths):
@@ -1082,13 +1094,23 @@ def _observe_prepared_runtime_identity(
                 raise RuntimePreparationError(
                     f"published runtime manifest has a malformed {name} {group_label} identity"
                 )
-            entries.append(_observe_external_path_entry(Path(path), f"{name} {group_label} path"))
-            entries.append(
-                _observe_external_regular_file(Path(realpath), f"{name} {group_label} target")
+            digest = record.get("sha256")
+            if not isinstance(digest, str):
+                raise RuntimePreparationError(
+                    f"published runtime manifest has a malformed {name} {group_label} digest"
+                )
+            external_resolutions.append(
+                _observe_external_executable_resolution(
+                    Path(path),
+                    Path(realpath),
+                    digest,
+                    f"{name} {group_label}",
+                )
             )
     return _PreparedRuntimeObservation(
         root_entries=tuple(sorted(_scandir_names(root_fd, root))),
         entries=tuple(entries),
+        external_resolutions=tuple(external_resolutions),
     )
 
 
@@ -1104,6 +1126,12 @@ def _observation_stat(info: os.stat_result) -> tuple[int, ...]:
         info.st_mtime_ns,
         info.st_ctime_ns,
     )
+
+
+def _resolution_directory_stat(info: os.stat_result) -> tuple[int, ...]:
+    """Identity fields unaffected by unrelated namespace changes below a directory."""
+
+    return (info.st_dev, info.st_ino, info.st_mode)
 
 
 def _observe_runtime_directory(root_fd: int, relpath: str, root: Path) -> _RuntimeEntryObservation:
@@ -1126,24 +1154,6 @@ def _observe_runtime_directory(root_fd: int, relpath: str, root: Path) -> _Runti
         )
     finally:
         os.close(fd)
-
-
-def _open_stable_observation_parent(path: Path) -> int:
-    parent_fd = _open_existing_confined_directory(path.parent)
-    try:
-        _require_physical_identity(parent_fd, path.parent)
-    except BaseException:
-        os.close(parent_fd)
-        raise
-    return parent_fd
-
-
-def _observe_regular_entry(path: Path, label: str) -> _RuntimeEntryObservation:
-    parent_fd = _open_stable_observation_parent(path)
-    try:
-        return _observe_regular_from_parent(parent_fd, path, label)
-    finally:
-        os.close(parent_fd)
 
 
 def _observe_regular_from_parent(
@@ -1208,36 +1218,274 @@ def _observe_runtime_regular_file(
         os.close(parent_fd)
 
 
-def _observe_external_regular_file(path: Path, label: str) -> _RuntimeEntryObservation:
-    if not path.is_absolute():
-        raise RuntimePreparationError(f"published runtime {label} path must be absolute")
-    return _observe_regular_entry(path, label)
+def _observe_external_executable_resolution(
+    configured: Path,
+    expected_realpath: Path,
+    expected_digest: str,
+    label: str,
+) -> _ExternalResolutionObservation:
+    """Resolve one configured executable through a bounded, stable no-follow chain.
 
+    Every directory and link encountered is retained and re-proved before returning. The
+    final regular executable is opened non-blocking from its retained parent, bound to that
+    entry and its bytes, and required to be the manifest-declared realpath. This is a focused
+    external-executable resolver: it performs no ``PATH`` lookup and never mutates a node.
+    """
 
-def _observe_external_path_entry(path: Path, label: str) -> _RuntimeEntryObservation:
-    if not path.is_absolute():
-        raise RuntimePreparationError(f"published runtime {label} path must be absolute")
-    parent_fd = _open_stable_observation_parent(path)
+    if not configured.is_absolute() or not expected_realpath.is_absolute():
+        raise RuntimePreparationError(f"published runtime {label} paths must be absolute")
+    pending = _normalize_external_resolution_parts((), str(configured), (), label)
+    resolved: list[str] = []
+    descriptors: list[int] = []
+    directory_bindings: list[tuple[int, str, int, os.stat_result, Path]] = []
+    symlink_bindings: list[tuple[int, str, os.stat_result, str, Path]] = []
+    chain: list[_RuntimeEntryObservation] = []
+    symlink_count = 0
+    steps = 0
+    root_fd: int | None = None
+    endpoint_fd: int | None = None
+    endpoint_parent_fd: int | None = None
+    endpoint_name = ""
+    endpoint_before: os.stat_result | None = None
+    endpoint_path: Path | None = None
     try:
+        root_fd = _open_external_resolution_root(label)
+        descriptors.append(root_fd)
+        current_fd = os.dup(root_fd)
+        descriptors.append(current_fd)
+        while pending:
+            steps += 1
+            if steps > _MAX_EXTERNAL_RESOLUTION_COMPONENTS * (
+                _MAX_EXTERNAL_RESOLUTION_SYMLINKS + 1
+            ):
+                raise RuntimePreparationError(
+                    f"published runtime {label} resolution exceeds its bounded traversal"
+                )
+            component = pending.pop(0)
+            lexical_path = Path("/").joinpath(*resolved, component)
+            try:
+                entry_before = os.stat(component, dir_fd=current_fd, follow_symlinks=False)
+            except FileNotFoundError as exc:
+                raise RuntimePreparationError(
+                    f"published runtime {label} resolution is missing {lexical_path}"
+                ) from exc
+            except OSError as exc:
+                raise RuntimePreparationError(
+                    f"cannot observe published runtime {label} resolution at {lexical_path}: {exc}"
+                ) from exc
+            if stat.S_ISLNK(entry_before.st_mode):
+                symlink_count += 1
+                if symlink_count > _MAX_EXTERNAL_RESOLUTION_SYMLINKS:
+                    raise RuntimePreparationError(
+                        f"published runtime {label} resolution exceeds "
+                        f"{_MAX_EXTERNAL_RESOLUTION_SYMLINKS} symlinks"
+                    )
+                try:
+                    target = os.readlink(component, dir_fd=current_fd)
+                    entry_after = os.stat(component, dir_fd=current_fd, follow_symlinks=False)
+                except OSError as exc:
+                    raise RuntimePreparationError(
+                        f"published runtime {label} symlink changed at {lexical_path}: {exc}"
+                    ) from exc
+                if _observation_stat(entry_after) != _observation_stat(entry_before):
+                    raise RuntimePreparationError(
+                        f"published runtime {label} symlink changed at {lexical_path}"
+                    )
+                symlink_bindings.append(
+                    (current_fd, component, entry_after, target, lexical_path)
+                )
+                chain.append(
+                    _RuntimeEntryObservation(
+                        label=str(lexical_path),
+                        kind="symlink",
+                        stat_fields=_observation_stat(entry_after),
+                        content_or_target=target,
+                    )
+                )
+                pending = _normalize_external_resolution_parts(
+                    tuple(resolved), target, tuple(pending), label
+                )
+                resolved = []
+                current_fd = os.dup(root_fd)
+                descriptors.append(current_fd)
+                continue
+            if not pending:
+                if not stat.S_ISREG(entry_before.st_mode):
+                    raise RuntimePreparationError(
+                        f"published runtime {label} endpoint must be a regular file: {lexical_path}"
+                    )
+                try:
+                    endpoint_fd = os.open(component, _READ_FLAGS, dir_fd=current_fd)
+                except OSError as exc:
+                    raise RuntimePreparationError(
+                        f"cannot open published runtime {label} endpoint {lexical_path}: {exc}"
+                    ) from exc
+                descriptors.append(endpoint_fd)
+                endpoint_opened = os.fstat(endpoint_fd)
+                if (
+                    not stat.S_ISREG(endpoint_opened.st_mode)
+                    or (entry_before.st_dev, entry_before.st_ino)
+                    != (endpoint_opened.st_dev, endpoint_opened.st_ino)
+                    or stat.S_IMODE(endpoint_opened.st_mode) & 0o111 == 0
+                ):
+                    raise RuntimePreparationError(
+                        f"published runtime {label} endpoint must be an executable regular file: "
+                        f"{lexical_path}"
+                    )
+                payload = _read_owned_descriptor(endpoint_fd, label, lexical_path)
+                observed_digest = sha256_bytes(payload)
+                if lexical_path != expected_realpath or observed_digest != expected_digest:
+                    raise RuntimePreparationError(
+                        f"published runtime {label} resolution identity changed: "
+                        f"{lexical_path} / {observed_digest}"
+                    )
+                endpoint_parent_fd = current_fd
+                endpoint_name = component
+                endpoint_before = endpoint_opened
+                endpoint_path = lexical_path
+                chain.append(
+                    _RuntimeEntryObservation(
+                        label=str(lexical_path),
+                        kind="regular",
+                        stat_fields=_observation_stat(endpoint_opened),
+                        content_or_target=observed_digest,
+                    )
+                )
+                break
+            if not stat.S_ISDIR(entry_before.st_mode):
+                raise RuntimePreparationError(
+                    f"published runtime {label} resolution component must be a directory: "
+                    f"{lexical_path}"
+                )
+            try:
+                child_fd = os.open(component, _NOFOLLOW_DIRECTORY_FLAGS, dir_fd=current_fd)
+            except OSError as exc:
+                raise RuntimePreparationError(
+                    f"cannot open published runtime {label} directory {lexical_path}: {exc}"
+                ) from exc
+            descriptors.append(child_fd)
+            opened = os.fstat(child_fd)
+            if (
+                not stat.S_ISDIR(opened.st_mode)
+                or (entry_before.st_dev, entry_before.st_ino) != (opened.st_dev, opened.st_ino)
+            ):
+                raise RuntimePreparationError(
+                    f"published runtime {label} directory changed at {lexical_path}"
+                )
+            directory_bindings.append((current_fd, component, child_fd, opened, lexical_path))
+            chain.append(
+                _RuntimeEntryObservation(
+                    label=str(lexical_path),
+                    kind="directory",
+                    stat_fields=_resolution_directory_stat(opened),
+                    content_or_target="",
+                )
+            )
+            resolved.append(component)
+            current_fd = child_fd
+
+        if endpoint_fd is None or endpoint_before is None or endpoint_path is None:
+            raise RuntimePreparationError(f"published runtime {label} resolution has no endpoint")
+        _reprove_external_resolution_chain(directory_bindings, symlink_bindings, label)
+        endpoint_after = os.fstat(endpoint_fd)
         try:
-            before = os.stat(path.name, dir_fd=parent_fd, follow_symlinks=False)
-            target = os.readlink(path.name, dir_fd=parent_fd) if stat.S_ISLNK(before.st_mode) else ""
-            after = os.stat(path.name, dir_fd=parent_fd, follow_symlinks=False)
+            endpoint_entry = os.stat(
+                endpoint_name, dir_fd=endpoint_parent_fd, follow_symlinks=False
+            )
         except OSError as exc:
-            raise RuntimePreparationError(f"cannot observe {label} {path}: {exc}") from exc
-        _require_physical_identity(parent_fd, path.parent)
-        if _observation_stat(after) != _observation_stat(before) or not (
-            stat.S_ISREG(after.st_mode) or stat.S_ISLNK(after.st_mode)
+            raise RuntimePreparationError(
+                f"published runtime {label} endpoint changed at {endpoint_path}: {exc}"
+            ) from exc
+        if (
+            _observation_stat(endpoint_after) != _observation_stat(endpoint_before)
+            or (endpoint_entry.st_dev, endpoint_entry.st_ino)
+            != (endpoint_after.st_dev, endpoint_after.st_ino)
         ):
-            raise RuntimePreparationError(f"published runtime {label} changed identity: {path}")
-        return _RuntimeEntryObservation(
+            raise RuntimePreparationError(
+                f"published runtime {label} endpoint changed at {endpoint_path}"
+            )
+        return _ExternalResolutionObservation(
             label=label,
-            kind="symlink" if stat.S_ISLNK(after.st_mode) else "regular",
-            stat_fields=_observation_stat(after),
-            content_or_target=target,
+            configured_path=str(configured),
+            resolved_path=str(endpoint_path),
+            chain=tuple(chain),
         )
     finally:
-        os.close(parent_fd)
+        for descriptor in reversed(descriptors):
+            os.close(descriptor)
+
+
+def _open_external_resolution_root(label: str) -> int:
+    """The one guarded anchor for an external executable's confined resolution walk."""
+
+    try:
+        return os.open("/", _DIRECTORY_FLAGS)
+    except OSError as exc:
+        raise RuntimePreparationError(
+            f"cannot open the filesystem root for published runtime {label} resolution: {exc}"
+        ) from exc
+
+
+def _normalize_external_resolution_parts(
+    base: tuple[str, ...], target: str, suffix: tuple[str, ...], label: str
+) -> list[str]:
+    parts = [] if target.startswith("/") else list(base)
+    for component in (*Path(target).parts, *suffix):
+        if component in {"", "/", "."}:
+            continue
+        if component == "..":
+            if not parts:
+                raise RuntimePreparationError(
+                    f"published runtime {label} resolution escapes the filesystem root"
+                )
+            parts.pop()
+        else:
+            parts.append(component)
+        if len(parts) > _MAX_EXTERNAL_RESOLUTION_COMPONENTS:
+            raise RuntimePreparationError(
+                f"published runtime {label} resolution exceeds "
+                f"{_MAX_EXTERNAL_RESOLUTION_COMPONENTS} components"
+            )
+    return parts
+
+
+def _reprove_external_resolution_chain(
+    directories: list[tuple[int, str, int, os.stat_result, Path]],
+    symlinks: list[tuple[int, str, os.stat_result, str, Path]],
+    label: str,
+) -> None:
+    for parent_fd, name, child_fd, before, path in directories:
+        try:
+            entry = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+            opened = os.fstat(child_fd)
+        except OSError as exc:
+            raise RuntimePreparationError(
+                f"published runtime {label} directory changed at {path}: {exc}"
+            ) from exc
+        if (
+            not stat.S_ISDIR(entry.st_mode)
+            or _resolution_directory_stat(opened) != _resolution_directory_stat(before)
+            or (entry.st_dev, entry.st_ino) != (opened.st_dev, opened.st_ino)
+        ):
+            raise RuntimePreparationError(
+                f"published runtime {label} directory changed at {path}"
+            )
+    for parent_fd, name, before, target, path in symlinks:
+        try:
+            entry = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+            observed_target = os.readlink(name, dir_fd=parent_fd)
+        except OSError as exc:
+            raise RuntimePreparationError(
+                f"published runtime {label} symlink changed at {path}: {exc}"
+            ) from exc
+        if (
+            not stat.S_ISLNK(entry.st_mode)
+            or _observation_stat(entry) != _observation_stat(before)
+            or observed_target != target
+        ):
+            raise RuntimePreparationError(
+                f"published runtime {label} symlink changed at {path}"
+            )
 
 
 def _observe_runtime_symlink(root_fd: int, relpath: str, root: Path) -> _RuntimeEntryObservation:
