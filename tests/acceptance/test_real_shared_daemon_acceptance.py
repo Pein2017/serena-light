@@ -203,6 +203,19 @@ class _HeldStdioClient:
             )
         )
 
+    async def find_symbol(self, relative_path: str, name_path: str) -> Mapping[str, object]:
+        return _data(
+            await self._call(
+                "find_symbol",
+                {
+                    "relative_path": relative_path,
+                    "name_path": name_path,
+                    "include_body": False,
+                    "max_answer_chars": 12_000,
+                },
+            )
+        )
+
     async def call_tool(
         self,
         name: str,
@@ -423,8 +436,12 @@ def test_real_shared_daemon_serves_concurrent_roots_and_survives_partial_release
             switched_runtime_identity = _mapping(switched_status["workspace"])
             assert switched_runtime_identity["kind"] == "non_git_read_only"
             assert switched_runtime_identity["python_environment"] == "llm-framework-study"
-            switched_issues = cast(list[Mapping[str, object]], switched_status["issues"])
-            assert [issue["code"] for issue in switched_issues] == ["SCOPE_INCOMPATIBLE"]
+            assert switched_status["issues"] == []
+            semantic_path = "torchtune/config/_parse.py"
+            switched_overview = await other_c.overview(semantic_path)
+            switched_find = await other_c.find_symbol(semantic_path, "parse")
+            assert switched_overview["files"], switched_overview
+            assert switched_find["files"], switched_find
             original = llm_read_only_target.read_bytes()
             denied = await other_c.call_tool(
                 "replace_symbol_body",

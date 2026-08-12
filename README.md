@@ -288,6 +288,16 @@ returned line + 1). An evident site-packages/environment mismatch produces one
 advisory `PYTHON_ENVIRONMENT_PATH_MISMATCH` warning and never switches the
 binding automatically.
 
+Exact read-only non-Git Python roots are also semantically usable when the
+selected interpreter's configured Pyright program exactly matches the trusted
+inventory. In particular, activating
+`/root/miniconda3/envs/llm-framework-study/lib/python3.12/site-packages` with
+`python_environment="llm-framework-study"` supports overview and symbol lookup
+while every edit remains rejected with `READ_ONLY_ROOT`. Serena Light validates
+the Pyright probe's canonical raw-string path order before materializing paths;
+this avoids a false `SCOPE_INCOMPATIBLE` caused by `pathlib` using a different
+component-wise sort order, without relaxing projection or trust checks.
+
 `get_runtime_status` is a non-warming control-plane probe. Its fixed public
 shape is `workspace`, `build`, `languages`, `executor`, and `issues`; healthy
 status omits lease/daemon IDs, interpreter/configuration paths, generations,

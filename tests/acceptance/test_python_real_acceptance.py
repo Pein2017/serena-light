@@ -8,6 +8,7 @@ test doubles.
 
 from __future__ import annotations
 
+import hashlib
 import subprocess
 import threading
 import time
@@ -383,6 +384,48 @@ def test_explicit_conda_environment_resolves_its_installed_package(tmp_path: Pat
     engine = _dict(_dict(diagnostics["data"])["engine"])
     assert engine["python_environment"] == "llm-framework-study"
     assert engine["interpreter"] == str(interpreter)
+
+
+def test_exact_llm_site_packages_is_semantically_navigable_and_read_only(record_property: Any) -> None:
+    """An exact non-Git root is usable when Pyright and trust own the same paths."""
+
+    interpreter = Path("/root/miniconda3/envs/llm-framework-study/bin/python")
+    site_packages = interpreter.parents[1] / "lib" / "python3.12" / "site-packages"
+    target = "torchtune/config/_parse.py"
+    target_path = site_packages / target
+    original = target_path.read_bytes()
+
+    with _real_runtime(site_packages, python_environment="llm-framework-study") as (runtime, process):
+        status = _dict(runtime.status())
+        projection = runtime.projections[LanguageFamily.PYTHON]
+        overview = _dict(runtime.get_symbols_overview(target, max_depth=0).to_dict())
+        symbol = _dict(runtime.find_symbol("parse", relative_path=target).to_dict())
+        edit = _dict(
+            runtime.replace_symbol_body(
+                "parse",
+                target,
+                "def parse(recipe_main): ...",
+                hashlib.sha256(original).hexdigest(),
+            ).to_dict()
+        )
+
+    record_property("peak_tree_rss_bytes", process.peak_tree_rss_bytes)
+    record_property("configured_program_count", projection.configured_program.count)
+    assert process.cleanup_ok, f"real non-Git acceptance left owned descendants: {process.cleanup_live}"
+    assert target_path.read_bytes() == original
+    assert _dict(status["identity"])["kind"] == "non_git_read_only"
+    assert _dict(status["identity"])["python_environment"] == "llm-framework-study"
+    assert "python" in _dict(status["adapters"])
+    assert "python" not in _dict(status["unavailable_language_families"])
+    assert projection.compatible is True
+    assert projection.configured_program.paths == projection.trust_inventory.paths
+    assert overview["ok"] is True, overview
+    overview_names = {item["name"] for item in _list(_dict(overview["data"])["symbols"])}
+    assert "parse" in overview_names
+    assert symbol["ok"] is True, symbol
+    assert _dict(_dict(symbol["data"])["symbol"])["name_path"] == "parse"
+    assert edit["ok"] is False, edit
+    assert _dict(edit["error"])["code"] == "READ_ONLY_ROOT"
 
 
 @pytest.mark.external_repo(root=str(TRANSFORMERS_ROOT), snapshot_env="SERENA_LIGHT_TRANSFORMERS_SNAPSHOT")

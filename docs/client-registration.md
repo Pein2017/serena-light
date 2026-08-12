@@ -284,6 +284,15 @@ installed environment, activation retains the selected binding and returns one
 `next_action=reactivate_with_path_environment`; it never auto-switches. Any
 existing non-Git directory binds as an exact read-only root.
 
+For an exact non-Git Python root, activation is not merely a lease success:
+when the selected interpreter's Pyright program equals the trusted inventory,
+semantic overview and symbol lookup are available. The release acceptance root
+`/root/miniconda3/envs/llm-framework-study/lib/python3.12/site-packages`, paired
+with `python_environment="llm-framework-study"`, resolves `parse` in
+`torchtune/config/_parse.py`; edits remain fail-closed as `READ_ONLY_ROOT`.
+Configured-program evidence is validated in the Node probe's raw-string order.
+The projection, digest, uniqueness, and outside-trust checks are unchanged.
+
 Normalized ranges use 0-based decoded-text lines and Unicode code-point
 columns; editor or `nl -ba` lines are returned line + 1. `get_runtime_status`
 has the fixed compact keys `workspace`, `build`, `languages`, `executor`, and

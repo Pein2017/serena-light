@@ -77,34 +77,34 @@ and commit `fix: validate Pyright paths in probe order`.
 - Consumes: exact `WorkspaceIdentity(kind=non_git_read_only, python_environment="llm-framework-study")` and the repaired attribution validator.
 - Produces: fresh-client evidence that `activate_workspace`, `get_symbols_overview`, and `find_symbol` work while `replace_symbol_body` remains read-only.
 
-- [ ] **Step 1: Replace the obsolete real-daemon expectation with a failing semantic assertion**
+- [x] **Step 1: Replace the obsolete real-daemon expectation with a failing semantic assertion**
 
 Activate `/root/miniconda3/envs/llm-framework-study/lib/python3.12/site-packages`
 with `python_environment="llm-framework-study"`; assert status has a Python
 adapter and no `SCOPE_INCOMPATIBLE`, then query a bounded known file such as
 `torchtune/__init__.py`. Retain the existing byte-preserving edit rejection.
 
-- [ ] **Step 2: Prove the acceptance fails without Task 1 and passes with it**
+- [x] **Step 2: Prove the acceptance fails without Task 1 and passes with it**
 
 Run the focused real shared-daemon and real Python acceptance selections. The
 historical base must fail at attribution; the repaired tree must return semantic
 success and `READ_ONLY_ROOT` for edit.
 
-- [ ] **Step 3: Run repository gates**
+- [x] **Step 3: Run repository gates**
 
 Run focused tests, complete `tests`, Ruff, Ty, source budget/ownership and
 provenance checks, strict OpenSpec validation, `git diff --check`, and verify no
 diff in `pyproject.toml`, `uv.lock`, `package-lock.json`, public schema/tool
 census, or canonical Serena.
 
-- [ ] **Step 4: Update release documentation and cachebuster**
+- [x] **Step 4: Update release documentation and cachebuster**
 
 Record exact commands, counts, old/new build identity, fixed root/interpreter,
 semantic outputs, edit refusal, and process cleanup. Run
 `update_plugin_cachebuster.py` on this checkout; do not hand-edit marketplace
 configuration.
 
-- [ ] **Step 5: Commit release evidence**
+- [x] **Step 5: Commit release evidence**
 
 Stage only acceptance, documentation, and plugin manifest paths; inspect the
 staged diff and commit `release: publish non-Git Pyright attribution fix`.
