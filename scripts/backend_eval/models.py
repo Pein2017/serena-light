@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -56,7 +57,16 @@ NEXT_ACTION_HOLD = "retain_pyright_and_disposition_admission"
 def canonical_json(value: Mapping[str, object]) -> bytes:
     """Serialize a mapping to sorted, compact, UTF-8, newline-terminated JSON bytes."""
 
-    return (json.dumps(value, sort_keys=True, ensure_ascii=False, separators=(",", ":")) + "\n").encode("utf-8")
+    return (
+        json.dumps(
+            value,
+            sort_keys=True,
+            ensure_ascii=False,
+            allow_nan=False,
+            separators=(",", ":"),
+        )
+        + "\n"
+    ).encode("utf-8")
 
 
 def sha256_bytes(value: bytes) -> str:
@@ -1567,7 +1577,7 @@ _ADMISSION_RECEIPT_FIELDS = frozenset(
 # itself mirrors AdmissionReceipt's public to_dict/from_dict/closed-field/canonical-order
 # discipline exactly, because it is this phase's published, top-level receipt.
 
-PROTOCOL_PHASE_RECEIPT_SCHEMA_VERSION = 1
+PROTOCOL_PHASE_RECEIPT_SCHEMA_VERSION = 2
 
 # Decision P2-3: task_utility is a fixed disposition literal, never fabricated Phase 2 data.
 CAPABILITY_TASK_UTILITY_DEFERRED = "deferred_to_feature_phase"
@@ -1577,14 +1587,28 @@ CAPABILITY_TASK_UTILITY_DEFERRED = "deferred_to_feature_phase"
 # second locally duplicated set.
 DIAGNOSTICS_MODES = frozenset({"push", "pull"})
 
-# The single frozen next_action literal every "pass" ProtocolPhaseReceipt must carry,
-# mirroring AdmissionReceipt's NEXT_ACTION_PASS. Phase 2's own status/disposition already
-# distinguishes which candidates survived (CandidateProtocolOutcome.gate_disposition); the
-# receipt-level next_action does not fork into a second string for that detail.
+# Closed actions derived from the surviving candidate set.  A sole-Pyright result ends the
+# evaluation at the protocol stop gate; a surviving competitor permits Phase 3 planning.
 PROTOCOL_PHASE_NEXT_ACTION_PASS = "begin_product_seam_planning_for_surviving_candidates"
+PROTOCOL_PHASE_NEXT_ACTION_STOP = "retain_pyright_and_stop_after_protocol_phase"
 
 _CANDIDATE_PROTOCOL_NAMES = frozenset({"pyright", "ty", "pyrefly"})
 _GATE_DISPOSITIONS = frozenset({"pass", "fail", "seam_incompatible_pull_only"})
+# The frozen Phase 2 callbacks exercise these five providers. ``declaration`` remains a raw
+# initialize fact in this phase and therefore is not fabricated as accepted request evidence.
+_PROBED_CAPABILITY_NAMES = frozenset(
+    {"definition", "document_symbols", "implementation", "references", "workspace_symbols"}
+)
+_PASS_LIFECYCLE_FIELDS = (
+    "retry_seam_disabled",
+    "bounded_timeout_observed",
+    "crash_handled",
+    "shutdown_clean",
+    "cleanup_clean",
+    "proxy_rejected",
+    "minimal_environment_verified",
+    "redaction_verified",
+)
 
 
 def _validate_diagnostics_mode(value: object, label: str) -> str:
@@ -1597,6 +1621,8 @@ def _validate_diagnostics_mode(value: object, label: str) -> str:
 def _validate_non_negative_number(value: object, label: str) -> float:
     if isinstance(value, bool) or not isinstance(value, int | float):
         raise ValueError(f"{label} must be a number")
+    if not math.isfinite(value):
+        raise ValueError(f"{label} must be finite")
     if value < 0:
         raise ValueError(f"{label} must be >= 0")
     return float(value)
@@ -1611,6 +1637,8 @@ def _optional_bool(value: object, label: str) -> bool | None:
 def _expect_number(value: object, label: str) -> float:
     if isinstance(value, bool) or not isinstance(value, int | float):
         raise ValueError(f"{label} must be a number")
+    if not math.isfinite(value):
+        raise ValueError(f"{label} must be finite")
     return float(value)
 
 
@@ -1869,6 +1897,84 @@ def _candidate_protocol_outcome_from_dict(value: object) -> CandidateProtocolOut
     )
 
 
+def _require_candidate_protocol_evidence(outcome: CandidateProtocolOutcome) -> None:
+    """Require complete, internally coherent evidence for every published outcome."""
+
+    label = f"ProtocolPhaseReceipt outcome {outcome.candidate}"
+    if outcome.gate_disposition == "pass" and outcome.issues:
+        raise ValueError(f"{label} has gate_disposition='pass' but carries issues")
+    if outcome.gate_disposition != "pass" and (
+        not outcome.issues or any(not issue.strip() for issue in outcome.issues)
+    ):
+        raise ValueError(f"{label} is not a survivor but does not carry actionable issues")
+
+    capability_names = frozenset(capability.name for capability in outcome.capabilities)
+    if capability_names != _PROBED_CAPABILITY_NAMES:
+        raise ValueError(
+            f"{label} has gate_disposition='pass' but capabilities do not cover exactly "
+            f"{sorted(_PROBED_CAPABILITY_NAMES)}"
+        )
+    raw_advertisements = {
+        "definition": outcome.raw_providers.definition,
+        "document_symbols": outcome.raw_providers.document_symbols,
+        "implementation": outcome.raw_providers.implementation,
+        "references": outcome.raw_providers.references,
+        "workspace_symbols": outcome.raw_providers.workspace_symbols,
+    }
+    for capability in outcome.capabilities:
+        if capability.advertised is not raw_advertisements[capability.name]:
+            raise ValueError(
+                f"{label} capability {capability.name} advertised value does not match raw_providers"
+            )
+        if capability.advertised:
+            if capability.accepted is None or capability.normalized_valid is None:
+                raise ValueError(
+                    f"{label} capability {capability.name} is advertised but lacks a boolean result"
+                )
+            if capability.normalized_valid and not capability.accepted:
+                raise ValueError(
+                    f"{label} capability {capability.name} is normalized-valid without an accepted request"
+                )
+        else:
+            if (
+                outcome.candidate == "ty"
+                and capability.name == "implementation"
+                and (
+                    (capability.accepted, capability.normalized_valid) != (None, None)
+                    or not capability.notes.strip()
+                )
+            ):
+                raise ValueError(
+                    f"{label} capability implementation lacks explicit negative evidence"
+                )
+            if (capability.accepted, capability.normalized_valid) not in (
+                (None, None),
+                (False, False),
+            ):
+                raise ValueError(
+                    f"{label} capability {capability.name} has an incoherent unadvertised result"
+                )
+
+
+def _require_passing_candidate_evidence(outcome: CandidateProtocolOutcome) -> None:
+    """Reject a survivor unless all capability and lifecycle evidence is affirmative."""
+
+    label = f"ProtocolPhaseReceipt outcome {outcome.candidate}"
+    for capability in outcome.capabilities:
+        if capability.advertised and (
+            capability.accepted is not True or capability.normalized_valid is not True
+        ):
+            raise ValueError(
+                f"{label} capability {capability.name} was advertised but not accepted and normalized-valid"
+            )
+
+    for field in _PASS_LIFECYCLE_FIELDS:
+        if getattr(outcome.lifecycle, field) is not True:
+            raise ValueError(
+                f"{label} has gate_disposition='pass' but lifecycle.{field} is not true"
+            )
+
+
 @dataclass(frozen=True, slots=True)
 class ProtocolPhaseReceipt:
     """The Phase 2 protocol-plane receipt, mirroring :class:`AdmissionReceipt` exactly.
@@ -1963,11 +2069,6 @@ class ProtocolPhaseReceipt:
         ended = _validate_utc_timestamp(self.ended_at, "ProtocolPhaseReceipt.ended_at")
         if ended < started:
             raise ValueError("ProtocolPhaseReceipt.ended_at must not precede started_at")
-        if self.next_action != PROTOCOL_PHASE_NEXT_ACTION_PASS:
-            raise ValueError(
-                f"ProtocolPhaseReceipt status is pass but next_action is not "
-                f"{PROTOCOL_PHASE_NEXT_ACTION_PASS!r}"
-            )
         # Deliberately exact, not merely "contains a correct protocol entry": see the class
         # docstring. A pass may not carry any budget beyond the one this phase bounds.
         frozen_protocol_budget = PhaseBudget("protocol", DEFAULT_PHASE_BUDGETS["protocol"].seconds)
@@ -1987,8 +2088,46 @@ class ProtocolPhaseReceipt:
             raise ValueError(
                 "ProtocolPhaseReceipt status is pass but production identity changed between before and after"
             )
-        if not outcomes:
-            raise ValueError("ProtocolPhaseReceipt status is pass but it carries no candidate outcome")
+        candidate_names = frozenset(outcome.candidate for outcome in outcomes)
+        if candidate_names != _CANDIDATE_PROTOCOL_NAMES:
+            raise ValueError(
+                "ProtocolPhaseReceipt status is pass but outcomes do not cover exactly "
+                f"{sorted(_CANDIDATE_PROTOCOL_NAMES)}"
+            )
+        pyright = next(outcome for outcome in outcomes if outcome.candidate == "pyright")
+        if pyright.gate_disposition != "pass":
+            raise ValueError("ProtocolPhaseReceipt status is pass but Pyright did not survive the protocol gate")
+        locked_candidate_versions = {
+            package.name: package.version for package in self.candidate_lock.candidates
+        }
+        if set(locked_candidate_versions) != _CANDIDATE_NAMES:
+            raise ValueError(
+                "ProtocolPhaseReceipt status is pass but candidate_lock does not uniquely bind ty and pyrefly"
+            )
+        for outcome in outcomes:
+            locked_version = locked_candidate_versions.get(outcome.candidate)
+            if locked_version is not None and outcome.engine_version != locked_version:
+                raise ValueError(
+                    f"ProtocolPhaseReceipt outcome {outcome.candidate} engine_version "
+                    f"does not match locked version {locked_version!r}"
+                )
+        survivors = tuple(outcome for outcome in outcomes if outcome.gate_disposition == "pass")
+        if not survivors:
+            raise ValueError("ProtocolPhaseReceipt status is pass but it carries no surviving candidate")
+        for outcome in outcomes:
+            _require_candidate_protocol_evidence(outcome)
+        for survivor in survivors:
+            _require_passing_candidate_evidence(survivor)
+        expected_next_action = (
+            PROTOCOL_PHASE_NEXT_ACTION_PASS
+            if any(outcome.candidate != "pyright" for outcome in survivors)
+            else PROTOCOL_PHASE_NEXT_ACTION_STOP
+        )
+        if self.next_action != expected_next_action:
+            raise ValueError(
+                "ProtocolPhaseReceipt status is pass but next_action does not match its survivors: "
+                f"expected {expected_next_action!r}, got {self.next_action!r}"
+            )
         before_by_root = {manifest.root: manifest for manifest in root_manifests_before}
         after_by_root = {manifest.root: manifest for manifest in root_manifests_after}
         delta_roots = {delta.root for delta in write_deltas}
@@ -2001,6 +2140,11 @@ class ProtocolPhaseReceipt:
         for delta in write_deltas:
             before_manifest = before_by_root[delta.root]
             after_manifest = after_by_root[delta.root]
+            if delta.kind != before_manifest.kind or delta.kind != after_manifest.kind:
+                raise ValueError(
+                    f"ProtocolPhaseReceipt status is pass but write_deltas[{delta.root}].kind "
+                    "does not match both root manifests"
+                )
             if delta.before_manifest_digest != before_manifest.manifest_digest:
                 raise ValueError(
                     f"ProtocolPhaseReceipt status is pass but write_deltas[{delta.root}]."
@@ -2010,6 +2154,14 @@ class ProtocolPhaseReceipt:
                 raise ValueError(
                     f"ProtocolPhaseReceipt status is pass but write_deltas[{delta.root}]."
                     "after_manifest_digest does not match its root_manifests_after entry"
+                )
+            if before_manifest.manifest_digest != after_manifest.manifest_digest:
+                raise ValueError(
+                    f"ProtocolPhaseReceipt status is pass but root {delta.root} manifest digest changed"
+                )
+            if delta.declared:
+                raise ValueError(
+                    f"ProtocolPhaseReceipt status is pass but write_deltas[{delta.root}] has declared paths"
                 )
             if delta.unexpected:
                 raise ValueError(

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from typing import Any, cast
 
 import pytest
@@ -10,6 +11,7 @@ from scripts.backend_eval.models import (
     CAPABILITY_TASK_UTILITY_DEFERRED,
     EVALUATION_CONTRACT_VERSION,
     PROTOCOL_PHASE_NEXT_ACTION_PASS,
+    PROTOCOL_PHASE_NEXT_ACTION_STOP,
     PROTOCOL_PHASE_RECEIPT_SCHEMA_VERSION,
     CandidateLock,
     CandidatePackage,
@@ -26,6 +28,7 @@ from scripts.backend_eval.models import (
     RootManifest,
     RuntimeBinding,
     WriteDelta,
+    canonical_json,
     default_phase_budgets,
 )
 from serena_light.lsp.adapter import RawLspProviders
@@ -36,6 +39,13 @@ _SHA_C = "c" * 64
 _SHA_D = "d" * 64
 _SHA_E = "e" * 64
 _GIT_REV = "f" * 40
+_PROBED_CAPABILITY_NAMES = (
+    "definition",
+    "document_symbols",
+    "implementation",
+    "references",
+    "workspace_symbols",
+)
 
 
 def _capability_evidence(name: str = "definition", **overrides: object) -> CapabilityEvidence:
@@ -84,17 +94,46 @@ def _raw_providers(**overrides: object) -> RawLspProviders:
 
 
 def _candidate_protocol_outcome(candidate: str = "pyright", **overrides: object) -> CandidateProtocolOutcome:
+    raw_providers = _raw_providers()
     fields: dict[str, object] = {
         "candidate": candidate,
-        "engine_version": "1.1.403",
-        "raw_providers": _raw_providers(),
-        "capabilities": (_capability_evidence("definition"), _capability_evidence("references")),
+        "engine_version": "1.1.403" if candidate == "pyright" else "0.0.1",
+        "raw_providers": raw_providers,
+        "capabilities": tuple(
+            _capability_evidence(name, advertised=getattr(raw_providers, name))
+            for name in _PROBED_CAPABILITY_NAMES
+        ),
         "lifecycle": _lifecycle_evidence(),
         "gate_disposition": "pass",
         "issues": (),
     }
     fields.update(overrides)
     return CandidateProtocolOutcome(**fields)
+
+
+def _failed_candidate_protocol_outcome(
+    candidate: str,
+    *,
+    gate_disposition: str = "fail",
+) -> CandidateProtocolOutcome:
+    return _candidate_protocol_outcome(
+        candidate,
+        gate_disposition=gate_disposition,
+        issues=(f"{candidate} did not survive the protocol gate",),
+    )
+
+
+def _canonical_protocol_outcomes(
+    *,
+    pyright: CandidateProtocolOutcome | None = None,
+    pyrefly: CandidateProtocolOutcome | None = None,
+    ty: CandidateProtocolOutcome | None = None,
+) -> tuple[CandidateProtocolOutcome, ...]:
+    return (
+        pyrefly or _failed_candidate_protocol_outcome("pyrefly"),
+        pyright or _candidate_protocol_outcome("pyright"),
+        ty or _failed_candidate_protocol_outcome("ty"),
+    )
 
 
 def _production_identity(**overrides: object) -> ProductionIdentity:
@@ -245,13 +284,25 @@ def _protocol_phase_receipt(*, status: str = "pass", **overrides: object) -> Pro
         "root_manifests_before": (_root_manifest(),),
         "root_manifests_after": (_root_manifest(),),
         "write_deltas": (_write_delta(),),
-        "outcomes": (_candidate_protocol_outcome("pyright"),),
+        "outcomes": _canonical_protocol_outcomes(),
         "issues": (),
         "artifact_tree_digest": _SHA_C,
-        "next_action": PROTOCOL_PHASE_NEXT_ACTION_PASS,
+        "next_action": PROTOCOL_PHASE_NEXT_ACTION_STOP,
     }
     fields.update(overrides)
     return ProtocolPhaseReceipt(**fields)
+
+
+def _protocol_phase_receipt_with_pyright(
+    pyright: CandidateProtocolOutcome,
+) -> ProtocolPhaseReceipt:
+    return _protocol_phase_receipt(
+        outcomes=_canonical_protocol_outcomes(
+            pyright=pyright,
+            ty=_candidate_protocol_outcome("ty"),
+        ),
+        next_action=PROTOCOL_PHASE_NEXT_ACTION_PASS,
+    )
 
 
 # --- CapabilityEvidence -------------------------------------------------------
@@ -301,6 +352,12 @@ def test_lifecycle_evidence_rejects_unknown_diagnostics_mode() -> None:
 def test_lifecycle_evidence_rejects_negative_cold_readiness() -> None:
     with pytest.raises(ValueError, match="cold_readiness_seconds"):
         _lifecycle_evidence(cold_readiness_seconds=-0.1)
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
+def test_lifecycle_evidence_rejects_non_finite_cold_readiness(value: float) -> None:
+    with pytest.raises(ValueError, match="finite"):
+        _lifecycle_evidence(cold_readiness_seconds=value)
 
 
 def test_lifecycle_evidence_rejects_negative_counts() -> None:
@@ -360,6 +417,10 @@ def test_protocol_phase_receipt_pass_requires_the_frozen_next_action_literal() -
         _protocol_phase_receipt(status="pass", next_action="do_something_else")
 
 
+def test_protocol_phase_receipt_schema_advances_to_v2() -> None:
+    assert PROTOCOL_PHASE_RECEIPT_SCHEMA_VERSION == 2
+
+
 def test_protocol_phase_receipt_pass_requires_evaluator() -> None:
     with pytest.raises(ValueError, match="evaluator"):
         _protocol_phase_receipt(status="pass", evaluator=None)
@@ -385,9 +446,447 @@ def test_protocol_phase_receipt_pass_rejects_unexpected_write() -> None:
         _protocol_phase_receipt(status="pass", write_deltas=(_write_delta(unexpected=("evil.py",)),))
 
 
-def test_protocol_phase_receipt_pass_requires_at_least_one_outcome() -> None:
-    with pytest.raises(ValueError, match="outcome"):
+@pytest.mark.parametrize("field", ["declared", "control_changes"])
+def test_protocol_phase_receipt_pass_rejects_every_kind_of_write_delta(field: str) -> None:
+    with pytest.raises(ValueError, match=field):
+        _protocol_phase_receipt(status="pass", write_deltas=(_write_delta(**{field: ("src/a.py",)}),))
+
+
+def test_protocol_phase_receipt_pass_requires_exactly_all_three_candidate_outcomes() -> None:
+    with pytest.raises(ValueError, match="exactly"):
         _protocol_phase_receipt(status="pass", outcomes=())
+
+    with pytest.raises(ValueError, match="exactly"):
+        _protocol_phase_receipt(
+            status="pass",
+            outcomes=(
+                _failed_candidate_protocol_outcome("pyrefly"),
+                _candidate_protocol_outcome("pyright"),
+            ),
+        )
+
+
+@pytest.mark.parametrize("candidate", ["ty", "pyrefly"])
+def test_protocol_phase_receipt_pass_binds_candidate_engine_version_to_lock(candidate: str) -> None:
+    mismatched = _failed_candidate_protocol_outcome(candidate)
+    mismatched = _candidate_protocol_outcome(
+        candidate,
+        engine_version="9999",
+        gate_disposition=mismatched.gate_disposition,
+        issues=mismatched.issues,
+    )
+    outcomes = (
+        _canonical_protocol_outcomes(ty=mismatched)
+        if candidate == "ty"
+        else _canonical_protocol_outcomes(pyrefly=mismatched)
+    )
+    with pytest.raises(ValueError, match=f"{candidate}.*engine_version"):
+        _protocol_phase_receipt(outcomes=outcomes)
+
+
+@pytest.mark.parametrize("candidate", ["ty", "pyrefly"])
+def test_protocol_phase_receipt_from_dict_rejects_candidate_engine_version_not_in_lock(candidate: str) -> None:
+    payload = _protocol_phase_receipt().to_dict()
+    outcomes = cast("list[dict[str, Any]]", payload["outcomes"])
+    outcome = next(item for item in outcomes if item["candidate"] == candidate)
+    outcome["engine_version"] = "9999"
+    with pytest.raises(ValueError, match=f"{candidate}.*engine_version"):
+        ProtocolPhaseReceipt.from_dict(payload)
+
+
+def test_protocol_phase_receipt_pass_requires_pyright_to_survive() -> None:
+    failed_pyright = _failed_candidate_protocol_outcome("pyright")
+    with pytest.raises(ValueError, match="Pyright"):
+        _protocol_phase_receipt(
+            outcomes=_canonical_protocol_outcomes(pyright=failed_pyright),
+            next_action=PROTOCOL_PHASE_NEXT_ACTION_PASS,
+        )
+
+
+def test_protocol_phase_receipt_pass_derives_stop_action_for_sole_pyright_survivor() -> None:
+    receipt = _protocol_phase_receipt()
+    assert receipt.next_action == PROTOCOL_PHASE_NEXT_ACTION_STOP
+
+    with pytest.raises(ValueError, match="next_action"):
+        _protocol_phase_receipt(next_action=PROTOCOL_PHASE_NEXT_ACTION_PASS)
+
+
+def test_protocol_phase_receipt_pass_derives_product_seam_action_for_competitor_survivor() -> None:
+    passing_ty = _candidate_protocol_outcome("ty")
+    receipt = _protocol_phase_receipt(
+        outcomes=_canonical_protocol_outcomes(ty=passing_ty),
+        next_action=PROTOCOL_PHASE_NEXT_ACTION_PASS,
+    )
+    assert receipt.next_action == PROTOCOL_PHASE_NEXT_ACTION_PASS
+
+    with pytest.raises(ValueError, match="next_action"):
+        _protocol_phase_receipt(
+            outcomes=_canonical_protocol_outcomes(ty=passing_ty),
+            next_action=PROTOCOL_PHASE_NEXT_ACTION_STOP,
+        )
+
+
+def test_protocol_phase_receipt_seam_incompatible_candidate_is_retained_but_not_a_survivor() -> None:
+    pull_only_ty = _failed_candidate_protocol_outcome(
+        "ty",
+        gate_disposition="seam_incompatible_pull_only",
+    )
+    receipt = _protocol_phase_receipt(outcomes=_canonical_protocol_outcomes(ty=pull_only_ty))
+    assert receipt.next_action == PROTOCOL_PHASE_NEXT_ACTION_STOP
+    assert receipt.outcomes[-1].gate_disposition == "seam_incompatible_pull_only"
+
+
+@pytest.mark.parametrize("gate_disposition", ["fail", "seam_incompatible_pull_only"])
+@pytest.mark.parametrize("issues", [(), ("",), (" ",)])
+def test_protocol_phase_receipt_non_survivor_requires_actionable_issues(
+    gate_disposition: str,
+    issues: tuple[str, ...],
+) -> None:
+    invalid_ty = _candidate_protocol_outcome(
+        "ty",
+        gate_disposition=gate_disposition,
+        issues=issues,
+    )
+    with pytest.raises(ValueError, match="ty.*issues"):
+        _protocol_phase_receipt(outcomes=_canonical_protocol_outcomes(ty=invalid_ty))
+
+
+def test_protocol_phase_receipt_non_survivor_requires_complete_capability_evidence() -> None:
+    invalid_pyrefly = _failed_candidate_protocol_outcome("pyrefly")
+    invalid_pyrefly = _candidate_protocol_outcome(
+        "pyrefly",
+        gate_disposition=invalid_pyrefly.gate_disposition,
+        issues=invalid_pyrefly.issues,
+        capabilities=tuple(
+            _capability_evidence(name)
+            for name in _PROBED_CAPABILITY_NAMES
+            if name != "workspace_symbols"
+        ),
+    )
+    with pytest.raises(ValueError, match="pyrefly.*capabilities.*exactly"):
+        _protocol_phase_receipt(outcomes=_canonical_protocol_outcomes(pyrefly=invalid_pyrefly))
+
+
+def test_protocol_phase_receipt_non_survivor_binds_advertisement_to_raw_providers() -> None:
+    raw_providers = _raw_providers(implementation=False)
+    invalid_pyrefly = _candidate_protocol_outcome(
+        "pyrefly",
+        raw_providers=raw_providers,
+        capabilities=tuple(
+            _capability_evidence(name, advertised=True)
+            for name in _PROBED_CAPABILITY_NAMES
+        ),
+        gate_disposition="fail",
+        issues=("implementation advertisement evidence is inconsistent",),
+    )
+    with pytest.raises(ValueError, match="pyrefly.*implementation.*advertised"):
+        _protocol_phase_receipt(outcomes=_canonical_protocol_outcomes(pyrefly=invalid_pyrefly))
+
+
+@pytest.mark.parametrize(
+    ("accepted", "normalized_valid"),
+    [(None, None), (None, False), (False, True), (True, None)],
+)
+def test_protocol_phase_receipt_non_survivor_rejects_incoherent_advertised_results(
+    accepted: bool | None,
+    normalized_valid: bool | None,
+) -> None:
+    capabilities = tuple(
+        _capability_evidence(
+            name,
+            accepted=accepted if name == "definition" else True,
+            normalized_valid=normalized_valid if name == "definition" else True,
+        )
+        for name in _PROBED_CAPABILITY_NAMES
+    )
+    invalid_pyrefly = _candidate_protocol_outcome(
+        "pyrefly",
+        capabilities=capabilities,
+        gate_disposition="fail",
+        issues=("definition request failed",),
+    )
+    with pytest.raises(ValueError, match="pyrefly.*definition"):
+        _protocol_phase_receipt(outcomes=_canonical_protocol_outcomes(pyrefly=invalid_pyrefly))
+
+
+@pytest.mark.parametrize(
+    ("accepted", "normalized_valid"),
+    [(False, False), (True, False)],
+)
+def test_protocol_phase_receipt_non_survivor_allows_coherent_failed_advertised_results(
+    accepted: bool,
+    normalized_valid: bool,
+) -> None:
+    capabilities = tuple(
+        _capability_evidence(
+            name,
+            accepted=accepted if name == "definition" else True,
+            normalized_valid=normalized_valid if name == "definition" else True,
+        )
+        for name in _PROBED_CAPABILITY_NAMES
+    )
+    pyrefly = _candidate_protocol_outcome(
+        "pyrefly",
+        capabilities=capabilities,
+        gate_disposition="fail",
+        issues=("definition request did not produce normalized evidence",),
+    )
+    assert _protocol_phase_receipt(
+        outcomes=_canonical_protocol_outcomes(pyrefly=pyrefly)
+    ).status == "pass"
+
+
+def test_protocol_phase_receipt_preserves_explicit_ty_negative_implementation_evidence() -> None:
+    raw_providers = _raw_providers(implementation=False)
+    capabilities = tuple(
+        _capability_evidence(
+            name,
+            advertised=getattr(raw_providers, name),
+            accepted=None if name == "implementation" else True,
+            normalized_valid=None if name == "implementation" else True,
+            notes=(
+                "locked ty version does not advertise textDocument/implementation"
+                if name == "implementation"
+                else ""
+            ),
+        )
+        for name in _PROBED_CAPABILITY_NAMES
+    )
+    ty = _candidate_protocol_outcome(
+        "ty",
+        raw_providers=raw_providers,
+        capabilities=capabilities,
+        gate_disposition="fail",
+        issues=("ty failed a separate protocol gate",),
+    )
+    receipt = _protocol_phase_receipt(outcomes=_canonical_protocol_outcomes(ty=ty))
+    implementation = next(
+        capability
+        for capability in receipt.outcomes[-1].capabilities
+        if capability.name == "implementation"
+    )
+    assert implementation.accepted is None
+    assert implementation.normalized_valid is None
+    assert "does not advertise" in implementation.notes
+
+
+def test_protocol_phase_receipt_requires_explicit_ty_negative_implementation_note() -> None:
+    raw_providers = _raw_providers(implementation=False)
+    capabilities = tuple(
+        _capability_evidence(
+            name,
+            advertised=getattr(raw_providers, name),
+            accepted=None if name == "implementation" else True,
+            normalized_valid=None if name == "implementation" else True,
+            notes="",
+        )
+        for name in _PROBED_CAPABILITY_NAMES
+    )
+    invalid_ty = _candidate_protocol_outcome(
+        "ty",
+        raw_providers=raw_providers,
+        capabilities=capabilities,
+        gate_disposition="fail",
+        issues=("ty failed a separate protocol gate",),
+    )
+    with pytest.raises(ValueError, match="ty.*implementation.*negative"):
+        _protocol_phase_receipt(outcomes=_canonical_protocol_outcomes(ty=invalid_ty))
+
+
+def test_protocol_phase_receipt_requires_ty_negative_implementation_null_result() -> None:
+    raw_providers = _raw_providers(implementation=False)
+    capabilities = tuple(
+        _capability_evidence(
+            name,
+            advertised=getattr(raw_providers, name),
+            accepted=name != "implementation",
+            normalized_valid=name != "implementation",
+            notes=(
+                "locked ty version does not advertise textDocument/implementation"
+                if name == "implementation"
+                else ""
+            ),
+        )
+        for name in _PROBED_CAPABILITY_NAMES
+    )
+    invalid_ty = _candidate_protocol_outcome(
+        "ty",
+        raw_providers=raw_providers,
+        capabilities=capabilities,
+        gate_disposition="fail",
+        issues=("ty failed a separate protocol gate",),
+    )
+    with pytest.raises(ValueError, match="ty.*implementation.*negative"):
+        _protocol_phase_receipt(outcomes=_canonical_protocol_outcomes(ty=invalid_ty))
+
+
+def test_protocol_phase_receipt_pass_candidate_requires_no_issues() -> None:
+    invalid_pyright = _candidate_protocol_outcome("pyright", issues=("hidden failure",))
+    with pytest.raises(ValueError, match="pyright.*issues"):
+        _protocol_phase_receipt_with_pyright(invalid_pyright)
+
+
+@pytest.mark.parametrize(
+    ("accepted", "normalized_valid"),
+    [(False, True), (None, True), (True, False), (True, None)],
+)
+def test_protocol_phase_receipt_pass_candidate_requires_valid_advertised_capabilities(
+    accepted: bool | None,
+    normalized_valid: bool | None,
+) -> None:
+    invalid_capability = _capability_evidence(
+        "definition",
+        accepted=accepted,
+        normalized_valid=normalized_valid,
+    )
+    invalid_pyright = _candidate_protocol_outcome(
+        "pyright",
+        capabilities=(
+            invalid_capability,
+            *(
+                _capability_evidence(name)
+                for name in _PROBED_CAPABILITY_NAMES
+                if name != "definition"
+            ),
+        ),
+    )
+    with pytest.raises(ValueError, match="pyright.*definition"):
+        _protocol_phase_receipt_with_pyright(invalid_pyright)
+
+
+def test_protocol_phase_receipt_pass_candidate_requires_complete_capability_evidence() -> None:
+    incomplete_pyright = _candidate_protocol_outcome(
+        "pyright",
+        capabilities=tuple(
+            _capability_evidence(name)
+            for name in _PROBED_CAPABILITY_NAMES
+            if name != "workspace_symbols"
+        ),
+    )
+    with pytest.raises(ValueError, match="pyright.*capabilities.*exactly"):
+        _protocol_phase_receipt_with_pyright(incomplete_pyright)
+
+
+def test_protocol_phase_receipt_pass_candidate_binds_advertisement_to_raw_providers() -> None:
+    raw_providers = _raw_providers(implementation=False)
+    capabilities = tuple(
+        _capability_evidence(name, advertised=True)
+        for name in _PROBED_CAPABILITY_NAMES
+    )
+    invalid_pyright = _candidate_protocol_outcome(
+        "pyright",
+        raw_providers=raw_providers,
+        capabilities=capabilities,
+    )
+    with pytest.raises(ValueError, match="pyright.*implementation.*advertised"):
+        _protocol_phase_receipt_with_pyright(invalid_pyright)
+
+
+@pytest.mark.parametrize(
+    ("accepted", "normalized_valid"),
+    [(None, None), (False, False)],
+)
+def test_protocol_phase_receipt_allows_existing_unadvertised_capability_representations(
+    accepted: bool | None,
+    normalized_valid: bool | None,
+) -> None:
+    raw_providers = _raw_providers(implementation=False)
+    capabilities = tuple(
+        _capability_evidence(
+            name,
+            advertised=getattr(raw_providers, name),
+            accepted=accepted if name == "implementation" else True,
+            normalized_valid=normalized_valid if name == "implementation" else True,
+        )
+        for name in _PROBED_CAPABILITY_NAMES
+    )
+    pyright = _candidate_protocol_outcome(
+        "pyright",
+        raw_providers=raw_providers,
+        capabilities=capabilities,
+    )
+    assert _protocol_phase_receipt_with_pyright(pyright).status == "pass"
+
+
+@pytest.mark.parametrize(
+    ("accepted", "normalized_valid"),
+    [(True, True), (True, False), (False, True), (None, False), (False, None)],
+)
+def test_protocol_phase_receipt_rejects_incoherent_unadvertised_capability_representations(
+    accepted: bool | None,
+    normalized_valid: bool | None,
+) -> None:
+    raw_providers = _raw_providers(implementation=False)
+    capabilities = tuple(
+        _capability_evidence(
+            name,
+            advertised=getattr(raw_providers, name),
+            accepted=accepted if name == "implementation" else True,
+            normalized_valid=normalized_valid if name == "implementation" else True,
+        )
+        for name in _PROBED_CAPABILITY_NAMES
+    )
+    invalid_pyright = _candidate_protocol_outcome(
+        "pyright",
+        raw_providers=raw_providers,
+        capabilities=capabilities,
+    )
+    with pytest.raises(ValueError, match="pyright.*implementation.*unadvertised"):
+        _protocol_phase_receipt_with_pyright(invalid_pyright)
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "retry_seam_disabled",
+        "bounded_timeout_observed",
+        "crash_handled",
+        "shutdown_clean",
+        "cleanup_clean",
+        "proxy_rejected",
+        "minimal_environment_verified",
+        "redaction_verified",
+    ],
+)
+def test_protocol_phase_receipt_pass_candidate_requires_complete_lifecycle_evidence(field: str) -> None:
+    invalid_pyright = _candidate_protocol_outcome(
+        "pyright",
+        lifecycle=_lifecycle_evidence(**{field: False}),
+    )
+    with pytest.raises(ValueError, match=f"pyright.*{field}"):
+        _protocol_phase_receipt_with_pyright(invalid_pyright)
+
+
+def test_protocol_phase_receipt_pass_requires_equal_before_and_after_manifest_digests() -> None:
+    changed_manifest = _root_manifest(inventory_digest=_SHA_B)
+    delta = _write_delta(after_manifest_digest=changed_manifest.manifest_digest)
+    with pytest.raises(ValueError, match="manifest digest changed"):
+        _protocol_phase_receipt(
+            root_manifests_after=(changed_manifest,),
+            write_deltas=(delta,),
+        )
+
+
+@pytest.mark.parametrize(
+    ("after_manifest", "delta_kind"),
+    [
+        (_root_manifest(), "non_git"),
+        (_root_manifest(kind="non_git", source_revision=None), "git"),
+    ],
+)
+def test_protocol_phase_receipt_pass_binds_delta_kind_to_both_manifests(
+    after_manifest: RootManifest,
+    delta_kind: str,
+) -> None:
+    delta = _write_delta(
+        kind=delta_kind,
+        after_manifest_digest=after_manifest.manifest_digest,
+    )
+    with pytest.raises(ValueError, match="kind"):
+        _protocol_phase_receipt(
+            root_manifests_after=(after_manifest,),
+            write_deltas=(delta,),
+        )
 
 
 def test_protocol_phase_receipt_incomplete_does_not_require_pass_invariants() -> None:
@@ -409,10 +908,37 @@ def test_protocol_phase_receipt_rejects_unknown_schema() -> None:
     with pytest.raises(ValueError, match="schema_version"):
         ProtocolPhaseReceipt.from_dict({"schema_version": 999})
 
+    with pytest.raises(ValueError, match="schema_version"):
+        ProtocolPhaseReceipt.from_dict({"schema_version": 1})
+
 
 def test_protocol_phase_receipt_to_dict_from_dict_round_trips() -> None:
     receipt = _protocol_phase_receipt()
     assert ProtocolPhaseReceipt.from_dict(receipt.to_dict()) == receipt
+
+
+def test_protocol_phase_receipt_canonical_bytes_round_trip_without_drift() -> None:
+    receipt = _protocol_phase_receipt()
+    canonical = canonical_json(receipt.to_dict())
+    decoded = cast("dict[str, object]", json.loads(canonical))
+    reparsed = ProtocolPhaseReceipt.from_dict(decoded)
+    assert canonical_json(reparsed.to_dict()) == canonical
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
+def test_canonical_json_rejects_non_finite_numbers(value: float) -> None:
+    with pytest.raises(ValueError):
+        canonical_json({"value": value})
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
+def test_protocol_phase_receipt_from_dict_rejects_non_finite_lifecycle_number(value: float) -> None:
+    payload = _protocol_phase_receipt().to_dict()
+    outcomes = cast("list[dict[str, Any]]", payload["outcomes"])
+    lifecycle = cast("dict[str, object]", outcomes[1]["lifecycle"])
+    lifecycle["cold_readiness_seconds"] = value
+    with pytest.raises(ValueError, match="finite"):
+        ProtocolPhaseReceipt.from_dict(payload)
 
 
 def test_protocol_phase_receipt_from_dict_rejects_unknown_field() -> None:
