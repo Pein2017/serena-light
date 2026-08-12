@@ -15,24 +15,27 @@ cannot see `Path.read_bytes`, `Path.write_text`, `Path.mkdir`, or a production h
 and three whole families of read and write had survived it: every harness-owned write in
 `runtime.py`, the production-identity inputs and the production helpers behind them, and the
 corpus content digest. All six are repaired, tasks 1.13 and 1.15 were reopened and closed for
-them, and the run recorded below is a fresh run from the repaired, committed evaluator at
-HEAD `40eb2af`.
+them -- and a seventh, found by this repair's own receipt verification, before the admitting
+run. The run recorded below is a fresh run from the repaired, committed evaluator at HEAD
+`82651d0`.
 
 **Task 1.8 stays unchecked and on HOLD.** A checked box may never stand for an unreviewed
 run, and neither re-review of this receipt has happened. Nothing else blocks it.
 
-**No receipt has been erased.** Seven runs are now on record byte-for-byte: the original
+**No receipt has been erased.** Eight runs are now on record byte-for-byte: the original
 attempted run (instrument-limited), the repaired-instrument run (superseded when the last
 unbounded Git child was removed), the reviewed run (superseded by the first repair), the
 run admitted by the ceiling-and-mode repair, the run admitted by the guarded-read repair, the
-run admitted before the descriptor-ownership repair (superseded by this one), and the
-admitting run below. All 94 artifact files and 96 artifact directories of the six earlier runs
-were captured immediately before this run and re-captured after it: **94 files, 0 changed** in
-content, inode, size, `mtime`, or mode, and **96 directories, 0 changed** in every one of those
-fields. The only entry that moved at all is the artifact root's own `mtime`, which advanced
-because it gained the new evaluation-identity child -- same inode, same mode; every one of the
-16 new files and 17 new directories is under that child alone. All six earlier
-receipt-bearing identities still recompute their recorded `artifact_tree_digest` exactly.
+run admitted before the descriptor-ownership repair, the first descriptor-ownership run
+(superseded when its own verification exposed the narrowed production closure), and the
+admitting run below. All 110 artifact files and 113 artifact directories of the seven earlier
+runs were captured immediately before this run and re-captured after it: **110 files, 0
+changed** in content, inode, size, `mtime`, or mode, and **113 directories, 0 changed** in
+every one of those fields. The only entry that moved at all is the artifact root's own
+`mtime`, which advanced because it gained the new evaluation-identity child -- same inode, same
+mode; every one of the 16 new files and 17 new directories is under that child alone. All seven
+earlier receipt-bearing identities still recompute their recorded `artifact_tree_digest`
+exactly.
 
 
 ## What the second re-review held on
@@ -224,23 +227,24 @@ Three defects, each repaired and covered by adversarial tests:
 
 | Field | Value |
 | --- | --- |
-| `evaluation_identity` | `7ca37592647a147a8728d86052cdafe14495cad62ff4103f38571b5404e51900` |
-| `run_identity` | `c9a2456d9280dfde941e17c4ffa3e7b66049af2bc14b47b24c6660e9305d9b63` |
+| `evaluation_identity` | `59a381372e561da4efe27dbe892c6b3116852d51ec3eef0e0ee22e31e857d73f` |
+| `run_identity` | `35701e7bacdd7eb38cc0a1e7974f9cec602bf08bcc15535ce3710dd3ed6e74b5` |
 | receipt | `<repo>/.admission-artifacts/backend-eval/<evaluation-identity>/receipts/<run-identity>.json` |
-| receipt `sha256` | `8166f6f7a3fc72aa5195b3f9069da98e81a8380022e22227eda6720bf3455c4b` (39,749,106 bytes, inode `125835123`, mode `0600`) |
+| receipt `sha256` | `809fe9143797a226206e1ead56cea7848fa99b53cac059e77081952a37a0233a` (39,749,313 bytes, inode `125834382`, mode `0600`) |
 | `schema_version` / contract | `2` / `python-backend-evaluation-v1` |
 | `status` / `next_action` | `pass` / `begin_protocol_probe_planning` |
 | `issues` | none |
-| window | `started_at=2026-08-12T03:52:29Z`, `ended_at=2026-08-12T03:52:40Z` -- **11 s** of the 1800 s ceiling |
-| `artifact_tree_digest` | `98f30aa42639e45b44ec5ded065498a1e25ce2ba7108029f7641723549b91cf6` |
-| evaluator source | commit `40eb2afa00fc2be63a0cd36d4a479d3ae18f121a`, clean, closure `36d811bb9e5620f8d1cff2ab9ab070b1801871ce5e8a4ea24b45a4bf2cf07c15` |
+| window | `started_at=2026-08-12T04:13:54Z`, `ended_at=2026-08-12T04:14:06Z` -- **12 s** of the 1800 s ceiling |
+| `artifact_tree_digest` | `2944f88213980a448c6bd8e47e0f79b3001d9df0a994b5ba5de16f10807d5d7b` |
+| evaluator source | commit `82651d0dd66a72fc39f31f54c6b9ab03d5be8113`, clean, 13 files, closure `9205f879093d0d3c089386d98df8a89475ae8ad89338984d6bc1b6a8f2a01a26` |
+| executed production closure | 6 files, digest `d7ed23955949067b932e9b18e5818ca6bece52797cbd2b2241fb84981331966b`, clean -- byte-identical to the previous admitting run |
 | candidate lock | `6cd570324d1a35aa0f4c30b60fd3005fe0953e8efe230915fb19ad24184b9062` -- `pyrefly==1.2.0`, `ty==0.0.70`, unchanged from every earlier run |
 | runtime | `runtime_manifest_sha256=e578bf4d6f1d98df96140d6c03b793a26af60658e49ea03b6810581898a6b4ec`, `runtime_permission_repairs=none` |
 | corpus | 68,066 in-scope paths in 5 roots, 31 declared exclusions, 0 unexpected paths, 0 declared mutations, 0 changed controls |
 | production identity | build identity and dependency-lock digest identical before and after |
 
 This is the fresh run from the descriptor-ownership repair, produced by the clean committed
-checkout `40eb2af` with `git status --porcelain` empty before it. It is the first run in which
+checkout `82651d0` with `git status --porcelain` empty before it. It is the first run in which
 the production helpers -- the dependency-lock digest, the build identity, the runtime paths,
 and every corpus content digest -- executed inside the bounded, source-bound child rather than
 in the evaluator process, and in which every harness-owned read below the runtime root went
@@ -265,7 +269,7 @@ changed**, and all six receipt-bearing identities still recompute their recorded
 
 ```bash
 cd /data/CoordExp/.worktrees/serena-light-backend-eval-final-fix
-backend_eval_freeze_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"   # resolved to 2026-08-12T03:52:29Z
+backend_eval_freeze_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"   # resolved to 2026-08-12T04:13:54Z
 /data/CoordExp/.worktrees/serena-light-backend-eval/.venv/bin/python -m scripts.backend_eval.admission \
   --repo-root /data/CoordExp/serena-light \
   --artifact-root /data/CoordExp/serena-light/.admission-artifacts/backend-eval \
@@ -275,7 +279,7 @@ backend_eval_freeze_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"   # resolved to 2026-08-
   --exclude-newer "$backend_eval_freeze_at"
 ```
 
-Exit status `0`, empty stderr. Run once, from the clean committed checkout `40eb2af`, with
+Exit status `0`, empty stderr. Run once, from the clean committed checkout `82651d0`, with
 `git status --porcelain` empty before the run. No evaluation process, child, or descriptor
 outlived it.
 
@@ -290,9 +294,10 @@ helper import, which the receipt's `production_root` confirms.
 
 | Field | Value |
 | --- | --- |
-| evaluator source closure | 11 files of `scripts/backend_eval`, digest `8768d6944c091fa22b9e94f963a1135fef95a893550a1a914f998e39dfcaaae5` |
-| evaluator source commit | `2503f852708b3c31cf1462d2885a6f5591966085`, source clean |
-| executed production closure | 6 files, digest `d7ed23955949067b932e9b18e5818ca6bece52797cbd2b2241fb84981331966b` (unchanged), clean at that commit |
+| evaluator source closure | 13 files of `scripts/backend_eval`, digest `9205f879093d0d3c089386d98df8a89475ae8ad89338984d6bc1b6a8f2a01a26` |
+| evaluator source commit | `82651d0dd66a72fc39f31f54c6b9ab03d5be8113`, source clean |
+| executed production closure | 6 files, digest `d7ed23955949067b932e9b18e5818ca6bece52797cbd2b2241fb84981331966b` (unchanged), clean at that commit -- the three the bounded child executes are declared by `CHILD_EXECUTED_HELPERS` and pinned against the child's own report |
+| bounded child program | `production_child.py`, digest `3e48b129b6bf0873697f5155bf8845d180101f32b0db794dd6872e050b60a749`, equal to `production_child_digest()` read through the confined walk |
 | CLI host interpreter | `/root/miniconda3/envs/ms/bin/python3.12`, sha256 `068d88ca469ae96121a1a220eb9e0ac3e1a6400b193e3b9cc7c14f54f9ed28e4` |
 | environments | `llm-framework-study` (3.12.13), `ms` (3.12.11) |
 | service configurations | `pyrefly`, `pyright`, `ty` |
@@ -307,15 +312,16 @@ helper import, which the receipt's `production_root` confirms.
 | runtime manifest `sha256` | `e578bf4d6f1d98df96140d6c03b793a26af60658e49ea03b6810581898a6b4ec` (unchanged) |
 | `runtime_permission_repairs` | `none` -- the runtime was already `0600`/`0700` from the earlier repair; reuse made no repair |
 
-The lock digest and the runtime manifest digest are byte-identical to the previous admitting
-run: this run *reused* the already-corrected runtime through the same `_open_owned_descendant`
-walk the guarded-read fix touches, and found nothing to repair, which is exactly the
-ordinary-file behavior the fix was required to preserve.
+The lock digest and the runtime manifest digest are byte-identical to every earlier admitting
+run: this run *reused* the already-correct runtime through the component-wise descriptor walk,
+and found nothing to repair, which is exactly the ordinary-file behavior the repair was
+required to preserve.
 
 ### The measurement window and the corpus
 
-Five roots, ten manifests (before and after), **68,059 in-scope paths**, 31 declared excluded
-paths -- unchanged from the previous admitting run. `unexpected_write_paths=0`,
+Five roots, ten manifests (before and after), **68,066 in-scope paths**, 31 declared excluded
+paths. Every content digest in those manifests was computed by production's own
+`observe_file_digest`, executed in bounded chunks inside the killable child. `unexpected_write_paths=0`,
 `manifest_control_changes=0`, declared mutations `0` across all five roots. One write delta
 per root, each bound to both of its own manifest digests.
 
@@ -330,28 +336,37 @@ previous admitting run, since `src/serena_light` was not touched by this repair.
 ### Deadline, process, and cleanup evidence
 
 The run used 12 s of the 1800 s ceiling and completed publication inside it. Cleanup ran once
-on the passing path, under the same deadline, and removed nothing. A post-run scan for `uv`,
-`ty`, `pyright`, or `pyrefly` processes found none; the only running processes matching those
-names were the pre-existing production Serena Light MCP daemons, unrelated to this run and
-started before it.
+on the passing path, under the same deadline, and removed nothing. Every child the run started
+-- Git, and now the production-helper children -- went through the one bounded runner, in its
+own session, with the phase's remaining time as its bound; a post-run scan found no surviving
+`production_child`, `uv`, `ty`, `pyright`, or `pyrefly` process from this run, and no
+descriptor leaked.
 
 ### Independent re-verification
 
 From the published bytes alone, after the run: the canonical round trip is byte-identical;
 strict parsing succeeds and the budget set equals `DEFAULT_PHASE_BUDGETS` exactly;
-`artifact_tree_digest` recomputed over the evaluation root equals `7287a79d…`; the runtime
-manifest digest re-read from disk equals the receipt's `e578bf4d…`; and the live production
-identity equals both receipt sides (above).
+`artifact_tree_digest` recomputed over the evaluation root equals `2944f882…`; the runtime
+manifest digest re-read from disk equals the receipt's `e578bf4d…`; the child program digest
+read through the confined walk equals the `production_child.py` entry in the receipt's own
+evaluator closure; and the live production identity equals both receipt sides (above). All
+seven receipt-bearing identities -- this one and the six earlier ones -- recompute their
+recorded `artifact_tree_digest` exactly.
 
-### Preservation of all five earlier runs
+### Preservation of all seven earlier runs
 
-Captured immediately before this run and re-captured immediately after: **89 artifact files,
-0 changed** in content, inode, size, `mtime`, or mode, and 80 of the 81 earlier directories
-unchanged in all of those fields. The one exception is the artifact root directory's own
-`mtime`, which advanced because it gained the new evaluation-identity child -- the same
-behaviour every earlier run showed. Sixteen entries were created, all of them under
-`35b85d4e…d334/`. The run published under its own evaluation identity and its own per-run
-receipt path, so it shared no name with any earlier record.
+Captured immediately before this run and re-captured immediately after: **110 artifact files,
+0 changed** and **113 artifact directories, 0 changed** in content, inode, size, `mtime`, or
+mode. Measured against the baseline taken before the *first* run of this repair cycle, the six
+runs that predate it are likewise **94 files, 0 changed** and **96 directories, 0 changed**.
+The artifact root directory's own `mtime` advanced because it gained the new
+evaluation-identity child -- same inode, same mode -- the behaviour every earlier run showed.
+Sixteen files and seventeen directories were created, all of them under `59a38137…d73f/`. The
+run published under its own evaluation identity and its own per-run receipt path, so it shared
+no name with any earlier record.
+
+The intermediate run at `7ca37592…1900` is retained unchanged as evidence of the
+narrowed-closure defect that its own verification exposed; it is not the admitting run.
 
 | Artifact | `sha256` | size | inode |
 | --- | --- | --- | --- |
@@ -360,6 +375,18 @@ receipt path, so it shared no name with any earlier record.
 | `380aaeb4…9147d/receipts/7749b4f9…74be4.json` | `830705ebee286d49d64df18ede84de803d632cadb9292537631b587a212709ae` | 39,744,615 | `125834243` |
 | `207e7521…81e4/receipts/2f9e7a08…507b.json` | `3ef7be84035c01538be7ad73722fb82e4373e2464a0cabe9ffa5906a850dcdc9` | 39,745,560 | `125834277` |
 | `0960ec13…7025/receipts/991c9866…cff33.json` | `a0b1ff57dde7a8ec1e205793f1a15e4e7bda61a7e65e6e61e565e87b96367dfd` | 39,745,560 | `125834957` |
+| `35b85d4e…d334/receipts/ddfe7d49…b8562.json` | `80401b6e7b2e06e3db137d127fed9598868994082dcdeee805efd74bdb8d1fe8` | 39,745,560 | `125835009` |
+| `7ca37592…1900/receipts/c9a2456d…d9b63.json` | `8166f6f7a3fc72aa5195b3f9069da98e81a8380022e22227eda6720bf3455c4b` | 39,749,106 | `125835123` |
+
+### Superseded but retained (6) and (7): the two runs of this repair cycle
+
+| Run | Identity / receipt | Why it is not the admitting run |
+| --- | --- | --- |
+| 6 | `35b85d4e…d334` / `ddfe7d49…b8562`, `pass` in 12 s | Produced by HEAD `2503f85`, before the descriptor-ownership repair; superseded by it. |
+| 7 | `7ca37592…1900` / `c9a2456d…d9b63`, `pass` in 11 s | Produced by HEAD `40eb2af`. Its own receipt verification exposed the narrowed production closure (defect 7): it published `production_files` with four entries where six helpers were executed. **Retained as evidence of that defect, and explicitly not admitted.** The admitting run above is from HEAD `82651d0`, which restores the six-file closure and its digest `d7ed2395…966b`. |
+
+Both are byte-identical to when they were written, and both still recompute their own recorded
+`artifact_tree_digest`.
 
 ### Repository gates at this commit
 
@@ -369,7 +396,7 @@ scripts`: clean. `ty check`: clean (run against this worktree's own `.venv`). `o
 validate --all --strict`: 5 passed, 0 failed. `git diff --check`: clean.
 
 
-## Superseded but retained (5): the previously admitting run
+## Superseded but retained (5): the reviewed run that the second re-review overruled
 
 | Field | Value |
 | --- | --- |
