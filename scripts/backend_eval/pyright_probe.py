@@ -7,17 +7,16 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
 
+from scripts.backend_eval.manifests import read_stable_source_text
 from scripts.backend_eval.models import (
     CAPABILITY_TASK_UTILITY_DEFERRED,
     CandidateProtocolOutcome,
     CapabilityEvidence,
-    EnvironmentIdentity,
     LifecycleEvidence,
-    ServiceConfigIdentity,
 )
 from scripts.backend_eval.process import Deadline
 from scripts.backend_eval.protocol import BackendProtocolSpec, run_protocol_probe
-from scripts.backend_eval.runtime import CandidateRuntime, runtime_manifest_digest
+from scripts.backend_eval.runtime import CandidateRuntime, load_prepared_candidate_runtime
 from serena_light.lsp.adapter import RawLspProviders, read_only_client_request_handlers
 from serena_light.lsp.client import CONTENT_MODIFIED, LspResponseError, SyncLspClient
 from serena_light.lsp.normalize import NormalizationError, normalize_document_symbols, normalize_location
@@ -40,6 +39,9 @@ _CAPABILITY_NAMES = (
     "references",
     "workspace_symbols",
 )
+_REQUIRED_ADVERTISEMENTS = frozenset(
+    {"definition", "document_symbols", "references", "workspace_symbols"}
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -49,6 +51,12 @@ class _ObservedCapability:
     normalized_valid: bool
     notes: str
     error_code: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _PyrightSessionResult:
+    observations: tuple[_ObservedCapability, ...]
+    document_close_error: str | None = None
 
 
 def pyright_protocol_spec(facts: PyrightFacts) -> BackendProtocolSpec:
@@ -76,12 +84,8 @@ def run_pyright_capability_probe(
 ) -> CandidateProtocolOutcome:
     """Exercise Pyright's five Phase 2 semantic providers through the shared runner."""
 
-    root = workspace_root.resolve(strict=True)
-    source = target.resolve(strict=True)
-    try:
-        source.relative_to(root)
-    except ValueError as error:
-        raise ValueError(f"Pyright probe target must be inside the workspace: {source}") from error
+    root = workspace_root
+    source = target if target.is_absolute() else root / target
     line, character = symbol_position
     if (
         isinstance(line, bool)
@@ -93,11 +97,11 @@ def run_pyright_capability_probe(
     ):
         raise ValueError("Pyright probe symbol_position must contain two non-negative integers")
 
-    source_text = source.read_text(encoding="utf-8")
+    source_text = read_stable_source_text(root, source, deadline=deadline)
     source_uri = source.as_uri()
     started_elapsed = deadline.elapsed()
 
-    def session(client: SyncLspClient) -> tuple[_ObservedCapability, ...]:
+    def session(client: SyncLspClient) -> _PyrightSessionResult:
         client.notify("workspace/didChangeConfiguration", {"settings": {}})
         client.notify(
             "textDocument/didOpen",
@@ -115,7 +119,7 @@ def run_pyright_capability_probe(
                 "textDocument": {"uri": source_uri},
                 "position": {"line": line, "character": character},
             }
-            return (
+            observations = (
                 _observe_request(
                     client,
                     deadline,
@@ -157,8 +161,26 @@ def run_pyright_capability_probe(
                     _normalize_workspace_symbol_result,
                 ),
             )
-        finally:
+        except BaseException as primary:
+            try:
+                client.notify("textDocument/didClose", {"textDocument": {"uri": source_uri}})
+            except BaseException as close_error:
+                primary.add_note(
+                    "Pyright document close also failed: "
+                    f"{type(close_error).__name__}: {close_error}"
+                )
+            raise
+        try:
             client.notify("textDocument/didClose", {"textDocument": {"uri": source_uri}})
+        except BaseException as close_error:
+            return _PyrightSessionResult(
+                observations=observations,
+                document_close_error=(
+                    "Pyright document close failed: "
+                    f"{type(close_error).__name__}: {close_error}"
+                ),
+            )
+        return _PyrightSessionResult(observations=observations)
 
     protocol_session = run_protocol_probe(
         pyright_protocol_spec(facts),
@@ -167,7 +189,9 @@ def run_pyright_capability_probe(
         deadline=deadline,
         session=session,
     )
-    observations = {observation.name: observation for observation in protocol_session.result}
+    observations = {
+        observation.name: observation for observation in protocol_session.result.observations
+    }
     advertised = _advertised_capabilities(protocol_session.raw_providers)
     capabilities = tuple(
         CapabilityEvidence(
@@ -176,7 +200,12 @@ def run_pyright_capability_probe(
             accepted=observations[name].accepted,
             normalized_valid=observations[name].normalized_valid,
             task_utility=CAPABILITY_TASK_UTILITY_DEFERRED,
-            notes=observations[name].notes,
+            notes=(
+                "not advertised by locked Pyright baseline"
+                + (f"; {observations[name].notes}" if observations[name].notes else "")
+                if name == "implementation" and not advertised[name]
+                else observations[name].notes
+            ),
         )
         for name in _CAPABILITY_NAMES
     )
@@ -185,7 +214,14 @@ def run_pyright_capability_probe(
         for capability in capabilities
         if capability.advertised and (capability.accepted is not True or capability.normalized_valid is not True)
     ]
+    capability_issues.extend(
+        f"{name}: locked Pyright baseline did not advertise the required provider"
+        for name in sorted(_REQUIRED_ADVERTISEMENTS)
+        if not advertised[name]
+    )
     lifecycle_issues = [*protocol_session.terminal_errors, *protocol_session.cleanup_errors]
+    if protocol_session.result.document_close_error is not None:
+        lifecycle_issues.append(protocol_session.result.document_close_error)
     if protocol_session.exit_status not in (None, 0):
         lifecycle_issues.append(f"Pyright exited with status {protocol_session.exit_status}")
     issues = tuple(sorted({*capability_issues, *lifecycle_issues}))
@@ -193,6 +229,7 @@ def run_pyright_capability_probe(
         protocol_session.exit_status == 0
         and not protocol_session.terminal_errors
         and not protocol_session.cleanup_errors
+        and protocol_session.result.document_close_error is None
     )
     error_codes = tuple(
         observation.error_code for observation in observations.values() if observation.error_code is not None
@@ -206,7 +243,10 @@ def run_pyright_capability_probe(
         bounded_timeout_observed=False,
         crash_handled=False,
         shutdown_clean=shutdown_clean,
-        cleanup_clean=not protocol_session.cleanup_errors,
+        cleanup_clean=(
+            not protocol_session.cleanup_errors
+            and protocol_session.result.document_close_error is None
+        ),
         proxy_rejected=False,
         minimal_environment_verified=False,
         redaction_verified=False,
@@ -246,13 +286,20 @@ def _observe_request(
             error_code=error.code,
         )
     try:
-        normalize(raw_result)
+        normalized = normalize(raw_result)
     except (NormalizationError, TypeError, ValueError) as error:
         return _ObservedCapability(
             name=name,
             accepted=True,
             normalized_valid=False,
             notes=f"normalization failed: {error}",
+        )
+    if not normalized:
+        return _ObservedCapability(
+            name=name,
+            accepted=True,
+            normalized_valid=False,
+            notes="normalization returned no evidence",
         )
     return _ObservedCapability(name=name, accepted=True, normalized_valid=True, notes="")
 
@@ -294,16 +341,19 @@ def _normalize_workspace_symbol_result(raw_result: object) -> tuple[object, ...]
         return ()
     if not isinstance(raw_result, Sequence) or isinstance(raw_result, str | bytes):
         raise NormalizationError("workspace-symbol result must be a sequence or null")
-    locations: list[object] = []
+    symbols: list[Mapping[str, Any]] = []
     for entry in raw_result:
         if not isinstance(entry, Mapping):
-            raise NormalizationError("workspace-symbol result contains an entry without a location")
+            raise NormalizationError("workspace-symbol result contains a non-object entry")
         symbol = cast("Mapping[str, Any]", entry)
         location = symbol.get("location")
         if not isinstance(location, Mapping):
             raise NormalizationError("workspace-symbol result contains an entry without a location")
-        locations.append(normalize_location(cast("Mapping[str, Any]", location)))
-    return tuple(locations)
+        symbols.append(symbol)
+    return cast(
+        "tuple[object, ...]",
+        normalize_document_symbols(symbols, document_uri=""),
+    )
 
 
 def _advertised_capabilities(providers: RawLspProviders) -> dict[str, bool]:
@@ -317,66 +367,8 @@ def _advertised_capabilities(providers: RawLspProviders) -> dict[str, bool]:
 
 
 def _prepared_candidate_runtime() -> CandidateRuntime:
-    observed_manifest = runtime_manifest_digest(_RUNTIME_ROOT)
-    if observed_manifest != _RUNTIME_MANIFEST_SHA256:
-        raise RuntimeError(
-            "the Phase 1 prepared candidate runtime manifest changed: "
-            f"{observed_manifest} != {_RUNTIME_MANIFEST_SHA256}"
-        )
-    bin_dir = _RUNTIME_ROOT / "venv" / "bin"
-    home = _RUNTIME_ROOT / "home"
-    cache = _RUNTIME_ROOT / "cache"
-    config = _RUNTIME_ROOT / "config"
-    return CandidateRuntime(
-        root=_RUNTIME_ROOT,
-        python=bin_dir / "python",
-        ty=bin_dir / "ty",
-        pyrefly=bin_dir / "pyrefly",
-        lock_digest=_RUNTIME_LOCK_DIGEST,
-        executable_hashes=(
-            ("pyrefly", "8ff3120d48a68586cf061e509073d247fc76ee17b506d4d8bd89a4ab0b407695"),
-            ("ty", "a0f425a366d5df5b67b8e23b2a16d2e95cfd93a0ad4e9bfc68fcee49240e00a5"),
-        ),
-        home=home,
-        cache=cache,
-        config=config,
-        environments=(
-            EnvironmentIdentity(
-                name="llm-framework-study",
-                interpreter_path="/root/miniconda3/envs/llm-framework-study/bin/python",
-                interpreter_realpath="/root/miniconda3/envs/llm-framework-study/bin/python3.12",
-                version="3.12.13",
-            ),
-            EnvironmentIdentity(
-                name="ms",
-                interpreter_path="/root/miniconda3/envs/ms/bin/python",
-                interpreter_realpath="/root/miniconda3/envs/ms/bin/python3.12",
-                version="3.12.11",
-            ),
-        ),
-        service_configs=(
-            ServiceConfigIdentity(
-                backend="pyrefly",
-                config_path=str(config / "pyrefly/pyrefly.toml"),
-                config_sha256="9cbcaf9b661d0f873cece8e71ee2bc5900ddd5687720f357687a6571d61ad914",
-                home_path=str(home),
-                cache_path=str(cache),
-            ),
-            ServiceConfigIdentity(
-                backend="pyright",
-                config_path=str(config / "pyright/pyrightconfig.json"),
-                config_sha256="eff18e93bdb98237d0a00f3a4df8c900402433601a510f5f9f149e11ac3b539f",
-                home_path=str(home),
-                cache_path=str(cache),
-            ),
-            ServiceConfigIdentity(
-                backend="ty",
-                config_path=str(config / "ty/ty.toml"),
-                config_sha256="a67784aafa3a72c8dc706ef26339509845ceebe84f7a3e1bb20abf40748c03d1",
-                home_path=str(home),
-                cache_path=str(cache),
-            ),
-        ),
-        manifest_path=_RUNTIME_ROOT / "runtime-manifest.json",
-        manifest_sha256=_RUNTIME_MANIFEST_SHA256,
+    return load_prepared_candidate_runtime(
+        _RUNTIME_ROOT,
+        expected_lock_digest=_RUNTIME_LOCK_DIGEST,
+        expected_manifest_sha256=_RUNTIME_MANIFEST_SHA256,
     )

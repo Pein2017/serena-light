@@ -54,9 +54,16 @@ def _facts(interpreter: Path) -> PyrightFacts:
 
 
 class _FakeClient:
-    def __init__(self, clock: _FakeClock, responses: Mapping[str, object]) -> None:
+    def __init__(
+        self,
+        clock: _FakeClock,
+        responses: Mapping[str, object],
+        *,
+        close_error: BaseException | None = None,
+    ) -> None:
         self.clock = clock
         self.responses = responses
+        self.close_error = close_error
         self.requests: list[tuple[str, object, float | None]] = []
         self.notifications: list[tuple[str, object]] = []
 
@@ -70,6 +77,8 @@ class _FakeClient:
 
     def notify(self, method: str, params: object = None) -> None:
         self.notifications.append((method, params))
+        if method == "textDocument/didClose" and self.close_error is not None:
+            raise self.close_error
 
 
 def _responses(target: Path) -> dict[str, object]:
@@ -91,7 +100,7 @@ def _responses(target: Path) -> dict[str, object]:
     return {
         "textDocument/definition": location,
         "textDocument/references": [location],
-        "textDocument/implementation": None,
+        "textDocument/implementation": [location],
         "textDocument/documentSymbol": [symbol],
         "workspace/symbol": [workspace_symbol],
     }
@@ -101,6 +110,8 @@ def _install_fake_runner(
     monkeypatch: pytest.MonkeyPatch,
     client: _FakeClient,
     captured: dict[str, object],
+    *,
+    providers: RawLspProviders | None = None,
 ) -> None:
     import scripts.backend_eval.pyright_probe as module
 
@@ -123,7 +134,8 @@ def _install_fake_runner(
         )
         result = session(client)
         return ProtocolSession(
-            raw_providers=RawLspProviders(
+            raw_providers=providers
+            or RawLspProviders(
                 definition=True,
                 implementation=True,
                 references=True,
@@ -242,6 +254,249 @@ def test_pyright_capability_probe_records_typed_lsp_error_and_still_closes_docum
     assert outcome.lifecycle.content_modified_count == 1
     assert outcome.gate_disposition == "fail"
     assert client.notifications[-1][0] == "textDocument/didClose"
+
+
+@pytest.mark.parametrize(
+    ("method", "capability_name", "empty_result"),
+    [
+        ("textDocument/definition", "definition", None),
+        ("textDocument/definition", "definition", []),
+        ("textDocument/references", "references", None),
+        ("textDocument/references", "references", []),
+        ("textDocument/implementation", "implementation", None),
+        ("textDocument/implementation", "implementation", []),
+        ("textDocument/documentSymbol", "document_symbols", None),
+        ("textDocument/documentSymbol", "document_symbols", []),
+        ("workspace/symbol", "workspace_symbols", None),
+        ("workspace/symbol", "workspace_symbols", []),
+    ],
+)
+def test_advertised_empty_results_are_accepted_but_fail_normalized_validity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    method: str,
+    capability_name: str,
+    empty_result: object,
+) -> None:
+    target = tmp_path / "known.py"
+    target.write_text("Known = 1\n", encoding="utf-8")
+    responses = _responses(target)
+    responses[method] = empty_result
+    client = _FakeClient(_FakeClock(), responses)
+    _install_fake_runner(monkeypatch, client, {})
+
+    outcome = run_pyright_capability_probe(
+        _facts(tmp_path / "python"),
+        tmp_path,
+        target,
+        (0, 0),
+        deadline=Deadline.start(client.clock, 10.0),
+    )
+
+    capability = next(item for item in outcome.capabilities if item.name == capability_name)
+    assert capability.advertised is True
+    assert capability.accepted is True
+    assert capability.normalized_valid is False
+    assert outcome.gate_disposition == "fail"
+
+
+@pytest.mark.parametrize(
+    "missing",
+    ["definition", "references", "document_symbols", "workspace_symbols"],
+)
+def test_pyright_gate_requires_current_baseline_advertisements(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, missing: str
+) -> None:
+    target = tmp_path / "known.py"
+    target.write_text("Known = 1\n", encoding="utf-8")
+    advertised = {
+        "definition": True,
+        "implementation": False,
+        "references": True,
+        "document_symbols": True,
+        "workspace_symbols": True,
+    }
+    advertised[missing] = False
+    providers = RawLspProviders(**advertised)
+    client = _FakeClient(_FakeClock(), _responses(target))
+    _install_fake_runner(monkeypatch, client, {}, providers=providers)
+
+    outcome = run_pyright_capability_probe(
+        _facts(tmp_path / "python"),
+        tmp_path,
+        target,
+        (0, 0),
+        deadline=Deadline.start(client.clock, 10.0),
+    )
+
+    assert outcome.gate_disposition == "fail"
+    assert any(missing in issue and "advertise" in issue for issue in outcome.issues)
+
+
+def test_unadvertised_implementation_remains_explicitly_unsupported_without_failing_gate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = tmp_path / "known.py"
+    target.write_text("Known = 1\n", encoding="utf-8")
+    responses = _responses(target)
+    responses["textDocument/implementation"] = None
+    providers = RawLspProviders(
+        definition=True,
+        implementation=False,
+        references=True,
+        document_symbols=True,
+        workspace_symbols=True,
+    )
+    client = _FakeClient(_FakeClock(), responses)
+    _install_fake_runner(monkeypatch, client, {}, providers=providers)
+
+    outcome = run_pyright_capability_probe(
+        _facts(tmp_path / "python"),
+        tmp_path,
+        target,
+        (0, 0),
+        deadline=Deadline.start(client.clock, 10.0),
+    )
+
+    implementation = next(item for item in outcome.capabilities if item.name == "implementation")
+    assert implementation.advertised is False
+    assert implementation.normalized_valid is False
+    assert "not advertised" in implementation.notes
+    assert outcome.gate_disposition == "pass"
+
+
+@pytest.mark.parametrize(
+    "workspace_symbols",
+    [
+        [
+            {
+                "kind": 12,
+                "location": {
+                    "uri": "file:///known.py",
+                    "range": {
+                        "start": {"line": 0, "character": 0},
+                        "end": {"line": 0, "character": 1},
+                    },
+                },
+            }
+        ],
+        [
+            {
+                "name": "Known",
+                "location": {
+                    "uri": "file:///known.py",
+                    "range": {
+                        "start": {"line": 0, "character": 0},
+                        "end": {"line": 0, "character": 1},
+                    },
+                },
+            }
+        ],
+        [{"name": "Known", "kind": 12, "location": {"uri": "file:///known.py"}}],
+        [
+            {
+                "name": "Known",
+                "kind": 12,
+                "location": {
+                    "uri": "file:///known.py",
+                    "range": {
+                        "start": {"line": 0, "character": 0},
+                        "end": {"line": 0, "character": 1},
+                    },
+                },
+            },
+            "bad",
+        ],
+    ],
+    ids=["missing-name", "missing-kind", "bad-location", "mixed-list"],
+)
+def test_workspace_symbols_require_the_full_production_symbol_shape(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, workspace_symbols: object
+) -> None:
+    target = tmp_path / "known.py"
+    target.write_text("Known = 1\n", encoding="utf-8")
+    responses = _responses(target)
+    responses["workspace/symbol"] = workspace_symbols
+    client = _FakeClient(_FakeClock(), responses)
+    _install_fake_runner(monkeypatch, client, {})
+
+    outcome = run_pyright_capability_probe(
+        _facts(tmp_path / "python"),
+        tmp_path,
+        target,
+        (0, 0),
+        deadline=Deadline.start(client.clock, 10.0),
+    )
+
+    capability = next(item for item in outcome.capabilities if item.name == "workspace_symbols")
+    assert capability.accepted is True
+    assert capability.normalized_valid is False
+    assert outcome.gate_disposition == "fail"
+
+
+def test_semantic_timeout_remains_primary_when_did_close_also_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = tmp_path / "known.py"
+    target.write_text("Known = 1\n", encoding="utf-8")
+    responses = _responses(target)
+    responses["textDocument/definition"] = TimeoutError("semantic-timeout")
+    client = _FakeClient(_FakeClock(), responses, close_error=RuntimeError("didClose-failure"))
+    _install_fake_runner(monkeypatch, client, {})
+
+    with pytest.raises(TimeoutError, match="semantic-timeout") as raised:
+        run_pyright_capability_probe(
+            _facts(tmp_path / "python"),
+            tmp_path,
+            target,
+            (0, 0),
+            deadline=Deadline.start(client.clock, 10.0),
+        )
+
+    assert any("didClose-failure" in note for note in raised.value.__notes__)
+
+
+def test_normalization_failure_remains_visible_when_did_close_also_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = tmp_path / "known.py"
+    target.write_text("Known = 1\n", encoding="utf-8")
+    responses = _responses(target)
+    responses["workspace/symbol"] = [{"kind": 12, "location": _responses(target)["textDocument/definition"]}]
+    client = _FakeClient(_FakeClock(), responses, close_error=RuntimeError("didClose-failure"))
+    _install_fake_runner(monkeypatch, client, {})
+
+    outcome = run_pyright_capability_probe(
+        _facts(tmp_path / "python"),
+        tmp_path,
+        target,
+        (0, 0),
+        deadline=Deadline.start(client.clock, 10.0),
+    )
+
+    assert outcome.gate_disposition == "fail"
+    assert any("workspace_symbols" in issue for issue in outcome.issues)
+    assert any("didClose-failure" in issue for issue in outcome.issues)
+
+
+def test_did_close_failure_alone_fails_the_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = tmp_path / "known.py"
+    target.write_text("Known = 1\n", encoding="utf-8")
+    client = _FakeClient(_FakeClock(), _responses(target), close_error=RuntimeError("didClose-failure"))
+    _install_fake_runner(monkeypatch, client, {})
+
+    outcome = run_pyright_capability_probe(
+        _facts(tmp_path / "python"),
+        tmp_path,
+        target,
+        (0, 0),
+        deadline=Deadline.start(client.clock, 10.0),
+    )
+
+    assert outcome.gate_disposition == "fail"
+    assert any("didClose-failure" in issue for issue in outcome.issues)
 
 
 @pytest.fixture(scope="module")

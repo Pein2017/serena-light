@@ -312,7 +312,13 @@ OWNERSHIP: frozenset[tuple[str, str, str, str]] = frozenset(
         ("manifests.py", "_open_declared_corpus_root", "os.open", GUARDED),
         ("manifests.py", "_open_metadata_directory", "os.close", DESCRIPTOR),
         ("manifests.py", "_open_metadata_directory", "os.open", CONFINED),
+        ("manifests.py", "_open_source_filesystem_root", "os.open", GUARDED),
+        ("manifests.py", "_open_stable_source_root", "os.close", DESCRIPTOR),
+        ("manifests.py", "_open_stable_source_root", "os.open", CONFINED),
         ("manifests.py", "_resolved", "Path.resolve", DECLARED),
+        ("manifests.py", "_require_stable_source_root", "os.fstat", DESCRIPTOR),
+        ("manifests.py", "_require_stable_source_root", "os.readlink", DESCRIPTOR),
+        ("manifests.py", "_require_stable_source_root", "os.stat", CONFINED),
         ("manifests.py", "_lstat", "Path.lstat", DECLARED),
         ("manifests.py", "_require_directory", "Path.lstat", DECLARED),
         ("manifests.py", "_scan_remainder", "os.close", DESCRIPTOR),
@@ -325,6 +331,12 @@ OWNERSHIP: frozenset[tuple[str, str, str, str]] = frozenset(
         ("manifests.py", "_walk_remainder", "os.open", CONFINED),
         ("manifests.py", "_walk_remainder", "os.readlink", CONFINED),
         ("manifests.py", "_walk_remainder", "os.scandir", DESCRIPTOR),
+        ("manifests.py", "read_stable_source_text", "os.close", DESCRIPTOR),
+        ("manifests.py", "read_stable_source_text", "os.dup", DESCRIPTOR),
+        ("manifests.py", "read_stable_source_text", "os.fstat", DESCRIPTOR),
+        ("manifests.py", "read_stable_source_text", "os.open", CONFINED),
+        ("manifests.py", "read_stable_source_text", "os.read", DESCRIPTOR),
+        ("manifests.py", "read_stable_source_text", "os.stat", CONFINED),
         # --- process.py
         ("process.py", "bound_executable", "os.access", DECLARED),
         ("process.py", "bound_executable", "os.close", DESCRIPTOR),
@@ -429,6 +441,12 @@ OWNERSHIP: frozenset[tuple[str, str, str, str]] = frozenset(
         ("runtime.py", "_require_venv_interpreter", "Path.is_file", DECLARED),
         ("runtime.py", "_require_venv_interpreter", "os.access", DECLARED),
         ("runtime.py", "_require_venv_interpreter", "os.path.realpath", DECLARED),
+        ("runtime.py", "_verify_manifest_candidate_executables", "os.close", DESCRIPTOR),
+        ("runtime.py", "_verify_manifest_candidate_executables", "os.fstat", DESCRIPTOR),
+        ("runtime.py", "_verify_manifest_external_identity", "os.access", DECLARED),
+        ("runtime.py", "_verify_manifest_external_identity", "os.path.realpath", DECLARED),
+        ("runtime.py", "_verify_selected_python_link", "os.close", DESCRIPTOR),
+        ("runtime.py", "_verify_selected_python_link", "os.readlink", CONFINED),
         ("runtime.py", "_runtime_lock", "os.close", DESCRIPTOR),
         ("runtime.py", "_runtime_lock", "os.open", CONFINED),
         ("runtime.py", "_scandir_names", "os.scandir", DESCRIPTOR),
@@ -441,6 +459,8 @@ OWNERSHIP: frozenset[tuple[str, str, str, str]] = frozenset(
         ("runtime.py", "_write_owned_descriptor", "stream.flush", DESCRIPTOR),
         ("runtime.py", "_write_owned_descriptor", "stream.write", DESCRIPTOR),
         ("runtime.py", "runtime_manifest_digest", "os.close", DESCRIPTOR),
+        ("runtime.py", "load_prepared_candidate_runtime", "os.close", DESCRIPTOR),
+        ("runtime.py", "load_prepared_candidate_runtime", "os.open", CONFINED),
         # --- source_binding.py
         ("source_binding.py", "_module_paths", "os.path.realpath", DECLARED),
         ("source_binding.py", "_read_regular_file", "os.close", DESCRIPTOR),
@@ -623,7 +643,7 @@ def test_the_ownership_document_names_every_audited_module() -> None:
     text = OWNERSHIP_DOC.read_text(encoding="utf-8")
     modules = {module for module, _function, _access, _owner in OWNERSHIP}
     # These execute no filesystem access of their own; the document says so.
-    without_access = {"__init__.py", "models.py"}
+    without_access = {"__init__.py", "models.py", "pyright_probe.py"}
     assert modules == {path.name for path in EVALUATOR_PACKAGE.glob("*.py")} - without_access
     for module in sorted(modules):
         assert module in text

@@ -62,6 +62,14 @@ Writes carry two further rules:
 * **Re-proof after the write.** The descriptor's device, inode, and mode are re-read after
   the write and must be unchanged.
 
+The Phase 2 source reader uses the same class without writing: it lexically rejects traversal,
+opens every workspace and target component from its parent descriptor, opens the leaf
+`O_RDONLY | O_NOFOLLOW | O_NONBLOCK`, bounds every chunk by the phase deadline and byte ceiling,
+and re-proves the leaf entry, open descriptor, and retained workspace-root identity after the
+read. The prepared-runtime loader likewise walks and retains the exact runtime root while it
+parses and verifies the canonical manifest and every runtime-owned byte; its external
+interpreter/tool path and realpath observations remain honestly `declared-path` below.
+
 ### `guarded`
 
 One open of an absolute pathname with the strongest guard a single open can carry, where no
@@ -248,20 +256,22 @@ ignore semantics, including `.gitignore` and `.git/info/exclude`, remain authori
 | `backend_eval_bootstrap.py` | the declared standard-library transport trust root: startup validation, source-image construction/sealing, bounded image child, relay, timeout, and reap; no admission semantics |
 | `candidate_lock.py` | the frozen candidate-lock transaction below the artifact root |
 | `identity.py` | the evaluator's own executed source closure |
-| `manifests.py` | the corpus capture: the Git freeze, the remainder scan, the metadata walk, and the delegation of both inventory helpers |
+| `manifests.py` | the corpus capture plus the bounded descriptor-safe Phase 2 workspace-source reader |
 | `production_child.py` | the bounded child that executes production helpers |
 | `process.py` | the bounded runner, the sealed-image primitive, the declared-executable binding |
 | `production_helper.py` | verifying the expected bytes and starting that child |
 | `production_identity.py` | the three declared production lock inputs |
 | `protocol.py` | no direct filesystem access; one structurally collected `candidate-child` delegation through the frozen production process/transport primitives |
-| `runtime.py` | the service-owned candidate runtime |
+| `runtime.py` | service-owned candidate runtime preparation and the separate read-only prepared-runtime manifest loader/verifier |
+| `pyright_probe.py` | no direct filesystem access; delegates source bytes to `manifests.py`, prepared-runtime verification to `runtime.py`, and candidate lifecycle to `protocol.py` |
 | `source_binding.py` | the executed production helper closure and the execution expectation |
 | `source_image.py` | the sealed evaluator-image descriptor, image-derived source closure, owner root, and loader-origin checks |
 | `write_guard.py` | one `lstat` bracket around a changed remainder record |
 
-`models.py` and `protocol.py` execute no direct filesystem access of their own: the former
-serializes and validates, while the latter reads only the in-memory process environment and
-declares its candidate process/transport delegation as `candidate-child`.
+`models.py`, `protocol.py`, and `pyright_probe.py` execute no direct filesystem byte access of
+their own: the first serializes and validates, the second declares its candidate
+process/transport delegation as `candidate-child`, and the third delegates its two read-only
+filesystem contracts to the audited `manifests.py` and `runtime.py` seams.
 `process.py`
 resolves `memfd_create` from the already-loaded process image rather than through
 `ctypes.util.find_library`, which would shell out to `ldconfig` and put an unbounded child

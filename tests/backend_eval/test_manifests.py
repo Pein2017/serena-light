@@ -13,6 +13,7 @@ from unittest import SkipTest
 
 import pytest
 
+import scripts.backend_eval.manifests as manifests_module
 import serena_light.workspace.inventory as inventory_module
 from scripts.backend_eval.manifests import (
     DIGEST_CHUNK_SIZE,
@@ -47,6 +48,113 @@ class _FakeClock:
 
     def advance(self, seconds: float) -> None:
         self.now += seconds
+
+
+def test_stable_source_reader_reads_regular_utf8_bytes_from_the_declared_root(tmp_path: Path) -> None:
+    source = tmp_path / "pkg" / "module.py"
+    source.parent.mkdir()
+    source.write_text("answer = 42\n", encoding="utf-8")
+
+    assert manifests_module.read_stable_source_text(
+        tmp_path, source, deadline=Deadline.start(monotonic_clock, 10.0)
+    ) == "answer = 42\n"
+
+
+@pytest.mark.parametrize("relative", ["../outside.py", "pkg/../../outside.py"])
+def test_stable_source_reader_rejects_parent_traversal(tmp_path: Path, relative: str) -> None:
+    outside = tmp_path.parent / "outside.py"
+    outside.write_text("outside = True\n", encoding="utf-8")
+
+    with pytest.raises(ManifestError, match="traversal|inside"):
+        manifests_module.read_stable_source_text(
+            tmp_path, tmp_path / relative, deadline=Deadline.start(monotonic_clock, 10.0)
+        )
+
+
+@pytest.mark.parametrize("link_on_leaf", [False, True], ids=["intermediate", "leaf"])
+def test_stable_source_reader_rejects_symlinks(tmp_path: Path, link_on_leaf: bool) -> None:
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "module.py").write_text("outside = True\n", encoding="utf-8")
+    root = tmp_path / "root"
+    root.mkdir()
+    if link_on_leaf:
+        (root / "module.py").symlink_to(outside / "module.py")
+        target = root / "module.py"
+    else:
+        (root / "pkg").symlink_to(outside, target_is_directory=True)
+        target = root / "pkg" / "module.py"
+
+    with pytest.raises(ManifestError, match="link|regular|open"):
+        manifests_module.read_stable_source_text(
+            root, target, deadline=Deadline.start(monotonic_clock, 10.0)
+        )
+
+
+def test_stable_source_reader_refuses_a_fifo_without_blocking(tmp_path: Path) -> None:
+    fifo = tmp_path / "blocked.py"
+    os.mkfifo(fifo)
+    started = time.monotonic()
+
+    with pytest.raises(ManifestError, match="regular"):
+        manifests_module.read_stable_source_text(
+            tmp_path, fifo, deadline=Deadline.start(monotonic_clock, 1.0)
+        )
+
+    assert time.monotonic() - started < 0.5
+
+
+def test_stable_source_reader_rejects_oversized_and_invalid_utf8(tmp_path: Path) -> None:
+    oversized = tmp_path / "oversized.py"
+    oversized.write_bytes(b"12345")
+    invalid = tmp_path / "invalid.py"
+    invalid.write_bytes(b"\xff")
+
+    with pytest.raises(ManifestError, match="maximum"):
+        manifests_module.read_stable_source_text(
+            tmp_path, oversized, deadline=Deadline.start(monotonic_clock, 10.0), max_bytes=4
+        )
+    with pytest.raises(ManifestError, match="UTF-8"):
+        manifests_module.read_stable_source_text(
+            tmp_path, invalid, deadline=Deadline.start(monotonic_clock, 10.0)
+        )
+
+
+def test_stable_source_reader_observes_an_expired_deadline_before_open(tmp_path: Path) -> None:
+    source = tmp_path / "module.py"
+    source.write_text("answer = 42\n", encoding="utf-8")
+    clock = _FakeClock()
+    deadline = Deadline.start(clock, 1.0)
+    clock.advance(1.0)
+
+    with pytest.raises(DeadlineExceeded):
+        manifests_module.read_stable_source_text(tmp_path, source, deadline=deadline)
+
+
+def test_stable_source_reader_rejects_a_leaf_replaced_during_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "module.py"
+    source.write_bytes(b"a" * 128)
+    original_read = manifests_module.os.read
+    replaced = False
+
+    def replacing_read(fd: int, size: int) -> bytes:
+        nonlocal replaced
+        chunk = original_read(fd, size)
+        if chunk and not replaced:
+            replaced = True
+            source.rename(tmp_path / "old.py")
+            source.write_bytes(b"b" * 128)
+        return chunk
+
+    monkeypatch.setattr(manifests_module.os, "read", replacing_read)
+
+    with pytest.raises(ManifestError, match="changed"):
+        manifests_module.read_stable_source_text(
+            tmp_path, source, deadline=Deadline.start(monotonic_clock, 10.0)
+        )
+    assert replaced
 
 
 def test_git_child_uses_only_exact_root_trust_and_config_free_environment(

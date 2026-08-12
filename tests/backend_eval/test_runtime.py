@@ -17,6 +17,7 @@ from typing import Any
 
 import pytest
 
+import scripts.backend_eval.runtime as runtime_module
 from scripts.backend_eval.candidate_lock import CommandResult
 from scripts.backend_eval.manifests import default_corpus_requests
 from scripts.backend_eval.models import (
@@ -436,6 +437,126 @@ def _static_runtime() -> CandidateRuntime:
 def _manifest(root: Path) -> dict[str, Any]:
     decoded: dict[str, Any] = json.loads((root / MANIFEST_FILE_NAME).read_bytes())
     return decoded
+
+
+def _load_prepared(runtime: CandidateRuntime) -> CandidateRuntime:
+    return runtime_module.load_prepared_candidate_runtime(
+        runtime.root,
+        expected_lock_digest=runtime.lock_digest,
+        expected_manifest_sha256=runtime.manifest_sha256,
+    )
+
+
+def _tree_snapshot(root: Path) -> tuple[tuple[str, str, int, int, str | None], ...]:
+    records: list[tuple[str, str, int, int, str | None]] = []
+    for path in sorted((root, *root.rglob("*"))):
+        info = path.lstat()
+        relative = "." if path == root else path.relative_to(root).as_posix()
+        kind = "symlink" if path.is_symlink() else "directory" if path.is_dir() else "file"
+        digest = sha256_bytes(path.read_bytes()) if kind == "file" else None
+        records.append((relative, kind, info.st_mode, info.st_ino, digest))
+    return tuple(records)
+
+
+def test_read_only_loader_reconstructs_the_verified_prepared_runtime(
+    lock: CandidateLock, request_: RuntimeRequest
+) -> None:
+    runtime = prepare_candidate_runtime(lock, request_, runner=_FakeRunner(), expectation=real_expectation())
+
+    assert _load_prepared(runtime) == runtime
+
+
+def test_read_only_loader_refuses_valid_manifest_bytes_copied_under_another_root(
+    lock: CandidateLock, request_: RuntimeRequest, tmp_path: Path
+) -> None:
+    runtime = prepare_candidate_runtime(lock, request_, runner=_FakeRunner(), expectation=real_expectation())
+    copied = tmp_path / "copied" / runtime.lock_digest
+    copied.parent.mkdir()
+    shutil.copytree(runtime.root, copied, symlinks=True)
+
+    with pytest.raises(RuntimePreparationError, match="does not describe"):
+        runtime_module.load_prepared_candidate_runtime(
+            copied,
+            expected_lock_digest=runtime.lock_digest,
+            expected_manifest_sha256=runtime.manifest_sha256,
+        )
+
+
+def test_read_only_loader_refuses_manifest_digest_mismatch(
+    lock: CandidateLock, request_: RuntimeRequest
+) -> None:
+    runtime = prepare_candidate_runtime(lock, request_, runner=_FakeRunner(), expectation=real_expectation())
+    runtime.manifest_path.write_bytes(runtime.manifest_path.read_bytes() + b"\n")
+
+    with pytest.raises(RuntimePreparationError, match="manifest.*digest|changed|not canonical"):
+        _load_prepared(runtime)
+
+
+@pytest.mark.parametrize("special", ["symlink", "fifo"])
+def test_read_only_loader_refuses_a_special_manifest_promptly(
+    lock: CandidateLock, request_: RuntimeRequest, tmp_path: Path, special: str
+) -> None:
+    runtime = prepare_candidate_runtime(lock, request_, runner=_FakeRunner(), expectation=real_expectation())
+    runtime.manifest_path.unlink()
+    if special == "symlink":
+        outside = tmp_path / "outside-manifest.json"
+        outside.write_text("{}", encoding="utf-8")
+        runtime.manifest_path.symlink_to(outside)
+    else:
+        os.mkfifo(runtime.manifest_path)
+    started = time.monotonic()
+
+    with pytest.raises(RuntimePreparationError, match="link|regular|open"):
+        _load_prepared(runtime)
+
+    assert time.monotonic() - started < 0.5
+
+
+@pytest.mark.parametrize("missing", ["venv/bin/ty", "config/pyright/pyrightconfig.json"])
+def test_read_only_loader_refuses_missing_executable_or_service_config(
+    lock: CandidateLock, request_: RuntimeRequest, missing: str
+) -> None:
+    runtime = prepare_candidate_runtime(lock, request_, runner=_FakeRunner(), expectation=real_expectation())
+    (runtime.root / missing).unlink()
+
+    with pytest.raises(RuntimePreparationError, match="missing"):
+        _load_prepared(runtime)
+
+
+def test_read_only_loader_refuses_changed_candidate_mode(
+    lock: CandidateLock, request_: RuntimeRequest
+) -> None:
+    runtime = prepare_candidate_runtime(lock, request_, runner=_FakeRunner(), expectation=real_expectation())
+    runtime.ty.chmod(0o600)
+
+    with pytest.raises(RuntimePreparationError, match="executable"):
+        _load_prepared(runtime)
+
+
+def test_read_only_loader_refuses_a_retargeted_selected_python_link(
+    lock: CandidateLock, request_: RuntimeRequest, tmp_path: Path
+) -> None:
+    runtime = prepare_candidate_runtime(lock, request_, runner=_FakeRunner(), expectation=real_expectation())
+    alternate = tmp_path / "alternate-python"
+    alternate.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    alternate.chmod(0o700)
+    runtime.python.unlink()
+    runtime.python.symlink_to(alternate)
+
+    with pytest.raises(RuntimePreparationError, match="python|interpreter|identity"):
+        _load_prepared(runtime)
+
+
+def test_read_only_loader_never_writes_or_repairs_the_runtime(
+    lock: CandidateLock, request_: RuntimeRequest
+) -> None:
+    runtime = prepare_candidate_runtime(lock, request_, runner=_FakeRunner(), expectation=real_expectation())
+    before = _tree_snapshot(runtime.root)
+
+    loaded = _load_prepared(runtime)
+
+    assert loaded.permission_repairs == ()
+    assert _tree_snapshot(runtime.root) == before
 
 
 # --- content-addressed layout -------------------------------------------------

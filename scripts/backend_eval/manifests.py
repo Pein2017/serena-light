@@ -103,6 +103,9 @@ _SHA256_RE = re.compile(r"[0-9a-f]{64}")
 _INVENTORY_KINDS = {"git_inventory_from_bytes": "git", "bounded_non_git_inventory": "bounded_no_symlink"}
 _MAX_SCAN_DEPTH = 128
 _DIRECTORY_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+_SOURCE_READ_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
+_SOURCE_READ_CHUNK = 64 * 1024
+MAX_SOURCE_BYTES = 4 * 1024 * 1024
 # Git receives an explicit environment: no ambient GIT_* control may steer the corpus scan.
 _GIT_ENVIRONMENT_PATH = "/usr/bin:/bin"
 
@@ -111,6 +114,139 @@ Check = Callable[[], None]
 
 class ManifestError(RuntimeError):
     """The requested root cannot be frozen without weakening its boundary."""
+
+
+def read_stable_source_text(
+    workspace_root: Path,
+    target: Path,
+    *,
+    deadline: Deadline,
+    max_bytes: int = MAX_SOURCE_BYTES,
+) -> str:
+    """Read one UTF-8 source file through a stable, component-wise no-follow walk."""
+
+    if not workspace_root.is_absolute():
+        raise ManifestError("the source workspace root must be absolute")
+    source = target if target.is_absolute() else workspace_root / target
+    try:
+        relative = source.relative_to(workspace_root)
+    except ValueError as exc:
+        raise ManifestError(f"source target must be lexically inside {workspace_root}: {source}") from exc
+    if not relative.parts or any(part in {"", ".", ".."} for part in relative.parts):
+        raise ManifestError(f"source target contains traversal outside {workspace_root}: {source}")
+    if isinstance(max_bytes, bool) or not isinstance(max_bytes, int) or max_bytes <= 0:
+        raise ValueError("max_bytes must be a positive integer")
+
+    parent_fd, root_fd = _open_stable_source_root(workspace_root, deadline)
+    leaf_parent = os.dup(root_fd)
+    leaf_fd: int | None = None
+    try:
+        _require_stable_source_root(parent_fd, root_fd, workspace_root, deadline)
+        for component in relative.parts[:-1]:
+            deadline.check("open source directory")
+            try:
+                child = os.open(component, _DIRECTORY_FLAGS, dir_fd=leaf_parent)
+            except OSError as exc:
+                raise ManifestError(
+                    f"cannot open source directory component {component!r} without following a link: {exc}"
+                ) from exc
+            os.close(leaf_parent)
+            leaf_parent = child
+        deadline.check("open source file")
+        try:
+            leaf_fd = os.open(relative.parts[-1], _SOURCE_READ_FLAGS, dir_fd=leaf_parent)
+        except OSError as exc:
+            raise ManifestError(f"cannot open source file {source} without following a link: {exc}") from exc
+        before = os.fstat(leaf_fd)
+        entry_before = os.stat(relative.parts[-1], dir_fd=leaf_parent, follow_symlinks=False)
+        if not stat.S_ISREG(before.st_mode) or not stat.S_ISREG(entry_before.st_mode):
+            raise ManifestError(f"source target must be a regular file: {source}")
+        if (before.st_dev, before.st_ino) != (entry_before.st_dev, entry_before.st_ino):
+            raise ManifestError(f"source target changed before it could be read: {source}")
+        if before.st_size > max_bytes:
+            raise ManifestError(f"source target exceeds the maximum of {max_bytes} bytes: {source}")
+
+        chunks: list[bytes] = []
+        size = 0
+        while True:
+            deadline.check("read source file")
+            try:
+                chunk = os.read(leaf_fd, min(_SOURCE_READ_CHUNK, max_bytes + 1 - size))
+            except OSError as exc:
+                raise ManifestError(f"cannot read source file {source}: {exc}") from exc
+            if not chunk:
+                break
+            chunks.append(chunk)
+            size += len(chunk)
+            if size > max_bytes:
+                raise ManifestError(f"source target exceeds the maximum of {max_bytes} bytes: {source}")
+
+        deadline.check("verify source file")
+        after = os.fstat(leaf_fd)
+        entry_after = os.stat(relative.parts[-1], dir_fd=leaf_parent, follow_symlinks=False)
+        stable_fields = ("st_dev", "st_ino", "st_mode", "st_size", "st_mtime_ns", "st_ctime_ns")
+        if any(getattr(before, name) != getattr(after, name) for name in stable_fields) or (
+            after.st_dev,
+            after.st_ino,
+        ) != (entry_after.st_dev, entry_after.st_ino):
+            raise ManifestError(f"source target changed while it was read: {source}")
+        _require_stable_source_root(parent_fd, root_fd, workspace_root, deadline)
+        try:
+            return b"".join(chunks).decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise ManifestError(f"source target is not valid UTF-8: {source}") from exc
+    finally:
+        if leaf_fd is not None:
+            os.close(leaf_fd)
+        os.close(leaf_parent)
+        os.close(root_fd)
+        os.close(parent_fd)
+
+
+def _open_stable_source_root(root: Path, deadline: Deadline) -> tuple[int, int]:
+    """Open the root and retain its parent so later pathname replacement is detectable."""
+
+    if root == Path("/"):
+        raise ManifestError("the filesystem root cannot be a source workspace")
+    deadline.check("open source workspace root")
+    current = _open_source_filesystem_root()
+    try:
+        for component in root.parts[1:-1]:
+            deadline.check("open source workspace component")
+            child = os.open(component, _DIRECTORY_FLAGS, dir_fd=current)
+            os.close(current)
+            current = child
+        deadline.check("open source workspace root")
+        root_fd = os.open(root.name, _DIRECTORY_FLAGS, dir_fd=current)
+    except OSError as exc:
+        os.close(current)
+        raise ManifestError(f"cannot open source workspace {root} without following a link: {exc}") from exc
+    return current, root_fd
+
+
+def _open_source_filesystem_root() -> int:
+    """The one guarded anchor for the source reader's confined absolute walk."""
+
+    try:
+        return os.open("/", os.O_RDONLY | os.O_DIRECTORY)
+    except OSError as exc:
+        raise ManifestError(f"cannot open filesystem root for source read: {exc}") from exc
+
+
+def _require_stable_source_root(parent_fd: int, root_fd: int, root: Path, deadline: Deadline) -> None:
+    deadline.check("verify source workspace root")
+    try:
+        entry = os.stat(root.name, dir_fd=parent_fd, follow_symlinks=False)
+        opened = os.fstat(root_fd)
+        physical = Path(os.readlink(f"/proc/self/fd/{root_fd}"))
+    except OSError as exc:
+        raise ManifestError(f"source workspace root changed while reading {root}: {exc}") from exc
+    if (
+        not stat.S_ISDIR(entry.st_mode)
+        or (entry.st_dev, entry.st_ino) != (opened.st_dev, opened.st_ino)
+        or physical != root
+    ):
+        raise ManifestError(f"source workspace root changed while reading {root}")
 
 
 @dataclass(frozen=True, slots=True)

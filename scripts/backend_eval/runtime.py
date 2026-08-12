@@ -119,6 +119,7 @@ __all__ = [
     "ProductionIdentityError",
     "RuntimePreparationError",
     "RuntimeRequest",
+    "load_prepared_candidate_runtime",
     "minimal_backend_environment",
     "owned_runtime_directory_relpaths",
     "owned_runtime_file_relpaths",
@@ -963,6 +964,244 @@ def runtime_manifest_digest(root: Path) -> str:
         )
     finally:
         os.close(root_fd)
+
+
+def load_prepared_candidate_runtime(
+    root: Path,
+    *,
+    expected_lock_digest: str,
+    expected_manifest_sha256: str,
+) -> CandidateRuntime:
+    """Load one already-published runtime through a strictly read-only verification path.
+
+    This seam never acquires a preparation lock, repairs permissions, runs a tool, resolves a
+    new candidate lock, or consults ``PATH``.  It accepts only manifest evidence whose logical
+    paths and bytes still describe the exact retained root supplied by the caller.
+    """
+
+    _require_absolute(root, "prepared runtime root")
+    if root.name != expected_lock_digest:
+        raise RuntimePreparationError("prepared runtime root is not addressed by the expected lock digest")
+    for label, digest in (
+        ("expected lock", expected_lock_digest),
+        ("expected manifest", expected_manifest_sha256),
+    ):
+        if len(digest) != 64 or digest != digest.lower().strip():
+            raise ValueError(f"{label} digest must be a canonical lowercase SHA-256")
+
+    parent_fd = _open_existing_confined_directory(root.parent)
+    try:
+        try:
+            root_fd = os.open(root.name, _NOFOLLOW_DIRECTORY_FLAGS, dir_fd=parent_fd)
+        except OSError as exc:
+            raise RuntimePreparationError(f"cannot open prepared runtime root {root}: {exc}") from exc
+        try:
+            _require_open_root(parent_fd, root_fd, root, "read-only load open")
+            layout = _Layout.opened(root, root_fd)
+            published = _read_manifest(layout)
+            if published is None:
+                raise RuntimePreparationError(f"prepared runtime is missing {MANIFEST_FILE_NAME}: {root}")
+            manifest, payload = published
+            observed_manifest = sha256_bytes(payload)
+            if observed_manifest != expected_manifest_sha256:
+                raise RuntimePreparationError(
+                    "prepared runtime manifest digest changed: "
+                    f"{observed_manifest} != {expected_manifest_sha256}"
+                )
+            runtime = _load_verified_manifest_runtime(
+                layout,
+                manifest,
+                observed_manifest,
+                expected_lock_digest,
+            )
+            _require_open_root(parent_fd, root_fd, root, "read-only load return")
+            return runtime
+        finally:
+            os.close(root_fd)
+    finally:
+        os.close(parent_fd)
+
+
+def _load_verified_manifest_runtime(
+    layout: _Layout,
+    manifest: Mapping[str, Any],
+    manifest_sha256: str,
+    lock_digest: str,
+) -> CandidateRuntime:
+    root = layout.logical_root
+    logical = layout.logical()
+    if manifest.get("schema_version") != RUNTIME_MANIFEST_SCHEMA_VERSION:
+        raise RuntimePreparationError(f"published runtime manifest has an unsupported schema version: {root}")
+    if manifest.get("candidate_lock_digest") != lock_digest or manifest.get("root") != str(root):
+        raise RuntimePreparationError(f"published runtime manifest does not describe {root}")
+    if manifest.get("directories") != {name: str(root / name) for name in RUNTIME_DIRECTORY_NAMES}:
+        raise RuntimePreparationError(f"published runtime manifest does not describe the layout of {root}")
+    if manifest.get("requirements_snapshot") != {
+        "path": str(logical.requirements),
+        "sha256": lock_digest,
+    }:
+        raise RuntimePreparationError(f"published runtime manifest does not describe the installed lock of {root}")
+    if manifest.get("python") != str(logical.bin_dir / "python"):
+        raise RuntimePreparationError(f"published runtime manifest does not describe the selected python of {root}")
+
+    _require_only_declared_entries(layout.bound_root_fd(), root, published=True)
+    _require_owned_modes(layout.bound_root_fd(), root)
+    _require_digest(
+        _read_confined_file(
+            layout.bound_root_fd(),
+            REQUIREMENTS_SNAPSHOT_NAME,
+            root,
+            "installed candidate requirements lock",
+        ),
+        lock_digest,
+        logical.requirements,
+    )
+
+    tools = _expect_mapping(manifest.get("tools"), "tools")
+    if sorted(tools) != ["python", "uv"]:
+        raise RuntimePreparationError("published runtime manifest must record python and uv tools")
+    verified_tools = {
+        name: _verify_manifest_external_identity(tools[name], f"{name} tool")
+        for name in sorted(tools)
+    }
+    _verify_manifest_commands(manifest.get("commands"), verified_tools)
+
+    environment_records = _expect_mapping(
+        manifest.get("environment_executables"), "environment_executables"
+    )
+    raw_environments = manifest.get("environments")
+    if not isinstance(raw_environments, list):
+        raise RuntimePreparationError("published runtime manifest does not record its environments")
+    environments = tuple(_restore_environment(item) for item in raw_environments)
+    if tuple(identity.name for identity in environments) != tuple(sorted(environment_records)):
+        raise RuntimePreparationError("published runtime manifest records different evaluation environments")
+    for identity in environments:
+        record = _verify_manifest_external_identity(
+            environment_records[identity.name], f"{identity.name} interpreter"
+        )
+        if (
+            identity.interpreter_path,
+            identity.interpreter_realpath,
+            identity.version,
+        ) != (record["path"], record["realpath"], record["version_output"]):
+            raise RuntimePreparationError(
+                f"published runtime environment identity does not match {identity.name} interpreter"
+            )
+
+    selected_python = verified_tools["python"]
+    _verify_selected_python_link(layout, selected_python)
+    executables = _verify_manifest_candidate_executables(layout, manifest)
+    service_configs = _verify_published_service_configs(layout, manifest)
+    return CandidateRuntime(
+        root=root,
+        python=logical.bin_dir / "python",
+        ty=logical.bin_dir / "ty",
+        pyrefly=logical.bin_dir / "pyrefly",
+        lock_digest=lock_digest,
+        executable_hashes=tuple((name, executables[name]["sha256"]) for name in sorted(executables)),
+        home=logical.home,
+        cache=logical.cache,
+        config=logical.config,
+        environments=environments,
+        service_configs=service_configs,
+        manifest_path=root / MANIFEST_FILE_NAME,
+        manifest_sha256=manifest_sha256,
+    )
+
+
+def _verify_manifest_external_identity(value: object, label: str) -> dict[str, str]:
+    entry = _expect_mapping(value, label)
+    if sorted(entry) != _IDENTITY_RECORD_KEYS or any(not isinstance(item, str) for item in entry.values()):
+        raise RuntimePreparationError(f"published runtime manifest has a malformed {label} identity")
+    record = cast("dict[str, str]", dict(entry))
+    path = Path(record["path"])
+    realpath = Path(record["realpath"])
+    if not path.is_absolute() or not realpath.is_absolute() or Path(os.path.realpath(path)) != realpath:
+        raise RuntimePreparationError(f"published runtime {label} realpath identity changed")
+    if not os.access(path, os.X_OK):
+        raise RuntimePreparationError(f"published runtime {label} is not executable: {path}")
+    if _file_digest(realpath, label) != record["sha256"]:
+        raise RuntimePreparationError(f"published runtime {label} bytes changed: {realpath}")
+    if not record["version_output"]:
+        raise RuntimePreparationError(f"published runtime {label} has no version identity")
+    return record
+
+
+def _verify_manifest_commands(value: object, tools: Mapping[str, Mapping[str, str]]) -> None:
+    expected = [
+        [
+            tools["uv"]["path"],
+            "venv",
+            "venv",
+            "--python",
+            tools["python"]["path"],
+            "--no-python-downloads",
+            "--python-preference",
+            "only-system",
+        ],
+        [
+            tools["uv"]["path"],
+            "pip",
+            "sync",
+            SEALED_REQUIREMENTS_ARGUMENT,
+            "--require-hashes",
+            "--only-binary",
+            ":all:",
+            "--no-sources",
+            "--no-python-downloads",
+            "--python",
+            "venv/bin/python",
+        ],
+    ]
+    if value != expected:
+        raise RuntimePreparationError("published runtime was prepared by a different command")
+
+
+def _verify_selected_python_link(layout: _Layout, selected: Mapping[str, str]) -> None:
+    parent_fd = _open_confined_relpath(
+        layout.bound_root_fd(), "venv/bin", layout.logical_root, leaf_flags=_NOFOLLOW_DIRECTORY_FLAGS
+    )
+    try:
+        try:
+            target = os.readlink("python", dir_fd=parent_fd)
+        except OSError as exc:
+            raise RuntimePreparationError("prepared runtime selected python link is missing or invalid") from exc
+    finally:
+        os.close(parent_fd)
+    if target != selected["path"]:
+        raise RuntimePreparationError("prepared runtime selected python link changed identity")
+
+
+def _verify_manifest_candidate_executables(
+    layout: _Layout, manifest: Mapping[str, Any]
+) -> dict[str, dict[str, str]]:
+    recorded = _expect_mapping(manifest.get("executables"), "executables")
+    if sorted(recorded) != ["pyrefly", "ty"]:
+        raise RuntimePreparationError("published runtime manifest must record pyrefly and ty executables")
+    verified: dict[str, dict[str, str]] = {}
+    for name in sorted(recorded):
+        entry = _expect_mapping(recorded[name], f"{name} executable")
+        if sorted(entry) != _EXECUTABLE_RECORD_KEYS or any(
+            not isinstance(item, str) for item in entry.values()
+        ):
+            raise RuntimePreparationError(f"published runtime manifest has a malformed {name} executable")
+        expected_path = layout.logical().bin_dir / name
+        if entry["path"] != str(expected_path) or not entry["version_output"]:
+            raise RuntimePreparationError(f"published runtime executable {name} identity changed")
+        fd = _open_owned_descendant(
+            layout.bound_root_fd(), f"venv/bin/{name}", layout.logical_root, directory=False
+        )
+        try:
+            info = os.fstat(fd)
+            if not stat.S_ISREG(info.st_mode) or stat.S_IMODE(info.st_mode) & 0o111 == 0:
+                raise RuntimePreparationError(f"candidate executable {name} must be executable")
+            observed = sha256_bytes(_read_owned_descriptor(fd, f"candidate executable {name}", expected_path))
+        finally:
+            os.close(fd)
+        if observed != entry["sha256"]:
+            raise RuntimePreparationError(f"published runtime executable {name} changed: {expected_path}")
+        verified[name] = cast("dict[str, str]", dict(entry))
+    return verified
 
 
 def _verify_published_runtime(
