@@ -48,7 +48,13 @@
 > family, each first proven to hang under a bounded `pytest-timeout` override without the fix
 > -- cover the FIFO case at the runtime manifest, the owned-runtime mode-repair walk, the
 > admission artifact-tree read, the evaluator source closure, and the bound production helper
-> closure, each asserting a typed error well under one second and no leaked descriptor.
+> closure, each asserting a typed error well under one second and no leaked descriptor. A
+> fresh evidence-only admission run from the repaired, committed evaluator at HEAD `2503f85`
+> -- evaluation identity `35b85d4e…d334`, run `ddfe7d49…b8562`, `status=pass`, 12 s of the
+> 1800 s ceiling, `runtime_permission_repairs=none` -- supersedes the run below as *the*
+> admitting run in `phase-1-acceptance.md`; it is unaffected by the guarded-read fix, which
+> changes nothing about ordinary-file behavior, and all five earlier runs remain preserved
+> byte-for-byte.
 >
 > **Task 1.8 background from the first re-review.** The final Sol-xhigh review of the earlier
 > admitting run (evaluator HEAD `7d40d41`, evaluation identity `380aaeb4…9147d`) found three
