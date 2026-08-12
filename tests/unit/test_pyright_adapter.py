@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import subprocess
 from collections.abc import Mapping
@@ -240,6 +241,37 @@ def test_owned_files_report_validation_fails_closed_on_version_and_digest_drift(
     drifted = {**base, "engine": {**base["engine"], "version": "1.1.404"}}
     with pytest.raises(PyrightAttributionError, match="version drift"):
         _validate_owned_files_report(drifted, expected_cli=facts.engine_path)
+
+
+def test_owned_files_report_uses_probe_string_order() -> None:
+    """Catch validating Node's string-sorted protocol with ``Path`` ordering."""
+
+    facts = PyrightFacts.locked()
+    owned = [
+        "/tmp/site-packages/wrapt-stubs/__init__.pyi",
+        "/tmp/site-packages/wrapt/__init__.py",
+    ]
+    assert owned == sorted(owned)
+    assert [Path(item) for item in owned] != sorted(Path(item) for item in owned)
+
+    def report(paths: list[str]) -> dict[str, object]:
+        digest = hashlib.sha256("\0".join(paths).encode("utf-8", "surrogateescape")).hexdigest()
+        return {
+            "schema_version": 1,
+            "engine": {"version": facts.engine_version, "cli_entrypoint": str(facts.engine_path)},
+            "project": {"project_kind": "workspace_default", "selected_config_path": None},
+            "owned_files": paths,
+            "owned_file_count": len(paths),
+            "owned_files_sha256": digest,
+            "bundle": {},
+        }
+
+    evidence = _validate_owned_files_report(report(owned), expected_cli=facts.engine_path)
+
+    assert evidence.owned_files == tuple(Path(item) for item in owned)
+    for invalid in ([*reversed(owned)], [owned[0], owned[0]]):
+        with pytest.raises(PyrightAttributionError, match="unique and sorted"):
+            _validate_owned_files_report(report(invalid), expected_cli=facts.engine_path)
 
 
 def test_production_node_probe_exports_fail_closed_bundle_and_module_checks() -> None:

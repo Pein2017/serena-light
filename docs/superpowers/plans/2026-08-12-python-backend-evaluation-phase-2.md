@@ -12,18 +12,14 @@ production-shaped protocol-probe harness that starts locked Pyright, ty, and Pyr
 directly, records initialize/capability/lifecycle/fault evidence through reused production
 transport and process-launch code, proves zero workspace mutation, and publishes one
 90-minute-bounded protocol-phase receipt with a typed per-candidate gate outcome — without
-creating a production backend registry, without touching `src/serena_light`, and without
+creating a production backend registry, without authoring production behavior, and without
 importing Phase 3's `WorkspaceRuntime`/`LanguageAdapter` scope.
 
-**Precondition this plan does not resolve:** OpenSpec task 1.8 is currently unchecked and
-`phase-1-acceptance.md` states Phase 1 stays on HOLD pending two independent re-reviews of
-its admitting run (evaluator HEAD `2503f85`, evaluation identity
-`35b85d4e…d334`). This plan may be authored and reviewed now, but **no task below may
-execute against a real candidate runtime until those two re-reviews close task 1.8** — Task
-1 (interfaces/schema) and static-only steps have no such dependency and may proceed, but
-every task that launches `scripts.backend_eval.runtime.prepare_candidate_runtime` or a real
-subprocess must first confirm task 1.8 is checked. Record this as an explicit precondition
-check at the start of Task 2.
+**Resolved Phase 1 precondition:** OpenSpec task 1.8 is checked after the admitting run and
+both required independent reviews passed. Preserve its immutable receipt and evidence; this
+baseline synchronization does not rerun admission. Every later task that launches
+`scripts.backend_eval.runtime.prepare_candidate_runtime` or a real subprocess must first
+confirm task 1.8 remains checked.
 
 **Architecture:** Phase 2 code lives under `scripts/backend_eval/` (flat modules, matching
 Phase 1's layout) and tests under `tests/backend_eval/`; production code never imports
@@ -69,9 +65,14 @@ snapshot-marker gate in `tests/conftest.py`, Ruff, Ty, OpenSpec.
   `src/serena_light`; import no `serena_light.workspace.runtime` or
   `serena_light.lsp.adapter.LanguageAdapter` symbol from `scripts/backend_eval` (Phase 3
   scope — see Decision P2-1 below).
-- Do not modify `pyproject.toml`, `uv.lock`, `package-lock.json`, `src/serena_light`,
-  `openspec/specs`, production bootstrap, client registrations, canonical Serena, or the
-  installed Serena Light MCP.
+- Phase 2 authors no production behavior. To prevent a historical Pyright baseline, the sole
+  permitted production-source exception is to carry the exact changes from production sync
+  commit `453d1115cf69330cdfa766c7dda8712a7b81b6bc`: both
+  `src/serena_light/lsp/pyright.py` and `tests/unit/test_pyright_adapter.py` must remain
+  byte-identical to current production `fd6335c5182a56bb266adc6f0ec07bf862bf3117`. Do not
+  modify `pyproject.toml`, `uv.lock`, `package-lock.json`, any other `src/serena_light` or
+  production-test path, `openspec/specs`, production bootstrap, client registrations,
+  canonical Serena, or the installed Serena Light MCP.
 - Do not launch a candidate server outside a test process, do not mutate any evaluated
   workspace path outside a declared disposable fixture, and do not run this plan's real
   subprocess tasks against runtimes/artifacts as this session — that is the implementing
@@ -374,13 +375,32 @@ structurally un-overridable. Do not proceed to Task 2 with an unresolved blocker
 
 ---
 
+### Pre-Task-2 current-production baseline gate
+
+Before any Task 2 work begins, synchronize the reviewed Task 1 HEAD
+`a176596612d2fed1f15a2dd3b13d71ef9609959f` with current production
+`fd6335c5182a56bb266adc6f0ec07bf862bf3117` by carrying only the source and unit-test changes
+from `453d1115cf69330cdfa766c7dda8712a7b81b6bc`. Verify both resulting blobs are byte-identical
+to `fd6335c`; do not carry that commit's unrelated historical-plan edit. This is a baseline
+synchronization, not Phase 2-authored production behavior, and it does not authorize an
+admission rerun, candidate preparation or launch, or any runtime, artifact, corpus, client,
+canonical Serena, or OpenSpec-authority mutation.
+
+This synchronization task does not run a Phase 2 evaluator or issue a receipt. When Task 2
+and the real Phase 2 evaluation run later, capture a fresh evaluator/executed-source identity
+from the post-sync Phase 2 HEAD and bind the new Phase 2 receipt to it; neither the reviewed
+Task 1 identity at `a176596` nor any Phase 1 receipt may stand in for that fresh evidence.
+
+---
+
 ### Task 2: Pyright protocol probe — production-shaped vertical slice
 
 **OpenSpec coverage:** 2.2
 
-**Precondition:** OpenSpec task 1.8 must be checked (Phase 1 admitting run independently
-re-reviewed) before Step 5 (the only step that launches a real subprocess against a prepared
-`CandidateRuntime`); Steps 1–4 and 6–7 do not require it.
+**Precondition:** The pre-Task-2 current-production baseline gate above must pass before Step
+1. OpenSpec task 1.8 must be checked (Phase 1 admitting run independently re-reviewed) before
+Step 5 (the only step that launches a real subprocess against a prepared `CandidateRuntime`);
+Steps 1–4 and 6–7 do not require task 1.8.
 
 **Files:**
 - Create: `scripts/backend_eval/pyright_probe.py`
