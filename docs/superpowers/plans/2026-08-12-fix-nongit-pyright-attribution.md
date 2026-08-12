@@ -28,14 +28,14 @@
 - Consumes: schema-1 owned-files reports emitted by `pyright_owned_files_probe.mjs`.
 - Produces: `_validate_owned_files_report(report, *, expected_cli) -> PyrightOwnedFilesEvidence` accepting unique raw strings in canonical string order.
 
-- [ ] **Step 1: Write the failing protocol regression**
+- [x] **Step 1: Write the failing protocol regression**
 
 Add a report with `owned_files` ordered as
 `["/tmp/wrapt-stubs/__init__.pyi", "/tmp/wrapt/__init__.py"]`, compute its
 existing `_path_digest`, and assert validation succeeds. Also assert reversing
 the raw strings and duplicating one remain typed `PyrightAttributionError`s.
 
-- [ ] **Step 2: Run the exact regression and verify RED**
+- [x] **Step 2: Run the exact regression and verify RED**
 
 Run:
 
@@ -46,19 +46,19 @@ PYTHONPATH=src /data/CoordExp/serena-light/.venv/bin/python -m pytest \
 
 Expected: FAIL with `Pyright owned-files attribution paths are not unique and sorted`.
 
-- [ ] **Step 3: Implement the minimum validator correction**
+- [x] **Step 3: Implement the minimum validator correction**
 
 In `_validate_owned_files_report`, first validate every `raw` item as an
 absolute NUL-free string, keep a `raw_paths: list[str]`, require
 `raw_paths == sorted(raw_paths)` and uniqueness, then create `Path` instances.
 Do not change `_path_digest` or projection logic.
 
-- [ ] **Step 4: Verify GREEN and focused guardrails**
+- [x] **Step 4: Verify GREEN and focused guardrails**
 
 Run the exact regression, then all `tests/unit/test_pyright_adapter.py` tests.
 Expected: PASS, including existing version/digest and outside-trust failures.
 
-- [ ] **Step 5: Commit the implementation**
+- [x] **Step 5: Commit the implementation**
 
 Stage only the two files, inspect the staged diff, run `git diff --cached --check`,
 and commit `fix: validate Pyright paths in probe order`.

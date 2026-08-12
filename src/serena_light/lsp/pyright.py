@@ -427,12 +427,14 @@ def _validate_owned_files_report(report: Any, *, expected_cli: Path) -> PyrightO
     cli = Path(str(engine.get("cli_entrypoint"))).resolve()
     if cli != expected_cli.resolve():
         raise PyrightAttributionError(f"Pyright CLI attribution drift: {cli} != {expected_cli.resolve()}")
+    raw_paths: list[str] = []
     paths: list[Path] = []
     for raw in owned:
         if not isinstance(raw, str) or not Path(raw).is_absolute() or "\0" in raw:
             raise PyrightAttributionError(f"Pyright owned-files attribution contains an invalid path: {raw!r}")
+        raw_paths.append(raw)
         paths.append(Path(raw))
-    if paths != sorted(paths) or len(paths) != len(set(paths)):
+    if raw_paths != sorted(raw_paths) or len(paths) != len(set(paths)):
         raise PyrightAttributionError("Pyright owned-files attribution paths are not unique and sorted")
     digest = _path_digest(paths)
     if report.get("owned_file_count") != len(paths) or report.get("owned_files_sha256") != digest:
