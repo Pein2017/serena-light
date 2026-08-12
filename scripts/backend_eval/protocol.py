@@ -224,7 +224,7 @@ def run_protocol_probe[T](
     workspace_root: Path,
     *,
     deadline: Deadline,
-    session: Callable[[SyncLspClient], T],
+    session: Callable[[SyncLspClient, RawLspProviders], T],
 ) -> ProtocolSession[T]:
     """Launch ``spec``'s backend, run ``initialize``/``initialized``, then ``session``.
 
@@ -295,7 +295,7 @@ def run_protocol_probe[T](
         )
         client.notify("initialized", {})
         deadline.check(f"{spec.name} session")
-        result = session(client)
+        result = session(client, raw_providers)
         deadline.check(f"{spec.name} session complete")
     except BaseException as error:
         primary = error

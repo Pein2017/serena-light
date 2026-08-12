@@ -181,8 +181,9 @@ def _install_fake_runner(
             deadline=deadline,
         )
         typed_spec = cast(Any, spec)
+        active_providers = providers or _providers()
         return ProtocolSession(
-            raw_providers=providers or _providers(),
+            raw_providers=active_providers,
             diagnostic_provider=True,
             position_encoding=typed_spec.position_encoding,
             engine=typed_spec.engine(runtime),
@@ -190,7 +191,7 @@ def _install_fake_runner(
             terminal_errors=(),
             cleanup_errors=(),
             exit_status=exit_status,
-            result=session(client),
+            result=session(client, active_providers),
         )
 
     monkeypatch.setattr(module, "run_protocol_probe", fake_run_protocol_probe)
@@ -399,22 +400,27 @@ def test_ty_gate_requires_every_baseline_provider(
     assert any(missing in issue and "advertise" in issue for issue in outcome.issues)
 
 
-def test_unexpected_implementation_advertisement_fails_without_an_unmeasured_request(
+def test_advertised_implementation_is_requested_once_and_records_normalized_evidence(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    responses = _responses(tmp_path / "known.py")
+    responses["textDocument/implementation"] = responses["textDocument/references"]
     outcome, client, _runtime_value, _config = _run_fake(
         tmp_path,
         monkeypatch,
+        responses=responses,
         providers=_providers(implementation=True),
     )
 
     implementation = next(item for item in outcome.capabilities if item.name == "implementation")
     assert implementation.advertised is True
-    assert implementation.accepted is None
-    assert implementation.normalized_valid is None
-    assert outcome.gate_disposition == "fail"
-    assert any("implementation" in issue and "not exercised" in issue for issue in outcome.issues)
-    assert "textDocument/implementation" not in [method for method, _params, _timeout in client.requests]
+    assert implementation.accepted is True
+    assert implementation.normalized_valid is True
+    assert implementation.notes == ""
+    assert outcome.gate_disposition == "pass"
+    assert [method for method, _params, _timeout in client.requests].count(
+        "textDocument/implementation"
+    ) == 1
 
 
 def test_ty_probe_preserves_typed_lsp_error_and_fresh_request_deadlines(

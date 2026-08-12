@@ -101,7 +101,10 @@ def run_pyright_capability_probe(
     source_uri = source.as_uri()
     started_elapsed = deadline.elapsed()
 
-    def session(client: SyncLspClient) -> _PyrightSessionResult:
+    def session(
+        client: SyncLspClient,
+        providers: RawLspProviders,
+    ) -> _PyrightSessionResult:
         client.notify("workspace/didChangeConfiguration", {"settings": {}})
         client.notify(
             "textDocument/didOpen",
@@ -136,13 +139,22 @@ def run_pyright_capability_probe(
                     {**position_params, "context": {"includeDeclaration": True}},
                     _normalize_locations,
                 ),
-                _observe_request(
-                    client,
-                    deadline,
-                    "implementation",
-                    "textDocument/implementation",
-                    position_params,
-                    _normalize_locations,
+                (
+                    _observe_request(
+                        client,
+                        deadline,
+                        "implementation",
+                        "textDocument/implementation",
+                        position_params,
+                        _normalize_locations,
+                    )
+                    if providers.implementation
+                    else _ObservedCapability(
+                        name="implementation",
+                        accepted=False,
+                        normalized_valid=False,
+                        notes="",
+                    )
                 ),
                 _observe_request(
                     client,

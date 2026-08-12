@@ -24,7 +24,12 @@ from scripts.backend_eval.models import DIAGNOSTICS_MODES, EnvironmentIdentity, 
 from scripts.backend_eval.process import Deadline, DeadlineExceeded, monotonic_clock
 from scripts.backend_eval.protocol import BackendProtocolSpec, protocol_session_from_error, run_protocol_probe
 from scripts.backend_eval.runtime import BACKEND_ENVIRONMENT_KEYS, SERVICE_CONFIG_RELPATHS, CandidateRuntime
-from serena_light.lsp.adapter import AdapterRuntime, EngineMetadata, SubprocessAdapterRuntimeProvider
+from serena_light.lsp.adapter import (
+    AdapterRuntime,
+    EngineMetadata,
+    RawLspProviders,
+    SubprocessAdapterRuntimeProvider,
+)
 from serena_light.lsp.client import LspTransportClosed, SyncLspClient
 from serena_light.lsp.positions import PositionEncoding
 
@@ -264,8 +269,10 @@ def test_run_protocol_probe_initializes_and_runs_session_then_stops(tmp_path: Pa
     runtime = _fake_runtime(tmp_path)
     spec = _fake_spec()
     deadline = Deadline.start(monotonic_clock, 30.0)
+    seen_providers: list[RawLspProviders] = []
 
-    def session(client: SyncLspClient) -> str:
+    def session(client: SyncLspClient, providers: RawLspProviders) -> str:
+        seen_providers.append(providers)
         result = client.request("textDocument/hover", {})
         assert isinstance(result, dict)
         return str(result["echoed"])
@@ -276,6 +283,8 @@ def test_run_protocol_probe_initializes_and_runs_session_then_stops(tmp_path: Pa
     assert session_result.raw_providers.definition is True
     assert session_result.raw_providers.references is True
     assert session_result.raw_providers.implementation is False
+    assert seen_providers == [session_result.raw_providers]
+    assert seen_providers[0] is session_result.raw_providers
     assert session_result.diagnostic_provider is False
     assert session_result.position_encoding == PositionEncoding.UTF16
     assert session_result.engine.name == "fake"
@@ -290,7 +299,7 @@ def test_run_protocol_probe_records_advertised_pull_diagnostic_provider(tmp_path
     spec = _fake_spec(_fake_server_script(capabilities={"diagnosticProvider": {"interFileDependencies": True}}))
     deadline = Deadline.start(monotonic_clock, 30.0)
 
-    def session(client: SyncLspClient) -> None:
+    def session(client: SyncLspClient, _providers: RawLspProviders) -> None:
         del client
 
     session_result = run_protocol_probe(spec, runtime, tmp_path, deadline=deadline, session=session)
@@ -303,7 +312,7 @@ def test_run_protocol_probe_negotiates_the_servers_selected_position_encoding(tm
     spec = _fake_spec(_fake_server_script(capabilities={"positionEncoding": "utf-32"}))
     deadline = Deadline.start(monotonic_clock, 30.0)
 
-    def session(client: SyncLspClient) -> None:
+    def session(client: SyncLspClient, _providers: RawLspProviders) -> None:
         del client
 
     session_result = run_protocol_probe(spec, runtime, tmp_path, deadline=deadline, session=session)
@@ -316,7 +325,7 @@ def test_run_protocol_probe_rejects_a_non_mapping_initialize_result(tmp_path: Pa
     spec = _fake_spec(_fake_server_script(bad_initialize_result=True))
     deadline = Deadline.start(monotonic_clock, 30.0)
 
-    def session(client: SyncLspClient) -> None:
+    def session(client: SyncLspClient, _providers: RawLspProviders) -> None:
         del client
         raise AssertionError("session must never run when initialize itself is malformed")
 
@@ -363,7 +372,7 @@ def test_run_protocol_probe_starts_no_child_process_when_the_engine_callable_rai
     )
     deadline = Deadline.start(monotonic_clock, 30.0)
 
-    def session(client: SyncLspClient) -> None:
+    def session(client: SyncLspClient, _providers: RawLspProviders) -> None:
         del client
         raise AssertionError("session must never run when the engine callable itself failed")
 
@@ -390,7 +399,7 @@ def test_run_protocol_probe_preserves_the_primary_exception_when_evidence_attach
 
     monkeypatch.setattr(protocol_module, "_attach_protocol_session", failing_attach)
 
-    def session(client: SyncLspClient) -> None:
+    def session(client: SyncLspClient, _providers: RawLspProviders) -> None:
         del client
         raise RuntimeError("boom")
 
@@ -411,7 +420,7 @@ def test_run_protocol_probe_treats_a_bare_true_diagnostic_provider_as_enabled(tm
     spec = _fake_spec(_fake_server_script(capabilities={"diagnosticProvider": True}))
     deadline = Deadline.start(monotonic_clock, 30.0)
 
-    def session(client: SyncLspClient) -> None:
+    def session(client: SyncLspClient, _providers: RawLspProviders) -> None:
         del client
 
     session_result = run_protocol_probe(spec, runtime, tmp_path, deadline=deadline, session=session)
@@ -424,7 +433,7 @@ def test_run_protocol_probe_treats_an_absent_diagnostic_provider_as_disabled(tmp
     spec = _fake_spec(_fake_server_script(capabilities={}))
     deadline = Deadline.start(monotonic_clock, 30.0)
 
-    def session(client: SyncLspClient) -> None:
+    def session(client: SyncLspClient, _providers: RawLspProviders) -> None:
         del client
 
     session_result = run_protocol_probe(spec, runtime, tmp_path, deadline=deadline, session=session)
@@ -437,7 +446,7 @@ def test_run_protocol_probe_rejects_an_unsupported_selected_position_encoding(tm
     spec = _fake_spec(_fake_server_script(capabilities={"positionEncoding": "utf-7"}))
     deadline = Deadline.start(monotonic_clock, 30.0)
 
-    def session(client: SyncLspClient) -> None:
+    def session(client: SyncLspClient, _providers: RawLspProviders) -> None:
         del client
         raise AssertionError("session must never run when the server selects an unsupported encoding")
 
@@ -461,7 +470,7 @@ def test_run_protocol_probe_redacts_bearer_tokens_and_secret_assignments_in_stde
     spec = _fake_spec(_fake_server_script(capabilities={}, stderr_text=secret_text))
     deadline = Deadline.start(monotonic_clock, 30.0)
 
-    def session(client: SyncLspClient) -> None:
+    def session(client: SyncLspClient, _providers: RawLspProviders) -> None:
         del client
 
     session_result = run_protocol_probe(spec, runtime, tmp_path, deadline=deadline, session=session)
@@ -478,7 +487,7 @@ def test_run_protocol_probe_bounds_the_stderr_tail_to_1024_characters(tmp_path: 
     spec = _fake_spec(_fake_server_script(capabilities={}, stderr_text="z" * 5000))
     deadline = Deadline.start(monotonic_clock, 30.0)
 
-    def session(client: SyncLspClient) -> None:
+    def session(client: SyncLspClient, _providers: RawLspProviders) -> None:
         del client
 
     session_result = run_protocol_probe(spec, runtime, tmp_path, deadline=deadline, session=session)
@@ -495,8 +504,12 @@ def test_run_protocol_probe_attaches_protocol_session_evidence_when_session_rais
     spec = _fake_spec()
     deadline = Deadline.start(monotonic_clock, 30.0)
 
-    def session(client: SyncLspClient) -> None:
+    received_providers: RawLspProviders | None = None
+
+    def session(client: SyncLspClient, providers: RawLspProviders) -> None:
+        nonlocal received_providers
         del client
+        received_providers = providers
         raise RuntimeError("boom")
 
     with pytest.raises(RuntimeError, match="boom") as excinfo:
@@ -507,6 +520,7 @@ def test_run_protocol_probe_attaches_protocol_session_evidence_when_session_rais
     assert evidence.result is None
     # initialize already completed before session raised, so this is real, not default, evidence.
     assert evidence.raw_providers.definition is True
+    assert received_providers is evidence.raw_providers
     assert evidence.engine.name == "fake"
 
 
@@ -524,7 +538,7 @@ def test_run_protocol_probe_attaches_no_evidence_when_the_deadline_is_already_ex
     deadline = Deadline.start(clock, 1.0)
     clock.advance(2.0)
 
-    def session(client: SyncLspClient) -> None:
+    def session(client: SyncLspClient, _providers: RawLspProviders) -> None:
         del client
         raise AssertionError("session must never run when the deadline is already expired")
 
@@ -542,7 +556,7 @@ def test_run_protocol_probe_attaches_protocol_session_evidence_when_session_over
     clock = _FakeClock()
     deadline = Deadline.start(clock, 5.0)
 
-    def session(client: SyncLspClient) -> str:
+    def session(client: SyncLspClient, _providers: RawLspProviders) -> str:
         result = client.request("textDocument/hover", {})
         assert isinstance(result, dict)
         clock.advance(10.0)
@@ -566,7 +580,7 @@ def test_run_protocol_probe_attaches_evidence_with_nonempty_terminal_errors_when
     spec = _fake_spec(_fake_server_script(crash_on_method="textDocument/hover"))
     deadline = Deadline.start(monotonic_clock, 30.0)
 
-    def session(client: SyncLspClient) -> None:
+    def session(client: SyncLspClient, _providers: RawLspProviders) -> None:
         client.request("textDocument/hover", {})
 
     with pytest.raises(LspTransportClosed) as excinfo:
@@ -587,7 +601,7 @@ def test_run_protocol_probe_reports_a_nonzero_exit_status_when_shutdown_crashes(
     spec = _fake_spec(_fake_server_script(exit_status_on_shutdown=23))
     deadline = Deadline.start(monotonic_clock, 30.0)
 
-    def session(client: SyncLspClient) -> str:
+    def session(client: SyncLspClient, _providers: RawLspProviders) -> str:
         del client
         return "session-complete"
 
@@ -613,7 +627,7 @@ def test_run_protocol_probe_stderr_tail_reflects_output_written_up_to_process_ex
     spec = _fake_spec(_fake_server_script(capabilities={}, stderr_text="startup-marker\n"))
     deadline = Deadline.start(monotonic_clock, 30.0)
 
-    def session(client: SyncLspClient) -> None:
+    def session(client: SyncLspClient, _providers: RawLspProviders) -> None:
         del client
 
     session_result = run_protocol_probe(spec, runtime, tmp_path, deadline=deadline, session=session)
@@ -639,7 +653,7 @@ def test_run_protocol_probe_calls_shutdown_and_stop_even_when_session_raises(
 
     monkeypatch.setattr(protocol_module.SubprocessAdapterRuntimeProvider, "stop", spy_stop)
 
-    def session(client: SyncLspClient) -> None:
+    def session(client: SyncLspClient, _providers: RawLspProviders) -> None:
         del client
         raise RuntimeError("boom")
 
@@ -665,7 +679,7 @@ def test_run_protocol_probe_propagates_a_provider_stop_failure_when_there_is_no_
 
     monkeypatch.setattr(protocol_module.SubprocessAdapterRuntimeProvider, "stop", failing_stop)
 
-    def session(client: SyncLspClient) -> str:
+    def session(client: SyncLspClient, _providers: RawLspProviders) -> str:
         result = client.request("textDocument/hover", {})
         assert isinstance(result, dict)
         return str(result["echoed"])
@@ -695,7 +709,7 @@ def test_run_protocol_probe_records_a_provider_stop_failure_onto_the_primary_exc
 
     monkeypatch.setattr(protocol_module.SubprocessAdapterRuntimeProvider, "stop", failing_stop)
 
-    def session(client: SyncLspClient) -> None:
+    def session(client: SyncLspClient, _providers: RawLspProviders) -> None:
         del client
         raise RuntimeError("boom")
 
@@ -733,7 +747,7 @@ def test_run_protocol_probe_makes_a_graceful_shutdown_failure_the_primary_when_t
 
     monkeypatch.setattr(SyncLspClient, "shutdown", failing_shutdown)
 
-    def session(client: SyncLspClient) -> str:
+    def session(client: SyncLspClient, _providers: RawLspProviders) -> str:
         result = client.request("textDocument/hover", {})
         assert isinstance(result, dict)
         return str(result["echoed"])
@@ -760,7 +774,7 @@ def test_run_protocol_probe_records_a_shutdown_failure_onto_the_primary_exceptio
 
     monkeypatch.setattr(SyncLspClient, "shutdown", failing_shutdown)
 
-    def session(client: SyncLspClient) -> None:
+    def session(client: SyncLspClient, _providers: RawLspProviders) -> None:
         del client
         raise RuntimeError("boom")
 
@@ -782,7 +796,7 @@ def test_run_protocol_probe_never_launches_when_deadline_already_expired(tmp_pat
     deadline = Deadline.start(clock, 1.0)
     clock.advance(2.0)
 
-    def session(client: SyncLspClient) -> None:
+    def session(client: SyncLspClient, _providers: RawLspProviders) -> None:
         del client
         raise AssertionError("session must never run when the deadline is already expired")
 
@@ -796,7 +810,7 @@ def test_run_protocol_probe_raises_deadline_exceeded_when_session_overruns(tmp_p
     clock = _FakeClock()
     deadline = Deadline.start(clock, 5.0)
 
-    def session(client: SyncLspClient) -> str:
+    def session(client: SyncLspClient, _providers: RawLspProviders) -> str:
         result = client.request("textDocument/hover", {})
         assert isinstance(result, dict)
         clock.advance(10.0)
@@ -827,7 +841,7 @@ def test_run_protocol_probe_skips_the_graceful_shutdown_handshake_once_the_budge
 
     monkeypatch.setattr(SyncLspClient, "shutdown", spy_shutdown)
 
-    def session(client: SyncLspClient) -> str:
+    def session(client: SyncLspClient, _providers: RawLspProviders) -> str:
         result = client.request("textDocument/hover", {})
         assert isinstance(result, dict)
         clock.advance(10.0)  # exhausts the deadline before cleanup runs
@@ -859,7 +873,7 @@ def test_run_protocol_probe_skips_graceful_shutdown_when_remaining_budget_is_bel
 
     monkeypatch.setattr(SyncLspClient, "shutdown", spy_shutdown)
 
-    def session(client: SyncLspClient) -> str:
+    def session(client: SyncLspClient, _providers: RawLspProviders) -> str:
         result = client.request("textDocument/hover", {})
         assert isinstance(result, dict)
         clock.advance(5.0 - minimum / 2)  # leaves less than the honest minimum remaining, but still positive
@@ -888,7 +902,7 @@ def test_run_protocol_probe_attempts_graceful_shutdown_when_remaining_budget_mee
 
     monkeypatch.setattr(SyncLspClient, "shutdown", spy_shutdown)
 
-    def session(client: SyncLspClient) -> str:
+    def session(client: SyncLspClient, _providers: RawLspProviders) -> str:
         result = client.request("textDocument/hover", {})
         assert isinstance(result, dict)
         clock.advance(5.0 - minimum * 2)  # comfortably above the honest minimum
@@ -915,7 +929,7 @@ def test_run_protocol_probe_attempts_graceful_shutdown_while_budget_remains(
 
     monkeypatch.setattr(SyncLspClient, "shutdown", spy_shutdown)
 
-    def session(client: SyncLspClient) -> None:
+    def session(client: SyncLspClient, _providers: RawLspProviders) -> None:
         del client
         raise RuntimeError("boom")
 
@@ -951,7 +965,7 @@ def test_run_protocol_probe_never_leaves_the_candidate_process_running(
 
     monkeypatch.setattr(protocol_module.SubprocessAdapterRuntimeProvider, "start", spy_start)
 
-    def session(client: SyncLspClient) -> None:
+    def session(client: SyncLspClient, _providers: RawLspProviders) -> None:
         client.request("textDocument/hover", {})
 
     run_protocol_probe(spec, runtime, tmp_path, deadline=deadline, session=session)
@@ -1002,7 +1016,7 @@ def test_run_protocol_probe_child_environment_is_exactly_the_minimal_allowlist(
     for key, value in _AMBIENT_LEAK_PROBE.items():
         monkeypatch.setenv(key, value)
 
-    def session(client: SyncLspClient) -> dict[str, object]:
+    def session(client: SyncLspClient, _providers: RawLspProviders) -> dict[str, object]:
         result = client.request("textDocument/hover", {})
         assert isinstance(result, dict)
         environment = result["environment"]
@@ -1037,7 +1051,7 @@ def test_run_protocol_probe_never_mutates_the_real_process_environment(
         monkeypatch.setenv(key, value)
     before = dict(os.environ)
 
-    def session(client: SyncLspClient) -> None:
+    def session(client: SyncLspClient, _providers: RawLspProviders) -> None:
         client.request("textDocument/hover", {})
 
     run_protocol_probe(spec, runtime, tmp_path, deadline=deadline, session=session)

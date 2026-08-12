@@ -132,16 +132,16 @@ def _install_fake_runner(
             workspace_root=workspace_root,
             deadline=deadline,
         )
-        result = session(client)
+        active_providers = providers or RawLspProviders(
+            definition=True,
+            implementation=True,
+            references=True,
+            document_symbols=True,
+            workspace_symbols=True,
+        )
+        result = session(client, active_providers)
         return ProtocolSession(
-            raw_providers=providers
-            or RawLspProviders(
-                definition=True,
-                implementation=True,
-                references=True,
-                document_symbols=True,
-                workspace_symbols=True,
-            ),
+            raw_providers=active_providers,
             diagnostic_provider=False,
             position_encoding=PositionEncoding.UTF16,
             engine=EngineMetadata(
@@ -360,8 +360,12 @@ def test_unadvertised_implementation_remains_explicitly_unsupported_without_fail
 
     implementation = next(item for item in outcome.capabilities if item.name == "implementation")
     assert implementation.advertised is False
+    assert implementation.accepted is False
     assert implementation.normalized_valid is False
-    assert "not advertised" in implementation.notes
+    assert implementation.notes == "not advertised by locked Pyright baseline"
+    assert "textDocument/implementation" not in [
+        method for method, _params, _timeout in client.requests
+    ]
     assert outcome.gate_disposition == "pass"
 
 

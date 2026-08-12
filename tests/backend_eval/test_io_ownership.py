@@ -497,6 +497,9 @@ OWNERSHIP: frozenset[tuple[str, str, str, str]] = frozenset(
         ("source_image.py", "_verified_context", "os.fstat", OWN_IMAGE),
         ("source_image.py", "evaluation_owner_root", "Path.resolve", DECLARED),
         ("source_image.py", "evaluator_source_files", "stream.read", OWN_IMAGE),
+        # --- ty_probe.py
+        ("ty_probe.py", "initialize_params", "Path.is_dir", DECLARED),
+        ("ty_probe.py", "initialize_params", "Path.resolve", DECLARED),
         # --- write_guard.py
         ("write_guard.py", "_hashed_remainder_record", "Path.lstat", DECLARED),
     }

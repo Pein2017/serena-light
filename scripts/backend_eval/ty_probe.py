@@ -164,7 +164,10 @@ def run_ty_capability_probe(
     source_uri = source.as_uri()
     started_elapsed = deadline.elapsed()
 
-    def session(client: SyncLspClient) -> _TySessionResult:
+    def session(
+        client: SyncLspClient,
+        providers: RawLspProviders,
+    ) -> _TySessionResult:
         client.notify(
             "workspace/didChangeConfiguration",
             {
@@ -194,10 +197,6 @@ def run_ty_capability_probe(
                 "textDocument": {"uri": source_uri},
                 "position": {"line": line, "character": character},
             }
-            # The shared runner exposes initialize providers only after this callback returns.
-            # Until that interface carries the advertisement into the callback, implementation
-            # is not requested: the absent branch stays the exact Task 2.5 negative, while an
-            # advertised provider becomes an explicit fail-closed, unmeasured issue.
             observations = (
                 _observe_request(
                     client,
@@ -214,6 +213,20 @@ def run_ty_capability_probe(
                     "textDocument/references",
                     {**position_params, "context": {"includeDeclaration": True}},
                     _normalize_locations,
+                ),
+                *(
+                    (
+                        _observe_request(
+                            client,
+                            deadline,
+                            "implementation",
+                            "textDocument/implementation",
+                            position_params,
+                            _normalize_locations,
+                        ),
+                    )
+                    if providers.implementation
+                    else ()
                 ),
                 _observe_request(
                     client,
@@ -273,7 +286,6 @@ def run_ty_capability_probe(
         f"{capability.name}: {capability.notes or 'advertised request was not normalized-valid'}"
         for capability in capabilities
         if capability.advertised
-        and capability.name != "implementation"
         and (capability.accepted is not True or capability.normalized_valid is not True)
     ]
     capability_issues.extend(
@@ -281,11 +293,6 @@ def run_ty_capability_probe(
         for name in sorted(_REQUIRED_ADVERTISEMENTS)
         if not advertised[name]
     )
-    if advertised["implementation"]:
-        capability_issues.append(
-            "implementation: locked ty unexpectedly advertised a provider that was not exercised"
-        )
-
     lifecycle_issues = [*protocol_session.terminal_errors, *protocol_session.cleanup_errors]
     if protocol_session.result.document_close_error is not None:
         lifecycle_issues.append(protocol_session.result.document_close_error)
@@ -336,18 +343,14 @@ def _capability_evidence(
     advertised: bool,
     observations: Mapping[str, _ObservedCapability],
 ) -> CapabilityEvidence:
-    if name == "implementation":
+    if name == "implementation" and not advertised:
         return CapabilityEvidence(
             name=name,
             advertised=advertised,
             accepted=None,
             normalized_valid=None,
             task_utility=CAPABILITY_TASK_UTILITY_DEFERRED,
-            notes=(
-                "locked ty unexpectedly advertised textDocument/implementation; not exercised"
-                if advertised
-                else "locked ty version does not advertise textDocument/implementation"
-            ),
+            notes="locked ty version does not advertise textDocument/implementation",
         )
     observation = observations[name]
     return CapabilityEvidence(

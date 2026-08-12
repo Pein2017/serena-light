@@ -268,6 +268,7 @@ ignore semantics, including `.gitignore` and `.git/info/exclude`, remain authori
 | `protocol.py` | no direct filesystem access; one structurally collected `candidate-child` delegation through the frozen production process/transport primitives |
 | `runtime.py` | service-owned candidate runtime preparation and the separate read-only prepared-runtime manifest loader/verifier |
 | `pyright_probe.py` | no direct filesystem access; delegates source bytes to `manifests.py`, prepared-runtime verification to `runtime.py`, and candidate lifecycle to `protocol.py` |
+| `ty_probe.py` | two `declared-path` workspace-root observations (`Path.resolve()` and `Path.is_dir()`) used only to refuse an invalid caller path; delegates source bytes to `manifests.py`, prepared-runtime verification to `runtime.py`, and candidate lifecycle to `protocol.py` |
 | `source_binding.py` | the executed production helper closure and the execution expectation |
 | `source_image.py` | the sealed evaluator-image descriptor, image-derived source closure, owner root, and loader-origin checks |
 | `write_guard.py` | one `lstat` bracket around a changed remainder record |
