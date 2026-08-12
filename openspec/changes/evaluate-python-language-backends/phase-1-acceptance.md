@@ -1,17 +1,22 @@
 # Phase 1 acceptance: admission gate
 
-**Admission gate disposition: HOLD. The gate has no admitting run at this commit.** The
-final Sol-xhigh review of the previous run -- evaluator HEAD `7d40d41`, evaluation identity
-`380aaeb4…9147d` -- found three defects that make its PASS untrustworthy *as a gate*, and the
-instrument has been repaired for all three. The repaired evaluator has not yet produced a
-run, so nothing here claims a PASS. Task 1.8 stays **unchecked** and on HOLD; tasks 1.11,
-1.13, and 1.14 were reopened for the repair.
+**Admission gate disposition: PASS on the run below. Phase 1 completion remains on HOLD
+pending two independent re-reviews of *that* receipt.** The final Sol-xhigh review of the
+previous run -- evaluator HEAD `7d40d41`, evaluation identity `380aaeb4…9147d` -- found three
+defects that made its PASS untrustworthy *as a gate*. All three are repaired, tasks 1.11,
+1.13, and 1.14 were reopened and closed for them, and the run recorded below was produced by
+the repaired evaluator from the clean committed checkout `285c203`.
 
-**No receipt has been erased.** Three runs remain on record byte-for-byte: the original
+**Task 1.8 stays unchecked and on HOLD.** A checked box may never stand for an unreviewed
+run, and neither re-review of this receipt has happened. Nothing else blocks it.
+
+**No receipt has been erased.** Four runs are now on record byte-for-byte: the original
 attempted run (instrument-limited), the repaired-instrument run (superseded when the last
-unbounded Git child was removed), and the reviewed run below (superseded by this repair).
-Their internal consistency is unchanged; what changed is what a *gate* may conclude from
-them.
+unbounded Git child was removed), the reviewed run (superseded by this repair), and the
+admitting run below. All 46 artifact files of the three earlier runs were captured
+immediately before this run and re-captured immediately after: identical in content *and* in
+inode, size, `mtime`, and mode, with every one of the 16 new files under the new evaluation
+identity alone.
 
 
 ## What the final review held on
@@ -50,6 +55,162 @@ Three defects, each now repaired and covered by adversarial tests:
    *names* plus `admission.seconds > 0`, so a receipt could claim a pass against a widened
    ceiling. Repaired: every budget must equal its frozen `DEFAULT_PHASE_BUDGETS` seconds, in
    construction and in parsing, with a mutation test per budget.
+
+
+## The admitting run
+
+| Field | Value |
+| --- | --- |
+| `evaluation_identity` | `207e75213dbab46151297694d0dc854208112c72821420d75aea2320e1aa81e4` |
+| `run_identity` | `2f9e7a084790d7c4d63426bb9d65e07763cdb6513db332735d1fab20b915507b` |
+| receipt | `<repo>/.admission-artifacts/backend-eval/<evaluation-identity>/receipts/<run-identity>.json` |
+| receipt `sha256` | `3ef7be84035c01538be7ad73722fb82e4373e2464a0cabe9ffa5906a850dcdc9` (39,745,560 bytes, mode `0600`) |
+| `schema_version` / contract | `2` / `python-backend-evaluation-v1` |
+| `status` / `next_action` | `pass` / `begin_protocol_probe_planning` |
+| `issues` | none |
+| window | `started_at=2026-08-12T00:13:38Z`, `ended_at=2026-08-12T00:13:45Z` -- **7 s** of the 1800 s ceiling (8 s process wall) |
+| `artifact_tree_digest` | `aed095bce63a9e4ee09057511f18223c160581ebe95b77d0a3324ad5fd5f5b4f` |
+
+### Exact command
+
+```bash
+cd /data/CoordExp/.worktrees/serena-light-backend-eval-final-fix
+backend_eval_freeze_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"   # resolved to 2026-08-12T00:13:38Z
+/data/CoordExp/.worktrees/serena-light-backend-eval/.venv/bin/python -m scripts.backend_eval.admission \
+  --repo-root /data/CoordExp/serena-light \
+  --artifact-root /data/CoordExp/serena-light/.admission-artifacts/backend-eval \
+  --runtime-base /data/CoordExp/.codex/runtime/serena-light/backend-eval \
+  --uv /root/miniconda3/envs/ms/bin/uv \
+  --python /root/miniconda3/envs/ms/bin/python \
+  --exclude-newer "$backend_eval_freeze_at"
+```
+
+Exit status `0`, empty stderr. Run once, from the clean committed checkout `285c203`.
+
+**Recorded deviation, now fully receipt-bound.** The declared `conda run -n ms python -m
+scripts.backend_eval.admission ...` form still fails before the module is reached: in the
+`ms` environment `import scripts` resolves to `/data/verl/scripts/__init__.py`, a regular
+package that shadows this repository's `scripts` namespace package. The CLI host was again
+the parent evaluation `.venv`. What changed is that the deviation no longer imports unbound
+parent source: the package binds `serena_light` to this checkout's `src` before any helper
+import, and the receipt records the executed production closure by origin, bytes, and
+cleanliness. Neither environment was altered and nothing was installed globally. The
+evaluated `ms` `uv` and `ms` interpreter were passed explicitly through `--uv` and `--python`.
+
+### Evaluator, production helpers, host, and bootstrap environment
+
+| Field | Value |
+| --- | --- |
+| evaluator source closure | 11 modules of `scripts/backend_eval`, digest `439c392512602129faaa173b85ba8c726749913cf2a4b7f586894a97fa6f49ec` |
+| evaluator source commit | `285c2034c50a53540695f390957bae4fb530106b`, source clean |
+| production closure root | `/data/CoordExp/.worktrees/serena-light-backend-eval-final-fix/src` -- the evaluator's *own* checkout |
+| production closure | 6 executed `serena_light` modules, digest `d7ed23955949067b932e9b18e5818ca6bece52797cbd2b2241fb84981331966b`, source clean |
+| CLI host configured path | `/data/CoordExp/.worktrees/serena-light-backend-eval/.venv/bin/python` |
+| CLI host realpath / version | `/root/miniconda3/envs/ms/bin/python3.12` / `3.12.11` |
+| CLI host `sha256` | `068d88ca469ae96121a1a220eb9e0ac3e1a6400b193e3b9cc7c14f54f9ed28e4` |
+| bootstrap inherited keys | `ALL_PROXY`, `HTTPS_PROXY`, `HTTP_PROXY`, `LANG`, `NO_PROXY`, `all_proxy`, `http_proxy`, `https_proxy`, `no_proxy` -- names and SHA-256 value digests only |
+| bootstrap service keys | `HOME`, `PATH`, `TMPDIR`, `UV_CACHE_DIR`, `UV_NO_CONFIG`, `UV_PYTHON_DOWNLOADS`, `XDG_CACHE_HOME`, `XDG_CONFIG_HOME` |
+| bootstrap refused keys | `CONDA_EXE`, `GIT_EDITOR` |
+
+The six bound production modules are `serena_light/__init__.py`, `bootstrap.py`,
+`build_identity.py`, `workspace/__init__.py`, `workspace/identity.py`, and
+`workspace/inventory.py`, each carried in the receipt with its own SHA-256. No proxy value,
+CA path, or other environment value appears in plaintext anywhere in the receipt.
+
+### Candidate lock and runtime
+
+A fresh `--exclude-newer 2026-08-12T00:13:38Z` resolved to the same frozen bytes as all three
+earlier runs -- lock digest
+`6cd570324d1a35aa0f4c30b60fd3005fe0953e8efe230915fb19ad24184b9062`, `pyrefly==1.2.0` (12
+lock-set hashes) and `ty==0.0.70` (18), raw-lock witness 2,576 bytes -- so the runtime was
+content addressed to the same root, verified in full, and reused rather than rebuilt. No
+candidate language server was launched.
+
+| Field | Value |
+| --- | --- |
+| runtime root | `/data/CoordExp/.codex/runtime/serena-light/backend-eval/6cd570324d1a35aa0f4c30b60fd3005fe0953e8efe230915fb19ad24184b9062/` |
+| `runtime-manifest.json` `sha256` | `e578bf4d6f1d98df96140d6c03b793a26af60658e49ea03b6810581898a6b4ec` (recomputed from disk before PASS, and again after the run) |
+| environments | `llm-framework-study` 3.12.13, `ms` 3.12.11 |
+| service configs | `pyrefly` `9cbcaf9b…`, `pyright` `eff18e93…`, `ty` `a67784aa…` |
+
+The selected Linux x86_64 wheels and the untouched production `ty 0.0.24` slot are exactly as
+recorded further down.
+
+### The measurement window and the corpus
+
+The first capture ran **before** the candidate lock was compiled and before the runtime was
+prepared; the second ran **after** preparation and before cleanup and publication.
+
+| Root | Kind | Inventory | Hashed | Remainder | Excluded | Before = after manifest digest |
+| --- | --- | --- | --- | --- | --- | --- |
+| `/data/CoordExp/.worktrees/research-probes` | git | 1280 | 1281 | 61422 | 27 | `1a36381bf389553202246647de133e06e2c5617dabaaee76aa209e99061ec032` |
+| `/data/CoordExp/serena-light` | git | 158 | 159 | 651 | 3 | `8e00ef0c49396e7ed0972b9444fec7b497324381be2907ed239e7f8fbda6ac7d` |
+| `/data/ms-swift` | git | 617 | 618 | 1711 | 1 | `f26ed45a75cada25a81255f343dea266f9b679a82a882b53f397a8e0f9443151` |
+| `/root/miniconda3/envs/llm-framework-study/lib/python3.12/site-packages` | non_git | 3 | 3 | 0 | 0 | `8af78cfa9a1f4950b9cc38e2084de2b1490dec2145c2c42ae53590a3be6db094` |
+| `/root/miniconda3/envs/ms/lib/python3.12/site-packages/transformers` | non_git | 2214 | 2214 | 0 | 0 | `8d9a9884993e7e25373b45a6b0d8fa18c9e80f8f7e115fd290e7d4f708fbaa72` |
+
+Source revisions: `research-probes` `f4b061b7`, `serena-light` `5e7d8ba8`, `ms-swift`
+`f2797138`. **Counts.** 68,090 observed = 68,059 in scope + 31 excluded. One delta per root,
+each bound to its own before and after manifest digest; every `unexpected`, `declared`, and
+`control_changes` list is empty, and every before digest equals its after digest.
+
+All ten manifest digests are byte-identical to the two preceding runs'. The repair changed the
+gate's ceiling, identity, and strictness, not what the corpus instrument observes.
+
+### Production identity invariant
+
+`production_identity_before == production_identity_after`, with the published `after` side
+captured after evaluation-owned cleanup, and independently re-measured after the run against
+`/data/CoordExp/serena-light`: all three readings are equal, and equal to every earlier run's.
+
+| Field | Value |
+| --- | --- |
+| `pyproject.toml` | `97c8e100f9dd8b0f77a1cbf69a02bea1b1c4ff3d04d168cbf4f4854e914e17d4` |
+| `uv.lock` | `5998451d896430ca4df3cf28f92e6a0bc413bcb840673c5f4db8be64f9a9edca` |
+| `package-lock.json` | `c4f17c7f2e5faf7f69a1d11642792cb8bae5b6502c7288cde3577a8ec3fe0cba` |
+| `dependency_lock_digest` | `eff6ebdf252faff7f77cb3a2f3894d17b9a0dfc89b46bd193fafdaa9e9ab4941` |
+| `compute_build_identity` | `77e0ff6e7b74c3e100e75a3b81bb025a8e906642a089d0c81c755aaba6d183aa` |
+| `runtime_paths` | 9 production entries, all below `…/serena-light/deps/eff6ebdf…ab4941/`, unchanged |
+
+### Deadline, process, and cleanup evidence
+
+The 1800 s ceiling now covers resolution, runtime preparation, both captures, cleanup, the
+final production identity, the artifact digest, **lock acquisition, and publication**;
+collection reserves 300 s so a timeout could still publish a receipt, and publication keeps a
+5 s reserve in front of its atomic link. This run used 7 s of the ceiling for its collected
+evidence and completed publication inside it -- the run returns its receipt only after the
+link and the directory `fsync` have both happened below the ceiling. Every child ran in its
+own session with the phase's remaining time as its bound. Cleanup ran once on the passing
+path and removed nothing. A post-run scan for `uv`, `ty`, or `pyrefly` processes found none.
+
+### Independent re-verification
+
+From the published bytes alone, after the run: the canonical round trip is byte-identical,
+all ten `RootManifest.manifest_digest` values recompute from their own canonical fields, every
+delta's before and after digest equals its manifest, the budget set equals
+`DEFAULT_PHASE_BUDGETS` exactly, the recorded production closure equals the closure a fresh
+in-process binding produces, the runtime manifest digest re-read from disk matches the
+receipt, and the live production identity equals both receipt sides. Parsing re-runs the full
+tightened PASS invariant set and succeeds.
+
+### Preservation of all three earlier runs
+
+Captured immediately before this run and re-captured immediately after: **46 artifact files,
+0 changed** in content, inode, size, `mtime`, or mode. Sixteen files were created, all of them
+under `207e7521…81e4/`. The run published under its own evaluation identity and its own
+per-run receipt path, so it shared no name with any earlier record.
+
+| Artifact | `sha256` | size | inode |
+| --- | --- | --- | --- |
+| `36696159…99335/admission-receipt.json` | `de6d1a93c089f209cdc9e4e618ff0614f55faf3e9d02e31d295c8d295fe9c348` | 2,367,756 | `125834110` |
+| `1d00793b…a36297/receipts/c7136711…166767.json` | `29ed04ed65a447100064265b7540dfec1a13bd5174a198d2f526a56971b6f45e` | 39,744,615 | `125834210` |
+| `380aaeb4…9147d/receipts/7749b4f9…74be4.json` | `830705ebee286d49d64df18ede84de803d632cadb9292537631b587a212709ae` | 39,744,615 | `125834243` |
+
+### Repository gates at this commit
+
+`pytest -q tests`: 1400 passed, 35 skipped (the 35 skips are the external-root snapshot gates,
+unchanged). `ruff check src tests scripts`: clean. `ty check --python <eval venv>`: clean.
+`openspec validate --all --strict`: 5 passed, 0 failed. `git diff --check`: clean.
 
 
 ## Superseded but retained (3): the reviewed run
