@@ -6,7 +6,7 @@ from __future__ import annotations
 import shlex
 from pathlib import Path
 
-from external_snapshot import (
+from external_snapshot import (  # ty: ignore[unresolved-import] -- direct-script sibling import
     DEFAULT_SNAPSHOT_PROFILE,
     NODE_DEPENDENCY_AUTHORITY_PROFILE,
     snapshot_identity,

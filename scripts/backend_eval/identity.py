@@ -2,8 +2,9 @@
 
 Four facts decide whether a receipt is reproducible evidence of *this* evaluator:
 
-* the digest of the executed ``scripts/backend_eval`` source closure, measured from the
-  bytes actually imported rather than from a commit;
+* the digest of the complete ``scripts/backend_eval`` source image from which the command's
+  semantic child imports, measured from the inherited sealed descriptor rather than from a
+  later disk read or merely from a commit;
 * the digest of the executed *production* helper closure -- the ``serena_light`` modules
   this evaluator runs for manifests, the write guard, and the production identity -- taken
   from :mod:`scripts.backend_eval.source_binding`, which refuses any helper resolved outside
@@ -43,9 +44,16 @@ from scripts.backend_eval.process import (
     run_bounded_bytes,
 )
 from scripts.backend_eval.source_binding import (
+    EVALUATION_OWNER_ROOT,
     PRODUCTION_SOURCE_ROOT,
     SourceBindingError,
     bind_production_source,
+)
+from scripts.backend_eval.source_image import (
+    SourceImageError,
+    evaluator_source_files,
+    require_image_module,
+    source_image_active,
 )
 
 __all__ = [
@@ -62,7 +70,7 @@ __all__ = [
     "capture_evaluator_identity",
 ]
 
-EVALUATOR_PACKAGE = Path(__file__).resolve().parent
+EVALUATOR_PACKAGE = EVALUATION_OWNER_ROOT / "scripts" / "backend_eval"
 
 # The only ambient values a bootstrap download may inherit.
 BOOTSTRAP_INHERITED_KEYS: tuple[str, ...] = (
@@ -135,7 +143,7 @@ def capture_evaluator_identity(*, deadline: Deadline | None = None) -> Evaluator
     source_files = _source_closure()
     _require_no_shadowed_module(dict(source_files))
     production_files = _production_closure()
-    commit, clean = _source_commit(deadline)
+    commit, clean = _source_commit(deadline, source_files)
     production_clean = commit is not None and _is_clean(PRODUCTION_SOURCE_ROOT, deadline)
     executable = Path(sys.executable)
     if not executable.is_absolute():
@@ -156,7 +164,14 @@ def capture_evaluator_identity(*, deadline: Deadline | None = None) -> Evaluator
 
 
 def _source_closure() -> tuple[tuple[str, str], ...]:
-    """Digest every Python module of the evaluator package through one guarded read each."""
+    """Digest every evaluator module from the sealed image, or guarded disk imports in tests."""
+
+    try:
+        imaged = evaluator_source_files()
+    except SourceImageError as error:
+        raise IdentityError(str(error)) from error
+    if imaged is not None:
+        return tuple((name, sha256_bytes(payload)) for name, payload in imaged)
 
     try:
         names = sorted(entry.name for entry in os.scandir(EVALUATOR_PACKAGE) if entry.name.endswith(".py"))
@@ -185,12 +200,20 @@ def _require_no_shadowed_module(recorded: Mapping[str, str]) -> None:
         origin = getattr(module, "__file__", None)
         if origin is None:
             continue
+        if source_image_active():
+            try:
+                require_image_module(name, module, set(recorded))
+            except SourceImageError as error:
+                raise IdentityError(str(error)) from error
+            continue
         path = Path(origin).resolve()
         if path.parent != EVALUATOR_PACKAGE or path.name not in recorded:
             raise IdentityError(f"imported evaluator module {name} is not part of the recorded closure: {path}")
 
 
-def _source_commit(deadline: Deadline | None) -> tuple[str | None, bool]:
+def _source_commit(
+    deadline: Deadline | None, source_files: tuple[tuple[str, str], ...]
+) -> tuple[str | None, bool]:
     """Return the Git commit of the evaluator checkout and whether its source is clean."""
 
     revision = _git(("rev-parse", "HEAD"), deadline)
@@ -199,7 +222,23 @@ def _source_commit(deadline: Deadline | None) -> tuple[str | None, bool]:
     commit = revision.decode("utf-8", "replace").strip()
     if len(commit) not in {40, 64} or any(character not in "0123456789abcdef" for character in commit):
         return None, False
-    return commit, _is_clean(EVALUATOR_PACKAGE, deadline)
+    clean = _is_clean(EVALUATOR_PACKAGE, deadline)
+    if source_image_active():
+        clean = clean and _image_matches_current_checkout(source_files)
+    return commit, clean
+
+
+def _image_matches_current_checkout(source_files: tuple[tuple[str, str], ...]) -> bool:
+    """A restored pathname cannot make transient image bytes look clean at the Git commit."""
+
+    recorded = dict(source_files)
+    try:
+        names = sorted(entry.name for entry in os.scandir(EVALUATOR_PACKAGE) if entry.name.endswith(".py"))
+    except OSError as error:
+        raise IdentityError(f"cannot compare the sealed evaluator with {EVALUATOR_PACKAGE}: {error}") from error
+    if names != sorted(recorded):
+        return False
+    return all(sha256_bytes(_read_regular_file(EVALUATOR_PACKAGE / name)) == recorded[name] for name in names)
 
 
 def _is_clean(subtree: Path, deadline: Deadline | None) -> bool:

@@ -192,6 +192,12 @@ F_SEAL_SEAL` by this process before it is read back, so no other party can subst
 change it. The child's read of the production source image belongs here too: the descriptor it
 `pread`s was sealed by the parent before the child was started.
 
+The admission command's evaluator zip is owned here as well. The standard-library bootstrap
+reads the complete evaluator package through a descriptor-confined walk, writes and seals one
+`memfd`, and starts the semantic evaluator with that descriptor as its zip import root.
+`source_image.py` verifies the seal set and hashes the archive from that inherited descriptor;
+its `ZipFile` reads operate on an in-memory `BytesIO`, not a filesystem pathname.
+
 ## Executables the evaluation runs
 
 `git` is declared, not discovered. `shutil.which("git", ...) or shutil.which("git") or
@@ -210,7 +216,7 @@ executables, not this one, so no receipt field changed.
 | Module | What it owns |
 | --- | --- |
 | `__init__.py` | one `realpath` of its own file, to bind `serena_light` to this checkout |
-| `admission.py` | the artifact tree digest, the receipt publication, the publication lock, the evaluation directory |
+| `admission.py` | the pre-import evaluator image bootstrap, bounded image child, artifact tree digest, receipt publication, publication lock, and evaluation directory |
 | `candidate_lock.py` | the frozen candidate-lock transaction below the artifact root |
 | `identity.py` | the evaluator's own executed source closure |
 | `manifests.py` | the corpus capture: the Git freeze, the remainder scan, the metadata walk, and the delegation of both inventory helpers |
@@ -220,6 +226,7 @@ executables, not this one, so no receipt field changed.
 | `production_identity.py` | the three declared production lock inputs |
 | `runtime.py` | the service-owned candidate runtime |
 | `source_binding.py` | the executed production helper closure and the execution expectation |
+| `source_image.py` | the sealed evaluator-image descriptor, image-derived source closure, owner root, and loader-origin checks |
 | `write_guard.py` | one `lstat` bracket around a changed remainder record |
 
 `models.py` executes no filesystem access of its own: it serializes and validates. `process.py`
@@ -257,8 +264,9 @@ claiming a guarantee the kernel does not offer.
 5. **The three production lock inputs are read below the *resolved* repository root.** If
    `repo_root` itself is reached through a symlink, `Path.resolve()` collapses it first and
    the physical path is what is opened; components above the root are not re-proven. The same
-   holds for the evaluator owner root the confined helper reads walk out from: it is derived
-   from `source_binding`'s own resolved `__file__`, and its ancestors are not re-proven.
+   root boundary applies to the production-helper walk. The evaluator-image bootstrap is
+   stronger for its own checkout: it starts from one guarded open of `/` and opens every owner
+   component below that descriptor with `O_NOFOLLOW`.
 6. **The metadata traversal is evaluator-owned, and its root open is only guarded.** It used
    to call production's `open_guarded_directory`; that call is gone, because it would put
    production code back in the evaluator process. The replacement does the same thing --
@@ -277,3 +285,9 @@ claiming a guarantee the kernel does not offer.
    change: it is a claim that a changed file cannot run, in this run or in any other run in
    the same process, and that a late change is caught by the pre-publication identity
    re-capture rather than published as a `pass`.
+9. **The original command process is a transport root of trust.** Python must compile enough
+   code to create the first immutable source image. That process imports no evaluator semantic
+   module: it only confines and reads the closure, creates and seals the image, starts the
+   isolated child, relays bytes and exit status, enforces an outer bound, and kills/reaps the
+   child group on failure. Receipt construction, helper execution, corpus capture, cleanup,
+   and publication all run in the image child whose bytes the identity names.

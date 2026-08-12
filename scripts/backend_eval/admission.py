@@ -18,7 +18,8 @@ remainder files are hashed and the after manifest is rebuilt -- before any ``Wri
 is constructed, so every delta is bound to the two manifest digests it was derived from.
 
 **One ceiling for the whole gate.**  The frozen 1800-second admission budget covers
-resolution, runtime preparation, both corpus captures, cleanup, the final production
+the pre-import evaluator-image capture and child startup, resolution, runtime preparation,
+both corpus captures, cleanup, the final production
 identity, the artifact digest, and receipt publication -- *including* the waiting and the
 I/O publication itself performs.  Collection stops early enough to leave a reserved
 finalization window, so a run that reaches the ceiling can still publish a trustworthy
@@ -50,7 +51,310 @@ trustworthy: without the production identity on both sides and the frozen candid
 run raises instead of publishing a receipt that would understate what is unknown.
 """
 
+# ruff: noqa: E402
+
 from __future__ import annotations
+
+# ``python -m scripts.backend_eval.admission`` reaches this guard before any evaluator
+# semantic import below.  The parent is deliberately only a transport bootstrap: it freezes
+# the complete evaluator package into one sealed zip image and runs ``main`` from that image.
+# Regular imports (including tests) continue below and preserve the module's existing API.
+import ctypes as _bootstrap_ctypes
+import fcntl as _bootstrap_fcntl
+import io as _bootstrap_io
+import os as _bootstrap_os
+import signal as _bootstrap_signal
+import stat as _bootstrap_stat
+import subprocess as _bootstrap_subprocess
+import sys as _bootstrap_sys
+import time as _bootstrap_time
+import zipfile as _bootstrap_zipfile
+from collections.abc import Mapping as _BootstrapMapping
+from collections.abc import Sequence as _BootstrapSequence
+from contextlib import suppress as _bootstrap_suppress
+from pathlib import Path as _BootstrapPath
+
+_SOURCE_IMAGE_ACTIVE_KEY = "SERENA_LIGHT_BACKEND_EVAL_SOURCE_IMAGE_ACTIVE"
+_SOURCE_IMAGE_FD_KEY = "SERENA_LIGHT_BACKEND_EVAL_SOURCE_IMAGE_FD"
+_SOURCE_IMAGE_PATH_KEY = "SERENA_LIGHT_BACKEND_EVAL_SOURCE_IMAGE_PATH"
+_SOURCE_IMAGE_OWNER_KEY = "SERENA_LIGHT_BACKEND_EVAL_OWNER_ROOT"
+_SOURCE_IMAGE_STARTED_KEY = "SERENA_LIGHT_BACKEND_EVAL_STARTED_MONOTONIC"
+_SOURCE_IMAGE_ACTIVE_VALUE = "1"
+_EVALUATOR_BOOTSTRAP_SECONDS = 1800.0
+_EVALUATOR_BOOTSTRAP_REAP_SECONDS = 20.0
+_EVALUATOR_BOOTSTRAP_GRACE_SECONDS = 5.0
+_BOOTSTRAP_DIRECTORY_FLAGS = _bootstrap_os.O_RDONLY | _bootstrap_os.O_DIRECTORY
+_BOOTSTRAP_NOFOLLOW_DIRECTORY_FLAGS = _BOOTSTRAP_DIRECTORY_FLAGS | _bootstrap_os.O_NOFOLLOW
+_BOOTSTRAP_READ_FLAGS = _bootstrap_os.O_RDONLY | _bootstrap_os.O_NOFOLLOW | _bootstrap_os.O_NONBLOCK
+_BOOTSTRAP_MFD_FLAGS = 0x0001 | 0x0002  # MFD_CLOEXEC | MFD_ALLOW_SEALING
+_BOOTSTRAP_ADD_SEALS = 1033
+_BOOTSTRAP_GET_SEALS = 1034
+_BOOTSTRAP_ALL_SEALS = 0x1 | 0x2 | 0x4 | 0x8
+_BOOTSTRAP_ZIP_TIME = (1980, 1, 1, 0, 0, 0)
+_BOOTSTRAP_ZIP_MODE = 0o100600 << 16
+_IMAGE_MAIN = b"""\
+import importlib
+import os
+import sys
+
+owner_root, image_fd = sys.argv[1:3]
+del sys.argv[1:3]
+os.environ["SERENA_LIGHT_BACKEND_EVAL_SOURCE_IMAGE_ACTIVE"] = "1"
+os.environ["SERENA_LIGHT_BACKEND_EVAL_SOURCE_IMAGE_FD"] = image_fd
+os.environ["SERENA_LIGHT_BACKEND_EVAL_SOURCE_IMAGE_PATH"] = sys.path[0]
+os.environ["SERENA_LIGHT_BACKEND_EVAL_OWNER_ROOT"] = owner_root
+module = importlib.import_module("scripts.backend_eval.admission")
+raise SystemExit(module.main())
+"""
+
+
+class EvaluatorBootstrapError(RuntimeError):
+    """The immutable evaluator image cannot be built or started."""
+
+
+class EvaluatorBootstrapTimeout(EvaluatorBootstrapError):
+    """The sealed evaluator exceeded its outer safety bound and was killed."""
+
+
+def _command_owner_root() -> _BootstrapPath:
+    """The checkout that supplied this command module, before semantic imports run."""
+
+    return _BootstrapPath(_bootstrap_os.path.abspath(__file__)).parent.parent.parent
+
+
+def _open_absolute_directory(path: _BootstrapPath) -> int:
+    """Open every absolute component without following a substituted ancestor."""
+
+    if not path.is_absolute():
+        raise EvaluatorBootstrapError(f"the evaluator owner root must be absolute: {path}")
+    fd = _open_filesystem_root(path)
+    try:
+        for part in path.parts[1:]:
+            child = _bootstrap_os.open(part, _BOOTSTRAP_NOFOLLOW_DIRECTORY_FLAGS, dir_fd=fd)
+            _bootstrap_os.close(fd)
+            fd = child
+        return fd
+    except OSError as error:
+        with _bootstrap_suppress(OSError):
+            _bootstrap_os.close(fd)
+        raise EvaluatorBootstrapError(f"cannot open evaluator owner root {path}: {error}") from error
+
+
+def _open_filesystem_root(label: _BootstrapPath) -> int:
+    """The one guarded pathname open from which the bootstrap confines every descendant."""
+
+    try:
+        return _bootstrap_os.open("/", _BOOTSTRAP_DIRECTORY_FLAGS)
+    except OSError as error:
+        raise EvaluatorBootstrapError(f"cannot open filesystem root for {label}: {error}") from error
+
+
+def _open_relative_directory(parent_fd: int, parts: _BootstrapSequence[str], label: str) -> int:
+    fd = _bootstrap_os.dup(parent_fd)
+    try:
+        for part in parts:
+            child = _bootstrap_os.open(part, _BOOTSTRAP_NOFOLLOW_DIRECTORY_FLAGS, dir_fd=fd)
+            _bootstrap_os.close(fd)
+            fd = child
+        return fd
+    except OSError as error:
+        _bootstrap_os.close(fd)
+        raise EvaluatorBootstrapError(f"cannot open evaluator directory {label}: {error}") from error
+
+
+def _read_relative_file(parent_fd: int, parts: _BootstrapSequence[str], label: str) -> bytes:
+    directory = _open_relative_directory(parent_fd, parts[:-1], label)
+    try:
+        fd = _bootstrap_os.open(parts[-1], _BOOTSTRAP_READ_FLAGS, dir_fd=directory)
+    except OSError as error:
+        _bootstrap_os.close(directory)
+        raise EvaluatorBootstrapError(f"cannot open evaluator source {label}: {error}") from error
+    try:
+        if not _bootstrap_stat.S_ISREG(_bootstrap_os.fstat(fd).st_mode):
+            raise EvaluatorBootstrapError(f"evaluator source {label} must be a regular file")
+        chunks: list[bytes] = []
+        while chunk := _bootstrap_os.read(fd, 1024 * 1024):
+            chunks.append(chunk)
+        return b"".join(chunks)
+    except OSError as error:
+        raise EvaluatorBootstrapError(f"cannot read evaluator source {label}: {error}") from error
+    finally:
+        _bootstrap_os.close(fd)
+        _bootstrap_os.close(directory)
+
+
+def _zip_entry(name: str, payload: bytes) -> tuple[_bootstrap_zipfile.ZipInfo, bytes]:
+    info = _bootstrap_zipfile.ZipInfo(name, _BOOTSTRAP_ZIP_TIME)
+    info.compress_type = _bootstrap_zipfile.ZIP_STORED
+    info.external_attr = _BOOTSTRAP_ZIP_MODE
+    info.create_system = 3
+    return info, payload
+
+
+def _build_evaluator_source_image(owner_root: _BootstrapPath) -> bytes:
+    """Read the complete evaluator closure once and pack those exact bytes deterministically."""
+
+    if not owner_root.is_absolute():
+        raise EvaluatorBootstrapError(f"the evaluator owner root must be absolute: {owner_root}")
+    owner_fd = _open_absolute_directory(owner_root)
+    package_fd = _open_relative_directory(owner_fd, ("scripts", "backend_eval"), "scripts/backend_eval")
+    try:
+        try:
+            names = sorted(
+                entry.name
+                for entry in _bootstrap_os.scandir(package_fd)
+                if entry.name.endswith(".py")
+            )
+        except OSError as error:
+            raise EvaluatorBootstrapError(f"cannot enumerate evaluator source closure: {error}") from error
+        if not names:
+            raise EvaluatorBootstrapError("the evaluator source closure is empty")
+        entries = [
+            _zip_entry("__main__.py", _IMAGE_MAIN),
+            _zip_entry(
+                "scripts/__init__.py",
+                _read_relative_file(owner_fd, ("scripts", "__init__.py"), "scripts/__init__.py"),
+            ),
+        ]
+        entries.extend(
+            _zip_entry(
+                f"scripts/backend_eval/{name}",
+                _read_relative_file(
+                    owner_fd,
+                    ("scripts", "backend_eval", name),
+                    f"scripts/backend_eval/{name}",
+                ),
+            )
+            for name in names
+        )
+    finally:
+        _bootstrap_os.close(package_fd)
+        _bootstrap_os.close(owner_fd)
+    buffer = _bootstrap_io.BytesIO()
+    with _bootstrap_zipfile.ZipFile(buffer, "w") as archive:
+        for info, payload in entries:
+            archive.writestr(info, payload)
+    return buffer.getvalue()
+
+
+def _sealed_evaluator_image(payload: bytes) -> int:
+    fd = -1
+    try:
+        handle = _bootstrap_ctypes.CDLL(None, use_errno=True)
+        if not hasattr(handle, "memfd_create"):
+            raise EvaluatorBootstrapError("this platform cannot provide a sealed evaluator image")
+        create = handle.memfd_create
+        create.argtypes = [_bootstrap_ctypes.c_char_p, _bootstrap_ctypes.c_uint]
+        create.restype = _bootstrap_ctypes.c_int
+        fd = create(b"backend-eval-source-image", _BOOTSTRAP_MFD_FLAGS)
+        if fd < 0:
+            raise OSError(
+                _bootstrap_ctypes.get_errno(),
+                _bootstrap_os.strerror(_bootstrap_ctypes.get_errno()),
+            )
+        written = 0
+        while written < len(payload):
+            written += _bootstrap_os.write(fd, payload[written:])
+        if (
+            _bootstrap_fcntl.fcntl(fd, _BOOTSTRAP_ADD_SEALS, _BOOTSTRAP_ALL_SEALS) != 0
+            or _bootstrap_fcntl.fcntl(fd, _BOOTSTRAP_GET_SEALS) != _BOOTSTRAP_ALL_SEALS
+            or _bootstrap_os.pread(fd, len(payload) + 1, 0) != payload
+        ):
+            raise EvaluatorBootstrapError("cannot seal the evaluator source image")
+        return fd
+    except (AttributeError, OSError) as error:
+        if fd >= 0:
+            with _bootstrap_suppress(OSError):
+                _bootstrap_os.close(fd)
+        raise EvaluatorBootstrapError(f"cannot build the sealed evaluator source image: {error}") from error
+
+
+def _kill_evaluator_group(process: _bootstrap_subprocess.Popen[bytes]) -> None:
+    try:
+        _bootstrap_os.killpg(_bootstrap_os.getpgid(process.pid), _bootstrap_signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        process.kill()
+    try:
+        process.communicate(timeout=_EVALUATOR_BOOTSTRAP_REAP_SECONDS)
+    except _bootstrap_subprocess.TimeoutExpired:  # pragma: no cover - SIGKILL always reaps
+        process.kill()
+        process.wait(timeout=_EVALUATOR_BOOTSTRAP_REAP_SECONDS)
+
+
+def _run_sealed_evaluator(
+    owner_root: _BootstrapPath,
+    argv: _BootstrapSequence[str],
+    *,
+    timeout: float,
+    environ: _BootstrapMapping[str, str],
+) -> tuple[int, bytes, bytes]:
+    """Execute admission from one sealed source image with exact stdout/exit passthrough."""
+
+    started = _bootstrap_time.monotonic()
+    image = _build_evaluator_source_image(owner_root)
+    remaining = timeout - (_bootstrap_time.monotonic() - started)
+    if remaining <= 0:
+        raise EvaluatorBootstrapTimeout("the evaluator source image exhausted the command deadline")
+    image_fd = _sealed_evaluator_image(image)
+    child_environment = dict(environ)
+    child_environment[_SOURCE_IMAGE_STARTED_KEY] = repr(started)
+    command = (
+        _bootstrap_sys.executable,
+        "-I",
+        "-B",
+        f"/proc/self/fd/{image_fd}",
+        str(owner_root),
+        str(image_fd),
+        *argv,
+    )
+    try:
+        process = _bootstrap_subprocess.Popen(
+            command,
+            cwd=owner_root,
+            env=child_environment,
+            stdin=_bootstrap_subprocess.DEVNULL,
+            stdout=_bootstrap_subprocess.PIPE,
+            stderr=_bootstrap_subprocess.PIPE,
+            pass_fds=(image_fd,),
+            start_new_session=True,
+        )
+        try:
+            stdout, stderr = process.communicate(timeout=remaining)
+        except _bootstrap_subprocess.TimeoutExpired as error:
+            _kill_evaluator_group(process)
+            raise EvaluatorBootstrapTimeout(
+                f"the sealed evaluator exceeded its {timeout:g}s outer bound and its process group was killed"
+            ) from error
+        except BaseException:
+            _kill_evaluator_group(process)
+            raise
+        return process.returncode, stdout, stderr
+    except OSError as error:
+        raise EvaluatorBootstrapError(f"cannot start the sealed evaluator: {error}") from error
+    finally:
+        _bootstrap_os.close(image_fd)
+
+
+def _bootstrap_command() -> int:
+    try:
+        returncode, stdout, stderr = _run_sealed_evaluator(
+            _command_owner_root(),
+            tuple(_bootstrap_sys.argv[1:]),
+            timeout=_EVALUATOR_BOOTSTRAP_SECONDS + _EVALUATOR_BOOTSTRAP_GRACE_SECONDS,
+            environ=_bootstrap_os.environ,
+        )
+    except EvaluatorBootstrapError as error:
+        _bootstrap_sys.stdout.write("status=incomplete\n")
+        _bootstrap_sys.stdout.write(f"issue=evaluator_bootstrap_failed: {error}\n")
+        _bootstrap_sys.stdout.write("next_action=hold\n")
+        return 2
+    _bootstrap_sys.stdout.buffer.write(stdout)
+    _bootstrap_sys.stderr.buffer.write(stderr)
+    return returncode
+
+
+if __name__ == "__main__":
+    raise SystemExit(_bootstrap_command())
 
 import argparse
 import os
@@ -117,6 +421,7 @@ from scripts.backend_eval.runtime import (
     runtime_manifest_digest,
 )
 from scripts.backend_eval.source_binding import HelperExpectation, SourceBindingError
+from scripts.backend_eval.source_image import SourceImageError, source_image_active, source_image_started
 from scripts.backend_eval.write_guard import (
     WriteGuardError,
     assert_no_unexpected_writes,
@@ -725,8 +1030,28 @@ def run_admission(
     the run actually observed.
     """
 
+    if services is None and not source_image_active():
+        raise _fail(
+            "incomplete",
+            "unsealed_evaluator_entrypoint",
+            "production admission must run through python -m scripts.backend_eval.admission "
+            "so its complete evaluator closure executes from one sealed source image",
+        )
     active = ProductionAdmissionServices() if services is None else services
-    collect = Deadline.start(clock, ADMISSION_BUDGET_SECONDS, reserve=FINALIZATION_RESERVE_SECONDS)
+    try:
+        bootstrap_started = source_image_started() if clock is monotonic_clock else None
+    except SourceImageError as exc:
+        raise _fail("incomplete", "evaluator_source_binding_failed", str(exc)) from exc
+    collect = (
+        Deadline.start(clock, ADMISSION_BUDGET_SECONDS, reserve=FINALIZATION_RESERVE_SECONDS)
+        if bootstrap_started is None
+        else Deadline(
+            clock=clock,
+            seconds=ADMISSION_BUDGET_SECONDS,
+            started=bootstrap_started,
+            reserve=FINALIZATION_RESERVE_SECONDS,
+        )
+    )
     finalize = collect.finalization()
     started_at = _utc_now()
     evidence = _Evidence(run_identity=new_run_identity(started_at))

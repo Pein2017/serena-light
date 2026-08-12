@@ -237,6 +237,36 @@ their enrichment, all three production-identity captures, the candidate-lock and
 identity brackets -- and compared before anything runs. No process-global first-use pin exists,
 so two admissions in one process cannot contaminate each other's truth.
 
+**The evaluator itself starts from one pre-import source image.** The expectation above used
+to begin too late for the parent evaluator: `python -m scripts.backend_eval.admission` imported
+`candidate_lock`, `identity`, `manifests`, `models`, `runtime`, and the rest of the admission
+graph before `capture_evaluator_identity()` ran. A transient evaluator module could therefore
+execute, restore its pathname, and let the later capture name the restored bytes. No second
+before/after disk hash can identify Python source that was already compiled.
+
+The command module now reaches a standard-library-only guard before any of those semantic
+imports. That transport bootstrap opens the checkout component by component without following
+links, reads every Python module in `scripts/backend_eval`, packs the complete closure into a
+deterministic zip image, seals its `memfd`, and launches an isolated `-I` child with that image
+as its only evaluator import root. `scripts` is a repository-owned regular package, so an
+ambient package of the same name cannot win before the guard; `-I` excludes `PYTHONPATH` and
+user site in the child. The outer monotonic origin is passed into `run_admission`, so image
+capture and process startup consume the same frozen 1800-second phase budget rather than
+creating a new pre-deadline step.
+
+`capture_evaluator_identity()` reads and hashes the evaluator entries from the inherited
+sealed descriptor itself, verifies the full seal set, and requires every loaded
+`scripts.backend_eval` module's zip loader and origin to name that same image. It separately
+compares image membership and bytes with the current checkout for the cleanliness witness. A
+module that restores its disk bytes while being imported therefore cannot disappear: its
+executed image bytes determine `source_files` and `source_digest`, and the mismatch makes the
+checkout witness unclean. The unavoidable root of trust is narrow and explicit: the original
+process executes only the transport code required to create, seal, start, relay, time out, and
+reap the image child; no receipt semantics or evaluator helper is imported there.
+The real-service `run_admission()` path also refuses when called from an ordinary disk import,
+before constructing production services, so the CLI cannot be bypassed by importing the
+orchestrator directly; dependency-injected unit tests retain their non-publishing seam.
+
 **No production code runs in the evaluator process.** The first cut of this repair still
 imported `bounded_non_git_trust_inventory`, `_decode_git_path`, `_inventory_from_candidates`,
 and `open_guarded_directory` into the *evaluator* for the corpus capture. That is the same

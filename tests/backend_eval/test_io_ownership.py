@@ -34,7 +34,7 @@ OWNERSHIP_DOC = EVALUATOR_ROOT / "docs" / "backend-eval-io-ownership.md"
 # production helper that reads a file the evaluation does not own.  A helper that only
 # decodes or normalizes strings is not filesystem access and is deliberately absent.
 
-_MODULE_QUALIFIED = ("os", "os.path", "shutil", "subprocess")
+_MODULE_QUALIFIED = ("os", "os.path", "shutil", "subprocess", "_bootstrap_os")
 _ACCESS_NAMES = {
     # --- namespace resolution and creation
     "os.open": "os.open",
@@ -219,11 +219,16 @@ OWNERSHIP: frozenset[tuple[str, str, str, str]] = frozenset(
         ("__init__.py", "<module>", "os.path.realpath", DECLARED),
         # --- admission.py
         ("admission.py", "__post_init__", "Path.is_dir", DECLARED),
+        ("admission.py", "_bootstrap_command", "stream.write", DESCRIPTOR),
+        ("admission.py", "_build_evaluator_source_image", "os.close", DESCRIPTOR),
+        ("admission.py", "_build_evaluator_source_image", "os.scandir", DESCRIPTOR),
         ("admission.py", "_collect_artifact_entries", "os.close", DESCRIPTOR),
         ("admission.py", "_collect_artifact_entries", "os.lstat", CONFINED),
         ("admission.py", "_collect_artifact_entries", "os.open", CONFINED),
         ("admission.py", "_collect_artifact_entries", "os.scandir", DESCRIPTOR),
         ("admission.py", "_open_declared_root", "os.open", GUARDED),
+        ("admission.py", "_open_absolute_directory", "os.close", DESCRIPTOR),
+        ("admission.py", "_open_absolute_directory", "os.open", CONFINED),
         ("admission.py", "_open_evaluation_directory", "os.close", DESCRIPTOR),
         ("admission.py", "_open_evaluation_directory", "os.open", GUARDED),
         ("admission.py", "_open_owned_child", "os.close", DESCRIPTOR),
@@ -232,6 +237,10 @@ OWNERSHIP: frozenset[tuple[str, str, str, str]] = frozenset(
         ("admission.py", "_open_owned_child", "os.open", CONFINED),
         ("admission.py", "_open_owned_walk", "os.close", DESCRIPTOR),
         ("admission.py", "_open_owned_walk", "os.open", CONFINED),
+        ("admission.py", "_open_filesystem_root", "os.open", GUARDED),
+        ("admission.py", "_open_relative_directory", "os.close", DESCRIPTOR),
+        ("admission.py", "_open_relative_directory", "os.dup", DESCRIPTOR),
+        ("admission.py", "_open_relative_directory", "os.open", CONFINED),
         ("admission.py", "_publication_lock", "os.close", DESCRIPTOR),
         ("admission.py", "_publication_lock", "os.fchmod", DESCRIPTOR),
         ("admission.py", "_publication_lock", "os.open", CONFINED),
@@ -245,7 +254,15 @@ OWNERSHIP: frozenset[tuple[str, str, str, str]] = frozenset(
         ("admission.py", "_read_artifact_bytes", "os.fstat", DESCRIPTOR),
         ("admission.py", "_read_artifact_bytes", "os.open", CONFINED),
         ("admission.py", "_read_artifact_bytes", "stream.read", DESCRIPTOR),
+        ("admission.py", "_read_relative_file", "os.close", DESCRIPTOR),
+        ("admission.py", "_read_relative_file", "os.fstat", DESCRIPTOR),
+        ("admission.py", "_read_relative_file", "os.open", CONFINED),
+        ("admission.py", "_read_relative_file", "os.read", DESCRIPTOR),
         ("admission.py", "_replace_temporary", "os.unlink", CONFINED),
+        ("admission.py", "_run_sealed_evaluator", "os.close", DESCRIPTOR),
+        ("admission.py", "_sealed_evaluator_image", "os.close", DESCRIPTOR),
+        ("admission.py", "_sealed_evaluator_image", "os.pread", OWN_IMAGE),
+        ("admission.py", "_sealed_evaluator_image", "os.write", OWN_IMAGE),
         ("admission.py", "_sync_directory", "os.fsync", DESCRIPTOR),
         ("admission.py", "_write_all", "os.write", DESCRIPTOR),
         ("admission.py", "artifact_tree_digest", "os.close", DESCRIPTOR),
@@ -292,12 +309,12 @@ OWNERSHIP: frozenset[tuple[str, str, str, str]] = frozenset(
         ("candidate_lock.py", "_write_artifact", "stream.flush", DESCRIPTOR),
         ("candidate_lock.py", "_write_artifact", "stream.write", DESCRIPTOR),
         # --- identity.py
-        ("identity.py", "<module>", "Path.resolve", DECLARED),
         ("identity.py", "_read_regular_file", "os.close", DESCRIPTOR),
         ("identity.py", "_read_regular_file", "os.fdopen", DESCRIPTOR),
         ("identity.py", "_read_regular_file", "os.fstat", DESCRIPTOR),
         ("identity.py", "_read_regular_file", "os.open", GUARDED),
         ("identity.py", "_read_regular_file", "stream.read", DESCRIPTOR),
+        ("identity.py", "_image_matches_current_checkout", "os.scandir", DECLARED),
         ("identity.py", "_require_no_shadowed_module", "Path.resolve", DECLARED),
         ("identity.py", "_source_closure", "os.scandir", DESCRIPTOR),
         ("identity.py", "capture_evaluator_identity", "os.path.realpath", DECLARED),
@@ -435,7 +452,6 @@ OWNERSHIP: frozenset[tuple[str, str, str, str]] = frozenset(
         ("runtime.py", "_write_owned_descriptor", "stream.write", DESCRIPTOR),
         ("runtime.py", "runtime_manifest_digest", "os.close", DESCRIPTOR),
         # --- source_binding.py
-        ("source_binding.py", "<module>", "Path.resolve", DECLARED),
         ("source_binding.py", "_module_paths", "os.path.realpath", DECLARED),
         ("source_binding.py", "_read_regular_file", "os.close", DESCRIPTOR),
         ("source_binding.py", "_read_regular_file", "os.fdopen", DESCRIPTOR),
@@ -444,6 +460,11 @@ OWNERSHIP: frozenset[tuple[str, str, str, str]] = frozenset(
         ("source_binding.py", "_read_regular_file", "stream.read", DESCRIPTOR),
         ("source_binding.py", "bind_production_source", "Path.resolve", DECLARED),
         ("source_binding.py", "bind_production_source", "os.path.realpath", DECLARED),
+        # --- source_image.py
+        ("source_image.py", "_source_image_bytes", "os.fstat", OWN_IMAGE),
+        ("source_image.py", "_source_image_bytes", "os.pread", OWN_IMAGE),
+        ("source_image.py", "evaluation_owner_root", "Path.resolve", DECLARED),
+        ("source_image.py", "evaluator_source_files", "stream.read", OWN_IMAGE),
         # --- write_guard.py
         ("write_guard.py", "_hashed_remainder_record", "Path.lstat", DECLARED),
     }
@@ -477,6 +498,8 @@ class _AccessVisitor(ast.NodeVisitor):
 def _called_name(func: ast.expr) -> str | None:
     if isinstance(func, ast.Attribute):
         base = ast.unparse(func.value)
+        if base == "_bootstrap_os":
+            base = "os"
         return f"{base}.{func.attr}" if base in _MODULE_QUALIFIED else func.attr
     if isinstance(func, ast.Name):
         return func.id

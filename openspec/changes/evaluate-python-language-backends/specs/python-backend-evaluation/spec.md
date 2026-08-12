@@ -258,13 +258,21 @@ The frozen evaluation contract SHALL cap active wall time at 30 minutes for mani
 - **WHEN** a phase needs a value only a production helper can compute, that helper checks a path's type and then reopens it by name, and the node is substituted in that window
 - **THEN** the helper runs as its exact unmodified production bytes inside a child that receives the phase's remaining time, runs in its own session, and has its whole process group killed on expiry, so the phase fails typed inside its ceiling instead of hanging, and no evaluation-owned copy of the helper's semantics is used in its place
 
-#### Scenario: A production helper is executed in a child
-- **WHEN** the evaluation starts that child
-- **THEN** the child program is read through a component-wise no-follow walk from the evaluator checkout's own open descriptor, pinned by digest for the whole run, and executed from a sealed immutable in-memory image addressed by descriptor rather than by a pathname the interpreter would resolve again, with only that descriptor inherited, in isolated mode with an explicit source root and a minimal environment carrying no ambient `PATH`, `PYTHONPATH`, or user site directory, and the published evaluator identity names those same program bytes
+#### Scenario: The evaluator command starts
+- **WHEN** `python -m scripts.backend_eval.admission` starts a receipt-producing execution
+- **THEN** its process performs only a standard-library transport bootstrap before reading the complete `scripts/backend_eval` Python closure through component-wise no-follow descriptors, packing those exact bytes into one sealed immutable source image, and starting the actual evaluator from that image in an isolated bounded child; the child imports no evaluator module from the checkout, an ambient `scripts` package, `PYTHONPATH`, or user site, the phase deadline starts before image capture, and the published evaluator identity derives its source-file digests from the same sealed image bytes the child imports
 
-#### Scenario: The executed child program or helper closure is substituted
-- **WHEN** the child program, or any production module the child reports having loaded, changes on disk during a run or is reached through a symlinked ancestor component
-- **THEN** the phase refuses rather than executing or believing it, because the program digest is pinned on first use and every reported helper byte is re-read component by component from the evaluator checkout's open descriptor and compared, rather than being accepted on an after-the-fact cleanliness observation
+#### Scenario: Production admission is called outside the sealed command
+- **WHEN** a caller imports the evaluator from disk and invokes real admission services in that process
+- **THEN** admission refuses before constructing those services or performing any evaluation action, while dependency-injected unit tests may still exercise the pure orchestration seam without publishing production evidence
+
+#### Scenario: A production helper is executed in a child
+- **WHEN** the sealed evaluator starts a production-helper child
+- **THEN** a `HelperExpectation` derived from that evaluator's captured identity names the exact child program and operation-specific helper closure before the child starts; both are read through component-wise no-follow walks, compared with the expectation, sealed into immutable in-memory images, and executed or imported only from those images in isolated mode with no ambient source root
+
+#### Scenario: The evaluator image, child program, or helper closure is substituted
+- **WHEN** an evaluator module, the production-child program, or any production module changes on disk during a run, is transiently restored, or is reached through a symlinked ancestor component
+- **THEN** transient evaluator bytes can execute only from the sealed evaluator image and are named by that image-derived identity, while a mismatch against the current checkout makes the source unclean; every production-child call independently enforces its per-run `HelperExpectation` before execution, with no process-global first-use pin and no post-hoc reread accepted as proof of the bytes that ran
 
 #### Scenario: Evaluation-owned cleanup runs
 - **WHEN** a phase runs its own cleanup before publishing

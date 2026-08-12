@@ -15,8 +15,18 @@ from __future__ import annotations
 import os
 import sys
 
-# <owner-root>/scripts/backend_eval/__init__.py -> <owner-root>
-_EVALUATION_OWNER_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
+# The sealed command image has a zip-shaped ``__file__``; its bootstrap supplies the disk
+# owner explicitly before importing this package.  Ordinary imports retain the path-derived
+# checkout binding.
+_IMAGE_ACTIVE = os.environ.get("SERENA_LIGHT_BACKEND_EVAL_SOURCE_IMAGE_ACTIVE") == "1"
+_CONFIGURED_OWNER = os.environ.get("SERENA_LIGHT_BACKEND_EVAL_OWNER_ROOT") if _IMAGE_ACTIVE else None
+if _CONFIGURED_OWNER is not None:
+    if not os.path.isabs(_CONFIGURED_OWNER):
+        raise RuntimeError(f"sealed evaluator owner root must be absolute: {_CONFIGURED_OWNER}")
+    _EVALUATION_OWNER_ROOT = _CONFIGURED_OWNER
+else:
+    # <owner-root>/scripts/backend_eval/__init__.py -> <owner-root>
+    _EVALUATION_OWNER_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 _PRODUCTION_SOURCE_ROOT = os.path.join(_EVALUATION_OWNER_ROOT, "src")
 
 if not sys.path or sys.path[0] != _PRODUCTION_SOURCE_ROOT:

@@ -62,6 +62,7 @@ from pathlib import Path
 from types import ModuleType
 
 from scripts.backend_eval.models import EvaluatorIdentity, canonical_json, sha256_bytes
+from scripts.backend_eval.source_image import evaluation_owner_root
 
 __all__ = [
     "CHILD_EXECUTED_HELPERS",
@@ -78,8 +79,9 @@ __all__ = [
     "production_source_digest",
 ]
 
-# <owner-root>/scripts/backend_eval/source_binding.py -> <owner-root>
-EVALUATION_OWNER_ROOT = Path(__file__).resolve().parent.parent.parent
+# In the sealed command child ``__file__`` names an entry inside the memfd zip image, not the
+# checkout.  The image bootstrap passes the exact disk owner before this module is imported.
+EVALUATION_OWNER_ROOT = evaluation_owner_root()
 PRODUCTION_SOURCE_ROOT = EVALUATION_OWNER_ROOT / "src"
 PRODUCTION_PACKAGE_NAME = "serena_light"
 PRODUCTION_PACKAGE = PRODUCTION_SOURCE_ROOT / PRODUCTION_PACKAGE_NAME
