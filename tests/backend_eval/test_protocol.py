@@ -24,7 +24,7 @@ from scripts.backend_eval.models import DIAGNOSTICS_MODES, EnvironmentIdentity, 
 from scripts.backend_eval.process import Deadline, DeadlineExceeded, monotonic_clock
 from scripts.backend_eval.protocol import BackendProtocolSpec, protocol_session_from_error, run_protocol_probe
 from scripts.backend_eval.runtime import BACKEND_ENVIRONMENT_KEYS, SERVICE_CONFIG_RELPATHS, CandidateRuntime
-from serena_light.lsp.adapter import AdapterRuntime, EngineMetadata, RawLspProviders, SubprocessAdapterRuntimeProvider
+from serena_light.lsp.adapter import AdapterRuntime, EngineMetadata, SubprocessAdapterRuntimeProvider
 from serena_light.lsp.client import LspTransportClosed, SyncLspClient
 from serena_light.lsp.positions import PositionEncoding
 
@@ -317,6 +317,85 @@ def test_run_protocol_probe_rejects_a_non_mapping_initialize_result(tmp_path: Pa
         run_protocol_probe(spec, runtime, tmp_path, deadline=deadline, session=session)
 
 
+# --- Fix round 3: engine frozen before any process side effect -------------------
+
+
+def test_run_protocol_probe_starts_no_child_process_when_the_engine_callable_raises(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``spec.engine(runtime)`` is evaluated before ``provider.start()``, so a failing
+    engine callable never launches a child and leaves no evidence to corrupt."""
+
+    runtime = _fake_runtime(tmp_path)
+    start_calls: list[SubprocessAdapterRuntimeProvider] = []
+    original_start = protocol_module.SubprocessAdapterRuntimeProvider.start
+
+    def spy_start(
+        self: SubprocessAdapterRuntimeProvider,
+        *,
+        notification_handler: Callable[[str, Any], None],
+        terminal_handler: Callable[[BaseException], None],
+    ) -> AdapterRuntime:
+        start_calls.append(self)
+        return original_start(self, notification_handler=notification_handler, terminal_handler=terminal_handler)
+
+    monkeypatch.setattr(protocol_module.SubprocessAdapterRuntimeProvider, "start", spy_start)
+
+    def failing_engine(runtime: CandidateRuntime) -> EngineMetadata:
+        del runtime
+        raise RuntimeError("engine metadata unavailable")
+
+    spec = BackendProtocolSpec(
+        name="fake",
+        build_command=lambda runtime: (str(runtime.python), "-c", _fake_server_script()),
+        initialize_params=lambda root: {"rootUri": root.as_uri(), "capabilities": {}},
+        request_handlers=None,
+        engine=failing_engine,
+        position_encoding=PositionEncoding.UTF16,
+        diagnostics_mode="push",
+    )
+    deadline = Deadline.start(monotonic_clock, 30.0)
+
+    def session(client: SyncLspClient) -> None:
+        del client
+        raise AssertionError("session must never run when the engine callable itself failed")
+
+    with pytest.raises(RuntimeError, match="engine metadata unavailable") as excinfo:
+        run_protocol_probe(spec, runtime, tmp_path, deadline=deadline, session=session)
+
+    assert start_calls == []
+    assert protocol_session_from_error(excinfo.value) is None
+
+
+def test_run_protocol_probe_preserves_the_primary_exception_when_evidence_attachment_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A ``setattr`` failure while attaching evidence must never replace the original,
+    already-in-flight primary exception's type or message."""
+
+    runtime = _fake_runtime(tmp_path)
+    spec = _fake_spec()
+    deadline = Deadline.start(monotonic_clock, 30.0)
+
+    def failing_attach(error: BaseException, session_evidence: object) -> None:
+        del session_evidence
+        raise AttributeError("this exception type refuses new attributes")
+
+    monkeypatch.setattr(protocol_module, "_attach_protocol_session", failing_attach)
+
+    def session(client: SyncLspClient) -> None:
+        del client
+        raise RuntimeError("boom")
+
+    with pytest.raises(RuntimeError, match="boom") as excinfo:
+        run_protocol_probe(spec, runtime, tmp_path, deadline=deadline, session=session)
+
+    assert type(excinfo.value) is RuntimeError
+    assert str(excinfo.value) == "boom"
+    notes = getattr(excinfo.value, "__notes__", ())
+    assert any("could not attach protocol session evidence" in note for note in notes)
+
+
 # --- Minor 5: pinned seam behavior of the reused private production helpers -----
 
 
@@ -424,9 +503,14 @@ def test_run_protocol_probe_attaches_protocol_session_evidence_when_session_rais
     assert evidence.engine.name == "fake"
 
 
-def test_run_protocol_probe_attaches_protocol_session_evidence_when_the_deadline_is_already_expired(
+def test_run_protocol_probe_attaches_no_evidence_when_the_deadline_is_already_expired_at_entry(
     tmp_path: Path,
 ) -> None:
+    """The very first deadline check runs before ``spec.engine(runtime)`` is even called
+    (round 3: engine is frozen right after it, before any process side effect), so at this
+    earliest possible failure point there is no engine metadata to build evidence around --
+    nothing happened yet, so nothing is attached, rather than fabricating a placeholder."""
+
     runtime = _fake_runtime(tmp_path)
     spec = _fake_spec()
     clock = _FakeClock()
@@ -440,13 +524,7 @@ def test_run_protocol_probe_attaches_protocol_session_evidence_when_the_deadline
     with pytest.raises(DeadlineExceeded) as excinfo:
         run_protocol_probe(spec, runtime, tmp_path, deadline=deadline, session=session)
 
-    evidence = protocol_session_from_error(excinfo.value)
-    assert evidence is not None
-    assert evidence.result is None
-    # the process was never even launched, so this is the all-default evidence shape.
-    assert evidence.raw_providers == RawLspProviders()
-    assert evidence.terminal_errors == ()
-    assert evidence.stderr_tail == ""
+    assert protocol_session_from_error(excinfo.value) is None
 
 
 def test_run_protocol_probe_attaches_protocol_session_evidence_when_session_overruns_the_deadline(

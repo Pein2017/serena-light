@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import os
 from collections.abc import Callable, Mapping
+from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
@@ -112,6 +113,26 @@ def protocol_session_from_error(error: BaseException) -> ProtocolSession[Any] | 
 
 def _attach_protocol_session(error: BaseException, session_evidence: ProtocolSession[Any]) -> None:
     setattr(error, _PROTOCOL_SESSION_EVIDENCE_ATTR, session_evidence)
+
+
+def _try_attach_protocol_session(error: BaseException, session_evidence: ProtocolSession[Any]) -> None:
+    """Attach evidence to ``error`` without ever letting the attempt replace it.
+
+    ``setattr`` on an ordinary exception instance always succeeds (every exception this
+    module raises or lets propagate has a normal ``__dict__``), but if some future or
+    caller-supplied exception type refuses arbitrary attributes (for example, one declaring
+    ``__slots__`` with no ``__dict__``), attachment must fail closed onto the *same* original
+    exception -- preserving its type and message -- rather than let that failure become an
+    unrelated new exception that silently replaces it. A best-effort, bounded note records
+    that evidence attachment failed; if even that cannot be recorded, it is dropped rather
+    than risk masking ``error`` itself.
+    """
+
+    try:
+        _attach_protocol_session(error, session_evidence)
+    except BaseException as attach_error:
+        with suppress(BaseException):
+            error.add_note(f"cleanup: could not attach protocol session evidence: {attach_error!r}")
 
 
 def _child_environment(minimal_env: Mapping[str, str]) -> dict[str, str | None]:
@@ -214,12 +235,17 @@ def run_protocol_probe[T](
     On any failure, the same bounded :class:`ProtocolSession` evidence a successful call
     would have returned is attached to the raised exception (``result=None``), retrievable
     via :func:`protocol_session_from_error` -- so later lifecycle tasks never need a second,
-    failure-only evidence type.
+    failure-only evidence type. ``spec.engine(runtime)`` is evaluated first, before any
+    process side effect: it needs only ``runtime``, so a failing engine callable starts no
+    child and -- because it happens before ``provider``/``client`` exist -- is simply the one
+    failure raised, never a `finally`-block failure that could replace or mask a different
+    primary failure or leave cleanup evidence half-built.
     """
 
     raw_providers = RawLspProviders()
     diagnostic_provider = False
     position_encoding = spec.position_encoding
+    engine: EngineMetadata | None = None
     result: T | None = None
     terminal_errors: list[BaseException] = []
     terminal_error_strings: tuple[str, ...] = ()
@@ -228,8 +254,10 @@ def run_protocol_probe[T](
     provider: SubprocessAdapterRuntimeProvider | None = None
     adapter_runtime: AdapterRuntime | None = None
     client: SyncLspClient | None = None
+    session_evidence: ProtocolSession[Any] | None = None
     try:
         deadline.check(f"{spec.name} protocol probe start")
+        engine = spec.engine(runtime)
         command = spec.build_command(runtime)
         env = _child_environment(minimal_backend_environment(runtime, runtime.python))
         provider = SubprocessAdapterRuntimeProvider(
@@ -270,18 +298,20 @@ def run_protocol_probe[T](
             primary, cleanup_errors = _cleanup(client, provider, adapter_runtime, deadline, primary)
             stderr_tail = _redacted_stderr_tail(adapter_runtime.stderr_capture)
             terminal_error_strings = tuple(str(error) for error in terminal_errors) + cleanup_errors
-        session_evidence = ProtocolSession(
-            raw_providers=raw_providers,
-            diagnostic_provider=diagnostic_provider,
-            position_encoding=position_encoding,
-            engine=spec.engine(runtime),
-            stderr_tail=stderr_tail,
-            terminal_errors=terminal_error_strings,
-            result=None if primary is not None else result,
-        )
-        if primary is not None:
-            _attach_protocol_session(primary, session_evidence)
+        if engine is not None:
+            session_evidence = ProtocolSession(
+                raw_providers=raw_providers,
+                diagnostic_provider=diagnostic_provider,
+                position_encoding=position_encoding,
+                engine=engine,
+                stderr_tail=stderr_tail,
+                terminal_errors=terminal_error_strings,
+                result=None if primary is not None else result,
+            )
+            if primary is not None:
+                _try_attach_protocol_session(primary, session_evidence)
 
     if primary is not None:
         raise primary
+    assert session_evidence is not None  # engine (and everything else) succeeded on this path
     return cast("ProtocolSession[T]", session_evidence)
