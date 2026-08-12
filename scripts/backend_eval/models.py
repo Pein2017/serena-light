@@ -1572,28 +1572,26 @@ PROTOCOL_PHASE_RECEIPT_SCHEMA_VERSION = 1
 # Decision P2-3: task_utility is a fixed disposition literal, never fabricated Phase 2 data.
 CAPABILITY_TASK_UTILITY_DEFERRED = "deferred_to_feature_phase"
 
+# One canonical diagnostics-mode source: BackendProtocolSpec.diagnostics_mode (protocol.py)
+# and LifecycleEvidence.diagnostics_mode both validate against this same frozenset, never a
+# second locally duplicated set.
+DIAGNOSTICS_MODES = frozenset({"push", "pull"})
+
+# The single frozen next_action literal every "pass" ProtocolPhaseReceipt must carry,
+# mirroring AdmissionReceipt's NEXT_ACTION_PASS. Phase 2's own status/disposition already
+# distinguishes which candidates survived (CandidateProtocolOutcome.gate_disposition); the
+# receipt-level next_action does not fork into a second string for that detail.
+PROTOCOL_PHASE_NEXT_ACTION_PASS = "begin_product_seam_planning_for_surviving_candidates"
+
 _CANDIDATE_PROTOCOL_NAMES = frozenset({"pyright", "ty", "pyrefly"})
 _GATE_DISPOSITIONS = frozenset({"pass", "fail", "seam_incompatible_pull_only"})
-_DIAGNOSTICS_MODES = frozenset({"push", "pull"})
 
 
 def _validate_diagnostics_mode(value: object, label: str) -> str:
     text = _validate_non_empty_str(value, label)
-    if text not in _DIAGNOSTICS_MODES:
-        raise ValueError(f"{label} must be one of {sorted(_DIAGNOSTICS_MODES)}")
+    if text not in DIAGNOSTICS_MODES:
+        raise ValueError(f"{label} must be one of {sorted(DIAGNOSTICS_MODES)}")
     return text
-
-
-def _validate_bool(value: object, label: str) -> bool:
-    if not isinstance(value, bool):
-        raise ValueError(f"{label} must be a boolean")
-    return value
-
-
-def _validate_optional_bool(value: object, label: str) -> bool | None:
-    if value is None:
-        return None
-    return _validate_bool(value, label)
 
 
 def _validate_non_negative_number(value: object, label: str) -> float:
@@ -1634,9 +1632,9 @@ class CapabilityEvidence:
 
     def __post_init__(self) -> None:
         _validate_non_empty_str(self.name, "CapabilityEvidence.name")
-        _validate_bool(self.advertised, "CapabilityEvidence.advertised")
-        _validate_optional_bool(self.accepted, "CapabilityEvidence.accepted")
-        _validate_optional_bool(self.normalized_valid, "CapabilityEvidence.normalized_valid")
+        _expect_bool(self.advertised, "CapabilityEvidence.advertised")
+        _optional_bool(self.accepted, "CapabilityEvidence.accepted")
+        _optional_bool(self.normalized_valid, "CapabilityEvidence.normalized_valid")
         if self.task_utility != CAPABILITY_TASK_UTILITY_DEFERRED:
             raise ValueError(
                 f"CapabilityEvidence.task_utility must be {CAPABILITY_TASK_UTILITY_DEFERRED!r}, "
@@ -1705,7 +1703,7 @@ class LifecycleEvidence:
             "minimal_environment_verified",
             "redaction_verified",
         ):
-            _validate_bool(getattr(self, name), f"LifecycleEvidence.{name}")
+            _expect_bool(getattr(self, name), f"LifecycleEvidence.{name}")
 
 
 _LIFECYCLE_EVIDENCE_FIELDS = frozenset(
@@ -1876,9 +1874,16 @@ class ProtocolPhaseReceipt:
     """The Phase 2 protocol-plane receipt, mirroring :class:`AdmissionReceipt` exactly.
 
     Unlike :class:`AdmissionReceipt`, this receipt carries one :class:`CandidateProtocolOutcome`
-    per candidate instead of the fixed environment/service-config evidence, and a ``pass``
-    receipt requires only the frozen ``protocol`` budget rather than the complete Phase 1
-    budget set, because this receipt binds one phase, not the whole evaluation.
+    per candidate instead of the fixed environment/service-config evidence.
+
+    This receipt is deliberately **phase-scoped**, not whole-evaluation-scoped: a ``pass``
+    requires ``budgets`` to be *exactly* the single-element ``(PhaseBudget("protocol", 5400),)``
+    tuple -- not a superset that happens to include a correct ``protocol`` entry alongside
+    extra budgets (e.g. an accidentally carried ``admission`` or ``total`` budget from a
+    different phase's receipt). ``AdmissionReceipt`` carries the complete Phase 1 six-budget
+    set because it is itself the whole-admission-phase receipt; ``ProtocolPhaseReceipt`` only
+    ever bounds the one 90-minute protocol phase it publishes, so a second budget entry is
+    always a construction defect, never legitimate extra evidence.
     """
 
     schema_version: int
@@ -1958,12 +1963,19 @@ class ProtocolPhaseReceipt:
         ended = _validate_utc_timestamp(self.ended_at, "ProtocolPhaseReceipt.ended_at")
         if ended < started:
             raise ValueError("ProtocolPhaseReceipt.ended_at must not precede started_at")
-        protocol_budget = next((budget for budget in budgets if budget.name == "protocol"), None)
-        frozen_protocol_seconds = DEFAULT_PHASE_BUDGETS["protocol"].seconds
-        if protocol_budget is None or protocol_budget.seconds != frozen_protocol_seconds:
+        if self.next_action != PROTOCOL_PHASE_NEXT_ACTION_PASS:
             raise ValueError(
-                "ProtocolPhaseReceipt status is pass but its 'protocol' budget is not the frozen "
-                f"{frozen_protocol_seconds} seconds"
+                f"ProtocolPhaseReceipt status is pass but next_action is not "
+                f"{PROTOCOL_PHASE_NEXT_ACTION_PASS!r}"
+            )
+        # Deliberately exact, not merely "contains a correct protocol entry": see the class
+        # docstring. A pass may not carry any budget beyond the one this phase bounds.
+        frozen_protocol_budget = PhaseBudget("protocol", DEFAULT_PHASE_BUDGETS["protocol"].seconds)
+        if budgets != (frozen_protocol_budget,):
+            raise ValueError(
+                "ProtocolPhaseReceipt status is pass but budgets is not exactly the frozen "
+                f"single-entry ('protocol', {frozen_protocol_budget.seconds}) tuple: got "
+                f"{[(budget.name, budget.seconds) for budget in budgets]}"
             )
         if self.evaluator is None:
             raise ValueError("ProtocolPhaseReceipt status is pass but no evaluator identity is bound")

@@ -9,6 +9,7 @@ import pytest
 from scripts.backend_eval.models import (
     CAPABILITY_TASK_UTILITY_DEFERRED,
     EVALUATION_CONTRACT_VERSION,
+    PROTOCOL_PHASE_NEXT_ACTION_PASS,
     PROTOCOL_PHASE_RECEIPT_SCHEMA_VERSION,
     CandidateLock,
     CandidatePackage,
@@ -247,7 +248,7 @@ def _protocol_phase_receipt(*, status: str = "pass", **overrides: object) -> Pro
         "outcomes": (_candidate_protocol_outcome("pyright"),),
         "issues": (),
         "artifact_tree_digest": _SHA_C,
-        "next_action": "begin_product_seam_planning_for_surviving_candidates",
+        "next_action": PROTOCOL_PHASE_NEXT_ACTION_PASS,
     }
     fields.update(overrides)
     return ProtocolPhaseReceipt(**fields)
@@ -342,6 +343,23 @@ def test_protocol_phase_receipt_pass_requires_frozen_protocol_budget() -> None:
         _protocol_phase_receipt(status="pass", budgets=(PhaseBudget("protocol", 60 * 60),))
 
 
+def test_protocol_phase_receipt_pass_rejects_extra_budgets_beyond_the_frozen_protocol_entry() -> None:
+    """M8: phase-scoped by design -- an otherwise-correct protocol entry plus any extra
+    budget (even a legitimately-named one from another phase's receipt) is a defect, not
+    additional evidence."""
+
+    with pytest.raises(ValueError, match="budgets"):
+        _protocol_phase_receipt(
+            status="pass",
+            budgets=(PhaseBudget("protocol", 90 * 60), PhaseBudget("admission", 30 * 60)),
+        )
+
+
+def test_protocol_phase_receipt_pass_requires_the_frozen_next_action_literal() -> None:
+    with pytest.raises(ValueError, match="next_action"):
+        _protocol_phase_receipt(status="pass", next_action="do_something_else")
+
+
 def test_protocol_phase_receipt_pass_requires_evaluator() -> None:
     with pytest.raises(ValueError, match="evaluator"):
         _protocol_phase_receipt(status="pass", evaluator=None)
@@ -408,3 +426,41 @@ def test_protocol_phase_receipt_from_dict_rejects_unknown_field() -> None:
 def test_protocol_phase_receipt_budgets_frozen_protocol_matches_default() -> None:
     protocol_budget = next(budget for budget in default_phase_budgets() if budget.name == "protocol")
     assert protocol_budget == PhaseBudget("protocol", 90 * 60)
+
+
+# --- M11: nested unknown-field rejection, exercised through the top-level receipt --------
+
+
+def test_protocol_phase_receipt_from_dict_rejects_unknown_field_in_nested_capability() -> None:
+    payload = _protocol_phase_receipt().to_dict()
+    outcomes = cast("list[dict[str, Any]]", payload["outcomes"])
+    capabilities = cast("list[dict[str, Any]]", outcomes[0]["capabilities"])
+    capabilities[0]["unexpected"] = True
+    with pytest.raises(ValueError, match="unknown fields"):
+        ProtocolPhaseReceipt.from_dict(payload)
+
+
+def test_protocol_phase_receipt_from_dict_rejects_unknown_field_in_nested_lifecycle() -> None:
+    payload = _protocol_phase_receipt().to_dict()
+    outcomes = cast("list[dict[str, Any]]", payload["outcomes"])
+    lifecycle = cast("dict[str, Any]", outcomes[0]["lifecycle"])
+    lifecycle["unexpected"] = True
+    with pytest.raises(ValueError, match="unknown fields"):
+        ProtocolPhaseReceipt.from_dict(payload)
+
+
+def test_protocol_phase_receipt_from_dict_rejects_unknown_field_in_nested_raw_providers() -> None:
+    payload = _protocol_phase_receipt().to_dict()
+    outcomes = cast("list[dict[str, Any]]", payload["outcomes"])
+    raw_providers = cast("dict[str, Any]", outcomes[0]["raw_providers"])
+    raw_providers["unexpected"] = True
+    with pytest.raises(ValueError, match="unknown fields"):
+        ProtocolPhaseReceipt.from_dict(payload)
+
+
+def test_protocol_phase_receipt_from_dict_rejects_unknown_field_in_nested_outcome() -> None:
+    payload = _protocol_phase_receipt().to_dict()
+    outcomes = cast("list[dict[str, Any]]", payload["outcomes"])
+    outcomes[0]["unexpected"] = True
+    with pytest.raises(ValueError, match="unknown fields"):
+        ProtocolPhaseReceipt.from_dict(payload)
