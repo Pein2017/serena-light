@@ -452,6 +452,23 @@ OWNERSHIP: frozenset[tuple[str, str, str, str]] = frozenset(
         ("protocol_parent.py", "_read_exact_regular_file", "os.fstat", DESCRIPTOR),
         ("protocol_parent.py", "_read_exact_regular_file", "os.open", CONFINED),
         ("protocol_parent.py", "_read_exact_regular_file", "stream.read", DESCRIPTOR),
+        # --- protocol_phase.py
+        ("protocol_phase.py", "_ensure_owned_directory", "os.close", DESCRIPTOR),
+        ("protocol_phase.py", "_ensure_owned_directory", "os.mkdir", CONFINED),
+        ("protocol_phase.py", "_ensure_owned_directory", "os.open", CONFINED),
+        ("protocol_phase.py", "_open_protocol_artifact_owner_root", "os.open", GUARDED),
+        ("protocol_phase.py", "_open_protocol_run_root", "os.open", GUARDED),
+        ("protocol_phase.py", "create_run_root", "os.close", DESCRIPTOR),
+        ("protocol_phase.py", "create_run_root", "os.fchmod", DESCRIPTOR),
+        ("protocol_phase.py", "create_run_root", "os.fsync", DESCRIPTOR),
+        ("protocol_phase.py", "create_run_root", "os.mkdir", CONFINED),
+        ("protocol_phase.py", "create_run_root", "os.open", CONFINED),
+        ("protocol_phase.py", "write_sidecar", "os.close", DESCRIPTOR),
+        ("protocol_phase.py", "write_sidecar", "os.fchmod", DESCRIPTOR),
+        ("protocol_phase.py", "write_sidecar", "os.fsync", DESCRIPTOR),
+        ("protocol_phase.py", "write_sidecar", "os.open", CONFINED),
+        ("protocol_phase.py", "write_sidecar", "os.unlink", CONFINED),
+        ("protocol_phase.py", "write_sidecar", "os.write", DESCRIPTOR),
         # --- protocol_witness.py
         ("protocol_witness.py", "_checked_open", "os.close", DESCRIPTOR),
         ("protocol_witness.py", "_external_relative_path", "Path.resolve", DECLARED),
@@ -668,6 +685,12 @@ class _AccessVisitor(ast.NodeVisitor):
 
 def _called_name(func: ast.expr) -> str | None:
     if isinstance(func, ast.Attribute):
+        if (
+            func.attr == "replace"
+            and isinstance(func.value, ast.Call)
+            and _called_name(func.value.func) != "Path"
+        ):
+            return None
         base = ast.unparse(func.value)
         if base == "_bootstrap_os":
             base = "os"
@@ -697,6 +720,21 @@ def test_the_collector_does_not_treat_dataclass_replace_as_a_path_replace() -> N
             "from dataclasses import replace\n"
             "def updated(value):\n"
             "    return replace(value, field=1)\n"
+        )
+    )
+
+    assert visitor.found == set()
+
+
+def test_the_collector_does_not_treat_value_replacement_as_a_path_replace() -> None:
+    """Replacement on newly constructed datetime and text values is not filesystem I/O."""
+
+    visitor = _AccessVisitor()
+    visitor.visit(
+        ast.parse(
+            "def rendered(datetime, UTC, error):\n"
+            "    stamp = datetime.now(UTC).replace(microsecond=0).isoformat().replace('x', 'y')\n"
+            "    return stamp, str(error).replace('x', 'y')\n"
         )
     )
 

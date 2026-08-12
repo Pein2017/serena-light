@@ -291,6 +291,14 @@ anchor, then opens every ancestor and the 0600 regular leaf relative to retained
 Its remaining `open` calls are therefore `confined`; `fstat`, `fdopen`, `read`, and `close`
 operate only on descriptors. A missing exact receipt cannot fall through to another run.
 
+`protocol_phase.py` owns the protocol-run artifact namespace, not candidate source or runtime
+files. It separates the two absolute `guarded` directory opens into
+`_open_protocol_artifact_owner_root` and `_open_protocol_run_root`. From those retained roots,
+the run-directory walk and creation plus sidecar creation/removal are `confined`; payload I/O,
+mode normalization, durability barriers, and release are descriptor operations. Candidate
+processes remain owned by `protocol.py` and `protocol_lifecycle.py`, while immutable receipt
+publication remains owned by `publish.py`.
+
 `protocol_witness.py` owns a single disposable fixture below an already-created, caller-owned
 per-run directory. `_open_owned_run_root` is the only `guarded` absolute open and proves the
 root is the expected 0700 directory. Creation, verification, and cleanup then use only
@@ -337,6 +345,7 @@ ignore semantics, including `.gitignore` and `.git/info/exclude`, remain authori
 | `protocol.py` | no direct filesystem access; one structurally collected `candidate-child` delegation through the frozen production process/transport primitives |
 | `protocol_lifecycle.py` | lifecycle source-read delegation, exact candidate PID/create-time/PGID observation, fail-closed process-group signal and cleanup census, and the synchronously restored ambient poison proof |
 | `protocol_parent.py` | exact Phase 1 parent receipt binding: one guarded filesystem-root anchor, no-follow descriptor walk, strict regular-file read, and no discovery fallback |
+| `protocol_phase.py` | sealed Phase 2 orchestration and its protocol-run artifact namespace: guarded owner/run roots, confined run and sidecar operations, and descriptor-only payload durability |
 | `protocol_witness.py` | one deadline-bounded disposable witness below the caller-owned run root: confined creation, verification, durability, cleanup, and read-only external-definition observations |
 | `publish.py` | the generic atomic immutable publication: the per-target publication lock, the publication directory and every artifact component below the declared owner root, the `O_EXCL` temporary, the payload write, the atomic link, and the withdrawal |
 | `runtime.py` | service-owned candidate runtime preparation and the separate read-only prepared-runtime manifest loader/verifier |
