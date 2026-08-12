@@ -143,12 +143,14 @@ sufficient reasons visible in the current code and authority:
    contract or spec requires the harness to be the party that triggers cancellation via
    `$/cancelRequest`. CLAUDE.md forbids inventing schema/utility beyond current authority.
 
-Task 2.6 therefore drives real subprocess scenarios that are known to make each candidate
-return `-32800` on its own initiative — the two production-shaped triggers are (i) issuing a
-request and then `shutdown()`-ing the client while it is still in flight, and (ii) issuing two
-overlapping document-symbol requests against the same document version, which Pyright and
-similar servers commonly self-cancel the superseded one. The receipt records the observed
-`LspResponseError.code == -32800` count per candidate; it never sends `$/cancelRequest` and
+Task 2.6 therefore records `-32800` only when a real candidate returns it during another
+required protocol/lifecycle scenario. The harness does not manufacture a cancellation by
+racing shutdown with an in-flight request or by assuming that overlapping requests are
+deterministically self-cancelled: those behaviours are backend- and timing-dependent and
+cannot be a hard-gate fixture. A fake-client unit test proves that a returned
+`LspResponseError.code == -32800` is counted once and is never retried. A real run with zero
+observed cancellations records the truthful count `0`; it is not a failure and does not imply
+that the backend lacks cancellation support. The harness never sends `$/cancelRequest` and
 never adds a retry.
 
 ## Decision P2-3: `task_utility` is a fixed disposition field in Phase 2, not fabricated data
@@ -664,8 +666,9 @@ def test_diagnostics_mode_is_recorded_push_for_pyright() -> None: ...
 def test_content_modified_returns_the_documented_code_with_no_retry() -> None:
     # asserts client._retry_methods is empty (set_content_modified_retry_methods never called)
     ...
-def test_request_cancelled_is_observed_via_shutdown_in_flight_and_overlapping_requests() -> None:
-    # Decision P2-2: server-triggered only, no $/cancelRequest sent
+def test_request_cancelled_response_is_counted_once_without_retry(fake_client) -> None:
+    # Decision P2-2: deterministic unit proof for the observation path. Real candidates
+    # report the count actually observed during the other required scenarios, including 0.
     ...
 def test_bounded_request_timeout_raises_typed_timeout_and_cleans_up() -> None: ...
 def test_crash_is_detected_and_process_tree_is_fully_reaped() -> None: ...
@@ -680,10 +683,9 @@ def test_stderr_and_environment_are_redacted_in_the_recorded_evidence() -> None:
 Run: `conda run -n ms pytest -q tests/backend_eval/test_pyright_lifecycle.py`
 
 Expected: FAIL for any scenario not yet exercisable through Task 1/2's runner (for example, if
-`LifecycleEvidence` capture is not yet wired into `run_protocol_probe`'s return value); if a
-scenario needs a small runner addition (e.g., a bounded overlapping-request helper), add it to
-`protocol.py` in this task since it is lifecycle-test infrastructure, not a new production
-interface, and note the addition in the commit message.
+`LifecycleEvidence` capture is not yet wired into `run_protocol_probe`'s return value). Add
+only the smallest shared observation seam needed by a required scenario; do not add raw
+request-ID access, a cancellation sender, or a timing-dependent overlapping-request helper.
 
 - [ ] **Step 3: Make the scenarios pass against a real Pyright subprocess**
 
