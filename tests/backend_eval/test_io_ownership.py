@@ -216,9 +216,9 @@ _DESCRIPTOR_SOURCES = {
 OWNERSHIP: frozenset[tuple[str, str, str, str]] = frozenset(
     {
         # --- __init__.py
-        ("__init__.py", "<module>", "os.path.realpath", DECLARED),
         # --- admission.py
         ("admission.py", "__post_init__", "Path.is_dir", DECLARED),
+        ("admission.py", "<module>", "stream.write", DESCRIPTOR),
         ("admission.py", "_bootstrap_command", "stream.write", DESCRIPTOR),
         ("admission.py", "_build_evaluator_source_image", "os.close", DESCRIPTOR),
         ("admission.py", "_build_evaluator_source_image", "os.scandir", DESCRIPTOR),
@@ -463,6 +463,7 @@ OWNERSHIP: frozenset[tuple[str, str, str, str]] = frozenset(
         # --- source_image.py
         ("source_image.py", "_source_image_bytes", "os.fstat", OWN_IMAGE),
         ("source_image.py", "_source_image_bytes", "os.pread", OWN_IMAGE),
+        ("source_image.py", "_verified_context", "os.fstat", OWN_IMAGE),
         ("source_image.py", "evaluation_owner_root", "Path.resolve", DECLARED),
         ("source_image.py", "evaluator_source_files", "stream.read", OWN_IMAGE),
         # --- write_guard.py
@@ -622,7 +623,7 @@ def test_the_ownership_document_names_every_audited_module() -> None:
     text = OWNERSHIP_DOC.read_text(encoding="utf-8")
     modules = {module for module, _function, _access, _owner in OWNERSHIP}
     # Only this one executes no filesystem access of its own; the document says so.
-    without_access = {"models.py"}
+    without_access = {"__init__.py", "models.py"}
     assert modules == {path.name for path in EVALUATOR_PACKAGE.glob("*.py")} - without_access
     for module in sorted(modules):
         assert module in text

@@ -31,6 +31,7 @@ def _copy_evaluator(tmp_path: Path) -> Path:
     owner = tmp_path / "owner"
     (owner / "scripts").mkdir(parents=True)
     (owner / "scripts" / "__init__.py").write_text("", encoding="utf-8")
+    shutil.copy2(REPO_ROOT / "scripts" / "backend_eval_bootstrap.py", owner / "scripts")
     shutil.copytree(EVALUATOR_ROOT, owner / "scripts" / "backend_eval")
     shutil.copytree(REPO_ROOT / "src" / "serena_light", owner / "src" / "serena_light")
     for name in ("pyproject.toml", "uv.lock", "package-lock.json"):
@@ -100,7 +101,7 @@ def test_command_imports_transient_semantic_bytes_only_from_the_sealed_child(
     )
 
     process = subprocess.Popen(
-        [sys.executable, "-m", "scripts.backend_eval.admission", "--help"],
+        [sys.executable, "-I", "-S", "-B", "scripts/backend_eval_bootstrap.py", "--help"],
         cwd=owner,
         env={
             **os.environ,
@@ -115,7 +116,7 @@ def test_command_imports_transient_semantic_bytes_only_from_the_sealed_child(
     stdout, stderr = process.communicate(timeout=30)
 
     assert process.returncode == 0, stderr.decode("utf-8", "replace")
-    assert stdout.startswith(b"usage: python -m scripts.backend_eval.admission")
+    assert stdout.startswith(b"usage: python -I -S -B scripts/backend_eval_bootstrap.py")
     observed = json.loads(report.read_text(encoding="utf-8"))
     assert observed == {
         "pid": observed["pid"],
@@ -125,6 +126,19 @@ def test_command_imports_transient_semantic_bytes_only_from_the_sealed_child(
     assert observed["pid"] != process.pid
     assert not shadow_marker.exists()
     assert (owner / "scripts" / "backend_eval" / "models.py").read_bytes() == pristine != hostile
+
+
+def test_package_module_entrypoint_is_not_receipt_producing(tmp_path: Path) -> None:
+    owner = _copy_evaluator(tmp_path)
+    result = subprocess.run(
+        [sys.executable, "-m", "scripts.backend_eval.admission", "--help"],
+        cwd=owner,
+        capture_output=True,
+        timeout=10,
+        check=False,
+    )
+    assert result.returncode == 2
+    assert b"not a receipt-producing entrypoint" in result.stderr
 
 
 def test_source_image_contains_the_complete_evaluator_package(tmp_path: Path) -> None:
@@ -147,6 +161,47 @@ def test_source_image_contains_the_complete_evaluator_package(tmp_path: Path) ->
     }
     assert evaluator_entries == expected
     assert "scripts/__init__.py" in archive_names
+
+
+def test_package_initializers_execute_only_from_and_are_bound_by_the_sealed_image(
+    tmp_path: Path,
+) -> None:
+    owner = _copy_evaluator(tmp_path)
+    package = owner / "scripts" / "backend_eval"
+    scripts_report = tmp_path / "scripts-init.pid"
+    evaluator_report = tmp_path / "backend-init.pid"
+    scripts_init = (
+        "import os, pathlib\n"
+        f"pathlib.Path({str(scripts_report)!r}).write_text(str(os.getpid()))\n"
+    ).encode()
+    backend_init = (
+        "import hashlib, json, os, pathlib\n"
+        "from scripts.backend_eval.source_image import evaluator_source_files\n"
+        "_observed = {'pid': os.getpid(), 'digests': {name: hashlib.sha256(payload).hexdigest() "
+        "for name, payload in evaluator_source_files()}}\n"
+        f"pathlib.Path({str(evaluator_report)!r}).write_text(json.dumps(_observed))\n"
+    ).encode()
+    (owner / "scripts" / "__init__.py").write_bytes(scripts_init)
+    (package / "__init__.py").write_bytes(backend_init)
+    process = subprocess.Popen(
+        [sys.executable, "-I", "-S", "-B", "scripts/backend_eval_bootstrap.py", "--help"],
+        cwd=owner,
+        env={
+            **os.environ,
+            "SERENA_LIGHT_BACKEND_EVAL_SOURCE_IMAGE_ACTIVE": "1",
+            "SERENA_LIGHT_BACKEND_EVAL_OWNER_ROOT": str(tmp_path / "ambient-owner"),
+            "PYTHONPATH": str(tmp_path / "ambient-src"),
+        },
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    _stdout, stderr = process.communicate(timeout=10)
+    assert process.returncode == 0, stderr.decode("utf-8", "replace")
+    observed = json.loads(evaluator_report.read_text())
+    assert observed["digests"]["scripts/__init__.py"] == sha256(scripts_init).hexdigest()
+    assert observed["digests"]["__init__.py"] == sha256(backend_init).hexdigest()
+    assert int(scripts_report.read_text()) == observed["pid"]
+    assert observed["pid"] != process.pid
 
 
 def test_sealed_child_preserves_stdout_and_exit_code_and_ignores_ambient_shadow(
@@ -231,7 +286,7 @@ def test_identity_hashes_the_import_and_restore_bytes_from_the_source_image(
         "    identity = capture_evaluator_identity()\n"
         "    print(json.dumps({'recorded': dict(identity.source_files)['models.py'], "
         "'disk': sha256_bytes((identity_source := "
-        "__import__('pathlib').Path(__import__('os').environ['SERENA_LIGHT_BACKEND_EVAL_OWNER_ROOT']) "
+        f"__import__('pathlib').Path({str(owner)!r}) "
         "/ 'scripts/backend_eval/models.py').read_bytes())}))\n"
         "    return 0\n",
         encoding="utf-8",
@@ -262,11 +317,81 @@ def test_real_admission_refuses_an_unsealed_in_process_entrypoint(
         exclude_newer="2026-08-12T00:00:00Z",
     )
 
+    explicit = admission.ProductionAdmissionServices()
+
     def forbidden_services() -> None:
         raise AssertionError("production services were constructed before the sealed-entrypoint refusal")
 
     monkeypatch.setitem(admission.run_admission.__globals__, "ProductionAdmissionServices", forbidden_services)
 
     with pytest.raises(admission.AdmissionError) as error:
-        admission.run_admission(request)
+        admission.run_admission(request, services=explicit)
     assert error.value.failure.code == "unsealed_evaluator_entrypoint"
+
+
+def test_fake_services_and_main_cannot_publish_outside_the_sealed_image(tmp_path: Path) -> None:
+    request = admission.AdmissionRequest(
+        repo_root=tmp_path,
+        artifact_root=tmp_path / ".admission-artifacts" / "backend-eval",
+        runtime_base=tmp_path / "runtime",
+        uv=Path(sys.executable),
+        python=Path(sys.executable),
+        exclude_newer="2026-08-12T00:00:00Z",
+    )
+    fake = object()
+    with pytest.raises(admission.AdmissionError, match="unsealed_evaluator_entrypoint"):
+        admission.run_admission(request, services=fake)  # type: ignore[arg-type]
+    assert not request.artifact_root.exists()
+    result = admission.main(
+        [
+            "--repo-root", str(request.repo_root), "--artifact-root", str(request.artifact_root),
+            "--runtime-base", str(request.runtime_base), "--uv", str(request.uv),
+            "--python", str(request.python), "--exclude-newer", request.exclude_newer,
+        ],
+        services=fake,  # type: ignore[arg-type]
+    )
+    assert result == 2
+    assert not request.artifact_root.exists()
+
+
+def test_sealed_child_has_closed_startup_and_only_deliberate_external_inputs(tmp_path: Path) -> None:
+    owner = tmp_path / "owner"
+    package = owner / "scripts" / "backend_eval"
+    package.mkdir(parents=True)
+    (owner / "scripts" / "__init__.py").write_text("", encoding="utf-8")
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    marker = tmp_path / "startup-marker"
+    shadow = tmp_path / "site"
+    shadow.mkdir()
+    (shadow / "sitecustomize.py").write_text(
+        f"open({str(marker)!r}, 'w').write('sitecustomize')\n", encoding="utf-8"
+    )
+    (shadow / "hostile.pth").write_text(
+        f"import pathlib; pathlib.Path({str(marker)!r}).write_text('pth')\n", encoding="utf-8"
+    )
+    (package / "admission.py").write_text(
+        "import hashlib, json, os, sys\n"
+        "def main():\n"
+        "    print(json.dumps({'site': 'site' in sys.modules, 'keys': sorted(os.environ), "
+        "'proxy': hashlib.sha256(os.environ['HTTPS_PROXY'].encode()).hexdigest(), "
+        "'locale': hashlib.sha256(os.environ['LANG'].encode()).hexdigest()}))\n"
+        "    return 0\n",
+        encoding="utf-8",
+    )
+    proxy = "http://credential-do-not-print.invalid"
+    locale = "C.UTF-8"
+    returncode, stdout, stderr = admission._run_sealed_evaluator(
+        owner, (), timeout=5.0,
+        environ={
+            "HTTPS_PROXY": proxy, "LANG": locale, "PYTHONPATH": str(shadow),
+            "PYTHONHOME": str(shadow),
+            "SERENA_LIGHT_BACKEND_EVAL_OWNER_ROOT": str(tmp_path / "hostile-owner"),
+        },
+    )
+    assert returncode == 0, stderr.decode("utf-8", "replace")
+    assert json.loads(stdout) == {
+        "site": False, "keys": ["HTTPS_PROXY", "LANG"],
+        "proxy": sha256(proxy.encode()).hexdigest(), "locale": sha256(locale.encode()).hexdigest(),
+    }
+    assert proxy.encode() not in stdout + stderr
+    assert not marker.exists()

@@ -179,7 +179,10 @@ def _source_closure() -> tuple[tuple[str, str], ...]:
         raise IdentityError(f"cannot list the evaluator source closure {EVALUATOR_PACKAGE}: {error}") from error
     if not names:
         raise IdentityError(f"the evaluator source closure is empty: {EVALUATOR_PACKAGE}")
-    return tuple((name, sha256_bytes(_read_regular_file(EVALUATOR_PACKAGE / name))) for name in names)
+    closure = [(name, sha256_bytes(_read_regular_file(EVALUATOR_PACKAGE / name))) for name in names]
+    scripts_init = EVALUATION_OWNER_ROOT / "scripts" / "__init__.py"
+    closure.append(("scripts/__init__.py", sha256_bytes(_read_regular_file(scripts_init))))
+    return tuple(sorted(closure))
 
 
 def _production_closure() -> tuple[tuple[str, str], ...]:
@@ -195,10 +198,7 @@ def _require_no_shadowed_module(recorded: Mapping[str, str]) -> None:
     """Every imported evaluator module must be one of the files this closure recorded."""
 
     for name, module in tuple(sys.modules.items()):
-        if not name.startswith("scripts.backend_eval"):
-            continue
-        origin = getattr(module, "__file__", None)
-        if origin is None:
+        if name != "scripts" and not name.startswith("scripts.backend_eval"):
             continue
         if source_image_active():
             try:
@@ -206,8 +206,19 @@ def _require_no_shadowed_module(recorded: Mapping[str, str]) -> None:
             except SourceImageError as error:
                 raise IdentityError(str(error)) from error
             continue
+        origin = getattr(module, "__file__", None)
+        if origin is None:
+            raise IdentityError(
+                f"imported evaluator module {name} has no origin in the recorded closure"
+            )
         path = Path(origin).resolve()
-        if path.parent != EVALUATOR_PACKAGE or path.name not in recorded:
+        if name == "scripts":
+            owned = path == EVALUATION_OWNER_ROOT / "scripts" / "__init__.py"
+            recorded_name = "scripts/__init__.py"
+        else:
+            owned = path.parent == EVALUATOR_PACKAGE
+            recorded_name = path.name
+        if not owned or recorded_name not in recorded:
             raise IdentityError(f"imported evaluator module {name} is not part of the recorded closure: {path}")
 
 
@@ -222,7 +233,9 @@ def _source_commit(
     commit = revision.decode("utf-8", "replace").strip()
     if len(commit) not in {40, 64} or any(character not in "0123456789abcdef" for character in commit):
         return None, False
-    clean = _is_clean(EVALUATOR_PACKAGE, deadline)
+    clean = _is_clean(EVALUATOR_PACKAGE, deadline) and _is_clean(
+        EVALUATION_OWNER_ROOT / "scripts" / "__init__.py", deadline
+    )
     if source_image_active():
         clean = clean and _image_matches_current_checkout(source_files)
     return commit, clean
@@ -236,9 +249,17 @@ def _image_matches_current_checkout(source_files: tuple[tuple[str, str], ...]) -
         names = sorted(entry.name for entry in os.scandir(EVALUATOR_PACKAGE) if entry.name.endswith(".py"))
     except OSError as error:
         raise IdentityError(f"cannot compare the sealed evaluator with {EVALUATOR_PACKAGE}: {error}") from error
-    if names != sorted(recorded):
+    expected = [*names, "scripts/__init__.py"]
+    if sorted(expected) != sorted(recorded):
         return False
-    return all(sha256_bytes(_read_regular_file(EVALUATOR_PACKAGE / name)) == recorded[name] for name in names)
+    evaluator_matches = all(
+        sha256_bytes(_read_regular_file(EVALUATOR_PACKAGE / name)) == recorded[name]
+        for name in names
+    )
+    scripts_init = EVALUATION_OWNER_ROOT / "scripts" / "__init__.py"
+    return evaluator_matches and sha256_bytes(_read_regular_file(scripts_init)) == recorded[
+        "scripts/__init__.py"
+    ]
 
 
 def _is_clean(subtree: Path, deadline: Deadline | None) -> bool:

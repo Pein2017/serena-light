@@ -244,13 +244,19 @@ graph before `capture_evaluator_identity()` ran. A transient evaluator module co
 execute, restore its pathname, and let the later capture name the restored bytes. No second
 before/after disk hash can identify Python source that was already compiled.
 
-The command module now reaches a standard-library-only guard before any of those semantic
-imports. That transport bootstrap opens the checkout component by component without following
-links, reads every Python module in `scripts/backend_eval`, packs the complete closure into a
-deterministic zip image, seals its `memfd`, and launches an isolated `-I` child with that image
-as its only evaluator import root. `scripts` is a repository-owned regular package, so an
-ambient package of the same name cannot win before the guard; `-I` excludes `PYTHONPATH` and
-user site in the child. The outer monotonic origin is passed into `run_admission`, so image
+That package `-m` form is no longer receipt-producing. The canonical
+`python -I -S -B scripts/backend_eval_bootstrap.py` direct shim executes no package initializer
+before reaching the transport guard. Both sealed parent-package initializers are inert -- no
+imports, environment reads, or path mutation -- and their exact bytes are included in the
+image identity and cleanliness witness. The command module then reaches a standard-library-only guard before any semantic
+import. That transport bootstrap opens the checkout component by component without following
+links, reads both initializers and every Python module in `scripts/backend_eval`, packs the
+complete closure into a deterministic zip image, seals its `memfd`, and launches an isolated
+`-I -S -B` child with that image as its only evaluator import root. The child environment is
+reduced to the declared proxy, CA, and locale inputs, so Python startup cannot execute `.pth`,
+`sitecustomize`, site-packages, `PYTHONPATH`, or ambient internal owner/image controls. The
+child derives image state, owner, and deadline origin from the verified inherited descriptor
+and bootstrap arguments. The outer monotonic origin is passed into `run_admission`, so image
 capture and process startup consume the same frozen 1800-second phase budget rather than
 creating a new pre-deadline step.
 
@@ -263,9 +269,11 @@ executed image bytes determine `source_files` and `source_digest`, and the misma
 checkout witness unclean. The unavoidable root of trust is narrow and explicit: the original
 process executes only the transport code required to create, seal, start, relay, time out, and
 reap the image child; no receipt semantics or evaluator helper is imported there.
-The real-service `run_admission()` path also refuses when called from an ordinary disk import,
-before constructing production services, so the CLI cannot be bypassed by importing the
-orchestrator directly; dependency-injected unit tests retain their non-publishing seam.
+Every `run_admission()` path verifies the admission module's exact image loader and origin
+before constructing or invoking services, including explicit production or fake services and
+`main(..., services=...)`. Dependency-injected unit tests use `evaluate_admission()`, which
+returns the would-be receipt but cannot create a receipt path; publication stays exclusively
+behind the sealed-loader proof.
 
 **No production code runs in the evaluator process.** The first cut of this repair still
 imported `bounded_non_git_trust_inventory`, `_decode_git_path`, `_inventory_from_candidates`,

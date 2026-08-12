@@ -25,14 +25,16 @@ from scripts.backend_eval.admission import (
     AdmissionError,
     AdmissionRequest,
     ProductionAdmissionServices,
+    _Evidence,
     _Publication,
+    _publish_receipt,
     _read_artifact_bytes,
     admission_receipt_path,
     artifact_tree_digest,
+    evaluate_admission,
     evaluation_identity,
     main,
     new_run_identity,
-    run_admission,
 )
 from scripts.backend_eval.candidate_lock import CACHE_DIR_NAME, LOCK_FILE_NAME, CandidateLockError, CandidateLockRequest
 from scripts.backend_eval.identity import IdentityError
@@ -76,6 +78,21 @@ MANIFEST_DIGEST = "a" * 64
 REVISION = "a" * 40
 EXCLUDE_NEWER = "2026-08-11T00:00:00Z"
 COLLECT_WINDOW = ADMISSION_BUDGET_SECONDS - FINALIZATION_RESERVE_SECONDS
+
+
+def run_admission(
+    request: AdmissionRequest, *, services: object, clock: FakeClock
+) -> AdmissionReceipt:
+    """Evaluate with injected services, then unit-test the private publisher separately."""
+
+    receipt = evaluate_admission(request, services=services, clock=clock)  # type: ignore[arg-type]
+    evidence = _Evidence(
+        run_identity=receipt.run_identity,
+        evaluation_root=request.artifact_root / receipt.evaluation_identity,
+    )
+    deadline = Deadline(clock=clock, seconds=ADMISSION_BUDGET_SECONDS, started=0.0)
+    _publish_receipt(request, evidence, receipt, deadline)
+    return receipt
 
 
 # --- fixtures ------------------------------------------------------------------
@@ -1650,18 +1667,15 @@ def test_admission_issue_order_is_stable_across_identical_runs(request_: Admissi
 # --- the command line ----------------------------------------------------------------
 
 
-def test_cli_exits_zero_only_for_a_canonical_pass(
+def test_cli_dependency_injection_cannot_bypass_the_sealed_publisher(
     request_: AdmissionRequest, services: FakeServices, clock: FakeClock, capsys: pytest.CaptureFixture[str]
 ) -> None:
     exit_code = main(_argv(request_), services=services, clock=clock)
-    assert exit_code == 0
+    assert exit_code == 2
     out = capsys.readouterr().out
-    assert "status=pass" in out
-    assert f"next_action={NEXT_ACTION_PASS}" in out
-    assert "run_identity=" in out
-    assert "evaluator_source_digest=" in out
-    assert "runtime_manifest_sha256=" in out
-    assert "corpus_in_scope_paths=" in out
+    assert "status=incomplete" in out
+    assert "unsealed_evaluator_entrypoint" in out
+    assert services.order == []
 
 
 def test_cli_exits_two_for_a_hold(
@@ -1670,7 +1684,8 @@ def test_cli_exits_two_for_a_hold(
     services.identities = [_production_identity(), _production_identity(build_identity="7" * 64)]
     exit_code = main(_argv(request_), services=services, clock=clock)
     assert exit_code == 2
-    assert "status=hold" in capsys.readouterr().out
+    assert "unsealed_evaluator_entrypoint" in capsys.readouterr().out
+    assert services.order == []
 
 
 def test_cli_exits_two_when_no_receipt_can_be_published(
@@ -1681,7 +1696,8 @@ def test_cli_exits_two_when_no_receipt_can_be_published(
     assert exit_code == 2
     out = capsys.readouterr().out
     assert "status=incomplete" in out
-    assert "candidate_resolution_failed" in out
+    assert "unsealed_evaluator_entrypoint" in out
+    assert services.order == []
 
 
 def test_cli_rejects_a_malformed_freeze_timestamp(

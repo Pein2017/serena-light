@@ -55,8 +55,8 @@ run raises instead of publishing a receipt that would understate what is unknown
 
 from __future__ import annotations
 
-# ``python -m scripts.backend_eval.admission`` reaches this guard before any evaluator
-# semantic import below.  The parent is deliberately only a transport bootstrap: it freezes
+# The closed direct bootstrap reaches this guard before any evaluator semantic import below.
+# The parent is deliberately only a transport bootstrap: it freezes
 # the complete evaluator package into one sealed zip image and runs ``main`` from that image.
 # Regular imports (including tests) continue below and preserve the module's existing API.
 import ctypes as _bootstrap_ctypes
@@ -74,12 +74,6 @@ from collections.abc import Sequence as _BootstrapSequence
 from contextlib import suppress as _bootstrap_suppress
 from pathlib import Path as _BootstrapPath
 
-_SOURCE_IMAGE_ACTIVE_KEY = "SERENA_LIGHT_BACKEND_EVAL_SOURCE_IMAGE_ACTIVE"
-_SOURCE_IMAGE_FD_KEY = "SERENA_LIGHT_BACKEND_EVAL_SOURCE_IMAGE_FD"
-_SOURCE_IMAGE_PATH_KEY = "SERENA_LIGHT_BACKEND_EVAL_SOURCE_IMAGE_PATH"
-_SOURCE_IMAGE_OWNER_KEY = "SERENA_LIGHT_BACKEND_EVAL_OWNER_ROOT"
-_SOURCE_IMAGE_STARTED_KEY = "SERENA_LIGHT_BACKEND_EVAL_STARTED_MONOTONIC"
-_SOURCE_IMAGE_ACTIVE_VALUE = "1"
 _EVALUATOR_BOOTSTRAP_SECONDS = 1800.0
 _EVALUATOR_BOOTSTRAP_REAP_SECONDS = 20.0
 _EVALUATOR_BOOTSTRAP_GRACE_SECONDS = 5.0
@@ -93,19 +87,45 @@ _BOOTSTRAP_ALL_SEALS = 0x1 | 0x2 | 0x4 | 0x8
 _BOOTSTRAP_ZIP_TIME = (1980, 1, 1, 0, 0, 0)
 _BOOTSTRAP_ZIP_MODE = 0o100600 << 16
 _IMAGE_MAIN = b"""\
+import fcntl
 import importlib
 import os
+import stat
 import sys
+import types
 
-owner_root, image_fd = sys.argv[1:3]
-del sys.argv[1:3]
-os.environ["SERENA_LIGHT_BACKEND_EVAL_SOURCE_IMAGE_ACTIVE"] = "1"
-os.environ["SERENA_LIGHT_BACKEND_EVAL_SOURCE_IMAGE_FD"] = image_fd
-os.environ["SERENA_LIGHT_BACKEND_EVAL_SOURCE_IMAGE_PATH"] = sys.path[0]
-os.environ["SERENA_LIGHT_BACKEND_EVAL_OWNER_ROOT"] = owner_root
+owner_root, image_fd_raw, started_raw = sys.argv[1:4]
+del sys.argv[1:4]
+image_fd = int(image_fd_raw)
+image_path = "/proc/self/fd/" + image_fd_raw
+metadata = os.fstat(image_fd)
+if (
+    not os.path.isabs(owner_root)
+    or sys.path[0] != image_path
+    or not stat.S_ISREG(metadata.st_mode)
+    or fcntl.fcntl(image_fd, 1034) != 15
+):
+    raise SystemExit("invalid sealed evaluator bootstrap")
+started = float(started_raw)
+if started < 0:
+    raise SystemExit("invalid sealed evaluator deadline origin")
+context = types.ModuleType("_serena_light_backend_eval_bootstrap")
+context.image_fd = image_fd
+context.image_path = image_path
+context.owner_root = owner_root
+context.started = started
+sys.modules[context.__name__] = context
 module = importlib.import_module("scripts.backend_eval.admission")
 raise SystemExit(module.main())
 """
+
+# These values alone cross from the ambient command into the isolated image.  They are the
+# same external network/CA/locale inputs whose *digests* the receipt records later.
+_BOOTSTRAP_INHERITED_KEYS = (
+    "ALL_PROXY", "CURL_CA_BUNDLE", "HTTPS_PROXY", "HTTP_PROXY", "LANG", "LC_ALL",
+    "LC_CTYPE", "NO_PROXY", "REQUESTS_CA_BUNDLE", "SSL_CERT_DIR", "SSL_CERT_FILE",
+    "all_proxy", "http_proxy", "https_proxy", "no_proxy",
+)
 
 
 class EvaluatorBootstrapError(RuntimeError):
@@ -296,15 +316,16 @@ def _run_sealed_evaluator(
     if remaining <= 0:
         raise EvaluatorBootstrapTimeout("the evaluator source image exhausted the command deadline")
     image_fd = _sealed_evaluator_image(image)
-    child_environment = dict(environ)
-    child_environment[_SOURCE_IMAGE_STARTED_KEY] = repr(started)
+    child_environment = {key: environ[key] for key in _BOOTSTRAP_INHERITED_KEYS if key in environ}
     command = (
         _bootstrap_sys.executable,
         "-I",
+        "-S",
         "-B",
         f"/proc/self/fd/{image_fd}",
         str(owner_root),
         str(image_fd),
+        repr(started),
         *argv,
     )
     try:
@@ -354,6 +375,12 @@ def _bootstrap_command() -> int:
 
 
 if __name__ == "__main__":
+    if __spec__ is not None:
+        _bootstrap_sys.stderr.write(
+            "python -m scripts.backend_eval.admission is not a receipt-producing entrypoint; "
+            "use python -I -S -B scripts/backend_eval_bootstrap.py\n"
+        )
+        raise SystemExit(2)
     raise SystemExit(_bootstrap_command())
 
 import argparse
@@ -421,7 +448,7 @@ from scripts.backend_eval.runtime import (
     runtime_manifest_digest,
 )
 from scripts.backend_eval.source_binding import HelperExpectation, SourceBindingError
-from scripts.backend_eval.source_image import SourceImageError, source_image_active, source_image_started
+from scripts.backend_eval.source_image import SourceImageError, require_sealed_execution, source_image_started
 from scripts.backend_eval.write_guard import (
     WriteGuardError,
     assert_no_unexpected_writes,
@@ -447,6 +474,7 @@ __all__ = [
     "ProductionAdmissionServices",
     "admission_receipt_path",
     "artifact_tree_digest",
+    "evaluate_admission",
     "evaluation_identity",
     "main",
     "monotonic_clock",
@@ -1030,13 +1058,46 @@ def run_admission(
     the run actually observed.
     """
 
-    if services is None and not source_image_active():
+    try:
+        require_sealed_execution()
+    except SourceImageError as exc:
         raise _fail(
             "incomplete",
             "unsealed_evaluator_entrypoint",
-            "production admission must run through python -m scripts.backend_eval.admission "
-            "so its complete evaluator closure executes from one sealed source image",
-        )
+            f"production admission requires the exact sealed evaluator loader: {exc}",
+        ) from exc
+    receipt, evidence, finalize = _execute_admission(request, services=services, clock=clock)
+    with _translated("incomplete", "admission_deadline_exceeded"):
+        finalize.check("publish_receipt")
+    _publish_receipt(request, evidence, receipt, finalize)
+    return receipt
+
+
+def evaluate_admission(
+    request: AdmissionRequest,
+    *,
+    services: AdmissionServices,
+    clock: Clock = monotonic_clock,
+) -> AdmissionReceipt:
+    """Exercise injected orchestration without creating a receipt path.
+
+    This is deliberately not an admission or publication API.  It exists for deterministic
+    dependency-injected tests; only :func:`run_admission` can link canonical evidence, and it
+    first proves the exact sealed image loader regardless of which services were supplied.
+    """
+
+    receipt, _evidence, _finalize = _execute_admission(request, services=services, clock=clock)
+    return receipt
+
+
+def _execute_admission(
+    request: AdmissionRequest,
+    *,
+    services: AdmissionServices | None,
+    clock: Clock,
+) -> tuple[AdmissionReceipt, _Evidence, Deadline]:
+    """Shared non-publishing orchestration and its private publication state."""
+
     active = ProductionAdmissionServices() if services is None else services
     try:
         bootstrap_started = source_image_started() if clock is monotonic_clock else None
@@ -1069,10 +1130,7 @@ def run_admission(
     receipt = _build_receipt(
         request, active, evidence, status=status, started_at=started_at, failure=failure, deadline=finalize
     )
-    with _translated("incomplete", "admission_deadline_exceeded"):
-        finalize.check("publish_receipt")
-    _publish_receipt(request, evidence, receipt, finalize)
-    return receipt
+    return receipt, evidence, finalize
 
 
 def _collect(
@@ -1803,7 +1861,7 @@ def _utc_now() -> str:
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="python -m scripts.backend_eval.admission",
+        prog="python -I -S -B scripts/backend_eval_bootstrap.py",
         description="Run the Phase 1 backend-evaluation admission gate and publish its receipt.",
     )
     parser.add_argument("--repo-root", required=True, type=Path)
@@ -1835,6 +1893,16 @@ def main(
         )
     except ValueError as exc:
         print(f"status=incomplete code=invalid_request detail={exc}")
+        return 2
+    try:
+        require_sealed_execution()
+    except SourceImageError as exc:
+        print("status=incomplete")
+        detail = f"production admission requires the exact sealed evaluator loader: {exc}"
+        print(
+            f"issue={_issue(request, 'unsealed_evaluator_entrypoint', detail)}"
+        )
+        print(f"next_action={NEXT_ACTION_HOLD}")
         return 2
     active = ProductionAdmissionServices() if services is None else services
     try:

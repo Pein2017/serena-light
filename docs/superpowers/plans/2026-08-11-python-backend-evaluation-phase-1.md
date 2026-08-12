@@ -390,7 +390,7 @@ git commit -m "Detect backend evaluation workspace writes"
 **Interfaces:**
 - Consumes all Task 1–5 interfaces.
 - Produces: `run_admission(request: AdmissionRequest, *, clock: Clock = monotonic_clock) -> AdmissionReceipt`
-- Produces CLI: `python -m scripts.backend_eval.admission --repo-root ABS --artifact-root ABS --runtime-base ABS --uv ABS --python ABS --exclude-newer RFC3339`
+- Produces CLI: `python -I -S -B scripts/backend_eval_bootstrap.py --repo-root ABS --artifact-root ABS --runtime-base ABS --uv ABS --python ABS --exclude-newer RFC3339`
 - Exit `0` only for canonical PASS; exit `2` for typed admission HOLD/incomplete; never print secrets or full source paths beyond the declared roots.
 
 - [ ] **Step 1: Write failing orchestration tests**
@@ -447,7 +447,7 @@ Resolve a fresh UTC freeze timestamp once, print it into the command transcript,
 backend_eval_freeze_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 test -n "$backend_eval_freeze_at"
 echo "$backend_eval_freeze_at"
-conda run -n ms python -m scripts.backend_eval.admission \
+conda run -n ms python -I -S -B scripts/backend_eval_bootstrap.py \
   --repo-root /data/CoordExp/serena-light \
   --artifact-root /data/CoordExp/serena-light/.admission-artifacts/backend-eval \
   --runtime-base /data/CoordExp/.codex/runtime/serena-light/backend-eval \

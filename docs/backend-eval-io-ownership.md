@@ -168,8 +168,9 @@ The child guarantees:
   child refuses an unexpected extra module, a missing expected module, and any module that
   arrived through a loader other than the image's; the parent independently refuses a reported
   closure that is not exactly the expected one.
-* **No ambient shadowing.** `-I` refuses `PYTHONPATH` and the user site directory, the
-  environment carries no `PATH`, and the child strips its own directory from `sys.path`
+* **No ambient shadowing.** `-I -S -B` refuses `PYTHONPATH`, skips `site`, `.pth`,
+  `sitecustomize`, site-packages, and the user site directory; the transport environment
+  contains only declared proxy, CA, and locale values, and the child strips its own directory from `sys.path`
   before importing anything but the standard library -- so the ambient `scripts` namespace
   package that shadows this repository under a bare `ms` interpreter cannot reach it.
 * **Canonically bound I/O.** Request and response are canonical JSON, the response must
@@ -215,7 +216,7 @@ executables, not this one, so no receipt field changed.
 
 | Module | What it owns |
 | --- | --- |
-| `__init__.py` | one `realpath` of its own file, to bind `serena_light` to this checkout |
+| `__init__.py` | no filesystem access; both parent-package initializers are inert |
 | `admission.py` | the pre-import evaluator image bootstrap, bounded image child, artifact tree digest, receipt publication, publication lock, and evaluation directory |
 | `candidate_lock.py` | the frozen candidate-lock transaction below the artifact root |
 | `identity.py` | the evaluator's own executed source closure |
@@ -285,7 +286,8 @@ claiming a guarantee the kernel does not offer.
    change: it is a claim that a changed file cannot run, in this run or in any other run in
    the same process, and that a late change is caught by the pre-publication identity
    re-capture rather than published as a `pass`.
-9. **The original command process is a transport root of trust.** Python must compile enough
+9. **The original command process is a transport root of trust.** The closed direct bootstrap
+   runs no package initializer; the image's inert initializers are bound as sealed entries. Python then compiles enough
    code to create the first immutable source image. That process imports no evaluator semantic
    module: it only confines and reads the closure, creates and seals the image, starts the
    isolated child, relays bytes and exit status, enforces an outer bound, and kills/reaps the

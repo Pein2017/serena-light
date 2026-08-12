@@ -259,12 +259,12 @@ The frozen evaluation contract SHALL cap active wall time at 30 minutes for mani
 - **THEN** the helper runs as its exact unmodified production bytes inside a child that receives the phase's remaining time, runs in its own session, and has its whole process group killed on expiry, so the phase fails typed inside its ceiling instead of hanging, and no evaluation-owned copy of the helper's semantics is used in its place
 
 #### Scenario: The evaluator command starts
-- **WHEN** `python -m scripts.backend_eval.admission` starts a receipt-producing execution
-- **THEN** its process performs only a standard-library transport bootstrap before reading the complete `scripts/backend_eval` Python closure through component-wise no-follow descriptors, packing those exact bytes into one sealed immutable source image, and starting the actual evaluator from that image in an isolated bounded child; the child imports no evaluator module from the checkout, an ambient `scripts` package, `PYTHONPATH`, or user site, the phase deadline starts before image capture, and the published evaluator identity derives its source-file digests from the same sealed image bytes the child imports
+- **WHEN** `python -I -S -B scripts/backend_eval_bootstrap.py` starts a receipt-producing execution
+- **THEN** no package initializer runs before the standard-library transport bootstrap reads both inert initializer files and the complete `scripts/backend_eval` Python closure through component-wise no-follow descriptors, packs those exact bytes into one sealed immutable source image, and starts the actual evaluator under `-I -S -B`; the child receives only the declared proxy, CA, and locale inputs, derives its owner, deadline origin, and active-image state from the inherited sealed descriptor and bootstrap arguments rather than ambient internal-looking variables, imports no evaluator module from the checkout, ambient `PYTHONPATH`, `.pth`, `sitecustomize`, user site, or site-packages, and derives the published evaluator identity from the exact image bytes it imports; the legacy package `-m` form is not receipt-producing because Python would execute its package initializers before the guard
 
 #### Scenario: Production admission is called outside the sealed command
-- **WHEN** a caller imports the evaluator from disk and invokes real admission services in that process
-- **THEN** admission refuses before constructing those services or performing any evaluation action, while dependency-injected unit tests may still exercise the pure orchestration seam without publishing production evidence
+- **WHEN** a caller imports the evaluator from disk and invokes admission with default services, explicit production services, dependency-injected services, or through `main(..., services=...)`
+- **THEN** admission refuses before constructing or invoking those services or creating any receipt path unless the admission module proves its exact loader and origin against the inherited sealed image; dependency-injected unit tests use a separate non-publishing orchestration seam
 
 #### Scenario: A production helper is executed in a child
 - **WHEN** the sealed evaluator starts a production-helper child

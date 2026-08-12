@@ -30,6 +30,7 @@ def test_evaluator_identity_binds_the_executed_source_closure_and_host() -> None
     recorded = dict(identity.source_files)
     assert "admission.py" in recorded
     assert "models.py" in recorded
+    assert "scripts/__init__.py" in recorded
     assert recorded["models.py"] == sha256_bytes((EVALUATOR_PACKAGE / "models.py").read_bytes())
     assert identity.host_python_path == sys.executable
     assert Path(identity.host_python_realpath).is_file()
@@ -49,6 +50,13 @@ def test_evaluator_identity_refuses_a_shadowed_module(monkeypatch: pytest.Monkey
     shadow.__file__ = "/tmp/elsewhere/shadow.py"
     monkeypatch.setitem(sys.modules, "scripts.backend_eval.shadow", shadow)
     with pytest.raises(IdentityError, match="not part of the recorded closure"):
+        capture_evaluator_identity()
+
+
+def test_evaluator_identity_refuses_a_fileless_module(monkeypatch: pytest.MonkeyPatch) -> None:
+    shadow = types.ModuleType("scripts.backend_eval.fileless")
+    monkeypatch.setitem(sys.modules, shadow.__name__, shadow)
+    with pytest.raises(IdentityError, match="has no origin"):
         capture_evaluator_identity()
 
 
