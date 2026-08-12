@@ -84,6 +84,7 @@ from scripts.backend_eval.production_identity import (
     assert_production_identity_unchanged,
     capture_production_identity,
 )
+from scripts.backend_eval.source_binding import HelperExpectation
 
 __all__ = [
     "ARTIFACT_ROOT_BASE_PARTS",
@@ -169,6 +170,7 @@ class CandidateLockRequest:
 def compile_candidate_lock(
     request: CandidateLockRequest,
     *,
+    expectation: HelperExpectation,
     runner: CommandRunner = subprocess_runner,
     recompile: bool = False,
     deadline: Deadline | None = None,
@@ -183,7 +185,7 @@ def compile_candidate_lock(
     the prior freeze or leaves no reusable freeze at all.
     """
 
-    before = capture_production_identity(request.repo_root, deadline=deadline)
+    before = capture_production_identity(request.repo_root, expectation=expectation, deadline=deadline)
     try:
         with (
             _artifact_directory(request) as dir_fd,
@@ -198,27 +200,34 @@ def compile_candidate_lock(
             if frozen_lock is not None and not recompile:
                 lock = _accept_frozen_lock(request, command, dir_fd, frozen_lock, frozen_receipt)
                 _assert_production_identity_unchanged(
-                    before, request.repo_root, cause=None, deadline=deadline
+                    before, request.repo_root, expectation, cause=None, deadline=deadline
                 )
                 return lock
             return _resolve_candidate_lock(
-                request, runner, command, dir_fd, before, frozen_lock, frozen_receipt, deadline
+                request, runner, command, dir_fd, before, frozen_lock, frozen_receipt, expectation, deadline
             )
     except BaseException as exc:
         # Drift raised inside the transaction is already the authoritative error.
         if not isinstance(exc, ProductionIdentityError):
-            _assert_production_identity_unchanged(before, request.repo_root, cause=exc, deadline=deadline)
+            _assert_production_identity_unchanged(
+                before, request.repo_root, expectation, cause=exc, deadline=deadline
+            )
         raise
 
 
 def _assert_production_identity_unchanged(
-    before: ProductionIdentity, repo_root: Path, *, cause: BaseException | None, deadline: Deadline | None
+    before: ProductionIdentity,
+    repo_root: Path,
+    expectation: HelperExpectation,
+    *,
+    cause: BaseException | None,
+    deadline: Deadline | None,
 ) -> None:
     """Re-check production identity; drift outranks and chains the failure that caused it."""
 
     try:
         assert_production_identity_unchanged(
-            before, capture_production_identity(repo_root, deadline=deadline)
+            before, capture_production_identity(repo_root, expectation=expectation, deadline=deadline)
         )
     except ProductionIdentityError as identity_error:
         if cause is None:
@@ -234,6 +243,7 @@ def _resolve_candidate_lock(
     before: ProductionIdentity,
     frozen_lock: bytes | None,
     frozen_receipt: bytes | None,
+    expectation: HelperExpectation,
     deadline: Deadline | None = None,
 ) -> CandidateLock:
     """Resolve once inside a durable transaction that publishes only a validated freeze."""
@@ -264,7 +274,9 @@ def _resolve_candidate_lock(
             lock = _build_lock(request, lock_bytes)
             # Production identity is validated inside the transaction: the receipt is published
             # only for a resolution that provably left production untouched.
-            _assert_production_identity_unchanged(before, request.repo_root, cause=None, deadline=deadline)
+            _assert_production_identity_unchanged(
+                before, request.repo_root, expectation, cause=None, deadline=deadline
+            )
             # The lock contents must be durable before anything published depends on them.
             _fsync_file(lock_fd, LOCK_FILE_NAME)
         _write_artifact(dir_fd, RECEIPT_FILE_NAME, _receipt_bytes(command, CANONICAL_REQUIREMENTS_BYTES, lock))

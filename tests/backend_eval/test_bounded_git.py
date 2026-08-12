@@ -28,6 +28,7 @@ from scripts.backend_eval.manifests import (
 )
 from scripts.backend_eval.process import CommandBytesResult, Deadline, monotonic_clock, run_bounded_bytes
 from serena_light.workspace.inventory import git_trust_inventory
+from tests.backend_eval.support import real_expectation
 
 COMBINED_LS_FILES = ("ls-files", "--cached", "--others", "--exclude-standard", "-z")
 
@@ -147,7 +148,7 @@ def test_git_manifest_capture_succeeds_with_the_unbounded_helper_forbidden(
 
     monkeypatch.setattr(inventory_module, "git_trust_inventory", _forbidden)
 
-    manifest = capture_root_manifest(_request(root))
+    manifest = capture_root_manifest(_request(root), expectation=real_expectation())
 
     assert manifest.inventory_digest == expected.digest
     assert manifest.inventory_count == expected.count
@@ -156,7 +157,7 @@ def test_git_manifest_capture_succeeds_with_the_unbounded_helper_forbidden(
     # A rejected candidate still stops the capture, exactly as before.
     (root / "escape.py").symlink_to(tmp_path / "absent-target.py")
     with pytest.raises(manifests.ManifestError, match="trust inventory rejected"):
-        capture_root_manifest(_request(root))
+        capture_root_manifest(_request(root), expectation=real_expectation())
 
 
 # --- subprocess accounting ------------------------------------------------------------
@@ -210,14 +211,14 @@ def test_every_child_of_a_capture_comes_through_the_bounded_runner(
     monkeypatch.setattr(subprocess, "Popen", recording_popen)
     monkeypatch.setattr(subprocess, "run", forbidden_run)
 
-    capture_root_manifest(_request(root), deadline=deadline)
+    capture_root_manifest(_request(root), deadline=deadline, expectation=real_expectation())
 
     # One child per bounded call and no others: nothing spawned a process another way, and
     # every one of them got its own session so its whole group can be killed on expiry.
     assert len(spawned) == len(bounded) > 0
     assert [tuple(command) for command in spawned] == [command for command, _timeout in bounded]
     assert sessions == [True] * len(spawned)
-    git_commands = [command for command, _timeout in bounded if command[0] == manifests._GIT_EXECUTABLE]
+    git_commands = [command for command, _timeout in bounded if command[0] == str(manifests.GIT_EXECUTABLE)]
     # One `--show-toplevel` guard, then four bounded Git children per freeze state, twice.
     assert [command[1:] for command in git_commands] == [
         ("rev-parse", "--show-toplevel"),
@@ -230,7 +231,7 @@ def test_every_child_of_a_capture_comes_through_the_bounded_runner(
         ],
     ]
     # Exactly one bounded digest child, executing the production helper under -I.
-    helpers = [command for command, _timeout in bounded if command[0] != manifests._GIT_EXECUTABLE]
+    helpers = [command for command, _timeout in bounded if command[0] != str(manifests.GIT_EXECUTABLE)]
     assert len(helpers) == 1
     assert helpers[0][1:3] == ("-I", "-B")
     # The program is a sealed in-memory image addressed by descriptor, never a pathname.
@@ -256,7 +257,7 @@ def test_a_capture_without_a_deadline_still_only_uses_the_bounded_runner(
     monkeypatch.setattr(manifests, "run_bounded_bytes", recording_bounded)
     monkeypatch.setattr(subprocess, "run", lambda *a, **k: (_ for _ in ()).throw(AssertionError("unbounded run")))
 
-    capture_root_manifest(_request(root))
+    capture_root_manifest(_request(root), expectation=real_expectation())
 
     assert len(calls) == 9, "one root guard plus two freeze states of four bounded children"
 
@@ -274,4 +275,4 @@ def test_a_hung_git_child_stops_the_capture(tmp_path: Path, monkeypatch: pytest.
     monkeypatch.setattr(manifests, "run_bounded_bytes", hanging_bounded)
 
     with pytest.raises(manifests.ManifestError, match="timed out"):
-        capture_root_manifest(_request(root))
+        capture_root_manifest(_request(root), expectation=real_expectation())

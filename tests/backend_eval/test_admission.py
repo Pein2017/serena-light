@@ -8,6 +8,7 @@ import inspect
 import itertools
 import json
 import os
+import shutil
 import stat
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -64,6 +65,11 @@ from scripts.backend_eval.runtime import (
     RuntimePreparationError,
     RuntimeRequest,
 )
+from scripts.backend_eval.source_binding import (
+    CHILD_EXECUTED_HELPERS,
+    PRODUCTION_CHILD_NAME,
+    HelperExpectation,
+)
 
 LOCK_DIGEST = "1" * 64
 MANIFEST_DIGEST = "a" * 64
@@ -86,13 +92,24 @@ def _production_identity(*, build_identity: str = "b" * 64) -> ProductionIdentit
     )
 
 
-def _evaluator(*, source_digest_seed: str = "9") -> EvaluatorIdentity:
+def _evaluator(*, source_digest_seed: str = "9", child_digest_seed: str = "4") -> EvaluatorIdentity:
+    """A synthetic identity that can still produce an execution expectation.
+
+    Admission derives the production-helper expectation from this identity before any child
+    may run, so the identity has to name the child program and every declared child-executed
+    helper -- exactly the completeness the real capture provides.
+    """
+
     return EvaluatorIdentity.build(
-        source_files=(("admission.py", source_digest_seed * 64), ("models.py", "8" * 64)),
+        source_files=(
+            ("admission.py", source_digest_seed * 64),
+            ("models.py", "8" * 64),
+            (PRODUCTION_CHILD_NAME, child_digest_seed * 64),
+        ),
         source_commit="7" * 40,
         source_clean=True,
         production_root="/data/CoordExp/serena-light/src",
-        production_files=(("src/serena_light/workspace/inventory.py", "5" * 64),),
+        production_files=tuple((relative, "5" * 64) for relative in CHILD_EXECUTED_HELPERS),
         production_clean=True,
         host_python_path="/data/CoordExp/.worktrees/serena-light-backend-eval/.venv/bin/python",
         host_python_realpath="/root/miniconda3/envs/ms/bin/python3.12",
@@ -246,6 +263,9 @@ class FakeServices:
     runtime_requests: list[RuntimeRequest] = field(default_factory=list)
     identity_calls: int = 0
     corpus_calls: int = 0
+    evaluator_calls: int = 0
+    evaluator_final: EvaluatorIdentity | None = None
+    expectations: list[tuple[str, HelperExpectation]] = field(default_factory=list)
     cleanup_stages: list[str] = field(default_factory=list)
     digest_calls: int = 0
     order: list[str] = field(default_factory=list)
@@ -267,24 +287,34 @@ class FakeServices:
 
     def capture_evaluator_identity(self, deadline: Deadline) -> EvaluatorIdentity:
         assert isinstance(deadline, Deadline)
-        self._enter("evaluator")
+        # The second capture is the pre-publication bracket, and it is a separate step.
+        self.evaluator_calls += 1
+        self._enter("evaluator" if self.evaluator_calls == 1 else "evaluator_final")
+        if self.evaluator_final is not None and self.evaluator_calls > 1:
+            return self.evaluator_final
         return self.evaluator or _evaluator()
 
     def capture_bootstrap_environment(self) -> BootstrapEnvironmentIdentity:
         self._enter("bootstrap")
         return _bootstrap()
 
-    def capture_production_identity(self, repo_root: Path, deadline: Deadline) -> ProductionIdentity:
+    def capture_production_identity(
+        self, repo_root: Path, deadline: Deadline, expectation: HelperExpectation
+    ) -> ProductionIdentity:
         assert repo_root.is_absolute()
         assert isinstance(deadline, Deadline)
+        self.expectations.append(("capture_production_identity", expectation))
         step = ("identity_before", "identity_after", "identity_final")[min(self.identity_calls, 2)]
         self.identity_calls += 1
         self._enter(step)
         index = min(self.identity_calls - 1, len(self.identities) - 1)
         return self.identities[index]
 
-    def compile_candidate_lock(self, request: CandidateLockRequest, deadline: Deadline) -> CandidateLock:
+    def compile_candidate_lock(
+        self, request: CandidateLockRequest, deadline: Deadline, expectation: HelperExpectation
+    ) -> CandidateLock:
         assert isinstance(deadline, Deadline)
+        self.expectations.append(("compile_candidate_lock", expectation))
         self.lock_requests.append(request)
         self._enter("candidate_lock")
         assert self.lock is not None
@@ -293,9 +323,14 @@ class FakeServices:
         return self.lock
 
     def prepare_candidate_runtime(
-        self, lock: CandidateLock, request: RuntimeRequest, deadline: Deadline
+        self,
+        lock: CandidateLock,
+        request: RuntimeRequest,
+        deadline: Deadline,
+        expectation: HelperExpectation,
     ) -> CandidateRuntime:
         assert isinstance(deadline, Deadline)
+        self.expectations.append(("prepare_candidate_runtime", expectation))
         self.runtime_requests.append(request)
         self._enter("runtime")
         return _candidate_runtime(self.runtime_base)
@@ -305,23 +340,33 @@ class FakeServices:
         self._enter("runtime_manifest")
         return self.manifest_digest
 
-    def capture_corpus(self, deadline: Deadline) -> tuple[RootManifest, ...]:
+    def capture_corpus(
+        self, deadline: Deadline, expectation: HelperExpectation
+    ) -> tuple[RootManifest, ...]:
         assert isinstance(deadline, Deadline)
+        self.expectations.append(("capture_corpus", expectation))
         step = "corpus_before" if self.corpus_calls == 0 else "corpus_after"
         self.corpus_calls += 1
         self._enter(step)
         index = min(self.corpus_calls - 1, len(self.corpora) - 1)
         return self.corpora[index]
 
-    def artifact_tree_digest(self, artifact_root: Path, deadline: Deadline) -> str:
+    def artifact_tree_digest(self, owner_root: Path, evaluation_root: Path, deadline: Deadline) -> str:
         assert isinstance(deadline, Deadline)
+        assert evaluation_root.is_relative_to(owner_root)
         self.digest_calls += 1
         self._enter("artifact_digest")
-        return artifact_tree_digest(artifact_root)
+        return artifact_tree_digest(owner_root, evaluation_root)
 
     def cleanup(
-        self, evaluation_root: Path, run_identity: str, stage: str, deadline: Deadline
+        self,
+        owner_root: Path,
+        evaluation_root: Path,
+        run_identity: str,
+        stage: str,
+        deadline: Deadline,
     ) -> tuple[str, ...]:
+        assert evaluation_root.is_relative_to(owner_root)
         assert len(run_identity) == 64
         assert isinstance(deadline, Deadline)
         self.clock.advance(self.step_seconds.get("cleanup", 0.0))
@@ -352,30 +397,45 @@ class _DriftingServices:
     def capture_bootstrap_environment(self) -> BootstrapEnvironmentIdentity:
         return self.inner.capture_bootstrap_environment()
 
-    def capture_production_identity(self, repo_root: Path, deadline: Deadline) -> ProductionIdentity:
-        return self.inner.capture_production_identity(repo_root, deadline)
+    def capture_production_identity(
+        self, repo_root: Path, deadline: Deadline, expectation: HelperExpectation
+    ) -> ProductionIdentity:
+        return self.inner.capture_production_identity(repo_root, deadline, expectation)
 
-    def compile_candidate_lock(self, request: CandidateLockRequest, deadline: Deadline) -> CandidateLock:
-        return self.inner.compile_candidate_lock(request, deadline)
+    def compile_candidate_lock(
+        self, request: CandidateLockRequest, deadline: Deadline, expectation: HelperExpectation
+    ) -> CandidateLock:
+        return self.inner.compile_candidate_lock(request, deadline, expectation)
 
     def prepare_candidate_runtime(
-        self, lock: CandidateLock, request: RuntimeRequest, deadline: Deadline
+        self,
+        lock: CandidateLock,
+        request: RuntimeRequest,
+        deadline: Deadline,
+        expectation: HelperExpectation,
     ) -> CandidateRuntime:
-        return self.inner.prepare_candidate_runtime(lock, request, deadline)
+        return self.inner.prepare_candidate_runtime(lock, request, deadline, expectation)
 
     def runtime_manifest_digest(self, root: Path) -> str:
         return self.inner.runtime_manifest_digest(root)
 
-    def capture_corpus(self, deadline: Deadline) -> tuple[RootManifest, ...]:
-        return self.inner.capture_corpus(deadline)
+    def capture_corpus(
+        self, deadline: Deadline, expectation: HelperExpectation
+    ) -> tuple[RootManifest, ...]:
+        return self.inner.capture_corpus(deadline, expectation)
 
-    def artifact_tree_digest(self, artifact_root: Path, deadline: Deadline) -> str:
-        return self.inner.artifact_tree_digest(artifact_root, deadline)
+    def artifact_tree_digest(self, owner_root: Path, evaluation_root: Path, deadline: Deadline) -> str:
+        return self.inner.artifact_tree_digest(owner_root, evaluation_root, deadline)
 
     def cleanup(
-        self, evaluation_root: Path, run_identity: str, stage: str, deadline: Deadline
+        self,
+        owner_root: Path,
+        evaluation_root: Path,
+        run_identity: str,
+        stage: str,
+        deadline: Deadline,
     ) -> tuple[str, ...]:
-        summary = self.inner.cleanup(evaluation_root, run_identity, stage, deadline)
+        summary = self.inner.cleanup(owner_root, evaluation_root, run_identity, stage, deadline)
         self.inner.clock.drift = self.drift
         return summary
 
@@ -617,14 +677,14 @@ def test_artifact_tree_digest_excludes_the_receipts_and_the_resolver_cache(tmp_p
     (root / CACHE_DIR_NAME).mkdir(parents=True)
     (root / CACHE_DIR_NAME / "blob").write_bytes(b"volatile")
     (root / LOCK_FILE_NAME).write_bytes(b"ty==0.0.70\n")
-    baseline = artifact_tree_digest(root)
+    baseline = artifact_tree_digest(tmp_path, root)
     (root / RECEIPTS_DIR_NAME).mkdir()
     (root / RECEIPTS_DIR_NAME / "abc.json").write_bytes(b"{}\n")
     (root / PUBLICATION_LOCK_NAME).write_bytes(b"")
     (root / CACHE_DIR_NAME / "blob").write_bytes(b"changed")
-    assert artifact_tree_digest(root) == baseline
+    assert artifact_tree_digest(tmp_path, root) == baseline
     (root / LOCK_FILE_NAME).write_bytes(b"ty==0.0.71\n")
-    assert artifact_tree_digest(root) != baseline
+    assert artifact_tree_digest(tmp_path, root) != baseline
 
 
 def test_a_third_party_cache_file_keeps_its_tool_mode_behind_owned_ancestors(tmp_path: Path) -> None:
@@ -639,13 +699,13 @@ def test_a_third_party_cache_file_keeps_its_tool_mode_behind_owned_ancestors(tmp
     root = tmp_path / "artifacts"
     (root / CACHE_DIR_NAME / "uv").mkdir(parents=True)
     (root / LOCK_FILE_NAME).write_bytes(b"ty==0.0.70\n")
-    baseline = artifact_tree_digest(root)
+    baseline = artifact_tree_digest(tmp_path, root)
 
     tool_lock = root / CACHE_DIR_NAME / "uv" / ".lock"
     tool_lock.write_bytes(b"")
     os.chmod(tool_lock, 0o777)
 
-    assert artifact_tree_digest(root) == baseline
+    assert artifact_tree_digest(tmp_path, root) == baseline
     assert stat.S_IMODE(tool_lock.stat().st_mode) == 0o777
 
 
@@ -672,7 +732,7 @@ def test_artifact_tree_digest_refuses_a_symlinked_artifact(tmp_path: Path) -> No
     (tmp_path / "outside").write_bytes(b"payload")
     (root / "link").symlink_to(tmp_path / "outside")
     with pytest.raises(AdmissionError, match="symlink"):
-        artifact_tree_digest(root)
+        artifact_tree_digest(tmp_path, root)
 
 
 def test_artifact_tree_digest_refuses_a_symlinked_subdirectory(tmp_path: Path) -> None:
@@ -683,7 +743,7 @@ def test_artifact_tree_digest_refuses_a_symlinked_subdirectory(tmp_path: Path) -
     (outside / "secret").write_bytes(b"secret")
     (root / "nested" / "link").symlink_to(outside, target_is_directory=True)
     with pytest.raises(AdmissionError, match="symlink"):
-        artifact_tree_digest(root)
+        artifact_tree_digest(tmp_path, root)
 
 
 def test_artifact_tree_digest_refuses_a_special_file(tmp_path: Path) -> None:
@@ -691,7 +751,7 @@ def test_artifact_tree_digest_refuses_a_special_file(tmp_path: Path) -> None:
     root.mkdir()
     os.mkfifo(root / "pipe")
     with pytest.raises(AdmissionError, match="special file"):
-        artifact_tree_digest(root)
+        artifact_tree_digest(tmp_path, root)
 
 
 def test_read_artifact_bytes_refuses_a_fifo_promptly(tmp_path: Path) -> None:
@@ -733,7 +793,7 @@ def test_artifact_tree_digest_stops_cooperatively(tmp_path: Path) -> None:
         raise _Stop("the ceiling was reached during the artifact traversal")
 
     with pytest.raises(_Stop):
-        artifact_tree_digest(root, check=_check)
+        artifact_tree_digest(tmp_path, root, check=_check)
 
 
 # --- the deadline ---------------------------------------------------------------
@@ -1036,12 +1096,12 @@ def test_the_production_cleanup_receives_and_honours_the_deadline(tmp_path: Path
     expired = Deadline.start(clock, 10.0)
     clock.advance(11.0)
     with pytest.raises(DeadlineExceeded, match="cleanup:open"):
-        ProductionAdmissionServices().cleanup(evaluation_root, run_identity, "pass", expired)
+        ProductionAdmissionServices().cleanup(tmp_path, evaluation_root, run_identity, "pass", expired)
     # Refusing early means the temporary is still there for a run that has budget left.
     assert (evaluation_root / RECEIPTS_DIR_NAME / f".{run_identity}.json.tmp").is_file()
 
     live = Deadline.start(FakeClock(), 100.0)
-    assert ProductionAdmissionServices().cleanup(evaluation_root, run_identity, "pass", live) == (
+    assert ProductionAdmissionServices().cleanup(tmp_path, evaluation_root, run_identity, "pass", live) == (
         "removed_temporary_receipt",
     )
     assert not (evaluation_root / RECEIPTS_DIR_NAME / f".{run_identity}.json.tmp").exists()
@@ -1269,7 +1329,7 @@ def test_production_cleanup_removes_only_this_runs_temporary_receipt(tmp_path: P
     (receipts / f".{other}.json.tmp").write_bytes(b"another run's partial state")
 
     live = Deadline.start(FakeClock(), 100.0)
-    summary = ProductionAdmissionServices().cleanup(evaluation_root, mine, "incomplete", live)
+    summary = ProductionAdmissionServices().cleanup(tmp_path, evaluation_root, mine, "incomplete", live)
 
     assert summary == ("removed_temporary_receipt",)
     assert not (receipts / f".{mine}.json.tmp").exists()
@@ -1277,12 +1337,261 @@ def test_production_cleanup_removes_only_this_runs_temporary_receipt(tmp_path: P
     assert (receipts / f"{other}.json").is_file()
     assert (receipts / f".{other}.json.tmp").is_file()
     assert (evaluation_root / LOCK_FILE_NAME).is_file()
-    assert ProductionAdmissionServices().cleanup(evaluation_root, mine, "pass", live) == ()
+    assert ProductionAdmissionServices().cleanup(tmp_path, evaluation_root, mine, "pass", live) == ()
 
 
 def test_production_cleanup_tolerates_a_missing_evaluation_root(tmp_path: Path) -> None:
     live = Deadline.start(FakeClock(), 100.0)
-    assert ProductionAdmissionServices().cleanup(tmp_path / "absent", "1" * 64, "incomplete", live) == ()
+    assert ProductionAdmissionServices().cleanup(tmp_path, tmp_path / "absent", "1" * 64, "incomplete", live) == ()
+
+
+# --- ancestor substitution: the two claims that were false ---------------------------
+
+
+def _owned_tree(tmp_path: Path) -> tuple[Path, Path, str]:
+    """A declared owner root with an evaluation root two components below it."""
+
+    owner = tmp_path / "owner"
+    evaluation_root = owner / "artifacts" / "identity"
+    (evaluation_root / RECEIPTS_DIR_NAME).mkdir(parents=True)
+    return owner, evaluation_root, "c" * 64
+
+
+def test_cleanup_refuses_a_symlinked_ancestor_and_never_unlinks_outside_the_owner_root(
+    tmp_path: Path,
+) -> None:
+    """The reproduced exploit: cleanup followed a symlinked ancestor and unlinked a decoy.
+
+    ``os.open(evaluation_root / "receipts", O_NOFOLLOW)`` guards only the *last* component, so
+    a swapped ``artifacts`` -- or evaluation-identity directory -- pointed the whole walk at
+    another tree, and cleanup unlinked this run's temporary name inside it.  The walk now
+    starts at the declared owner root's descriptor and opens every component from its parent.
+    """
+
+    owner, evaluation_root, run_identity = _owned_tree(tmp_path)
+    temporary = f".{run_identity}.json.tmp"
+
+    outside = tmp_path / "outside" / "identity" / RECEIPTS_DIR_NAME
+    outside.mkdir(parents=True)
+    decoy = outside / temporary
+    decoy.write_bytes(b"another owner's file")
+
+    shutil.rmtree(owner / "artifacts")
+    (owner / "artifacts").symlink_to(tmp_path / "outside")
+
+    live = Deadline.start(FakeClock(), 100.0)
+    with pytest.raises(AdmissionError) as error:
+        ProductionAdmissionServices().cleanup(owner, evaluation_root, run_identity, "pass", live)
+
+    assert error.value.failure.code == "cleanup_failed"
+    assert error.value.failure.status == "incomplete"
+    assert decoy.is_file()
+    assert decoy.read_bytes() == b"another owner's file"
+
+
+def test_cleanup_refuses_a_symlinked_receipts_directory_itself(tmp_path: Path) -> None:
+    owner, evaluation_root, run_identity = _owned_tree(tmp_path)
+    temporary = f".{run_identity}.json.tmp"
+    outside = tmp_path / "outside-receipts"
+    outside.mkdir()
+    decoy = outside / temporary
+    decoy.write_bytes(b"another owner's file")
+
+    (evaluation_root / RECEIPTS_DIR_NAME).rmdir()
+    (evaluation_root / RECEIPTS_DIR_NAME).symlink_to(outside)
+
+    live = Deadline.start(FakeClock(), 100.0)
+    with pytest.raises(AdmissionError):
+        ProductionAdmissionServices().cleanup(owner, evaluation_root, run_identity, "pass", live)
+
+    assert decoy.is_file()
+
+
+def test_cleanup_still_removes_its_own_temporary_through_the_confined_walk(tmp_path: Path) -> None:
+    """The repair does not weaken per-run temporary ownership: the walk still finds it."""
+
+    owner, evaluation_root, run_identity = _owned_tree(tmp_path)
+    mine = evaluation_root / RECEIPTS_DIR_NAME / f".{run_identity}.json.tmp"
+    mine.write_bytes(b"partial")
+    other = evaluation_root / RECEIPTS_DIR_NAME / f".{'d' * 64}.json.tmp"
+    other.write_bytes(b"another run's partial state")
+
+    live = Deadline.start(FakeClock(), 100.0)
+    summary = ProductionAdmissionServices().cleanup(owner, evaluation_root, run_identity, "pass", live)
+
+    assert summary == ("removed_temporary_receipt",)
+    assert not mine.exists()
+    assert other.is_file()
+
+
+def test_the_artifact_tree_digest_refuses_a_substituted_ancestor(tmp_path: Path) -> None:
+    """The same defect on the evidence side: the digest could describe another tree entirely.
+
+    ``artifact_tree_digest`` opened the whole absolute evaluation root under one
+    ``O_NOFOLLOW``.  A swapped intermediate component therefore made it traverse -- and
+    publish the digest of -- a tree the run never wrote.
+    """
+
+    owner, evaluation_root, _run_identity = _owned_tree(tmp_path)
+    (evaluation_root / LOCK_FILE_NAME).write_bytes(b"ty==0.0.70\n")
+    baseline = artifact_tree_digest(owner, evaluation_root)
+
+    other = tmp_path / "other" / "identity"
+    other.mkdir(parents=True)
+    (other / LOCK_FILE_NAME).write_bytes(b"ty==9.9.99\n")
+    shutil.rmtree(owner / "artifacts")
+    (owner / "artifacts").symlink_to(tmp_path / "other")
+
+    with pytest.raises(AdmissionError) as error:
+        artifact_tree_digest(owner, evaluation_root)
+
+    assert error.value.failure.code == "artifact_digest_failed"
+    # The other tree is real and digests differently; the point is that the run never
+    # published *its* digest under this evaluation root.
+    assert baseline != artifact_tree_digest(tmp_path, other)
+
+
+def test_the_artifact_tree_digest_refuses_an_evaluation_root_outside_its_owner(
+    tmp_path: Path,
+) -> None:
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    with pytest.raises(AdmissionError, match="not below the declared owner root"):
+        artifact_tree_digest(tmp_path / "owner", outside)
+
+
+# --- the evaluator identity is re-measured before publication -------------------------
+
+
+def test_a_late_evaluator_mutation_cannot_yield_a_pass(
+    request_: AdmissionRequest, services: FakeServices, clock: FakeClock
+) -> None:
+    """An evaluator or helper edited after the last ordinary helper call is never a ``pass``.
+
+    The first capture bound every production-helper child of this run; nothing after it
+    re-read the evaluator's own bytes, so a late edit would have been published under an
+    identity that no longer described the code on disk.
+    """
+
+    services.evaluator_final = _evaluator(source_digest_seed="1")
+
+    receipt = run_admission(request_, services=services, clock=clock)
+
+    assert receipt.status == "hold"
+    assert receipt.next_action == NEXT_ACTION_HOLD
+    assert any(issue.startswith("evaluator_identity_changed") for issue in receipt.issues)
+    assert "source_digest" in " ".join(receipt.issues)
+    assert services.order.index("cleanup") < services.order.index("evaluator_final")
+
+
+def test_the_pre_publication_evaluator_capture_is_inside_the_ceiling(
+    request_: AdmissionRequest, services: FakeServices, clock: FakeClock
+) -> None:
+    """It is a finalization step like every other one, judged by the same absolute ceiling."""
+
+    services.step_seconds["evaluator_final"] = ADMISSION_BUDGET_SECONDS + 1.0
+
+    with pytest.raises(AdmissionError) as error:
+        run_admission(request_, services=services, clock=clock)
+
+    assert error.value.failure.code == "admission_deadline_exceeded"
+
+
+def test_a_pre_publication_evaluator_capture_that_fails_fails_closed(
+    request_: AdmissionRequest, services: FakeServices, clock: FakeClock
+) -> None:
+    services.failures["evaluator_final"] = IdentityError("the evaluator source closure is empty")
+
+    with pytest.raises(AdmissionError) as error:
+        run_admission(request_, services=services, clock=clock)
+
+    assert error.value.failure.code == "evaluator_identity_capture_failed"
+    assert error.value.failure.status == "incomplete"
+
+
+def test_an_unchanged_evaluator_publishes_the_pass_it_earned(
+    request_: AdmissionRequest, services: FakeServices, clock: FakeClock
+) -> None:
+    receipt = run_admission(request_, services=services, clock=clock)
+
+    assert receipt.status == "pass"
+    assert services.evaluator_calls == 2
+    assert not any(issue.startswith("evaluator_identity_changed") for issue in receipt.issues)
+
+
+# --- the execution expectation is carried structurally --------------------------------
+
+
+def test_every_production_helper_call_carries_this_runs_own_expectation(
+    request_: AdmissionRequest, services: FakeServices, clock: FakeClock
+) -> None:
+    """No ambient process-global pin decides which bytes a child may execute."""
+
+    receipt = run_admission(request_, services=services, clock=clock)
+    assert receipt.status == "pass"
+
+    expected = HelperExpectation.from_identity(_evaluator())
+    steps = [step for step, _expectation in services.expectations]
+    assert steps.count("capture_production_identity") == 3
+    assert steps.count("capture_corpus") == 2
+    assert {"compile_candidate_lock", "prepare_candidate_runtime"} <= set(steps)
+    assert all(carried == expected for _step, carried in services.expectations)
+
+
+def test_two_admissions_in_one_process_carry_their_own_expectations(
+    request_: AdmissionRequest, clock: FakeClock, services: FakeServices
+) -> None:
+    """Sequential runs never contaminate each other: each binds only its own identity."""
+
+    first = run_admission(request_, services=services, clock=clock)
+
+    second_clock = FakeClock()
+    second_services = replace(services, clock=second_clock)
+    second_services.expectations = []
+    second_services.order = []
+    second_services.identity_calls = 0
+    second_services.corpus_calls = 0
+    second_services.evaluator_calls = 0
+    second_services.cleanup_stages = []
+    second_services.lock_requests = []
+    second_services.runtime_requests = []
+    second_services.evaluator = _evaluator(source_digest_seed="3", child_digest_seed="2")
+    second = run_admission(request_, services=second_services, clock=second_clock)
+
+    assert first.status == second.status == "pass"
+    assert first.evaluation_identity != second.evaluation_identity
+    first_expected = HelperExpectation.from_identity(_evaluator())
+    second_expected = HelperExpectation.from_identity(
+        _evaluator(source_digest_seed="3", child_digest_seed="2")
+    )
+    assert first_expected != second_expected
+    assert all(carried == second_expected for _step, carried in second_services.expectations)
+
+
+def test_an_identity_that_cannot_authorize_a_child_holds_the_run(
+    request_: AdmissionRequest, services: FakeServices, clock: FakeClock
+) -> None:
+    """An evaluator identity that does not name the child program publishes no ``pass``."""
+
+    incomplete = EvaluatorIdentity.build(
+        source_files=(("admission.py", "9" * 64), ("models.py", "8" * 64)),
+        source_commit="7" * 40,
+        source_clean=True,
+        production_root="/data/CoordExp/serena-light/src",
+        production_files=tuple((relative, "5" * 64) for relative in CHILD_EXECUTED_HELPERS),
+        production_clean=True,
+        host_python_path="/data/CoordExp/.worktrees/serena-light-backend-eval/.venv/bin/python",
+        host_python_realpath="/root/miniconda3/envs/ms/bin/python3.12",
+        host_python_sha256="6" * 64,
+        host_python_version="3.12.11",
+    )
+    services.evaluator = incomplete
+
+    with pytest.raises(AdmissionError) as error:
+        run_admission(request_, services=services, clock=clock)
+
+    assert error.value.failure.code == "evaluator_source_binding_failed"
+    assert error.value.failure.status == "hold"
 
 
 # --- issues ------------------------------------------------------------------------

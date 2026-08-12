@@ -34,7 +34,14 @@ from scripts.backend_eval.models import (
     EvaluatorIdentity,
     sha256_bytes,
 )
-from scripts.backend_eval.process import CommandTimeout, Deadline, run_bounded_bytes
+from scripts.backend_eval.process import (
+    GIT_EXECUTABLE,
+    CommandTimeout,
+    Deadline,
+    ExecutableBindingError,
+    bound_executable,
+    run_bounded_bytes,
+)
 from scripts.backend_eval.source_binding import (
     PRODUCTION_SOURCE_ROOT,
     SourceBindingError,
@@ -110,7 +117,6 @@ BOOTSTRAP_SERVICE_KEYS: tuple[str, ...] = (
 )
 BOOTSTRAP_SERVICE_PATH = "/usr/bin:/bin"
 
-_GIT_EXECUTABLE = "/usr/bin/git"
 # O_NONBLOCK keeps a FIFO or other blocking special node from hanging the open; the fstat
 # regular-file check below then refuses it promptly rather than reading empty bytes.
 _READ_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
@@ -210,8 +216,12 @@ def _git(args: tuple[str, ...], deadline: Deadline | None) -> bytes | None:
     if home:
         env["HOME"] = home
     try:
+        executable = bound_executable(GIT_EXECUTABLE)
+    except ExecutableBindingError as error:
+        raise IdentityError(f"the declared Git executable cannot be bound: {error}") from error
+    try:
         result = run_bounded_bytes(
-            [_GIT_EXECUTABLE, *args], cwd=EVALUATOR_PACKAGE, env=env, timeout=timeout
+            [str(executable), *args], cwd=EVALUATOR_PACKAGE, env=env, timeout=timeout
         )
     except CommandTimeout as error:
         raise IdentityError(f"evaluator source Git probe timed out: {' '.join(args)}: {error}") from error

@@ -34,18 +34,63 @@ OWNERSHIP_DOC = EVALUATOR_ROOT / "docs" / "backend-eval-io-ownership.md"
 # production helper that reads a file the evaluation does not own.  A helper that only
 # decodes or normalizes strings is not filesystem access and is deliberately absent.
 
-_MODULE_QUALIFIED = ("os", "shutil", "subprocess")
+_MODULE_QUALIFIED = ("os", "os.path", "shutil", "subprocess")
 _ACCESS_NAMES = {
+    # --- namespace resolution and creation
     "os.open": "os.open",
     "os.fdopen": "os.fdopen",
     "os.mkdir": "os.mkdir",
     "os.makedirs": "os.makedirs",
     "os.scandir": "os.scandir",
     "os.listdir": "os.listdir",
+    "open": "open",
+    # --- namespace mutation
+    "os.link": "os.link",
+    "os.unlink": "os.unlink",
+    "os.rename": "os.rename",
+    "os.replace": "os.replace",
+    "os.rmdir": "os.rmdir",
+    "os.symlink": "os.symlink",
+    "os.remove": "os.remove",
+    # --- metadata and link inspection
+    "os.stat": "os.stat",
+    "os.lstat": "os.lstat",
+    "os.fstat": "os.fstat",
+    "os.readlink": "os.readlink",
+    "os.access": "os.access",
+    "os.chmod": "os.chmod",
+    "os.fchmod": "os.fchmod",
+    "os.path.realpath": "os.path.realpath",
+    "os.path.islink": "os.path.islink",
+    "os.path.isfile": "os.path.isfile",
+    "os.path.isdir": "os.path.isdir",
+    "os.path.exists": "os.path.exists",
+    "os.path.getsize": "os.path.getsize",
+    # --- descriptor byte movement and durability
+    "os.read": "os.read",
+    "os.write": "os.write",
+    "os.pread": "os.pread",
+    "os.pwrite": "os.pwrite",
+    "os.lseek": "os.lseek",
+    "os.truncate": "os.truncate",
+    "os.ftruncate": "os.ftruncate",
+    "os.fsync": "os.fsync",
+    "os.fdatasync": "os.fdatasync",
+    "read": "stream.read",
+    "write": "stream.write",
+    "flush": "stream.flush",
+    # --- descriptor duplication and release
+    "os.dup": "os.dup",
+    "os.dup2": "os.dup2",
+    "os.close": "os.close",
+    "os.closerange": "os.closerange",
+    # --- executable and path discovery
+    "shutil.which": "shutil.which",
     "shutil.copy2": "shutil.copy2",
     "shutil.copytree": "shutil.copytree",
     "shutil.rmtree": "shutil.rmtree",
-    "open": "open",
+    "shutil.move": "shutil.move",
+    # --- pathname-shaped pathlib access
     "read_bytes": "Path.read_bytes",
     "read_text": "Path.read_text",
     "write_bytes": "Path.write_bytes",
@@ -57,6 +102,22 @@ _ACCESS_NAMES = {
     "rglob": "Path.rglob",
     "glob": "Path.glob",
     "walk": "Path.walk",
+    "lstat": "Path.lstat",
+    "stat": "Path.stat",
+    "is_file": "Path.is_file",
+    "is_dir": "Path.is_dir",
+    "is_symlink": "Path.is_symlink",
+    "exists": "Path.exists",
+    "resolve": "Path.resolve",
+    "samefile": "Path.samefile",
+    "symlink_to": "Path.symlink_to",
+    "hardlink_to": "Path.hardlink_to",
+    "unlink": "Path.unlink",
+    "rename": "Path.rename",
+    "replace": "Path.replace",
+    "chmod": "Path.chmod",
+    "readlink": "Path.readlink",
+    # --- production helpers that read a file the evaluation does not own
     "observe_file_digest": "production.observe_file_digest",
     "dependency_lock_digest": "production.dependency_lock_digest",
     "compute_build_identity": "production.compute_build_identity",
@@ -69,13 +130,32 @@ _ACCESS_NAMES = {
 # --- the owner classes -----------------------------------------------------------------
 
 CONFINED = "confined"
-"""Component-wise ``O_NOFOLLOW`` descriptor walk out from an already-proven open root."""
+"""Reached component by component from an already-proven descriptor, ``O_NOFOLLOW`` throughout.
+
+Every intermediate directory is opened from its parent's descriptor and every leaf name is
+resolved relative to a descriptor, so no swapped ancestor can move the target.  The walk's
+own starting point is a ``guarded`` root open, declared separately.
+"""
 
 GUARDED = "guarded"
-"""``O_NOFOLLOW | O_NONBLOCK`` plus an ``fstat`` regular-file proof on that same descriptor.
+"""One open of an absolute pathname with the strongest single-open guard, and no parent to walk from.
 
-Used where no owning root descriptor exists: the caller's declared lock, an executable's
-realpath outside every root, the evaluator's own source closure.
+Two shapes, both honest about what they do *not* close.  A declared root directory is opened
+``O_DIRECTORY``, which refuses a non-directory before any type-specific open handler runs but
+proves nothing about the components above it -- it is where confinement starts, not something
+confinement covers.  A regular file outside every owned root -- the CLI host interpreter, the
+declared Git executable, the evaluator's own source closure -- is opened
+``O_NOFOLLOW | O_NONBLOCK`` and proven regular by ``fstat`` on that same descriptor.
+"""
+
+DECLARED = "declared-path"
+"""A pathname-shaped *observation* of a caller-declared path, used only to refuse.
+
+Weaker than ``guarded`` and named separately for that reason: ``Path.is_file()``,
+``Path.lstat()``, ``os.access``, and ``os.path.realpath`` resolve the name again, so a node
+substituted after the observation is not caught by it.  Every row in this class only ever
+*rejects* -- it never authorizes a byte to move, and the read or write that follows is owned
+by a ``confined``, ``guarded``, or ``descriptor`` row that resolves nothing by name.
 """
 
 DESCRIPTOR = "descriptor"
@@ -85,7 +165,39 @@ CHILD = "production-child"
 """Exact production semantics, executed in the bounded, killable, source-bound child."""
 
 OWN_IMAGE = "own-image"
-"""Reads this process's own sealed ``memfd`` through ``/proc/self/fd``; no attacker surface."""
+"""Reads or writes this process's own sealed ``memfd``; no attacker surface."""
+
+# Descriptor primitives take a descriptor, never a name.  They are enumerated as rows like
+# everything else, *and* proven mechanically below to receive a descriptor-shaped argument, so
+# "it operates on a descriptor" is a checked claim rather than an assertion in a docstring.
+_DESCRIPTOR_PRIMITIVES = {
+    "os.close",
+    "os.closerange",
+    "os.dup",
+    "os.fchmod",
+    "os.fdatasync",
+    "os.fdopen",
+    "os.fstat",
+    "os.fsync",
+    "os.ftruncate",
+    "os.lseek",
+    "os.pread",
+    "os.pwrite",
+    "os.read",
+    "os.scandir",
+    "os.write",
+}
+
+# The closed set of expressions that may supply one.  ``os.open`` and ``os.dup`` are the
+# kernel's own; ``fileno`` is the descriptor a stream already wraps; the two evaluator
+# openers are confined walks declared in the table below and typed ``-> int``.
+_DESCRIPTOR_SOURCES = {
+    "os.open",
+    "os.dup",
+    "fileno",
+    "_open_owned_directory",
+    "_open_confined_child",
+}
 
 # --- the table -------------------------------------------------------------------------
 #
@@ -94,74 +206,230 @@ OWN_IMAGE = "own-image"
 
 OWNERSHIP: frozenset[tuple[str, str, str, str]] = frozenset(
     {
-        # admission.py -- the artifact tree, the receipt, and the publication lock.
-        ("admission.py", "cleanup", "os.open", CONFINED),
-        ("admission.py", "artifact_tree_digest", "os.open", CONFINED),
-        ("admission.py", "_collect_artifact_entries", "os.scandir", DESCRIPTOR),
+        # --- __init__.py
+        ("__init__.py", "<module>", "os.path.realpath", DECLARED),
+        # --- admission.py
+        ("admission.py", "__post_init__", "Path.is_dir", DECLARED),
+        ("admission.py", "_collect_artifact_entries", "os.close", DESCRIPTOR),
+        ("admission.py", "_collect_artifact_entries", "os.lstat", CONFINED),
         ("admission.py", "_collect_artifact_entries", "os.open", CONFINED),
-        ("admission.py", "_read_artifact_bytes", "os.open", CONFINED),
-        ("admission.py", "_read_artifact_bytes", "os.fdopen", DESCRIPTOR),
-        ("admission.py", "_publish_receipt", "os.open", CONFINED),
-        ("admission.py", "_publication_lock", "os.open", CONFINED),
-        ("admission.py", "_open_evaluation_directory", "os.open", CONFINED),
+        ("admission.py", "_collect_artifact_entries", "os.scandir", DESCRIPTOR),
+        ("admission.py", "_open_declared_root", "os.open", GUARDED),
+        ("admission.py", "_open_evaluation_directory", "os.close", DESCRIPTOR),
+        ("admission.py", "_open_evaluation_directory", "os.open", GUARDED),
+        ("admission.py", "_open_owned_child", "os.close", DESCRIPTOR),
+        ("admission.py", "_open_owned_child", "os.fchmod", DESCRIPTOR),
         ("admission.py", "_open_owned_child", "os.mkdir", CONFINED),
         ("admission.py", "_open_owned_child", "os.open", CONFINED),
-        # candidate_lock.py -- the frozen lock transaction below the artifact root.
-        ("candidate_lock.py", "_purge_quarantined_nodes", "os.scandir", DESCRIPTOR),
-        ("candidate_lock.py", "_resolution_lock", "os.open", CONFINED),
-        ("candidate_lock.py", "_artifact_directory", "os.open", CONFINED),
+        ("admission.py", "_open_owned_walk", "os.close", DESCRIPTOR),
+        ("admission.py", "_open_owned_walk", "os.open", CONFINED),
+        ("admission.py", "_publication_lock", "os.close", DESCRIPTOR),
+        ("admission.py", "_publication_lock", "os.fchmod", DESCRIPTOR),
+        ("admission.py", "_publication_lock", "os.open", CONFINED),
+        ("admission.py", "_publish_receipt", "os.close", DESCRIPTOR),
+        ("admission.py", "_publish_receipt", "os.fchmod", DESCRIPTOR),
+        ("admission.py", "_publish_receipt", "os.fsync", DESCRIPTOR),
+        ("admission.py", "_publish_receipt", "os.link", CONFINED),
+        ("admission.py", "_publish_receipt", "os.open", CONFINED),
+        ("admission.py", "_read_artifact_bytes", "os.close", DESCRIPTOR),
+        ("admission.py", "_read_artifact_bytes", "os.fdopen", DESCRIPTOR),
+        ("admission.py", "_read_artifact_bytes", "os.fstat", DESCRIPTOR),
+        ("admission.py", "_read_artifact_bytes", "os.open", CONFINED),
+        ("admission.py", "_read_artifact_bytes", "stream.read", DESCRIPTOR),
+        ("admission.py", "_replace_temporary", "os.unlink", CONFINED),
+        ("admission.py", "_sync_directory", "os.fsync", DESCRIPTOR),
+        ("admission.py", "_write_all", "os.write", DESCRIPTOR),
+        ("admission.py", "artifact_tree_digest", "os.close", DESCRIPTOR),
+        ("admission.py", "cleanup", "os.close", DESCRIPTOR),
+        ("admission.py", "cleanup", "os.fsync", DESCRIPTOR),
+        ("admission.py", "cleanup", "os.unlink", CONFINED),
+        ("admission.py", "withdraw", "os.unlink", CONFINED),
+        # --- candidate_lock.py
+        ("candidate_lock.py", "_artifact_directory", "os.close", DESCRIPTOR),
+        ("candidate_lock.py", "_artifact_directory", "os.open", GUARDED),
+        ("candidate_lock.py", "_ensure_cache_directory", "os.close", DESCRIPTOR),
+        ("candidate_lock.py", "_fsync_directory", "os.fsync", DESCRIPTOR),
+        ("candidate_lock.py", "_fsync_file", "os.fsync", DESCRIPTOR),
+        ("candidate_lock.py", "_node_exists", "os.lstat", CONFINED),
+        ("candidate_lock.py", "_open_owned_directory", "os.close", DESCRIPTOR),
+        ("candidate_lock.py", "_open_owned_directory", "os.fchmod", DESCRIPTOR),
         ("candidate_lock.py", "_open_owned_directory", "os.mkdir", CONFINED),
         ("candidate_lock.py", "_open_owned_directory", "os.open", CONFINED),
+        ("candidate_lock.py", "_open_regular_artifact", "os.close", DESCRIPTOR),
+        ("candidate_lock.py", "_open_regular_artifact", "os.fstat", DESCRIPTOR),
         ("candidate_lock.py", "_open_regular_artifact", "os.open", CONFINED),
-        ("candidate_lock.py", "_read_descriptor", "os.fdopen", DESCRIPTOR),
-        ("candidate_lock.py", "_write_artifact", "os.open", CONFINED),
-        ("candidate_lock.py", "_write_artifact", "os.fdopen", DESCRIPTOR),
+        ("candidate_lock.py", "_purge_directory", "Path.is_dir", DECLARED),
+        ("candidate_lock.py", "_purge_directory", "os.close", DESCRIPTOR),
         ("candidate_lock.py", "_purge_directory", "os.open", CONFINED),
+        ("candidate_lock.py", "_purge_directory", "os.rmdir", CONFINED),
         ("candidate_lock.py", "_purge_directory", "os.scandir", DESCRIPTOR),
-        # identity.py -- the evaluator's own executed source closure.
-        ("identity.py", "_source_closure", "os.scandir", DESCRIPTOR),
-        ("identity.py", "_read_regular_file", "os.open", GUARDED),
+        ("candidate_lock.py", "_purge_node", "os.lstat", CONFINED),
+        ("candidate_lock.py", "_purge_quarantined_nodes", "os.scandir", DESCRIPTOR),
+        ("candidate_lock.py", "_read_descriptor", "os.fdopen", DESCRIPTOR),
+        ("candidate_lock.py", "_read_descriptor", "stream.read", DESCRIPTOR),
+        ("candidate_lock.py", "_reject_non_regular", "os.lstat", CONFINED),
+        ("candidate_lock.py", "_remove_artifact", "os.unlink", CONFINED),
+        ("candidate_lock.py", "_rename_artifact", "os.rename", CONFINED),
+        ("candidate_lock.py", "_resolution_lock", "os.close", DESCRIPTOR),
+        ("candidate_lock.py", "_resolution_lock", "os.fchmod", DESCRIPTOR),
+        ("candidate_lock.py", "_resolution_lock", "os.open", CONFINED),
+        ("candidate_lock.py", "_validate_directory", "Path.is_dir", DECLARED),
+        ("candidate_lock.py", "_validate_executable", "Path.is_file", DECLARED),
+        ("candidate_lock.py", "_validate_executable", "os.access", DECLARED),
+        ("candidate_lock.py", "_write_artifact", "os.fchmod", DESCRIPTOR),
+        ("candidate_lock.py", "_write_artifact", "os.fdopen", DESCRIPTOR),
+        ("candidate_lock.py", "_write_artifact", "os.open", CONFINED),
+        ("candidate_lock.py", "_write_artifact", "os.replace", CONFINED),
+        ("candidate_lock.py", "_write_artifact", "stream.flush", DESCRIPTOR),
+        ("candidate_lock.py", "_write_artifact", "stream.write", DESCRIPTOR),
+        # --- identity.py
+        ("identity.py", "<module>", "Path.resolve", DECLARED),
+        ("identity.py", "_read_regular_file", "os.close", DESCRIPTOR),
         ("identity.py", "_read_regular_file", "os.fdopen", DESCRIPTOR),
-        # manifests.py -- the corpus capture.
+        ("identity.py", "_read_regular_file", "os.fstat", DESCRIPTOR),
+        ("identity.py", "_read_regular_file", "os.open", GUARDED),
+        ("identity.py", "_read_regular_file", "stream.read", DESCRIPTOR),
+        ("identity.py", "_require_no_shadowed_module", "Path.resolve", DECLARED),
+        ("identity.py", "_source_closure", "os.scandir", DESCRIPTOR),
+        ("identity.py", "capture_evaluator_identity", "os.path.realpath", DECLARED),
+        # --- manifests.py
         ("manifests.py", "_capture_transformers_manifest", "production.bounded_non_git_trust_inventory", CHILD),
-        ("manifests.py", "_scan_remainder", "os.open", CONFINED),
-        ("manifests.py", "_walk_remainder", "os.scandir", DESCRIPTOR),
-        ("manifests.py", "_walk_remainder", "os.open", CONFINED),
-        ("manifests.py", "_walk_metadata_root", "production.open_guarded_directory", CONFINED),
+        ("manifests.py", "_git_trust_inventory_from_bounded_bytes", "Path.resolve", DECLARED),
+        ("manifests.py", "_lstat", "Path.lstat", DECLARED),
+        ("manifests.py", "_require_directory", "Path.lstat", DECLARED),
+        ("manifests.py", "_scan_remainder", "os.close", DESCRIPTOR),
+        ("manifests.py", "_scan_remainder", "os.open", GUARDED),
+        ("manifests.py", "_walk_metadata_root", "os.close", DESCRIPTOR),
+        ("manifests.py", "_walk_metadata_root", "os.lstat", CONFINED),
+        ("manifests.py", "_walk_metadata_root", "os.readlink", CONFINED),
         ("manifests.py", "_walk_metadata_root", "os.scandir", DESCRIPTOR),
-        # production_child.py -- the bounded child itself.
-        ("production_child.py", "_production_files", "Path.read_bytes", CHILD),
-        ("production_child.py", "_production_identity", "production.runtime_paths", CHILD),
+        ("manifests.py", "_walk_metadata_root", "production.open_guarded_directory", CONFINED),
+        ("manifests.py", "_walk_remainder", "os.close", DESCRIPTOR),
+        ("manifests.py", "_walk_remainder", "os.lstat", CONFINED),
+        ("manifests.py", "_walk_remainder", "os.open", CONFINED),
+        ("manifests.py", "_walk_remainder", "os.readlink", CONFINED),
+        ("manifests.py", "_walk_remainder", "os.scandir", DESCRIPTOR),
+        # --- process.py
+        ("process.py", "bound_executable", "os.access", DECLARED),
+        ("process.py", "bound_executable", "os.close", DESCRIPTOR),
+        ("process.py", "bound_executable", "os.fstat", DESCRIPTOR),
+        ("process.py", "bound_executable", "os.open", GUARDED),
+        ("process.py", "sealed_image", "os.close", DESCRIPTOR),
+        ("process.py", "sealed_image", "os.pread", OWN_IMAGE),
+        ("process.py", "sealed_image", "os.write", OWN_IMAGE),
+        # --- production_child.py
+        ("production_child.py", "_load_image", "os.fstat", OWN_IMAGE),
+        ("production_child.py", "_load_image", "os.pread", OWN_IMAGE),
+        ("production_child.py", "_observe_file_digests", "production.observe_file_digest", CHILD),
         ("production_child.py", "_production_identity", "production.compute_build_identity", CHILD),
         ("production_child.py", "_production_identity", "production.dependency_lock_digest", CHILD),
-        ("production_child.py", "_observe_file_digests", "production.observe_file_digest", CHILD),
-        # production_helper.py -- the sealed child program and the re-read of reported bytes.
+        ("production_child.py", "_production_identity", "production.runtime_paths", CHILD),
+        ("production_child.py", "main", "os.path.realpath", DECLARED),
+        ("production_child.py", "main", "stream.flush", DESCRIPTOR),
+        ("production_child.py", "main", "stream.read", DESCRIPTOR),
+        ("production_child.py", "main", "stream.write", DESCRIPTOR),
+        # --- production_helper.py
         ("production_helper.py", "_open_owner_root", "os.open", GUARDED),
-        ("production_helper.py", "_read_owned_file", "os.open", CONFINED),
+        ("production_helper.py", "_read_owned_file", "os.close", DESCRIPTOR),
+        ("production_helper.py", "_read_owned_file", "os.dup", DESCRIPTOR),
         ("production_helper.py", "_read_owned_file", "os.fdopen", DESCRIPTOR),
-        # production_identity.py -- the three declared lock inputs.
-        ("production_identity.py", "_read_identity_inputs", "os.open", CONFINED),
-        ("production_identity.py", "_read_guarded", "os.open", CONFINED),
+        ("production_helper.py", "_read_owned_file", "os.fstat", DESCRIPTOR),
+        ("production_helper.py", "_read_owned_file", "os.open", CONFINED),
+        ("production_helper.py", "_read_owned_file", "stream.read", DESCRIPTOR),
+        ("production_helper.py", "run_production_helper", "os.close", DESCRIPTOR),
+        # --- production_identity.py
+        ("production_identity.py", "_read_guarded", "os.close", DESCRIPTOR),
         ("production_identity.py", "_read_guarded", "os.fdopen", DESCRIPTOR),
-        # runtime.py -- the service-owned candidate runtime.
-        ("runtime.py", "_runtime_lock", "os.open", CONFINED),
-        ("runtime.py", "_open_confined_directory", "os.open", CONFINED),
-        ("runtime.py", "_open_existing_confined_directory", "os.open", CONFINED),
+        ("production_identity.py", "_read_guarded", "os.fstat", DESCRIPTOR),
+        ("production_identity.py", "_read_guarded", "os.open", CONFINED),
+        ("production_identity.py", "_read_guarded", "stream.read", DESCRIPTOR),
+        ("production_identity.py", "_read_identity_inputs", "os.close", DESCRIPTOR),
+        ("production_identity.py", "_read_identity_inputs", "os.open", GUARDED),
+        ("production_identity.py", "capture_production_identity", "Path.resolve", DECLARED),
+        # --- runtime.py
+        ("runtime.py", "_capture_executable_identity", "os.path.realpath", DECLARED),
+        ("runtime.py", "_create_runtime_directories", "os.close", DESCRIPTOR),
+        ("runtime.py", "_fsync", "os.fsync", DESCRIPTOR),
+        ("runtime.py", "_normalize_owned_modes", "os.close", DESCRIPTOR),
+        ("runtime.py", "_normalize_owned_modes", "os.fchmod", DESCRIPTOR),
+        ("runtime.py", "_normalize_owned_modes", "os.fstat", DESCRIPTOR),
+        ("runtime.py", "_open_confined_child", "os.close", DESCRIPTOR),
+        ("runtime.py", "_open_confined_child", "os.fchmod", DESCRIPTOR),
         ("runtime.py", "_open_confined_child", "os.mkdir", CONFINED),
         ("runtime.py", "_open_confined_child", "os.open", CONFINED),
-        ("runtime.py", "_scandir_names", "os.scandir", DESCRIPTOR),
-        ("runtime.py", "_require_sealed_image", "Path.read_bytes", OWN_IMAGE),
-        ("runtime.py", "_read_regular_file", "os.open", GUARDED),
-        ("runtime.py", "_read_regular_file", "os.fdopen", DESCRIPTOR),
+        ("runtime.py", "_open_confined_directory", "os.close", DESCRIPTOR),
+        ("runtime.py", "_open_confined_directory", "os.open", CONFINED),
+        ("runtime.py", "_open_confined_directory_chain", "os.close", DESCRIPTOR),
+        ("runtime.py", "_open_confined_directory_chain", "os.dup", DESCRIPTOR),
         ("runtime.py", "_open_confined_existing_child", "os.open", CONFINED),
+        ("runtime.py", "_open_confined_relpath", "os.close", DESCRIPTOR),
+        ("runtime.py", "_open_confined_relpath", "os.dup", DESCRIPTOR),
+        ("runtime.py", "_open_existing_confined_directory", "os.close", DESCRIPTOR),
+        ("runtime.py", "_open_existing_confined_directory", "os.open", CONFINED),
         ("runtime.py", "_open_owned_write_leaf", "os.open", CONFINED),
-        ("runtime.py", "_write_owned_descriptor", "os.fdopen", DESCRIPTOR),
-        ("runtime.py", "_read_owned_descriptor", "os.fdopen", DESCRIPTOR),
-        ("runtime.py", "_purge_directory_contents", "os.scandir", DESCRIPTOR),
+        ("runtime.py", "_physical_path", "os.readlink", DESCRIPTOR),
+        ("runtime.py", "_physical_prefix", "os.path.realpath", DECLARED),
+        ("runtime.py", "_prepare", "os.close", DESCRIPTOR),
+        ("runtime.py", "_publish_manifest", "os.replace", CONFINED),
+        ("runtime.py", "_purge_directory_contents", "Path.is_dir", DECLARED),
+        ("runtime.py", "_purge_directory_contents", "os.close", DESCRIPTOR),
         ("runtime.py", "_purge_directory_contents", "os.open", CONFINED),
-        # source_binding.py -- the executed production helper closure.
-        ("source_binding.py", "_read_regular_file", "os.open", GUARDED),
+        ("runtime.py", "_purge_directory_contents", "os.rmdir", CONFINED),
+        ("runtime.py", "_purge_directory_contents", "os.scandir", DESCRIPTOR),
+        ("runtime.py", "_purge_directory_contents", "os.unlink", CONFINED),
+        ("runtime.py", "_purge_runtime_root", "os.rmdir", CONFINED),
+        ("runtime.py", "_read_confined_file", "os.close", DESCRIPTOR),
+        ("runtime.py", "_read_owned_descriptor", "os.fdopen", DESCRIPTOR),
+        ("runtime.py", "_read_owned_descriptor", "os.fstat", DESCRIPTOR),
+        ("runtime.py", "_read_owned_descriptor", "stream.read", DESCRIPTOR),
+        ("runtime.py", "_read_regular_file", "os.close", DESCRIPTOR),
+        ("runtime.py", "_read_regular_file", "os.fdopen", DESCRIPTOR),
+        ("runtime.py", "_read_regular_file", "os.fstat", DESCRIPTOR),
+        ("runtime.py", "_read_regular_file", "os.open", GUARDED),
+        ("runtime.py", "_read_regular_file", "stream.read", DESCRIPTOR),
+        ("runtime.py", "_require_directory", "Path.is_dir", DECLARED),
+        ("runtime.py", "_require_executable", "Path.is_file", DECLARED),
+        ("runtime.py", "_require_executable", "os.access", DECLARED),
+        ("runtime.py", "_require_existing_regular_file", "Path.is_file", DECLARED),
+        ("runtime.py", "_require_existing_regular_file", "Path.is_symlink", DECLARED),
+        ("runtime.py", "_require_open_root", "os.fstat", DESCRIPTOR),
+        ("runtime.py", "_require_open_root", "os.lstat", CONFINED),
+        ("runtime.py", "_require_owned_directory", "Path.lstat", DECLARED),
+        ("runtime.py", "_require_owned_modes", "os.close", DESCRIPTOR),
+        ("runtime.py", "_require_owned_modes", "os.fstat", DESCRIPTOR),
+        ("runtime.py", "_require_regular_executable_inside", "Path.lstat", DECLARED),
+        ("runtime.py", "_require_regular_executable_inside", "os.access", DECLARED),
+        ("runtime.py", "_require_regular_executable_inside", "os.path.realpath", DECLARED),
+        ("runtime.py", "_require_regular_file", "Path.is_file", DECLARED),
+        ("runtime.py", "_require_regular_file", "Path.is_symlink", DECLARED),
+        ("runtime.py", "_require_sealed_image", "Path.read_bytes", OWN_IMAGE),
+        ("runtime.py", "_require_venv_interpreter", "Path.is_file", DECLARED),
+        ("runtime.py", "_require_venv_interpreter", "os.access", DECLARED),
+        ("runtime.py", "_require_venv_interpreter", "os.path.realpath", DECLARED),
+        ("runtime.py", "_runtime_lock", "os.close", DESCRIPTOR),
+        ("runtime.py", "_runtime_lock", "os.open", CONFINED),
+        ("runtime.py", "_scandir_names", "os.scandir", DESCRIPTOR),
+        ("runtime.py", "_write_confined_file", "os.close", DESCRIPTOR),
+        ("runtime.py", "_write_owned_descriptor", "os.fchmod", DESCRIPTOR),
+        ("runtime.py", "_write_owned_descriptor", "os.fdopen", DESCRIPTOR),
+        ("runtime.py", "_write_owned_descriptor", "os.fstat", DESCRIPTOR),
+        ("runtime.py", "_write_owned_descriptor", "os.fsync", DESCRIPTOR),
+        ("runtime.py", "_write_owned_descriptor", "os.ftruncate", DESCRIPTOR),
+        ("runtime.py", "_write_owned_descriptor", "stream.flush", DESCRIPTOR),
+        ("runtime.py", "_write_owned_descriptor", "stream.write", DESCRIPTOR),
+        ("runtime.py", "runtime_manifest_digest", "os.close", DESCRIPTOR),
+        # --- source_binding.py
+        ("source_binding.py", "<module>", "Path.resolve", DECLARED),
+        ("source_binding.py", "_module_paths", "os.path.realpath", DECLARED),
+        ("source_binding.py", "_read_regular_file", "os.close", DESCRIPTOR),
         ("source_binding.py", "_read_regular_file", "os.fdopen", DESCRIPTOR),
+        ("source_binding.py", "_read_regular_file", "os.fstat", DESCRIPTOR),
+        ("source_binding.py", "_read_regular_file", "os.open", GUARDED),
+        ("source_binding.py", "_read_regular_file", "stream.read", DESCRIPTOR),
+        ("source_binding.py", "bind_production_source", "Path.resolve", DECLARED),
+        ("source_binding.py", "bind_production_source", "os.path.realpath", DECLARED),
+        # --- write_guard.py
+        ("write_guard.py", "_hashed_remainder_record", "Path.lstat", DECLARED),
     }
 )
 
@@ -226,6 +494,7 @@ def test_every_declared_access_has_exactly_one_owner() -> None:
     assert {owner for _module, _function, _access, owner in OWNERSHIP} <= {
         CONFINED,
         GUARDED,
+        DECLARED,
         DESCRIPTOR,
         CHILD,
         OWN_IMAGE,
@@ -233,23 +502,21 @@ def test_every_declared_access_has_exactly_one_owner() -> None:
 
 
 def test_no_evaluator_module_reads_or_writes_a_file_by_pathname() -> None:
-    """The pathname-shaped accesses are exactly the two that provably cannot be redirected.
+    """The one pathname-shaped byte access left is the one that cannot be redirected.
 
-    ``Path.read_bytes`` survives in two places only: the child re-reading a module Python
-    already imported (a regular file by construction, re-read guarded by the parent), and the
-    sealed ``memfd`` this process created and sealed itself.  Everything else that reads or
-    writes bytes does so through a descriptor whose every component was opened ``O_NOFOLLOW``.
+    ``Path.read_bytes`` survives in exactly one place: the sealed ``memfd`` this process
+    created and sealed itself.  Everything else that reads or writes bytes does so through a
+    descriptor whose every component was opened ``O_NOFOLLOW``, including the production
+    helpers, which now import from a sealed source image instead of re-reading their own
+    files from disk.
     """
 
     pathname_accesses = {
         (module, function, access)
         for module, function, access in _observed_accesses()
-        if access.startswith("Path.") or access == "open"
+        if access in {"Path.read_bytes", "Path.read_text", "Path.write_bytes", "Path.write_text", "open"}
     }
-    assert pathname_accesses == {
-        ("production_child.py", "_production_files", "Path.read_bytes"),
-        ("runtime.py", "_require_sealed_image", "Path.read_bytes"),
-    }
+    assert pathname_accesses == {("runtime.py", "_require_sealed_image", "Path.read_bytes")}
 
 
 def test_no_evaluator_module_creates_a_directory_by_pathname() -> None:
@@ -263,7 +530,50 @@ def test_no_evaluator_module_creates_a_directory_by_pathname() -> None:
     }
 
 
-@pytest.mark.parametrize("owner", [CONFINED, GUARDED, DESCRIPTOR, CHILD, OWN_IMAGE])
+def test_no_evaluator_module_discovers_an_executable_from_the_ambient_path() -> None:
+    """``shutil.which`` answers from whatever ``PATH`` the ambient process carries.
+
+    Every other input of this evaluation refuses ambient control, so the executables it runs
+    are declared absolute pathnames, proven regular through one descriptor before the child
+    starts.  A reintroduced ``which`` fails here.
+    """
+
+    assert not {
+        (module, function, access)
+        for module, function, access in _observed_accesses()
+        if access == "shutil.which"
+    }
+
+
+def test_every_descriptor_primitive_receives_a_descriptor_and_never_a_pathname() -> None:
+    """The descriptor class is proven mechanically, not asserted in a docstring.
+
+    Every call to a descriptor primitive is checked structurally: its descriptor argument is a
+    plain name, attribute, subscript, or the result of a call that returns a descriptor --
+    never a string literal, an f-string, a ``Path(...)``, a ``str(...)``, or a ``/`` join.  A
+    row that claimed ``descriptor`` while handing the call a constructed pathname fails here,
+    so the class cannot be used to hide a pathname-shaped access.
+    """
+
+    offenders: list[str] = []
+    for module in sorted(EVALUATOR_PACKAGE.glob("*.py")):
+        tree = ast.parse(module.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            name = _called_name(node.func)
+            if name not in _DESCRIPTOR_PRIMITIVES or not node.args:
+                continue
+            first = node.args[0]
+            if isinstance(first, ast.Name | ast.Attribute | ast.Subscript):
+                continue
+            if isinstance(first, ast.Call) and _called_name(first.func) in _DESCRIPTOR_SOURCES:
+                continue
+            offenders.append(f"{module.name}:{node.lineno} {name}({ast.unparse(first)})")
+    assert offenders == []
+
+
+@pytest.mark.parametrize("owner", [CONFINED, GUARDED, DECLARED, DESCRIPTOR, CHILD, OWN_IMAGE])
 def test_the_ownership_document_explains_each_owner_class(owner: str) -> None:
     assert OWNERSHIP_DOC.is_file()
     assert owner in OWNERSHIP_DOC.read_text(encoding="utf-8")
@@ -272,8 +582,8 @@ def test_the_ownership_document_explains_each_owner_class(owner: str) -> None:
 def test_the_ownership_document_names_every_audited_module() -> None:
     text = OWNERSHIP_DOC.read_text(encoding="utf-8")
     modules = {module for module, _function, _access, _owner in OWNERSHIP}
-    # These three execute no filesystem access of their own; the document says so explicitly.
-    without_access = {"__init__.py", "models.py", "process.py", "write_guard.py"}
+    # Only this one executes no filesystem access of its own; the document says so.
+    without_access = {"models.py"}
     assert modules == {path.name for path in EVALUATOR_PACKAGE.glob("*.py")} - without_access
     for module in sorted(modules):
         assert module in text

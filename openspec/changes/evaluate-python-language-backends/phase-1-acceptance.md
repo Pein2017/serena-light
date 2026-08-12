@@ -1,7 +1,81 @@
 # Phase 1 acceptance: admission gate
 
-**Admission gate disposition: PASS on the run below. Phase 1 completion remains on HOLD
-pending two independent re-reviews of *that* receipt.** A second Sol-xhigh re-review
+**Admission gate disposition: no admitted run. The last PASS -- run `59a38137…d73f` at HEAD
+`82651d0`, recorded at commit `49d557f` -- was REJECTED by the final review and is retained
+below as superseded evidence, never as an admitted PASS.** Two independent exact-target
+reviewers (Sol-xhigh and Opus-max) returned HOLD on it, for two defect families that no
+re-review of that receipt could clear. Both are repaired at this HEAD, and no admission run has
+been performed against the repaired evaluator: the next admitting run is the lead's one-shot
+step after review, and Task 1.8 stays unchecked until then.
+
+## The eighth defect family: what rejected run `59a38137…d73f`
+
+1. **The identity captured before first child use was not what first use enforced.**
+   `capture_evaluator_identity()` recorded `production_child.py` and the executed
+   production-helper closure, and then the first `run_production_helper()` called
+   `_PINNED_CHILD_DIGESTS.setdefault(...)` -- accepting whatever bytes were on disk at *that*
+   moment instead of requiring the earlier identity. A changed child program was reproduced
+   executing successfully after identity capture. The sealed `memfd` proved only that the bytes
+   read for `production_child.py` were the bytes executed; the six `serena_light` helpers were
+   still imported from the mutable `src` root and only *re-read* afterwards, so a transient
+   substitution could execute and be restored before either post-hoc read saw it.
+
+   Repaired: `HelperExpectation`, derived from the captured `EvaluatorIdentity`, is passed
+   explicitly into every production-helper call the admission makes and compared before
+   anything runs; the verified child program *and* the verified helper bytes are executed and
+   imported from sealed `memfd` images addressed by descriptor, with no `src` root on the
+   child's `sys.path` at all; closure membership is exact per operation and enforced in the
+   child and again in the parent; the evaluator identity is re-measured after cleanup and
+   before publication so a late mutation can never yield a `pass`; and `_PINNED_CHILD_DIGESTS`
+   is gone, so two admissions in one process cannot contaminate each other.
+
+2. **Two filesystem-ownership claims were false.** `ProductionAdmissionServices.cleanup()` was
+   reproduced following a symlinked ancestor and unlinking a decoy *outside* the evaluation
+   root: it opened `evaluation_root / receipts` as one absolute pathname under `O_NOFOLLOW`,
+   which protects only the leaf. `artifact_tree_digest()` had the same ancestor weakness and
+   fed admitted evidence. `shutil.which("git")` resolved the corpus scanner's Git from the
+   ambient `PATH`.
+
+   Repaired: both acquire their root by walking every component from the declared owner root's
+   descriptor; the ownership table names the root opens `guarded` rather than `confined`, adds
+   a `declared-path` class for the pathname-shaped observations that are weaker still, expands
+   the structural collector to namespace mutation, descriptor byte and durability operations,
+   metadata and link operations, descriptor duplication and release, and executable discovery,
+   and proves the `descriptor` class mechanically; and Git is one declared absolute executable,
+   proven a regular executable file through one descriptor before any child starts.
+
+Every one of these is covered by an adversarial regression that was first shown to fail against
+the pre-repair behaviour: the two ancestor-substitution exploits, the child-program and helper
+swaps between capture and first use, the helper swap inside the import window, the unexpected
+extra and missing expected closure members, the origin escape, the late evaluator mutation, and
+two sequential admissions in one process.
+
+## Repository gates at the final-review repair HEAD
+
+`pytest -q tests`: **1511 passed, 35 skipped** (the 35 skips are the external-root snapshot
+gates, unchanged; the count rose from 1427 with the new expectation, ownership, and
+ancestor-substitution regressions). `ruff check src tests scripts`: clean. `ty check`: clean
+(run against this worktree's own `.venv`). `openspec validate --all --strict`: 5 passed, 0
+failed. `git diff --check`: clean. Production lock/build/runtime identity invariants: unchanged
+and covered by `tests/backend_eval/test_production_identity.py` and
+`tests/acceptance/` -- `src/serena_light`, `pyproject.toml`, `uv.lock`, and
+`package-lock.json` are byte-identical to the frozen base.
+
+`conda run -n ms pytest -q tests` cannot run in this worktree and could not at the frozen base
+either: the shared `ms` environment carries an editable `.pth` for `/data/verl`, whose regular
+`scripts` package shadows this repository's `scripts` namespace package, so `tests/conftest.py`
+fails at `import scripts.backend_eval`. This is the same ambient shadowing every earlier run
+recorded as its CLI-host deviation. The gates above were therefore run with this worktree's own
+`.venv` -- the same interpreter `ty check` has always used, built on the `ms` interpreter.
+
+## The rejected run, retained
+
+**The record below is unchanged.** It describes run `59a38137…d73f` exactly as it was
+published, including its own then-current gate counts at HEAD `82651d0`. It is evidence of a
+rejected run, not an admitted PASS.
+
+**Its previous disposition, superseded.** Phase 1 completion remains on HOLD pending two
+independent re-reviews of an admitting receipt that does not yet exist. A second Sol-xhigh re-review
 overruled a passing review of an earlier run -- evaluator HEAD `285c203`, evaluation identity
 `207e7521…81e4` -- with executable evidence of three further defects, and completing their
 repair exposed a fourth. An Opus-max review of the repaired evaluator then found a fifth:
@@ -394,6 +468,9 @@ Both are byte-identical to when they were written, and both still recompute thei
 unchanged; the count rose from 1422 with the five new FIFO regressions). `ruff check src tests
 scripts`: clean. `ty check`: clean (run against this worktree's own `.venv`). `openspec
 validate --all --strict`: 5 passed, 0 failed. `git diff --check`: clean.
+
+*These are the counts at HEAD `82651d0`, the rejected run's own commit. The current gate counts
+are at the top of this record.*
 
 
 ## Superseded but retained (5): the reviewed run that the second re-review overruled

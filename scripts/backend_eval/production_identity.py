@@ -25,8 +25,10 @@ unchanged, from this evaluator's own checkout -- inside the bounded child in
 reopen it by name, so a substituted node can still block them; what the child guarantees is
 that the block costs the phase its remaining deadline and a typed failure, with the whole
 process group killed, rather than an unbounded hang the ceiling can never observe.  The
-child's executed helper bytes are digest-bound to this checkout, so
-:mod:`scripts.backend_eval.source_binding` still names every helper byte a receipt reports.
+child's executed helper bytes are the exact bytes the run's captured evaluator identity
+names: the caller passes that expectation in, the parent verifies each helper file against it
+through a confined walk before the child starts, and the child imports those verified bytes
+from a sealed image rather than from disk.
 """
 
 from __future__ import annotations
@@ -38,7 +40,7 @@ from pathlib import Path
 from scripts.backend_eval.models import ProductionIdentity, sha256_bytes
 from scripts.backend_eval.process import Deadline
 from scripts.backend_eval.production_helper import ProductionHelperError, run_production_helper
-from scripts.backend_eval.source_binding import SourceBindingError
+from scripts.backend_eval.source_binding import HelperExpectation, SourceBindingError
 
 PRODUCTION_IDENTITY_FILES = ("package-lock.json", "pyproject.toml", "uv.lock")
 
@@ -64,17 +66,20 @@ class ProductionIdentityChanged(ProductionIdentityError):
     """Raised when any production identity field changed across an evaluation step."""
 
 
-def capture_production_identity(repo_root: Path, *, deadline: Deadline | None = None) -> ProductionIdentity:
+def capture_production_identity(
+    repo_root: Path, *, expectation: HelperExpectation, deadline: Deadline | None = None
+) -> ProductionIdentity:
     """Return the byte-exact production identity of ``repo_root``.
 
     The per-file digests are computed here through guarded descriptors; the dependency-lock
     digest, build identity, and runtime paths come from the production implementations,
-    executed under ``deadline`` in a bounded, source-bound child.
+    executed under ``deadline`` in a bounded child that may run only the bytes ``expectation``
+    -- and therefore the run's own published evaluator identity -- names.
     """
 
     root = repo_root.resolve()
     digests = {name: sha256_bytes(payload) for name, payload in _read_identity_inputs(root).items()}
-    helper = _run_production_helpers(root, deadline)
+    helper = _run_production_helpers(root, expectation, deadline)
     return ProductionIdentity(
         pyproject_toml_sha256=digests["pyproject.toml"],
         uv_lock_sha256=digests["uv.lock"],
@@ -97,9 +102,13 @@ def assert_production_identity_unchanged(before: ProductionIdentity, after: Prod
         raise ProductionIdentityChanged(f"production identity changed: {', '.join(changed)}")
 
 
-def _run_production_helpers(root: Path, deadline: Deadline | None) -> dict[str, object]:
+def _run_production_helpers(
+    root: Path, expectation: HelperExpectation, deadline: Deadline | None
+) -> dict[str, object]:
     try:
-        return run_production_helper("production_identity", {"root": str(root)}, deadline=deadline)
+        return run_production_helper(
+            "production_identity", {"root": str(root)}, expectation=expectation, deadline=deadline
+        )
     except (ProductionHelperError, SourceBindingError) as exc:
         raise ProductionIdentityError(f"cannot capture production identity below {root}: {exc}") from exc
 

@@ -38,15 +38,22 @@ different filesystem states.
 from __future__ import annotations
 
 import os
-import shutil
 import stat
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
 from scripts.backend_eval.models import PathRecord, RootManifest, canonical_json, sha256_bytes
-from scripts.backend_eval.process import CommandTimeout, Deadline, run_bounded_bytes
+from scripts.backend_eval.process import (
+    GIT_EXECUTABLE,
+    CommandTimeout,
+    Deadline,
+    ExecutableBindingError,
+    bound_executable,
+    run_bounded_bytes,
+)
 from scripts.backend_eval.production_helper import ProductionHelperError, run_production_helper
+from scripts.backend_eval.source_binding import HelperExpectation, SourceBindingError
 from serena_light.workspace.identity import open_guarded_directory
 
 # Evaluation-only reuse of production's *pure* inventory helpers.  These are executed
@@ -79,16 +86,16 @@ EXCLUDED_DIRECTORY_NAMES: tuple[str, ...] = (".admission-artifacts", ".git", ".v
 # Content digests come from ``observe_file_digest`` executed in a bounded child, in chunks.
 # The chunk is a deliberate trade: production's guarded read inspects a candidate's type and
 # then reopens it by name with no ``O_NONBLOCK``, so a node substituted in that window blocks
-# the reader, and only a killable process group can bound it.  Chunking keeps the per-chunk
-# stability window short -- the ``lstat`` bracket around each chunk is what proves a hashed
-# path held still -- while keeping the number of children per capture small.
+# the reader, and only a killable process group can bound it.  Chunking keeps each child's
+# argument list and its own blast radius small; the stability proof is the *whole-pass*
+# ``lstat`` bracket in ``_hashed_records``, which is stricter than a per-chunk one because it
+# refuses a path that moved at any point during the pass, not merely during its own chunk.
 DIGEST_CHUNK_SIZE = 512
 
 _MAX_SCAN_DEPTH = 128
 _DIRECTORY_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
 # Git receives an explicit environment: no ambient GIT_* control may steer the corpus scan.
 _GIT_ENVIRONMENT_PATH = "/usr/bin:/bin"
-_GIT_EXECUTABLE = shutil.which("git", path=_GIT_ENVIRONMENT_PATH) or shutil.which("git") or "/usr/bin/git"
 
 Check = Callable[[], None]
 
@@ -207,37 +214,54 @@ def default_corpus_requests() -> tuple[RootManifestRequest, ...]:
 
 
 def freeze_default_corpus(
-    *, check: Check | None = None, deadline: Deadline | None = None
+    *,
+    expectation: HelperExpectation,
+    check: Check | None = None,
+    deadline: Deadline | None = None,
 ) -> tuple[RootManifest, ...]:
     """Freeze every fixed corpus root in canonical root order."""
 
     return tuple(
-        capture_root_manifest(request, check=check, deadline=deadline) for request in default_corpus_requests()
+        capture_root_manifest(request, expectation=expectation, check=check, deadline=deadline)
+        for request in default_corpus_requests()
     )
 
 
 def capture_root_manifest(
-    request: RootManifestRequest, *, check: Check | None = None, deadline: Deadline | None = None
+    request: RootManifestRequest,
+    *,
+    expectation: HelperExpectation,
+    check: Check | None = None,
+    deadline: Deadline | None = None,
 ) -> RootManifest:
-    """Capture one stable bounded root or fail before returning partial evidence."""
+    """Capture one stable bounded root or fail before returning partial evidence.
+
+    ``expectation`` is the run's own execution expectation: every content digest below is
+    computed by production's bytes in a bounded child, and that child may execute only the
+    bytes the captured evaluator identity names.
+    """
 
     root = request.root
     _require_directory(root, "root")
     stop = _checker(check, deadline)
     if request.kind == "git":
-        return _capture_git_manifest(root, request, stop, deadline)
-    return _capture_non_git_manifest(root, request, stop, deadline)
+        return _capture_git_manifest(root, request, stop, expectation, deadline)
+    return _capture_non_git_manifest(root, request, stop, expectation, deadline)
 
 
 def _capture_git_manifest(
-    root: Path, request: RootManifestRequest, stop: Check, deadline: Deadline | None
+    root: Path,
+    request: RootManifestRequest,
+    stop: Check,
+    expectation: HelperExpectation,
+    deadline: Deadline | None,
 ) -> RootManifest:
     _require_git_root(root, deadline)
     before, inventory = _git_freeze_state(root, deadline)
     _reject_inventory_rejections(inventory)
     hashed_names = set(inventory.paths) | set(request.fully_hashed_paths) | set(request.required_config_paths)
     disposition_for = _git_disposition_reader(before)
-    records = _hashed_records(root, sorted(hashed_names), disposition_for, deadline)
+    records = _hashed_records(root, sorted(hashed_names), disposition_for, expectation, deadline)
     remainder, excluded = _scan_remainder(root, hashed_names, disposition_for, stop)
     _require_disjoint_records(records, remainder)
     after, _ = _git_freeze_state(root, deadline)
@@ -256,14 +280,18 @@ def _capture_git_manifest(
 
 
 def _capture_non_git_manifest(
-    root: Path, request: RootManifestRequest, stop: Check, deadline: Deadline | None
+    root: Path,
+    request: RootManifestRequest,
+    stop: Check,
+    expectation: HelperExpectation,
+    deadline: Deadline | None,
 ) -> RootManifest:
     if root == MS_TRANSFORMERS_ROOT:
-        return _capture_transformers_manifest(root, request, stop, deadline)
+        return _capture_transformers_manifest(root, request, stop, expectation, deadline)
     if not request.fully_hashed_paths and not request.required_config_paths:
         raise ManifestError("non-Git roots require an exact fully hashed task path list")
     hashed_paths = tuple(sorted(set(request.fully_hashed_paths) | set(request.required_config_paths)))
-    records = _hashed_records(root, hashed_paths, lambda _relative: "declared", deadline)
+    records = _hashed_records(root, hashed_paths, lambda _relative: "declared", expectation, deadline)
     metadata = _metadata_records(root, request.metadata_roots, lambda _relative: "declared", stop)
     _require_disjoint_records(records, metadata)
     inventory_digest = sha256_bytes(canonical_json({"kind": "non_git", "paths": list(hashed_paths)}))
@@ -280,7 +308,11 @@ def _capture_non_git_manifest(
 
 
 def _capture_transformers_manifest(
-    root: Path, request: RootManifestRequest, stop: Check, deadline: Deadline | None
+    root: Path,
+    request: RootManifestRequest,
+    stop: Check,
+    expectation: HelperExpectation,
+    deadline: Deadline | None,
 ) -> RootManifest:
     try:
         inventory = bounded_non_git_trust_inventory(root)
@@ -288,7 +320,7 @@ def _capture_transformers_manifest(
         raise ManifestError(f"cannot capture bounded transformers inventory: {error}") from error
     _reject_inventory_rejections(inventory)
     hashed_paths = set(inventory.paths) | set(request.fully_hashed_paths) | set(request.required_config_paths)
-    records = _hashed_records(root, sorted(hashed_paths), lambda _relative: "declared", deadline)
+    records = _hashed_records(root, sorted(hashed_paths), lambda _relative: "declared", expectation, deadline)
     metadata = _metadata_records(root, request.metadata_roots, lambda _relative: "declared", stop)
     _require_disjoint_records(records, metadata)
     return RootManifest.build(
@@ -515,7 +547,7 @@ def _walk_metadata_root(
 
 
 def bounded_file_digests(
-    root: Path, relatives: Sequence[str], *, deadline: Deadline | None
+    root: Path, relatives: Sequence[str], *, expectation: HelperExpectation, deadline: Deadline | None
 ) -> dict[str, str | None]:
     """Digest every named path with production's ``observe_file_digest``, in bounded children.
 
@@ -531,15 +563,19 @@ def bounded_file_digests(
         chunk = tuple(relatives[start : start + DIGEST_CHUNK_SIZE])
         if deadline is not None:
             deadline.check("capture_corpus")
-        digests.update(_digest_chunk(root, chunk, deadline))
+        digests.update(_digest_chunk(root, chunk, expectation, deadline))
     return digests
 
 
-def _digest_chunk(root: Path, chunk: Sequence[str], deadline: Deadline | None) -> dict[str, str | None]:
+def _digest_chunk(
+    root: Path, chunk: Sequence[str], expectation: HelperExpectation, deadline: Deadline | None
+) -> dict[str, str | None]:
     paths = [str(root / relative) for relative in chunk]
     try:
-        result = run_production_helper("observe_file_digests", {"paths": paths}, deadline=deadline)
-    except ProductionHelperError as error:
+        result = run_production_helper(
+            "observe_file_digests", {"paths": paths}, expectation=expectation, deadline=deadline
+        )
+    except (ProductionHelperError, SourceBindingError) as error:
         raise ManifestError(f"cannot digest the hashed closure below {root}: {error}") from error
     recorded = result.get("digests")
     if not isinstance(recorded, list) or len(recorded) != len(chunk):
@@ -559,12 +595,20 @@ def _hashed_records(
     root: Path,
     relatives: Sequence[str],
     disposition_for: Callable[[str], str],
+    expectation: HelperExpectation,
     deadline: Deadline | None,
 ) -> tuple[PathRecord, ...]:
-    """Bracket one bounded digest pass with an ``lstat`` before and after every path."""
+    """Bracket the whole bounded digest pass with an ``lstat`` before and after every path.
+
+    The bracket is deliberately *whole-pass*, not per-chunk: every path is ``lstat``ed before
+    the first chunk starts and again after the last one finishes, and any path whose identity
+    moved anywhere inside that window fails the capture.  That is a wider window and a
+    stricter requirement than a per-chunk bracket -- a path that held still for its own chunk
+    but moved during another one is refused here and would be accepted there.
+    """
 
     before = {relative: _require_hashable(root, relative) for relative in relatives}
-    digests = bounded_file_digests(root, relatives, deadline=deadline)
+    digests = bounded_file_digests(root, relatives, expectation=expectation, deadline=deadline)
     records: list[PathRecord] = []
     for relative in relatives:
         digest = digests.get(relative)
@@ -631,8 +675,12 @@ def _git_environment() -> dict[str, str]:
 def _git_bytes(root: Path, args: tuple[str, ...], deadline: Deadline | None) -> bytes:
     timeout = None if deadline is None else deadline.remaining()
     try:
+        executable = bound_executable(GIT_EXECUTABLE)
+    except ExecutableBindingError as error:
+        raise ManifestError(f"the declared Git executable cannot be bound for {root}: {error}") from error
+    try:
         result = run_bounded_bytes(
-            [_GIT_EXECUTABLE, *args], cwd=root, env=_git_environment(), timeout=timeout
+            [str(executable), *args], cwd=root, env=_git_environment(), timeout=timeout
         )
     except CommandTimeout as error:
         raise ManifestError(f"Git command timed out for {root}: {' '.join(args)}: {error}") from error

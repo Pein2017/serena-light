@@ -19,6 +19,7 @@ from scripts.backend_eval.write_guard import (
     enrich_after_manifest,
 )
 from serena_light.workspace.inventory import observe_file_digest
+from tests.backend_eval.support import real_expectation
 
 
 class _FakeClock:
@@ -60,7 +61,11 @@ def _request(root: Path) -> RootManifestRequest:
 def _after(before: RootManifest, root: Path) -> RootManifest:
     """The second capture, enriched exactly as the admission gate enriches it."""
 
-    return enrich_after_manifest(before, capture_root_manifest(_request(root)))
+    return enrich_after_manifest(
+        before,
+        capture_root_manifest(_request(root), expectation=real_expectation()),
+        expectation=real_expectation(),
+    )
 
 
 def _apply_mutation(before: RootManifest, root: Path, mutation: str) -> RootManifest:
@@ -83,7 +88,7 @@ def _apply_mutation(before: RootManifest, root: Path, mutation: str) -> RootMani
 
 @pytest.mark.parametrize("mutation", ["create", "change", "delete", "symlink_retarget"])
 def test_write_guard_reports_unexpected_mutation(mutation: str, fixture_root: Path) -> None:
-    before = capture_root_manifest(_request(fixture_root))
+    before = capture_root_manifest(_request(fixture_root), expectation=real_expectation())
     after = _apply_mutation(before, fixture_root, mutation)
 
     delta = compare_root_manifests(before, after)
@@ -94,9 +99,9 @@ def test_write_guard_reports_unexpected_mutation(mutation: str, fixture_root: Pa
 
 
 def test_declared_disposable_edit_is_not_backend_write(fixture_root: Path) -> None:
-    before = capture_root_manifest(_request(fixture_root))
+    before = capture_root_manifest(_request(fixture_root), expectation=real_expectation())
     (fixture_root / "src" / "a.py").write_text("answer = 2\n", encoding="utf-8")
-    after = capture_root_manifest(_request(fixture_root))
+    after = capture_root_manifest(_request(fixture_root), expectation=real_expectation())
 
     delta = compare_root_manifests(before, after, declared_mutations=frozenset({"src/a.py"}))
 
@@ -108,11 +113,11 @@ def test_declared_disposable_edit_is_not_backend_write(fixture_root: Path) -> No
 
 def test_guard_detects_same_size_mtime_rewrite_from_content_hash(fixture_root: Path) -> None:
     source = fixture_root / "src" / "a.py"
-    before = capture_root_manifest(_request(fixture_root))
+    before = capture_root_manifest(_request(fixture_root), expectation=real_expectation())
     before_record = before.hashed_paths[0]
     source.write_text("answer = 9\n", encoding="utf-8")
     os.utime(source, ns=(before_record.mtime_ns, before_record.mtime_ns))
-    after = capture_root_manifest(_request(fixture_root))
+    after = capture_root_manifest(_request(fixture_root), expectation=real_expectation())
 
     delta = compare_root_manifests(before, after)
 
@@ -122,16 +127,16 @@ def test_guard_detects_same_size_mtime_rewrite_from_content_hash(fixture_root: P
 def test_guard_requires_content_hash_for_changed_metadata_record(fixture_root: Path) -> None:
     """An unenriched second capture is an incomplete observation, never a clean one."""
 
-    before = capture_root_manifest(_request(fixture_root))
+    before = capture_root_manifest(_request(fixture_root), expectation=real_expectation())
     (fixture_root / "scratch" / "cache.bin").write_bytes(b"newer!")
-    after = capture_root_manifest(_request(fixture_root))
+    after = capture_root_manifest(_request(fixture_root), expectation=real_expectation())
 
     with pytest.raises(WriteGuardError, match="content hash"):
         compare_root_manifests(before, after)
 
 
 def test_guard_accepts_changed_metadata_record_with_after_content_hash(fixture_root: Path) -> None:
-    before = capture_root_manifest(_request(fixture_root))
+    before = capture_root_manifest(_request(fixture_root), expectation=real_expectation())
     (fixture_root / "scratch" / "cache.bin").write_bytes(b"newer and longer")
     after = _after(before, fixture_root)
 
@@ -150,7 +155,7 @@ def test_remainder_metadata_binds_only_what_metadata_can_see(fixture_root: Path)
     every capture.
     """
 
-    before = capture_root_manifest(_request(fixture_root))
+    before = capture_root_manifest(_request(fixture_root), expectation=real_expectation())
     cache = fixture_root / "scratch" / "cache.bin"
     recorded = next(item for item in before.metadata_paths if item.path == "scratch/cache.bin")
     cache.write_bytes(b"newer")
@@ -167,7 +172,7 @@ def test_remainder_metadata_binds_only_what_metadata_can_see(fixture_root: Path)
 
 
 def test_declared_parent_path_does_not_suppress_a_child(fixture_root: Path) -> None:
-    before = capture_root_manifest(_request(fixture_root))
+    before = capture_root_manifest(_request(fixture_root), expectation=real_expectation())
     (fixture_root / "scratch" / "cache.bin").write_bytes(b"newer and longer")
     after = _after(before, fixture_root)
 
@@ -178,13 +183,13 @@ def test_declared_parent_path_does_not_suppress_a_child(fixture_root: Path) -> N
 
 
 def test_declared_symlink_target_does_not_suppress_symlink_retarget(fixture_root: Path) -> None:
-    before = capture_root_manifest(_request(fixture_root))
+    before = capture_root_manifest(_request(fixture_root), expectation=real_expectation())
     link = fixture_root / "scratch" / "link"
     link.unlink()
     target = fixture_root / "second-target"
     target.write_text("second\n", encoding="utf-8")
     link.symlink_to(target)
-    after = capture_root_manifest(_request(fixture_root))
+    after = capture_root_manifest(_request(fixture_root), expectation=real_expectation())
 
     delta = compare_root_manifests(before, after, declared_mutations=frozenset({str(target)}))
 
@@ -193,14 +198,14 @@ def test_declared_symlink_target_does_not_suppress_symlink_retarget(fixture_root
 
 
 def test_guard_rejects_root_or_kind_mismatch(fixture_root: Path) -> None:
-    before = capture_root_manifest(_request(fixture_root))
-    after = capture_root_manifest(_request(fixture_root))
+    before = capture_root_manifest(_request(fixture_root), expectation=real_expectation())
+    after = capture_root_manifest(_request(fixture_root), expectation=real_expectation())
 
     elsewhere = fixture_root.parent / "elsewhere"
     (elsewhere / "src").mkdir(parents=True)
     (elsewhere / "src" / "a.py").write_text("answer = 1\n", encoding="utf-8")
     (elsewhere / "scratch").mkdir()
-    other = capture_root_manifest(_request(elsewhere))
+    other = capture_root_manifest(_request(elsewhere), expectation=real_expectation())
 
     with pytest.raises(WriteGuardError, match="root"):
         compare_root_manifests(before, other)
@@ -221,7 +226,7 @@ def test_guard_rejects_root_or_kind_mismatch(fixture_root: Path) -> None:
 def test_manifest_capture_records_a_special_file_rather_than_hiding_it(fixture_root: Path) -> None:
     """A special node is recorded and compared; it is never silently skipped."""
 
-    before = capture_root_manifest(_request(fixture_root))
+    before = capture_root_manifest(_request(fixture_root), expectation=real_expectation())
     os.mkfifo(fixture_root / "scratch" / "named-pipe")
     after = _after(before, fixture_root)
 
@@ -232,7 +237,7 @@ def test_manifest_capture_records_a_special_file_rather_than_hiding_it(fixture_r
 
 
 def test_guard_canonicalizes_delta_path_order(fixture_root: Path) -> None:
-    before = capture_root_manifest(_request(fixture_root))
+    before = capture_root_manifest(_request(fixture_root), expectation=real_expectation())
     (fixture_root / "src" / "a.py").write_text("answer = 2\n", encoding="utf-8")
     (fixture_root / "scratch" / "cache.bin").write_bytes(b"newer and longer")
     after = _after(before, fixture_root)
@@ -269,11 +274,14 @@ def test_assertion_error_is_bounded_and_includes_counts_and_digests() -> None:
 def test_enrichment_hashes_changed_remainder_files_in_a_bounded_child(fixture_root: Path) -> None:
     """The default enrichment digest is production's, executed under the phase's ceiling."""
 
-    before = capture_root_manifest(_request(fixture_root))
+    before = capture_root_manifest(_request(fixture_root), expectation=real_expectation())
     (fixture_root / "scratch" / "cache.bin").write_bytes(b"cache!")
-    after = capture_root_manifest(_request(fixture_root))
+    after = capture_root_manifest(_request(fixture_root), expectation=real_expectation())
 
-    enriched = enrich_after_manifest(before, after, deadline=Deadline.start(monotonic_clock, 60.0))
+    enriched = enrich_after_manifest(
+                   before, after, deadline=Deadline.start(monotonic_clock, 60.0),
+                   expectation=real_expectation(),
+               )
 
     changed = next(record for record in enriched.metadata_paths if record.path == "scratch/cache.bin")
     assert changed.content_sha256 == observe_file_digest(fixture_root / "scratch" / "cache.bin")
@@ -282,11 +290,11 @@ def test_enrichment_hashes_changed_remainder_files_in_a_bounded_child(fixture_ro
 def test_enrichment_refuses_a_remainder_file_it_cannot_attribute(fixture_root: Path) -> None:
     """A FIFO where a changed remainder file was is an incomplete observation, not clean."""
 
-    before = capture_root_manifest(_request(fixture_root))
+    before = capture_root_manifest(_request(fixture_root), expectation=real_expectation())
     target = fixture_root / "scratch" / "cache.bin"
     target.unlink()
     os.mkfifo(target)
-    after = capture_root_manifest(_request(fixture_root))
+    after = capture_root_manifest(_request(fixture_root), expectation=real_expectation())
     # The metadata scan sees a special node, so force the enrichment to attempt the digest.
     forced = RootManifest.build(
         root=after.root,
@@ -304,17 +312,20 @@ def test_enrichment_refuses_a_remainder_file_it_cannot_attribute(fixture_root: P
 
     started = time.monotonic()
     with pytest.raises(WriteGuardError, match="could not be hashed"):
-        enrich_after_manifest(before, forced, deadline=Deadline.start(monotonic_clock, 30.0))
+        enrich_after_manifest(
+            before, forced, deadline=Deadline.start(monotonic_clock, 30.0),
+            expectation=real_expectation(),
+        )
     assert time.monotonic() - started < 10.0
 
 
 def test_enrichment_with_no_remaining_time_fails_closed(fixture_root: Path) -> None:
-    before = capture_root_manifest(_request(fixture_root))
+    before = capture_root_manifest(_request(fixture_root), expectation=real_expectation())
     (fixture_root / "scratch" / "cache.bin").write_bytes(b"cache!")
-    after = capture_root_manifest(_request(fixture_root))
+    after = capture_root_manifest(_request(fixture_root), expectation=real_expectation())
     clock = _FakeClock()
     deadline = Deadline.start(clock, 10.0)
     clock.advance(10.0)
 
     with pytest.raises((WriteGuardError, DeadlineExceeded)):
-        enrich_after_manifest(before, after, deadline=deadline)
+        enrich_after_manifest(before, after, deadline=deadline, expectation=real_expectation())

@@ -27,6 +27,7 @@ from pathlib import Path
 from scripts.backend_eval.manifests import ManifestError, bounded_file_digests
 from scripts.backend_eval.models import PathRecord, RootManifest, WriteDelta
 from scripts.backend_eval.process import Deadline
+from scripts.backend_eval.source_binding import HelperExpectation
 
 __all__ = [
     "WriteGuardError",
@@ -41,7 +42,9 @@ _CONTROL_FIELDS = ("excluded_paths", "inventory_count", "inventory_digest", "inv
 DigestReader = Callable[[Path], str | None]
 
 
-def _bounded_digest_reader(root: Path, deadline: Deadline | None) -> DigestReader:
+def _bounded_digest_reader(
+    root: Path, expectation: HelperExpectation, deadline: Deadline | None
+) -> DigestReader:
     """Production's ``observe_file_digest``, executed in a bounded, killable child.
 
     Enrichment reads only the remainder paths whose metadata actually moved, so this is
@@ -55,7 +58,7 @@ def _bounded_digest_reader(root: Path, deadline: Deadline | None) -> DigestReade
         except ValueError as error:  # pragma: no cover - structural guard
             raise WriteGuardError(f"{absolute} is not below the manifest root {root}") from error
         try:
-            return bounded_file_digests(root, (relative,), deadline=deadline)[relative]
+            return bounded_file_digests(root, (relative,), expectation=expectation, deadline=deadline)[relative]
         except ManifestError as error:
             raise WriteGuardError(f"cannot hash the changed remainder file {relative}: {error}") from error
 
@@ -70,6 +73,7 @@ def enrich_after_manifest(
     before: RootManifest,
     after: RootManifest,
     *,
+    expectation: HelperExpectation,
     deadline: Deadline | None = None,
     digest_for: DigestReader | None = None,
 ) -> RootManifest:
@@ -82,7 +86,9 @@ def enrich_after_manifest(
     _require_same_root_identity(before, after)
     before_records = {record.path: record for record in after_and_before_records(before)}
     root = Path(after.root)
-    read_digest = _bounded_digest_reader(root, deadline) if digest_for is None else digest_for
+    read_digest = (
+        _bounded_digest_reader(root, expectation, deadline) if digest_for is None else digest_for
+    )
     enriched: list[PathRecord] = []
     changed = False
     for record in after.metadata_paths:

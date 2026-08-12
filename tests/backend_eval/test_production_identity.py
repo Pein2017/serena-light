@@ -2,21 +2,19 @@
 
 from __future__ import annotations
 
-import json
 import os
 import shutil
-import sys
 import time
 from dataclasses import replace
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
 import pytest
 
 import scripts.backend_eval.production_identity as production_identity_module
 from scripts.backend_eval.identity import capture_evaluator_identity
-from scripts.backend_eval.models import ProductionIdentity, canonical_json, sha256_bytes
-from scripts.backend_eval.process import Deadline, monotonic_clock, run_bounded_bytes, sealed_image
+from scripts.backend_eval.models import ProductionIdentity, sha256_bytes
+from scripts.backend_eval.process import Deadline, monotonic_clock
 from scripts.backend_eval.production_helper import (
     PRODUCTION_CHILD_PATH,
     PRODUCTION_CHILD_RELPATH,
@@ -24,7 +22,6 @@ from scripts.backend_eval.production_helper import (
     ProductionHelperTimeout,
     _open_owner_root,
     _read_owned_file,
-    production_child_digest,
     run_production_helper,
 )
 from scripts.backend_eval.production_identity import (
@@ -37,11 +34,15 @@ from scripts.backend_eval.production_identity import (
 from scripts.backend_eval.source_binding import (
     CHILD_EXECUTED_HELPERS,
     EVALUATION_OWNER_ROOT,
+    OPERATION_HELPER_CLOSURES,
+    PRODUCTION_CHILD_NAME,
+    HelperExpectation,
     SourceBindingError,
     bind_production_source,
 )
 from serena_light.bootstrap import runtime_paths
 from serena_light.build_identity import compute_build_identity, dependency_lock_digest
+from tests.backend_eval.support import expectation_for, real_expectation
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 _SHA_F = "f" * 64
@@ -81,7 +82,7 @@ def _stub_root(tmp_path: Path, *, omit: str | None = None, symlink: str | None =
 
 
 def test_capture_production_identity_matches_runtime_functions(repo_root: Path) -> None:
-    identity = capture_production_identity(repo_root)
+    identity = capture_production_identity(repo_root, expectation=real_expectation())
     assert identity.dependency_lock_digest == dependency_lock_digest(repo_root)
     assert identity.build_identity == compute_build_identity(repo_root)
     assert dict(identity.runtime_paths) == {
@@ -90,7 +91,7 @@ def test_capture_production_identity_matches_runtime_functions(repo_root: Path) 
 
 
 def test_capture_production_identity_hashes_each_input_separately(repo_root: Path) -> None:
-    identity = capture_production_identity(repo_root)
+    identity = capture_production_identity(repo_root, expectation=real_expectation())
     assert identity.pyproject_toml_sha256 == sha256_bytes((repo_root / "pyproject.toml").read_bytes())
     assert identity.uv_lock_sha256 == sha256_bytes((repo_root / "uv.lock").read_bytes())
     assert identity.package_lock_json_sha256 == sha256_bytes((repo_root / "package-lock.json").read_bytes())
@@ -102,8 +103,8 @@ def test_production_identity_files_cover_the_three_production_inputs() -> None:
 
 
 def test_capture_production_identity_is_deterministic_and_canonical(repo_root: Path) -> None:
-    first = capture_production_identity(repo_root)
-    second = capture_production_identity(repo_root)
+    first = capture_production_identity(repo_root, expectation=real_expectation())
+    second = capture_production_identity(repo_root, expectation=real_expectation())
     assert first == second
     names = [name for name, _ in first.runtime_paths]
     assert names == sorted(names)
@@ -117,26 +118,26 @@ def test_capture_production_identity_reads_the_requested_root_only(tmp_path: Pat
     for name in PRODUCTION_IDENTITY_FILES:
         shutil.copy2(repo_root / name, copied / name)
     shutil.copytree(repo_root / "src", copied / "src")
-    identity = capture_production_identity(copied)
-    assert identity == capture_production_identity(repo_root)
+    identity = capture_production_identity(copied, expectation=real_expectation())
+    assert identity == capture_production_identity(repo_root, expectation=real_expectation())
 
 
 def test_capture_production_identity_rejects_a_missing_input(tmp_path: Path) -> None:
     root = _stub_root(tmp_path, omit="uv.lock")
     with pytest.raises(ProductionIdentityError, match="uv.lock"):
-        capture_production_identity(root)
+        capture_production_identity(root, expectation=real_expectation())
 
 
 def test_capture_production_identity_rejects_a_symlinked_input(tmp_path: Path) -> None:
     root = _stub_root(tmp_path, symlink="package-lock.json")
     with pytest.raises(ProductionIdentityError, match="without following a link"):
-        capture_production_identity(root)
+        capture_production_identity(root, expectation=real_expectation())
 
 
 def test_capture_production_identity_rejects_a_root_without_runtime_sources(tmp_path: Path) -> None:
     root = _stub_root(tmp_path)
     with pytest.raises(ProductionIdentityError, match="runtime sources"):
-        capture_production_identity(root)
+        capture_production_identity(root, expectation=real_expectation())
 
 
 def _identity() -> ProductionIdentity:
@@ -213,7 +214,7 @@ def test_capture_production_identity_refuses_a_fifo_input_promptly(tmp_path: Pat
 
     started = time.monotonic()
     with pytest.raises(ProductionIdentityError, match="must be a regular file"):
-        capture_production_identity(root)
+        capture_production_identity(root, expectation=real_expectation())
     elapsed = time.monotonic() - started
 
     assert elapsed < 5.0
@@ -229,13 +230,13 @@ def test_capture_production_identity_refuses_an_input_reached_through_a_link(tmp
 
     root = _stub_root(tmp_path, symlink="package-lock.json")
     with pytest.raises(ProductionIdentityError, match="cannot open"):
-        capture_production_identity(root)
+        capture_production_identity(root, expectation=real_expectation())
 
 
 def test_capture_production_identity_equals_the_production_helpers(repo_root: Path) -> None:
     """The bounded child returns exactly what the in-process production helpers return."""
 
-    identity = capture_production_identity(repo_root)
+    identity = capture_production_identity(repo_root, expectation=real_expectation())
     assert identity.dependency_lock_digest == dependency_lock_digest(repo_root)
     assert identity.build_identity == compute_build_identity(repo_root)
     assert dict(identity.runtime_paths) == {
@@ -251,7 +252,7 @@ def test_capture_production_identity_propagates_its_deadline(repo_root: Path) ->
     clock.advance(10.0)
 
     with pytest.raises(ProductionIdentityError):
-        capture_production_identity(repo_root, deadline=deadline)
+        capture_production_identity(repo_root, deadline=deadline, expectation=real_expectation())
 
 
 def test_capture_production_identity_kills_a_hung_helper_process_group(
@@ -276,7 +277,13 @@ def test_capture_production_identity_kills_a_hung_helper_process_group(
 
     started = time.monotonic()
     with pytest.raises(ProductionHelperTimeout, match="process group was killed"):
-        run_production_helper("production_identity", {"root": str(repo_root)}, deadline=deadline, python=stub)
+        run_production_helper(
+            "production_identity",
+            {"root": str(repo_root)},
+            expectation=real_expectation(),
+            deadline=deadline,
+            python=stub,
+        )
     elapsed = time.monotonic() - started
 
     assert elapsed < 20.0
@@ -286,12 +293,11 @@ def test_capture_production_identity_kills_a_hung_helper_process_group(
 
 
 def test_the_production_helper_child_binds_the_checkout_it_executed(repo_root: Path) -> None:
-    """A child that ran another checkout's helper bytes is refused, not believed."""
+    """An expectation pointed at another checkout cannot execute this one's helper bytes."""
 
+    elsewhere = replace(real_expectation(), owner_root=repo_root.parent)
     with pytest.raises((SourceBindingError, ProductionHelperError)):
-        run_production_helper(
-            "production_identity", {"root": str(repo_root)}, owner_root=repo_root.parent
-        )
+        run_production_helper("production_identity", {"root": str(repo_root)}, expectation=elsewhere)
 
 
 def test_the_production_helper_child_receives_no_ambient_import_path(
@@ -305,14 +311,16 @@ def test_the_production_helper_child_receives_no_ambient_import_path(
     (shadow / "serena_light" / "__init__.py").write_text("raise SystemExit(99)\n", encoding="utf-8")
     monkeypatch.setenv("PYTHONPATH", str(shadow))
 
-    identity = capture_production_identity(repo_root)
+    identity = capture_production_identity(repo_root, expectation=real_expectation())
 
     assert identity.build_identity == compute_build_identity(repo_root)
 
 
-def test_the_production_helper_child_refuses_an_unknown_operation(repo_root: Path) -> None:
-    with pytest.raises(ProductionHelperError, match="unknown production helper operation"):
-        run_production_helper("not_a_helper", {"root": str(repo_root)})
+def test_an_unknown_operation_is_refused_before_a_child_can_start(repo_root: Path) -> None:
+    """An operation with no declared closure has no expectation, so no child may run at all."""
+
+    with pytest.raises(SourceBindingError, match="unknown production helper operation"):
+        run_production_helper("not_a_helper", {"root": str(repo_root)}, expectation=real_expectation())
 
 
 def test_a_non_regular_runtime_source_changes_the_identity_rather_than_hanging(
@@ -332,12 +340,12 @@ def test_a_non_regular_runtime_source_changes_the_identity_rather_than_hanging(
     for name in PRODUCTION_IDENTITY_FILES:
         shutil.copy2(repo_root / name, copied / name)
     shutil.copytree(repo_root / "src", copied / "src")
-    before = capture_production_identity(copied)
+    before = capture_production_identity(copied, expectation=real_expectation())
     target = copied / "src" / "serena_light" / "build_identity.py"
     target.unlink()
     os.mkfifo(target)
 
-    after = capture_production_identity(copied)
+    after = capture_production_identity(copied, expectation=real_expectation())
 
     assert after.build_identity != before.build_identity
     with pytest.raises(ProductionIdentityChanged, match="build_identity"):
@@ -377,7 +385,10 @@ def test_a_substitution_after_the_guarded_read_fails_typed_inside_the_ceiling(
 
     started = time.monotonic()
     with pytest.raises(ProductionIdentityError, match="cannot capture production identity"):
-        capture_production_identity(copied, deadline=Deadline.start(monotonic_clock, 30.0))
+        capture_production_identity(
+            copied, deadline=Deadline.start(monotonic_clock, 30.0),
+            expectation=real_expectation(),
+        )
     assert time.monotonic() - started < 20.0
     assert substituted
 
@@ -418,6 +429,7 @@ def test_the_parent_reread_refuses_a_symlinked_intermediate_component(
     """
 
     owner = _owner_copy(tmp_path, repo_root)
+    expectation = expectation_for(owner)
     elsewhere = tmp_path / "elsewhere" / "serena_light"
     elsewhere.mkdir(parents=True)
     shutil.copytree(owner / "src" / "serena_light", elsewhere, dirs_exist_ok=True)
@@ -429,11 +441,12 @@ def test_the_parent_reread_refuses_a_symlinked_intermediate_component(
 
     # End to end the same layout is refused, by whichever guard sees it first.
     with pytest.raises((SourceBindingError, ProductionHelperError)):
-        run_production_helper("production_identity", {"root": str(owner)}, owner_root=owner)
+        run_production_helper("production_identity", {"root": str(owner)}, expectation=expectation)
 
 
 def test_the_parent_reread_refuses_a_symlinked_leaf(tmp_path: Path, repo_root: Path) -> None:
     owner = _owner_copy(tmp_path, repo_root)
+    expectation = expectation_for(owner)
     target = owner / "src" / "serena_light" / "build_identity.py"
     decoy = tmp_path / "decoy_build_identity.py"
     shutil.copy2(target, decoy)
@@ -444,7 +457,7 @@ def test_the_parent_reread_refuses_a_symlinked_leaf(tmp_path: Path, repo_root: P
         _read_owned(owner, "src/serena_light/build_identity.py")
 
     with pytest.raises((SourceBindingError, ProductionHelperError)):
-        run_production_helper("production_identity", {"root": str(owner)}, owner_root=owner)
+        run_production_helper("production_identity", {"root": str(owner)}, expectation=expectation)
 
 
 def test_the_parent_reread_refuses_a_blocking_special_node(tmp_path: Path, repo_root: Path) -> None:
@@ -466,36 +479,49 @@ def test_the_child_program_is_executed_from_a_sealed_image_not_a_pathname(
 ) -> None:
     """A mid-run substitution of the child program is refused, not executed.
 
-    The program is read once through the confined walk, pinned by digest, and executed from a
-    sealed ``memfd``; the pathname is never handed to the interpreter.  Swapping the file
-    after the first use therefore cannot get hostile bytes executed -- the digest pin refuses
-    the run instead, without waiting for an after-the-fact ``source_clean`` observation.
+    The program is read through the confined walk, compared against the expectation the run
+    captured, and executed from a sealed ``memfd``; the pathname is never handed to the
+    interpreter.  Swapping the file after the first use therefore cannot get hostile bytes
+    executed -- the expectation refuses the run instead, without waiting for an
+    after-the-fact ``source_clean`` observation.
     """
 
     owner = _owner_copy(tmp_path, repo_root)
-    first = run_production_helper("production_identity", {"root": str(owner)}, owner_root=owner)
+    expectation = expectation_for(owner)
+    first = run_production_helper("production_identity", {"root": str(owner)}, expectation=expectation)
     assert first["dependency_lock_digest"] == dependency_lock_digest(owner)
 
     hostile = owner / PRODUCTION_CHILD_RELPATH
     hostile.write_text("import sys\nsys.stdout.write('{}\\n')\n", encoding="utf-8")
 
-    with pytest.raises(SourceBindingError, match="changed during this run"):
-        run_production_helper("production_identity", {"root": str(owner)}, owner_root=owner)
+    with pytest.raises(SourceBindingError, match="not the .* this evaluator's identity names"):
+        run_production_helper("production_identity", {"root": str(owner)}, expectation=expectation)
 
 
 def test_the_child_program_digest_is_the_one_the_evaluator_identity_names(repo_root: Path) -> None:
-    """The bytes that run and the bytes the receipt names are the same bytes."""
+    """The bytes that run and the bytes the receipt names are the same bytes.
+
+    There is no separate probe to compare them with, and deliberately so: the comparison is
+    the execution path.  A helper run under an expectation built straight from the published
+    identity succeeds only if the child program on disk is byte-for-byte the one that identity
+    names, so this run *is* the equality.
+    """
 
     identity = capture_evaluator_identity()
-    recorded = dict(identity.source_files)
+    expectation = HelperExpectation.from_identity(identity)
 
-    assert recorded["production_child.py"] == production_child_digest()
+    assert expectation.child_digest == dict(identity.source_files)[PRODUCTION_CHILD_NAME]
+    result = run_production_helper(
+        "production_identity", {"root": str(repo_root)}, expectation=expectation
+    )
+    assert result["dependency_lock_digest"] == dependency_lock_digest(repo_root)
 
 
 def test_the_child_program_read_is_confined_to_the_owner_root(tmp_path: Path, repo_root: Path) -> None:
     """A symlinked ``scripts/backend_eval`` cannot supply the program that is executed."""
 
     owner = _owner_copy(tmp_path, repo_root)
+    expectation = expectation_for(owner)
     elsewhere = tmp_path / "elsewhere-scripts"
     elsewhere.mkdir()
     (elsewhere / "production_child.py").write_text("raise SystemExit(0)\n", encoding="utf-8")
@@ -503,7 +529,7 @@ def test_the_child_program_read_is_confined_to_the_owner_root(tmp_path: Path, re
     (owner / "scripts" / "backend_eval").symlink_to(elsewhere)
 
     with pytest.raises(SourceBindingError, match="without following a link"):
-        run_production_helper("production_identity", {"root": str(owner)}, owner_root=owner)
+        run_production_helper("production_identity", {"root": str(owner)}, expectation=expectation)
 
 
 def test_the_declared_child_closure_covers_what_the_child_actually_loads(repo_root: Path) -> None:
@@ -511,24 +537,23 @@ def test_the_declared_child_closure_covers_what_the_child_actually_loads(repo_ro
 
     Those helpers run in the bounded child, so ``sys.modules`` cannot see them and the bound
     closure declares them instead.  A declaration is only evidence while it matches reality,
-    so the child's own reported closure -- for every operation it supports -- must be a subset
-    of it, and a helper that starts importing something new fails here rather than silently
+    so *every* supported operation is executed here: the parent refuses any run whose reported
+    closure is not exactly the operation's declaration, so a helper that starts importing
+    something new -- or stops importing something declared -- fails here rather than silently
     leaving the receipt.
     """
 
-    reported: set[str] = set()
+    expectation = real_expectation()
     requests: tuple[tuple[str, dict[str, Any]], ...] = (
         ("production_identity", {"root": str(repo_root)}),
         ("observe_file_digests", {"paths": []}),
     )
     for operation, payload in requests:
-        response = _child_response(operation, payload)
-        loaded = {entry[0] for entry in response["production_files"]}
-        assert loaded, f"the child reported no production closure for {operation}"
-        reported |= loaded
+        run_production_helper(operation, payload, expectation=expectation)
 
-    assert reported <= set(CHILD_EXECUTED_HELPERS)
-    assert set(CHILD_EXECUTED_HELPERS) == reported
+    declared = {relative for closure in OPERATION_HELPER_CLOSURES.values() for relative in closure}
+    assert declared == set(CHILD_EXECUTED_HELPERS)
+    assert set(OPERATION_HELPER_CLOSURES) == {operation for operation, _payload in requests}
 
 
 def test_the_bound_production_closure_names_every_child_executed_helper() -> None:
@@ -539,25 +564,3 @@ def test_the_bound_production_closure_names_every_child_executed_helper() -> Non
     for relative in CHILD_EXECUTED_HELPERS:
         assert relative in bound
         assert bound[relative] == sha256_bytes((EVALUATION_OWNER_ROOT / relative).read_bytes())
-
-
-def _child_response(operation: str, payload: dict[str, Any]) -> dict[str, Any]:
-    """Run the child exactly as the helper does and return its whole structured response."""
-
-    owner = EVALUATION_OWNER_ROOT
-    owner_fd = _open_owner_root(owner, "test")
-    try:
-        program = _read_owned_file(owner_fd, PRODUCTION_CHILD_RELPATH, owner, "test")
-    finally:
-        os.close(owner_fd)
-    with sealed_image("test-production-child", program) as image_fd:
-        result = run_bounded_bytes(
-            [sys.executable, "-I", "-B", f"/proc/self/fd/{image_fd}", str(owner), str(owner / "src")],
-            cwd=owner,
-            env={"LC_ALL": "C"},
-            timeout=120.0,
-            stdin=canonical_json({"op": operation, **payload}),
-            pass_fds=(image_fd,),
-        )
-    assert result.returncode == 0, result.stdout
-    return cast("dict[str, Any]", json.loads(result.stdout))

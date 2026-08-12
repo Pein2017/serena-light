@@ -52,6 +52,7 @@ from scripts.backend_eval.runtime import (
     runtime_lock_path,
     runtime_manifest_digest,
 )
+from tests.backend_eval.support import real_expectation
 
 _HASH_A = "a" * 64
 _HASH_B = "b" * 64
@@ -443,7 +444,7 @@ def _manifest(root: Path) -> dict[str, Any]:
 def test_runtime_path_is_candidate_lock_content_addressed(
     lock: CandidateLock, request_: RuntimeRequest
 ) -> None:
-    runtime = prepare_candidate_runtime(lock, request_, runner=_FakeRunner())
+    runtime = prepare_candidate_runtime(lock, request_, runner=_FakeRunner(), expectation=real_expectation())
 
     assert runtime.root == request_.runtime_base / lock.digest
     assert runtime.lock_digest == lock.digest
@@ -452,7 +453,7 @@ def test_runtime_path_is_candidate_lock_content_addressed(
 def test_runtime_creates_only_the_declared_service_owned_directories(
     lock: CandidateLock, request_: RuntimeRequest
 ) -> None:
-    runtime = prepare_candidate_runtime(lock, request_, runner=_FakeRunner())
+    runtime = prepare_candidate_runtime(lock, request_, runner=_FakeRunner(), expectation=real_expectation())
 
     assert sorted(path.name for path in runtime.root.iterdir()) == sorted(
         (*RUNTIME_FILE_NAMES, *RUNTIME_DIRECTORY_NAMES)
@@ -533,7 +534,7 @@ def test_runtime_preparation_refuses_an_ancestor_swapped_after_validation(
     hop.symlink_to(elsewhere)
 
     with pytest.raises(RuntimePreparationError, match="symlink"):
-        prepare_candidate_runtime(lock, swapped, runner=_FakeRunner())
+        prepare_candidate_runtime(lock, swapped, runner=_FakeRunner(), expectation=real_expectation())
 
     assert not (elsewhere / "runtime-base").exists()
 
@@ -547,7 +548,7 @@ def test_runtime_preparation_refuses_a_symlinked_runtime_root(
     (request_.runtime_base / lock.digest).symlink_to(elsewhere)
 
     with pytest.raises(RuntimePreparationError, match="symlink"):
-        prepare_candidate_runtime(lock, request_, runner=_FakeRunner())
+        prepare_candidate_runtime(lock, request_, runner=_FakeRunner(), expectation=real_expectation())
 
     assert sorted(path.name for path in elsewhere.iterdir()) == []
 
@@ -563,7 +564,7 @@ def test_runtime_preparation_fails_closed_when_the_root_is_swapped_mid_probe(
     runner = _FakeRunner(swap=("--version", logical, attacker))
 
     with pytest.raises(RuntimePreparationError, match=r"swapped during preparation \(before publication\)"):
-        prepare_candidate_runtime(lock, request_, runner=runner)
+        prepare_candidate_runtime(lock, request_, runner=runner, expectation=real_expectation())
 
     moved = request_.runtime_base / f"{lock.digest}-moved"
     # Every later command, write, and read followed the open descriptor to the real root.
@@ -587,7 +588,7 @@ def test_runtime_preparation_fails_closed_when_the_root_is_swapped_before_public
     runner = _FakeRunner(swap=(str(request_.environment_interpreters[-1][1]), logical, attacker))
 
     with pytest.raises(RuntimePreparationError, match=r"swapped during preparation \(before publication\)"):
-        prepare_candidate_runtime(lock, request_, runner=runner)
+        prepare_candidate_runtime(lock, request_, runner=runner, expectation=real_expectation())
 
     assert sorted(path.name for path in attacker.iterdir()) == []
     assert sorted(path.name for path in (request_.runtime_base / f"{lock.digest}-moved").iterdir()) == []
@@ -602,7 +603,7 @@ def test_runtime_refuses_a_requirements_lock_that_is_not_the_candidate_lock(
     request_.requirements_lock.write_bytes(_OTHER_BODY)
 
     with pytest.raises(RuntimePreparationError, match="does not match the candidate lock digest"):
-        prepare_candidate_runtime(lock, request_, runner=_FakeRunner())
+        prepare_candidate_runtime(lock, request_, runner=_FakeRunner(), expectation=real_expectation())
 
 
 def test_runtime_installs_a_durable_evaluation_owned_snapshot_of_the_lock(
@@ -612,7 +613,7 @@ def test_runtime_installs_a_durable_evaluation_owned_snapshot_of_the_lock(
 
     runner = _FakeRunner()
 
-    runtime = prepare_candidate_runtime(lock, request_, runner=runner)
+    runtime = prepare_candidate_runtime(lock, request_, runner=runner, expectation=real_expectation())
 
     snapshot = runtime.root / REQUIREMENTS_SNAPSHOT_NAME
     assert snapshot.read_bytes() == _LOCK_BODY
@@ -631,7 +632,7 @@ def test_runtime_syncs_a_sealed_immutable_image_of_the_verified_bytes(
 ) -> None:
     runner = _FakeRunner(probe_sync_input=True)
 
-    runtime = prepare_candidate_runtime(lock, request_, runner=runner)
+    runtime = prepare_candidate_runtime(lock, request_, runner=runner, expectation=real_expectation())
 
     assert runner.observed_sync_input == _LOCK_BODY
     assert runner.sync_input_write_error is not None
@@ -647,7 +648,7 @@ def test_runtime_sync_input_is_immutable_across_a_transient_snapshot_mutation(
 
     runner = _FakeRunner(probe_sync_input=True, transient_snapshot=_OTHER_BODY)
 
-    runtime = prepare_candidate_runtime(lock, request_, runner=runner)
+    runtime = prepare_candidate_runtime(lock, request_, runner=runner, expectation=real_expectation())
 
     assert runner.observed_sync_input == _LOCK_BODY
     assert runner.sync_input_write_error is not None
@@ -661,7 +662,7 @@ def test_runtime_ignores_a_concurrent_replacement_of_the_source_lock(
 
     runner = _FakeRunner(rewrite_source=("venv", request_.requirements_lock, _OTHER_BODY))
 
-    runtime = prepare_candidate_runtime(lock, request_, runner=runner)
+    runtime = prepare_candidate_runtime(lock, request_, runner=runner, expectation=real_expectation())
 
     assert request_.requirements_lock.read_bytes() == _OTHER_BODY
     snapshot = runtime.root / REQUIREMENTS_SNAPSHOT_NAME
@@ -675,7 +676,7 @@ def test_runtime_fails_closed_when_the_installed_snapshot_changes_during_sync(
     runner = _FakeRunner(rewrite_snapshot=("sync", _OTHER_BODY))
 
     with pytest.raises(RuntimePreparationError, match="does not match the candidate lock digest"):
-        prepare_candidate_runtime(lock, request_, runner=runner)
+        prepare_candidate_runtime(lock, request_, runner=runner, expectation=real_expectation())
 
     assert not (request_.runtime_base / lock.digest).exists()
 
@@ -695,11 +696,11 @@ def test_runtime_refuses_a_symlinked_requirements_lock(
 def test_runtime_reuse_refuses_a_changed_requirements_snapshot(
     lock: CandidateLock, request_: RuntimeRequest
 ) -> None:
-    runtime = prepare_candidate_runtime(lock, request_, runner=_FakeRunner())
+    runtime = prepare_candidate_runtime(lock, request_, runner=_FakeRunner(), expectation=real_expectation())
     (runtime.root / REQUIREMENTS_SNAPSHOT_NAME).write_bytes(_OTHER_BODY)
 
     with pytest.raises(RuntimePreparationError, match="does not match the candidate lock digest"):
-        prepare_candidate_runtime(lock, request_, runner=_FakeRunner())
+        prepare_candidate_runtime(lock, request_, runner=_FakeRunner(), expectation=real_expectation())
 
 
 # --- exact commands, bound to the open descriptor -----------------------------
@@ -710,7 +711,7 @@ def test_runtime_runs_the_exact_uv_venv_and_hash_locked_sync_commands(
 ) -> None:
     runner = _FakeRunner()
 
-    runtime = prepare_candidate_runtime(lock, request_, runner=runner)
+    runtime = prepare_candidate_runtime(lock, request_, runner=runner, expectation=real_expectation())
 
     venv_command, sync_command = runner.install_commands
     assert venv_command == _expected_venv_command(request_)
@@ -727,7 +728,7 @@ def test_runtime_targets_every_command_through_the_open_runtime_descriptor(
 ) -> None:
     runner = _FakeRunner()
 
-    runtime = prepare_candidate_runtime(lock, request_, runner=runner)
+    runtime = prepare_candidate_runtime(lock, request_, runner=runner, expectation=real_expectation())
 
     assert runner.resolved_cwds == [runtime.root] * len(runner.calls)
     for _command, cwd, _env in runner.calls:
@@ -743,7 +744,7 @@ def test_runtime_probes_every_tool_candidate_and_interpreter_version(
 ) -> None:
     runner = _FakeRunner()
 
-    runtime = prepare_candidate_runtime(lock, request_, runner=runner)
+    runtime = prepare_candidate_runtime(lock, request_, runner=runner, expectation=real_expectation())
 
     venv_bin = runtime.root / "venv" / "bin"
     assert runner.resolved_commands == [
@@ -762,7 +763,10 @@ def test_runtime_probes_every_tool_candidate_and_interpreter_version(
 
 def test_runtime_reports_a_failed_install_command(lock: CandidateLock, request_: RuntimeRequest) -> None:
     with pytest.raises(RuntimePreparationError, match="hash mismatch"):
-        prepare_candidate_runtime(lock, request_, runner=_FakeRunner(fail_command="sync"))
+        prepare_candidate_runtime(
+            lock, request_, runner=_FakeRunner(fail_command="sync"),
+            expectation=real_expectation(),
+        )
 
 
 # --- executable identity ------------------------------------------------------
@@ -771,7 +775,7 @@ def test_runtime_reports_a_failed_install_command(lock: CandidateLock, request_:
 def test_runtime_records_candidate_executable_hashes(lock: CandidateLock, request_: RuntimeRequest) -> None:
     runner = _FakeRunner()
 
-    runtime = prepare_candidate_runtime(lock, request_, runner=runner)
+    runtime = prepare_candidate_runtime(lock, request_, runner=runner, expectation=real_expectation())
 
     assert runtime.executable_hashes == (
         ("pyrefly", sha256_bytes(runner.bodies["pyrefly"])),
@@ -787,14 +791,20 @@ def test_runtime_refuses_a_candidate_executable_outside_the_runtime_root(
     lock: CandidateLock, request_: RuntimeRequest
 ) -> None:
     with pytest.raises(RuntimePreparationError, match="must be a regular file"):
-        prepare_candidate_runtime(lock, request_, runner=_FakeRunner(symlink_executables=("ty",)))
+        prepare_candidate_runtime(
+            lock, request_, runner=_FakeRunner(symlink_executables=("ty",)),
+            expectation=real_expectation(),
+        )
 
 
 def test_runtime_refuses_a_missing_candidate_executable(
     lock: CandidateLock, request_: RuntimeRequest
 ) -> None:
     with pytest.raises(RuntimePreparationError, match="pyrefly"):
-        prepare_candidate_runtime(lock, request_, runner=_FakeRunner(omit_executables=("pyrefly",)))
+        prepare_candidate_runtime(
+            lock, request_, runner=_FakeRunner(omit_executables=("pyrefly",)),
+            expectation=real_expectation(),
+        )
 
 
 def test_runtime_refuses_an_executable_whose_version_is_not_the_locked_version(
@@ -803,14 +813,17 @@ def test_runtime_refuses_an_executable_whose_version_is_not_the_locked_version(
     runner = _FakeRunner(versions={"pyrefly": f"pyrefly {_PYREFLY_VERSION}", "ty": "ty 0.0.25"})
 
     with pytest.raises(RuntimePreparationError, match="does not report the locked version"):
-        prepare_candidate_runtime(lock, request_, runner=runner)
+        prepare_candidate_runtime(lock, request_, runner=runner, expectation=real_expectation())
 
 
 def test_runtime_refuses_a_venv_interpreter_that_is_not_the_requested_interpreter(
     lock: CandidateLock, request_: RuntimeRequest
 ) -> None:
     with pytest.raises(RuntimePreparationError, match="evaluation venv interpreter"):
-        prepare_candidate_runtime(lock, request_, runner=_FakeRunner(skip_venv_interpreter=True))
+        prepare_candidate_runtime(
+            lock, request_, runner=_FakeRunner(skip_venv_interpreter=True),
+            expectation=real_expectation(),
+        )
 
 
 # --- tool and interpreter identity ---------------------------------------------
@@ -829,7 +842,7 @@ def _expected_executable_record(path: Path, version: str) -> dict[str, str]:
 def test_runtime_binds_the_uv_and_base_python_identity(
     lock: CandidateLock, request_: RuntimeRequest
 ) -> None:
-    runtime = prepare_candidate_runtime(lock, request_, runner=_FakeRunner())
+    runtime = prepare_candidate_runtime(lock, request_, runner=_FakeRunner(), expectation=real_expectation())
 
     assert _manifest(runtime.root)["tools"] == {
         "python": _expected_executable_record(request_.python, _INTERPRETER_VERSION),
@@ -842,7 +855,7 @@ def test_runtime_binds_the_environment_interpreter_executable_identity(
 ) -> None:
     """EnvironmentIdentity is unchanged; the executable bytes are bound manifest-side."""
 
-    runtime = prepare_candidate_runtime(lock, request_, runner=_FakeRunner())
+    runtime = prepare_candidate_runtime(lock, request_, runner=_FakeRunner(), expectation=real_expectation())
 
     assert _manifest(runtime.root)["environment_executables"] == {
         name: _expected_executable_record(interpreter, _INTERPRETER_VERSION)
@@ -859,7 +872,7 @@ def test_runtime_binds_the_environment_interpreter_executable_identity(
 def test_runtime_records_configured_path_realpath_and_version_for_each_environment(
     lock: CandidateLock, request_: RuntimeRequest
 ) -> None:
-    runtime = prepare_candidate_runtime(lock, request_, runner=_FakeRunner())
+    runtime = prepare_candidate_runtime(lock, request_, runner=_FakeRunner(), expectation=real_expectation())
 
     assert tuple(identity.name for identity in runtime.environments) == _ENVIRONMENT_NAMES
     for identity, (name, interpreter) in zip(
@@ -890,7 +903,10 @@ def test_runtime_request_refuses_an_ambient_executable_or_interpreter_name(reque
 
 def test_runtime_refuses_an_empty_interpreter_version(lock: CandidateLock, request_: RuntimeRequest) -> None:
     with pytest.raises(RuntimePreparationError, match="did not report a version"):
-        prepare_candidate_runtime(lock, request_, runner=_FakeRunner(interpreter_version=""))
+        prepare_candidate_runtime(
+            lock, request_, runner=_FakeRunner(interpreter_version=""),
+            expectation=real_expectation(),
+        )
 
 
 # --- service-owned configuration ----------------------------------------------
@@ -899,7 +915,7 @@ def test_runtime_refuses_an_empty_interpreter_version(lock: CandidateLock, reque
 def test_runtime_materializes_deterministic_service_owned_configuration(
     lock: CandidateLock, request_: RuntimeRequest
 ) -> None:
-    runtime = prepare_candidate_runtime(lock, request_, runner=_FakeRunner())
+    runtime = prepare_candidate_runtime(lock, request_, runner=_FakeRunner(), expectation=real_expectation())
 
     assert tuple(identity.backend for identity in runtime.service_configs) == ("pyrefly", "pyright", "ty")
     for identity in runtime.service_configs:
@@ -914,7 +930,7 @@ def test_runtime_materializes_deterministic_service_owned_configuration(
 def test_runtime_configuration_is_never_written_into_a_corpus_root(
     lock: CandidateLock, request_: RuntimeRequest
 ) -> None:
-    runtime = prepare_candidate_runtime(lock, request_, runner=_FakeRunner())
+    runtime = prepare_candidate_runtime(lock, request_, runner=_FakeRunner(), expectation=real_expectation())
 
     corpus_roots = [corpus.root for corpus in default_corpus_requests()]
     for identity in runtime.service_configs:
@@ -925,10 +941,10 @@ def test_runtime_configuration_is_never_written_into_a_corpus_root(
 def test_runtime_configuration_bytes_are_stable_across_preparations(
     lock: CandidateLock, request_: RuntimeRequest, tmp_path: Path
 ) -> None:
-    first = prepare_candidate_runtime(lock, request_, runner=_FakeRunner())
+    first = prepare_candidate_runtime(lock, request_, runner=_FakeRunner(), expectation=real_expectation())
     second_request = replace(request_, runtime_base=tmp_path / "runtime-base-2")
 
-    second = prepare_candidate_runtime(lock, second_request, runner=_FakeRunner())
+    second = prepare_candidate_runtime(lock, second_request, runner=_FakeRunner(), expectation=real_expectation())
 
     assert [identity.config_sha256 for identity in first.service_configs] == [
         identity.config_sha256 for identity in second.service_configs
@@ -1004,7 +1020,7 @@ def test_bootstrap_commands_keep_ambient_proxy_but_own_home_cache_and_config(
     monkeypatch.setenv("PYTHONPATH", "/data/verl")
     runner = _FakeRunner()
 
-    runtime = prepare_candidate_runtime(lock, request_, runner=runner)
+    runtime = prepare_candidate_runtime(lock, request_, runner=runner, expectation=real_expectation())
 
     install_env = runner.environment_for("venv")
     assert install_env["HTTPS_PROXY"] == "http://proxy.internal:7890"
@@ -1033,7 +1049,7 @@ def test_only_install_commands_receive_the_ambient_environment(
     monkeypatch.setenv("http_proxy", "http://proxy.internal:7890")
     runner = _FakeRunner()
 
-    runtime = prepare_candidate_runtime(lock, request_, runner=runner)
+    runtime = prepare_candidate_runtime(lock, request_, runner=runner, expectation=real_expectation())
 
     install = set(runner.install_commands)
     for index, (command, _cwd, env) in enumerate(runner.calls):
@@ -1052,7 +1068,7 @@ def test_every_environment_path_stays_inside_the_runtime(
 
     runner = _FakeRunner()
 
-    runtime = prepare_candidate_runtime(lock, request_, runner=runner)
+    runtime = prepare_candidate_runtime(lock, request_, runner=runner, expectation=real_expectation())
 
     for index, (_command, _cwd, env) in enumerate(runner.calls):
         for key in ("HOME", "TMPDIR", "XDG_CACHE_HOME", "XDG_CONFIG_HOME"):
@@ -1066,10 +1082,10 @@ def test_every_environment_path_stays_inside_the_runtime(
 def test_runtime_reuse_runs_only_identity_revalidation_commands(
     lock: CandidateLock, request_: RuntimeRequest
 ) -> None:
-    first = prepare_candidate_runtime(lock, request_, runner=_FakeRunner())
+    first = prepare_candidate_runtime(lock, request_, runner=_FakeRunner(), expectation=real_expectation())
     reuse_runner = _FakeRunner()
 
-    second = prepare_candidate_runtime(lock, request_, runner=reuse_runner)
+    second = prepare_candidate_runtime(lock, request_, runner=reuse_runner, expectation=real_expectation())
 
     assert second == first
     assert reuse_runner.install_commands == []
@@ -1081,7 +1097,7 @@ def test_runtime_reuse_fails_closed_when_the_root_is_swapped_mid_probe(
 ) -> None:
     """A root swapped during a reuse probe must not yield a runtime naming attacker paths."""
 
-    runtime = prepare_candidate_runtime(lock, request_, runner=_FakeRunner())
+    runtime = prepare_candidate_runtime(lock, request_, runner=_FakeRunner(), expectation=real_expectation())
     manifest_bytes = (runtime.root / MANIFEST_FILE_NAME).read_bytes()
     executable_bytes = runtime.ty.read_bytes()
     attacker = tmp_path / "reuse-attacker-root"
@@ -1089,7 +1105,7 @@ def test_runtime_reuse_fails_closed_when_the_root_is_swapped_mid_probe(
     runner = _FakeRunner(swap=("--version", runtime.root, attacker))
 
     with pytest.raises(RuntimePreparationError, match=r"swapped during preparation \(before reuse return\)"):
-        prepare_candidate_runtime(lock, request_, runner=runner)
+        prepare_candidate_runtime(lock, request_, runner=runner, expectation=real_expectation())
 
     moved = request_.runtime_base / f"{lock.digest}-moved"
     # The already-published runtime survives intact under its moved directory.
@@ -1111,7 +1127,7 @@ def test_runtime_reuse_refuses_changed_interpreter_bytes_at_the_same_path_and_ve
 ) -> None:
     """Same configured path, same realpath, same version, different bytes: fail closed."""
 
-    prepare_candidate_runtime(lock, request_, runner=_FakeRunner())
+    prepare_candidate_runtime(lock, request_, runner=_FakeRunner(), expectation=real_expectation())
     _name, interpreter = request_.environment_interpreters[1]
     realpath = Path(os.path.realpath(interpreter))
     realpath.write_text("#!/bin/sh\nexit 0\n# tampered\n", encoding="utf-8")
@@ -1119,7 +1135,7 @@ def test_runtime_reuse_refuses_changed_interpreter_bytes_at_the_same_path_and_ve
     unchanged = _FakeRunner()
 
     with pytest.raises(RuntimePreparationError, match="ms identity changed"):
-        prepare_candidate_runtime(lock, request_, runner=unchanged)
+        prepare_candidate_runtime(lock, request_, runner=unchanged, expectation=real_expectation())
 
     assert str(interpreter) == str(request_.environment_interpreters[1][1])
     assert os.path.realpath(interpreter) == str(realpath)
@@ -1128,18 +1144,18 @@ def test_runtime_reuse_refuses_changed_interpreter_bytes_at_the_same_path_and_ve
 def test_runtime_reuse_refuses_a_changed_interpreter_version(
     lock: CandidateLock, request_: RuntimeRequest
 ) -> None:
-    prepare_candidate_runtime(lock, request_, runner=_FakeRunner())
+    prepare_candidate_runtime(lock, request_, runner=_FakeRunner(), expectation=real_expectation())
     _name, interpreter = request_.environment_interpreters[1]
     drifted = _FakeRunner(interpreter_versions={str(interpreter): "3.12.12"})
 
     with pytest.raises(RuntimePreparationError, match="ms identity changed"):
-        prepare_candidate_runtime(lock, request_, runner=drifted)
+        prepare_candidate_runtime(lock, request_, runner=drifted, expectation=real_expectation())
 
 
 def test_runtime_reuse_refuses_a_changed_interpreter_realpath(
     lock: CandidateLock, request_: RuntimeRequest
 ) -> None:
-    prepare_candidate_runtime(lock, request_, runner=_FakeRunner())
+    prepare_candidate_runtime(lock, request_, runner=_FakeRunner(), expectation=real_expectation())
     _name, interpreter = request_.environment_interpreters[1]
     moved = interpreter.parent / "python3.12-moved"
     shutil.copy2(os.path.realpath(interpreter), moved)
@@ -1147,88 +1163,94 @@ def test_runtime_reuse_refuses_a_changed_interpreter_realpath(
     interpreter.symlink_to(moved)
 
     with pytest.raises(RuntimePreparationError, match="ms identity changed"):
-        prepare_candidate_runtime(lock, request_, runner=_FakeRunner())
+        prepare_candidate_runtime(lock, request_, runner=_FakeRunner(), expectation=real_expectation())
 
 
 def test_runtime_reuse_refuses_a_changed_uv_binary(lock: CandidateLock, request_: RuntimeRequest) -> None:
-    prepare_candidate_runtime(lock, request_, runner=_FakeRunner())
+    prepare_candidate_runtime(lock, request_, runner=_FakeRunner(), expectation=real_expectation())
     request_.uv.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
 
     with pytest.raises(RuntimePreparationError, match="uv identity changed"):
-        prepare_candidate_runtime(lock, request_, runner=_FakeRunner())
+        prepare_candidate_runtime(lock, request_, runner=_FakeRunner(), expectation=real_expectation())
 
 
 def test_runtime_reuse_refuses_a_changed_base_python_version(
     lock: CandidateLock, request_: RuntimeRequest
 ) -> None:
-    prepare_candidate_runtime(lock, request_, runner=_FakeRunner())
+    prepare_candidate_runtime(lock, request_, runner=_FakeRunner(), expectation=real_expectation())
     drifted = _FakeRunner(interpreter_versions={str(request_.python): "3.12.12"})
 
     with pytest.raises(RuntimePreparationError, match="python identity changed"):
-        prepare_candidate_runtime(lock, request_, runner=drifted)
+        prepare_candidate_runtime(lock, request_, runner=drifted, expectation=real_expectation())
 
 
 def test_runtime_reuse_refuses_a_changed_uv_version(lock: CandidateLock, request_: RuntimeRequest) -> None:
-    prepare_candidate_runtime(lock, request_, runner=_FakeRunner())
+    prepare_candidate_runtime(lock, request_, runner=_FakeRunner(), expectation=real_expectation())
 
     with pytest.raises(RuntimePreparationError, match="uv identity changed"):
-        prepare_candidate_runtime(lock, request_, runner=_FakeRunner(uv_version="uv 0.9.6"))
+        prepare_candidate_runtime(
+            lock, request_, runner=_FakeRunner(uv_version="uv 0.9.6"),
+            expectation=real_expectation(),
+        )
 
 
 def test_runtime_reuse_refuses_a_changed_candidate_executable(
     lock: CandidateLock, request_: RuntimeRequest
 ) -> None:
-    runtime = prepare_candidate_runtime(lock, request_, runner=_FakeRunner())
+    runtime = prepare_candidate_runtime(lock, request_, runner=_FakeRunner(), expectation=real_expectation())
     runtime.ty.write_bytes(b"#!/bin/sh\nexit 1\n")
 
     with pytest.raises(RuntimePreparationError, match="ty"):
-        prepare_candidate_runtime(lock, request_, runner=_FakeRunner())
+        prepare_candidate_runtime(lock, request_, runner=_FakeRunner(), expectation=real_expectation())
 
 
 def test_runtime_reuse_refuses_changed_service_owned_configuration(
     lock: CandidateLock, request_: RuntimeRequest
 ) -> None:
-    runtime = prepare_candidate_runtime(lock, request_, runner=_FakeRunner())
+    runtime = prepare_candidate_runtime(lock, request_, runner=_FakeRunner(), expectation=real_expectation())
     Path(runtime.service_configs[0].config_path).write_bytes(b"{}\n")
 
     with pytest.raises(RuntimePreparationError, match="service configuration"):
-        prepare_candidate_runtime(lock, request_, runner=_FakeRunner())
+        prepare_candidate_runtime(lock, request_, runner=_FakeRunner(), expectation=real_expectation())
 
 
 def test_runtime_reuse_refuses_a_manifest_recorded_for_other_inputs(
     lock: CandidateLock, request_: RuntimeRequest, tmp_path: Path
 ) -> None:
-    prepare_candidate_runtime(lock, request_, runner=_FakeRunner())
+    prepare_candidate_runtime(lock, request_, runner=_FakeRunner(), expectation=real_expectation())
     other_uv = tmp_path / "tools" / "uv-2"
     other_uv.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
     other_uv.chmod(0o700)
 
     with pytest.raises(RuntimePreparationError, match="was prepared by a different command"):
-        prepare_candidate_runtime(lock, replace(request_, uv=other_uv), runner=_FakeRunner())
+        prepare_candidate_runtime(
+            lock, replace(request_, uv=other_uv), runner=_FakeRunner(),
+            expectation=real_expectation(),
+        )
 
 
 def test_runtime_reuse_refuses_a_malformed_manifest(lock: CandidateLock, request_: RuntimeRequest) -> None:
-    runtime = prepare_candidate_runtime(lock, request_, runner=_FakeRunner())
+    runtime = prepare_candidate_runtime(lock, request_, runner=_FakeRunner(), expectation=real_expectation())
     (runtime.root / MANIFEST_FILE_NAME).write_bytes(b"{ not json\n")
 
     with pytest.raises(RuntimePreparationError, match="manifest"):
-        prepare_candidate_runtime(lock, request_, runner=_FakeRunner())
+        prepare_candidate_runtime(lock, request_, runner=_FakeRunner(), expectation=real_expectation())
 
 
 def test_runtime_reuse_refuses_unexpected_content_in_the_runtime_root(
     lock: CandidateLock, request_: RuntimeRequest
 ) -> None:
-    runtime = prepare_candidate_runtime(lock, request_, runner=_FakeRunner())
+    runtime = prepare_candidate_runtime(lock, request_, runner=_FakeRunner(), expectation=real_expectation())
     (runtime.root / "stowaway.json").write_bytes(b"{}\n")
 
     with pytest.raises(RuntimePreparationError, match="unexpected"):
-        prepare_candidate_runtime(lock, request_, runner=_FakeRunner())
+        prepare_candidate_runtime(lock, request_, runner=_FakeRunner(), expectation=real_expectation())
 
 
 def test_runtime_manifest_is_canonical_and_records_the_published_identity(
     lock: CandidateLock, request_: RuntimeRequest
 ) -> None:
-    runtime = prepare_candidate_runtime(lock, request_, runner=_FakeRunner())
+    runtime = prepare_candidate_runtime(lock, request_, runner=_FakeRunner(), expectation=real_expectation())
 
     payload = (runtime.root / MANIFEST_FILE_NAME).read_bytes()
     decoded = json.loads(payload)
@@ -1248,7 +1270,7 @@ def _prepare_in_thread(
 ) -> threading.Thread:
     def run() -> None:
         try:
-            sink[key] = prepare_candidate_runtime(lock, request, runner=runner)
+            sink[key] = prepare_candidate_runtime(lock, request, runner=runner, expectation=real_expectation())
         except BaseException as exc:  # recorded, then asserted by the caller
             sink[key] = exc
 
@@ -1343,7 +1365,10 @@ def test_runtime_removes_a_partially_created_runtime_on_failure(
     lock: CandidateLock, request_: RuntimeRequest
 ) -> None:
     with pytest.raises(RuntimePreparationError):
-        prepare_candidate_runtime(lock, request_, runner=_FakeRunner(fail_command="sync"))
+        prepare_candidate_runtime(
+            lock, request_, runner=_FakeRunner(fail_command="sync"),
+            expectation=real_expectation(),
+        )
 
     assert not (request_.runtime_base / lock.digest).exists()
     assert request_.runtime_base.is_dir()
@@ -1357,7 +1382,7 @@ def test_runtime_discards_an_unpublished_partial_runtime_before_rebuilding(
     (root / "venv" / "bin" / "ty").write_bytes(b"stale\n")
     (root / "leftover").mkdir()
 
-    runtime = prepare_candidate_runtime(lock, request_, runner=_FakeRunner())
+    runtime = prepare_candidate_runtime(lock, request_, runner=_FakeRunner(), expectation=real_expectation())
 
     assert not (runtime.root / "leftover").exists()
     assert runtime.ty.read_bytes() == b"#!/bin/sh\nexit 0\n"
@@ -1366,12 +1391,12 @@ def test_runtime_discards_an_unpublished_partial_runtime_before_rebuilding(
 def test_runtime_keeps_a_published_runtime_when_a_later_preparation_fails(
     lock: CandidateLock, request_: RuntimeRequest
 ) -> None:
-    runtime = prepare_candidate_runtime(lock, request_, runner=_FakeRunner())
+    runtime = prepare_candidate_runtime(lock, request_, runner=_FakeRunner(), expectation=real_expectation())
     manifest_bytes = (runtime.root / MANIFEST_FILE_NAME).read_bytes()
     runtime.ty.write_bytes(b"#!/bin/sh\nexit 1\n")
 
     with pytest.raises(RuntimePreparationError):
-        prepare_candidate_runtime(lock, request_, runner=_FakeRunner())
+        prepare_candidate_runtime(lock, request_, runner=_FakeRunner(), expectation=real_expectation())
 
     assert (runtime.root / MANIFEST_FILE_NAME).read_bytes() == manifest_bytes
 
@@ -1384,7 +1409,7 @@ def test_runtime_preparation_leaves_production_identity_unchanged(
 ) -> None:
     before = {name: (request_.repo_root / name).read_bytes() for name in PRODUCTION_IDENTITY_FILES}
 
-    prepare_candidate_runtime(lock, request_, runner=_FakeRunner())
+    prepare_candidate_runtime(lock, request_, runner=_FakeRunner(), expectation=real_expectation())
 
     assert {name: (request_.repo_root / name).read_bytes() for name in PRODUCTION_IDENTITY_FILES} == before
 
@@ -1396,7 +1421,10 @@ def test_runtime_preparation_fails_and_cleans_up_when_production_identity_drifts
     original = pyproject.read_bytes()
     try:
         with pytest.raises(ProductionIdentityChanged):
-            prepare_candidate_runtime(lock, request_, runner=_FakeRunner(mutate=pyproject))
+            prepare_candidate_runtime(
+                lock, request_, runner=_FakeRunner(mutate=pyproject),
+                expectation=real_expectation(),
+            )
         assert not (request_.runtime_base / lock.digest).exists()
     finally:
         pyproject.write_bytes(original)
@@ -1417,7 +1445,7 @@ def test_a_hung_preparation_command_is_reported_as_a_typed_timeout(
         raise CommandTimeout("uv timed out after 1s and its process group was killed")
 
     with pytest.raises(RuntimePreparationError, match="timed out"):
-        prepare_candidate_runtime(lock, request_, runner=hanging_runner)
+        prepare_candidate_runtime(lock, request_, runner=hanging_runner, expectation=real_expectation())
 
 
 def test_the_preparation_deadline_is_propagated_to_every_child(
@@ -1427,7 +1455,7 @@ def test_the_preparation_deadline_is_propagated_to_every_child(
     deadline = Deadline.start(clock, 600, reserve=100)
     runner = _RecordingTimeoutRunner()
 
-    prepare_candidate_runtime(lock, request_, runner=runner, deadline=deadline)
+    prepare_candidate_runtime(lock, request_, runner=runner, deadline=deadline, expectation=real_expectation())
 
     assert runner.timeouts, "no command received a bound"
     assert all(timeout is not None and 0 < timeout <= 500 for timeout in runner.timeouts)
@@ -1440,7 +1468,7 @@ def test_service_owned_files_and_directories_ignore_the_ambient_umask(
 ) -> None:
     previous = os.umask(0o000)
     try:
-        runtime = prepare_candidate_runtime(lock, request_, runner=_FakeRunner())
+        runtime = prepare_candidate_runtime(lock, request_, runner=_FakeRunner(), expectation=real_expectation())
     finally:
         os.umask(previous)
 
@@ -1510,7 +1538,7 @@ def test_owned_runtime_files_are_the_five_harness_written_paths() -> None:
 def test_a_fresh_runtime_already_satisfies_the_owned_permission_contract(
     lock: CandidateLock, request_: RuntimeRequest
 ) -> None:
-    runtime = prepare_candidate_runtime(lock, request_, runner=_FakeRunner())
+    runtime = prepare_candidate_runtime(lock, request_, runner=_FakeRunner(), expectation=real_expectation())
 
     assert set(_modes(runtime.root, owned_runtime_file_relpaths()).values()) == {0o600}
     for name in owned_runtime_directory_relpaths():
@@ -1523,13 +1551,13 @@ def test_reuse_repairs_stale_harness_written_modes_without_touching_bytes(
 ) -> None:
     """A runtime published before the contract carries 0660 files; reuse corrects them."""
 
-    runtime = prepare_candidate_runtime(lock, request_, runner=_FakeRunner())
+    runtime = prepare_candidate_runtime(lock, request_, runner=_FakeRunner(), expectation=real_expectation())
     owned = owned_runtime_file_relpaths()
     before_bytes = {relpath: (runtime.root / relpath).read_bytes() for relpath in owned}
     for relpath in owned:
         os.chmod(runtime.root / relpath, 0o660)
 
-    reused = prepare_candidate_runtime(lock, request_, runner=_FakeRunner())
+    reused = prepare_candidate_runtime(lock, request_, runner=_FakeRunner(), expectation=real_expectation())
 
     assert reused.permission_repairs == owned
     assert set(_modes(reused.root, owned).values()) == {0o600}
@@ -1541,11 +1569,11 @@ def test_reuse_repairs_stale_harness_written_modes_without_touching_bytes(
 def test_a_second_reuse_reports_no_repair_once_the_modes_are_correct(
     lock: CandidateLock, request_: RuntimeRequest
 ) -> None:
-    prepare_candidate_runtime(lock, request_, runner=_FakeRunner())
+    prepare_candidate_runtime(lock, request_, runner=_FakeRunner(), expectation=real_expectation())
     os.chmod(request_.runtime_base / lock.digest / MANIFEST_FILE_NAME, 0o660)
 
-    first = prepare_candidate_runtime(lock, request_, runner=_FakeRunner())
-    second = prepare_candidate_runtime(lock, request_, runner=_FakeRunner())
+    first = prepare_candidate_runtime(lock, request_, runner=_FakeRunner(), expectation=real_expectation())
+    second = prepare_candidate_runtime(lock, request_, runner=_FakeRunner(), expectation=real_expectation())
 
     assert first.permission_repairs == (MANIFEST_FILE_NAME,)
     assert second.permission_repairs == ()
@@ -1561,7 +1589,7 @@ def test_reuse_leaves_third_party_cache_internals_at_their_tool_defined_modes(
     nothing and would break the tool's own assumptions.
     """
 
-    runtime = prepare_candidate_runtime(lock, request_, runner=_FakeRunner())
+    runtime = prepare_candidate_runtime(lock, request_, runner=_FakeRunner(), expectation=real_expectation())
     cache_lock = runtime.cache / ".lock"
     cache_lock.write_bytes(b"")
     os.chmod(cache_lock, 0o777)
@@ -1569,7 +1597,7 @@ def test_reuse_leaves_third_party_cache_internals_at_their_tool_defined_modes(
     venv_file.write_bytes(b"")
     os.chmod(venv_file, 0o777)
 
-    reused = prepare_candidate_runtime(lock, request_, runner=_FakeRunner())
+    reused = prepare_candidate_runtime(lock, request_, runner=_FakeRunner(), expectation=real_expectation())
 
     assert reused.permission_repairs == ()
     assert stat.S_IMODE(cache_lock.stat().st_mode) == 0o777
@@ -1584,7 +1612,7 @@ def test_reuse_refuses_a_harness_owned_path_replaced_by_a_symlink(
 ) -> None:
     """A repair never follows a link, so it can never chmod a target outside the root."""
 
-    runtime = prepare_candidate_runtime(lock, request_, runner=_FakeRunner())
+    runtime = prepare_candidate_runtime(lock, request_, runner=_FakeRunner(), expectation=real_expectation())
     outside = tmp_path / "outside.toml"
     outside.write_bytes(b"outside\n")
     os.chmod(outside, 0o644)
@@ -1593,7 +1621,7 @@ def test_reuse_refuses_a_harness_owned_path_replaced_by_a_symlink(
     target.symlink_to(outside)
 
     with pytest.raises(RuntimePreparationError, match="without following a link"):
-        prepare_candidate_runtime(lock, request_, runner=_FakeRunner())
+        prepare_candidate_runtime(lock, request_, runner=_FakeRunner(), expectation=real_expectation())
 
     assert stat.S_IMODE(outside.stat().st_mode) == 0o644
 
@@ -1601,21 +1629,21 @@ def test_reuse_refuses_a_harness_owned_path_replaced_by_a_symlink(
 def test_reuse_refuses_a_widened_service_owned_directory(
     lock: CandidateLock, request_: RuntimeRequest
 ) -> None:
-    runtime = prepare_candidate_runtime(lock, request_, runner=_FakeRunner())
+    runtime = prepare_candidate_runtime(lock, request_, runner=_FakeRunner(), expectation=real_expectation())
     os.chmod(runtime.config / "ty", 0o750)
 
     with pytest.raises(RuntimePreparationError, match="is 0750, not 0700"):
-        prepare_candidate_runtime(lock, request_, runner=_FakeRunner())
+        prepare_candidate_runtime(lock, request_, runner=_FakeRunner(), expectation=real_expectation())
 
 
 def test_the_permission_repair_does_not_touch_production(
     lock: CandidateLock, request_: RuntimeRequest
 ) -> None:
     before = {name: (request_.repo_root / name).stat().st_mode for name in PRODUCTION_IDENTITY_FILES}
-    prepare_candidate_runtime(lock, request_, runner=_FakeRunner())
+    prepare_candidate_runtime(lock, request_, runner=_FakeRunner(), expectation=real_expectation())
     for relpath in owned_runtime_file_relpaths():
         os.chmod(request_.runtime_base / lock.digest / relpath, 0o660)
-    prepare_candidate_runtime(lock, request_, runner=_FakeRunner())
+    prepare_candidate_runtime(lock, request_, runner=_FakeRunner(), expectation=real_expectation())
 
     assert {name: (request_.repo_root / name).stat().st_mode for name in PRODUCTION_IDENTITY_FILES} == before
 
@@ -1630,7 +1658,7 @@ def test_reuse_refuses_a_symlinked_owned_directory_and_never_chmods_outside(
     root.  Every component is opened from its parent's descriptor instead.
     """
 
-    runtime = prepare_candidate_runtime(lock, request_, runner=_FakeRunner())
+    runtime = prepare_candidate_runtime(lock, request_, runner=_FakeRunner(), expectation=real_expectation())
     outside = tmp_path / "outside-config"
     outside.mkdir()
     decoy = outside / "ty.toml"
@@ -1641,7 +1669,7 @@ def test_reuse_refuses_a_symlinked_owned_directory_and_never_chmods_outside(
     (runtime.config / "ty").symlink_to(outside)
 
     with pytest.raises(RuntimePreparationError, match="without following a link"):
-        prepare_candidate_runtime(lock, request_, runner=_FakeRunner())
+        prepare_candidate_runtime(lock, request_, runner=_FakeRunner(), expectation=real_expectation())
 
     assert stat.S_IMODE(decoy.stat().st_mode) == 0o644
     assert stat.S_IMODE(outside.stat().st_mode) == 0o755
@@ -1657,7 +1685,7 @@ def test_runtime_manifest_digest_refuses_a_fifo_promptly(
     recomputation hanging indefinitely on a FIFO left where ``runtime-manifest.json`` belongs.
     """
 
-    runtime = prepare_candidate_runtime(lock, request_, runner=_FakeRunner())
+    runtime = prepare_candidate_runtime(lock, request_, runner=_FakeRunner(), expectation=real_expectation())
     (runtime.root / MANIFEST_FILE_NAME).unlink()
     os.mkfifo(runtime.root / MANIFEST_FILE_NAME)
     before_fds = len(os.listdir("/proc/self/fd"))
@@ -1680,7 +1708,7 @@ def test_reuse_refuses_a_harness_owned_path_replaced_by_a_fifo(
     that recomputes the permission contract on every prepare call.
     """
 
-    runtime = prepare_candidate_runtime(lock, request_, runner=_FakeRunner())
+    runtime = prepare_candidate_runtime(lock, request_, runner=_FakeRunner(), expectation=real_expectation())
     target = runtime.config / SERVICE_CONFIG_RELPATHS["ty"]
     target.unlink()
     os.mkfifo(target)
@@ -1688,7 +1716,7 @@ def test_reuse_refuses_a_harness_owned_path_replaced_by_a_fifo(
 
     started = time.monotonic()
     with pytest.raises(RuntimePreparationError, match="must be a regular file"):
-        prepare_candidate_runtime(lock, request_, runner=_FakeRunner())
+        prepare_candidate_runtime(lock, request_, runner=_FakeRunner(), expectation=real_expectation())
     elapsed = time.monotonic() - started
 
     assert elapsed < 2.0
@@ -1741,7 +1769,10 @@ def test_the_snapshot_write_refuses_a_fifo_without_blocking(
     before_fds = len(os.listdir("/proc/self/fd"))
     started = time.monotonic()
     with pytest.raises(RuntimePreparationError, match="must be a regular file"):
-        prepare_candidate_runtime(lock, request_, runner=_FakeRunner(plant=(_base_interpreter_marker(), plant)))
+        prepare_candidate_runtime(
+            lock, request_, runner=_FakeRunner(plant=(_base_interpreter_marker(), plant)),
+            expectation=real_expectation(),
+        )
     elapsed = time.monotonic() - started
 
     assert elapsed < 5.0
@@ -1758,7 +1789,10 @@ def test_the_snapshot_write_refuses_a_symlinked_leaf_and_never_truncates_the_dec
         (root / REQUIREMENTS_SNAPSHOT_NAME).symlink_to(decoy)
 
     with pytest.raises(RuntimePreparationError, match="without following a link"):
-        prepare_candidate_runtime(lock, request_, runner=_FakeRunner(plant=(_base_interpreter_marker(), plant)))
+        prepare_candidate_runtime(
+            lock, request_, runner=_FakeRunner(plant=(_base_interpreter_marker(), plant)),
+            expectation=real_expectation(),
+        )
 
     assert decoy.read_bytes() == b"decoy bytes that must survive\n"
     assert stat.S_IMODE(decoy.stat().st_mode) == 0o644
@@ -1778,7 +1812,8 @@ def test_the_service_config_write_refuses_a_fifo_without_blocking(
     started = time.monotonic()
     with pytest.raises(RuntimePreparationError, match="must be a regular file"):
         prepare_candidate_runtime(
-            lock, request_, runner=_FakeRunner(plant=(_last_interpreter_marker(request_), plant))
+            lock, request_, runner=_FakeRunner(plant=(_last_interpreter_marker(request_), plant)),
+            expectation=real_expectation(),
         )
     elapsed = time.monotonic() - started
 
@@ -1799,7 +1834,8 @@ def test_the_service_config_write_refuses_a_symlinked_leaf_and_never_truncates_t
 
     with pytest.raises(RuntimePreparationError, match="without following a link"):
         prepare_candidate_runtime(
-            lock, request_, runner=_FakeRunner(plant=(_last_interpreter_marker(request_), plant))
+            lock, request_, runner=_FakeRunner(plant=(_last_interpreter_marker(request_), plant)),
+            expectation=real_expectation(),
         )
 
     assert decoy.read_bytes() == b"decoy bytes that must survive\n"
@@ -1828,7 +1864,8 @@ def test_the_service_config_write_refuses_a_symlinked_intermediate_component(
 
     with pytest.raises(RuntimePreparationError, match="not a symlink or special file"):
         prepare_candidate_runtime(
-            lock, request_, runner=_FakeRunner(plant=(_last_interpreter_marker(request_), plant))
+            lock, request_, runner=_FakeRunner(plant=(_last_interpreter_marker(request_), plant)),
+            expectation=real_expectation(),
         )
 
     assert sorted(path.name for path in outside.iterdir()) == ["ty.toml"]
@@ -1851,7 +1888,8 @@ def test_the_service_config_write_refuses_a_special_intermediate_component(
     started = time.monotonic()
     with pytest.raises(RuntimePreparationError, match="not a symlink or special file"):
         prepare_candidate_runtime(
-            lock, request_, runner=_FakeRunner(plant=(_last_interpreter_marker(request_), plant))
+            lock, request_, runner=_FakeRunner(plant=(_last_interpreter_marker(request_), plant)),
+            expectation=real_expectation(),
         )
     elapsed = time.monotonic() - started
 
@@ -1959,7 +1997,7 @@ def test_the_published_service_configuration_read_is_descriptor_confined(
     check and the read are two different resolutions of the same mutable path.
     """
 
-    runtime = prepare_candidate_runtime(lock, request_, runner=_FakeRunner())
+    runtime = prepare_candidate_runtime(lock, request_, runner=_FakeRunner(), expectation=real_expectation())
     target = runtime.config / SERVICE_CONFIG_RELPATHS["ty"]
     expected = target.read_bytes()
     outside = tmp_path / "identical-config.toml"
@@ -1969,7 +2007,7 @@ def test_the_published_service_configuration_read_is_descriptor_confined(
     target.symlink_to(outside)
 
     with pytest.raises(RuntimePreparationError, match="without following a link"):
-        prepare_candidate_runtime(lock, request_, runner=_FakeRunner())
+        prepare_candidate_runtime(lock, request_, runner=_FakeRunner(), expectation=real_expectation())
 
 
 def test_the_installed_snapshot_read_is_descriptor_confined(
@@ -1977,7 +2015,7 @@ def test_the_installed_snapshot_read_is_descriptor_confined(
 ) -> None:
     """The same for the installed lock snapshot: a matching outside file is still refused."""
 
-    runtime = prepare_candidate_runtime(lock, request_, runner=_FakeRunner())
+    runtime = prepare_candidate_runtime(lock, request_, runner=_FakeRunner(), expectation=real_expectation())
     target = runtime.root / REQUIREMENTS_SNAPSHOT_NAME
     outside = tmp_path / "identical-snapshot.lock"
     outside.write_bytes(target.read_bytes())
@@ -1986,13 +2024,13 @@ def test_the_installed_snapshot_read_is_descriptor_confined(
     target.symlink_to(outside)
 
     with pytest.raises(RuntimePreparationError, match="without following a link"):
-        prepare_candidate_runtime(lock, request_, runner=_FakeRunner())
+        prepare_candidate_runtime(lock, request_, runner=_FakeRunner(), expectation=real_expectation())
 
 
 def test_the_published_manifest_read_is_descriptor_confined(
     lock: CandidateLock, request_: RuntimeRequest, tmp_path: Path
 ) -> None:
-    runtime = prepare_candidate_runtime(lock, request_, runner=_FakeRunner())
+    runtime = prepare_candidate_runtime(lock, request_, runner=_FakeRunner(), expectation=real_expectation())
     target = runtime.root / MANIFEST_FILE_NAME
     outside = tmp_path / "identical-manifest.json"
     outside.write_bytes(target.read_bytes())
@@ -2001,7 +2039,7 @@ def test_the_published_manifest_read_is_descriptor_confined(
     target.symlink_to(outside)
 
     with pytest.raises(RuntimePreparationError, match="without following a link"):
-        prepare_candidate_runtime(lock, request_, runner=_FakeRunner())
+        prepare_candidate_runtime(lock, request_, runner=_FakeRunner(), expectation=real_expectation())
 
     with pytest.raises(RuntimePreparationError, match="without following a link"):
         runtime_manifest_digest(runtime.root)
@@ -2012,7 +2050,7 @@ def test_the_candidate_executable_digest_read_is_descriptor_confined(
 ) -> None:
     """A symlinked ``venv/bin`` must not redirect the recorded candidate byte digests."""
 
-    runtime = prepare_candidate_runtime(lock, request_, runner=_FakeRunner())
+    runtime = prepare_candidate_runtime(lock, request_, runner=_FakeRunner(), expectation=real_expectation())
     outside = tmp_path / "outside-bin"
     outside.mkdir()
     for name in ("pyrefly", "ty", "python"):
@@ -2022,7 +2060,7 @@ def test_the_candidate_executable_digest_read_is_descriptor_confined(
     (runtime.root / "venv" / "bin").symlink_to(outside)
 
     with pytest.raises(RuntimePreparationError):
-        prepare_candidate_runtime(lock, request_, runner=_FakeRunner())
+        prepare_candidate_runtime(lock, request_, runner=_FakeRunner(), expectation=real_expectation())
 
 
 def test_the_runtime_manifest_digest_refuses_a_symlinked_root(
@@ -2030,7 +2068,7 @@ def test_the_runtime_manifest_digest_refuses_a_symlinked_root(
 ) -> None:
     """``runtime_manifest_digest`` opens every component of its own root without following."""
 
-    runtime = prepare_candidate_runtime(lock, request_, runner=_FakeRunner())
+    runtime = prepare_candidate_runtime(lock, request_, runner=_FakeRunner(), expectation=real_expectation())
     alias = tmp_path / "runtime-alias"
     alias.symlink_to(runtime.root)
 

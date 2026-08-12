@@ -116,6 +116,7 @@ from scripts.backend_eval.runtime import (
     prepare_candidate_runtime,
     runtime_manifest_digest,
 )
+from scripts.backend_eval.source_binding import HelperExpectation, SourceBindingError
 from scripts.backend_eval.write_guard import (
     WriteGuardError,
     assert_no_unexpected_writes,
@@ -321,26 +322,41 @@ def _receipt_temporary_name(run_identity: str) -> str:
 class AdmissionServices(Protocol):
     """The external work admission orchestrates; every member is a Task 1-5 interface."""
 
-    def capture_production_identity(self, repo_root: Path, deadline: Deadline) -> ProductionIdentity: ...
+    def capture_production_identity(
+        self, repo_root: Path, deadline: Deadline, expectation: HelperExpectation
+    ) -> ProductionIdentity: ...
 
     def capture_evaluator_identity(self, deadline: Deadline) -> EvaluatorIdentity: ...
 
     def capture_bootstrap_environment(self) -> BootstrapEnvironmentIdentity: ...
 
-    def compile_candidate_lock(self, request: CandidateLockRequest, deadline: Deadline) -> CandidateLock: ...
+    def compile_candidate_lock(
+        self, request: CandidateLockRequest, deadline: Deadline, expectation: HelperExpectation
+    ) -> CandidateLock: ...
 
     def prepare_candidate_runtime(
-        self, lock: CandidateLock, request: RuntimeRequest, deadline: Deadline
+        self,
+        lock: CandidateLock,
+        request: RuntimeRequest,
+        deadline: Deadline,
+        expectation: HelperExpectation,
     ) -> CandidateRuntime: ...
 
-    def capture_corpus(self, deadline: Deadline) -> tuple[RootManifest, ...]: ...
+    def capture_corpus(
+        self, deadline: Deadline, expectation: HelperExpectation
+    ) -> tuple[RootManifest, ...]: ...
 
     def runtime_manifest_digest(self, root: Path) -> str: ...
 
-    def artifact_tree_digest(self, artifact_root: Path, deadline: Deadline) -> str: ...
+    def artifact_tree_digest(self, owner_root: Path, evaluation_root: Path, deadline: Deadline) -> str: ...
 
     def cleanup(
-        self, evaluation_root: Path, run_identity: str, stage: str, deadline: Deadline
+        self,
+        owner_root: Path,
+        evaluation_root: Path,
+        run_identity: str,
+        stage: str,
+        deadline: Deadline,
     ) -> tuple[str, ...]: ...
 
 
@@ -357,8 +373,10 @@ class ProductionAdmissionServices:
 
     runtime_permission_repairs: list[str] = field(default_factory=list)
 
-    def capture_production_identity(self, repo_root: Path, deadline: Deadline) -> ProductionIdentity:
-        return capture_production_identity(repo_root, deadline=deadline)
+    def capture_production_identity(
+        self, repo_root: Path, deadline: Deadline, expectation: HelperExpectation
+    ) -> ProductionIdentity:
+        return capture_production_identity(repo_root, expectation=expectation, deadline=deadline)
 
     def capture_evaluator_identity(self, deadline: Deadline) -> EvaluatorIdentity:
         return capture_evaluator_identity(deadline=deadline)
@@ -366,27 +384,42 @@ class ProductionAdmissionServices:
     def capture_bootstrap_environment(self) -> BootstrapEnvironmentIdentity:
         return bootstrap_environment_identity()
 
-    def compile_candidate_lock(self, request: CandidateLockRequest, deadline: Deadline) -> CandidateLock:
-        return compile_candidate_lock(request, deadline=deadline)
+    def compile_candidate_lock(
+        self, request: CandidateLockRequest, deadline: Deadline, expectation: HelperExpectation
+    ) -> CandidateLock:
+        return compile_candidate_lock(request, expectation=expectation, deadline=deadline)
 
     def prepare_candidate_runtime(
-        self, lock: CandidateLock, request: RuntimeRequest, deadline: Deadline
+        self,
+        lock: CandidateLock,
+        request: RuntimeRequest,
+        deadline: Deadline,
+        expectation: HelperExpectation,
     ) -> CandidateRuntime:
-        runtime = prepare_candidate_runtime(lock, request, deadline=deadline)
+        runtime = prepare_candidate_runtime(lock, request, expectation=expectation, deadline=deadline)
         self.runtime_permission_repairs.extend(runtime.permission_repairs)
         return runtime
 
-    def capture_corpus(self, deadline: Deadline) -> tuple[RootManifest, ...]:
-        return freeze_default_corpus(deadline=deadline)
+    def capture_corpus(
+        self, deadline: Deadline, expectation: HelperExpectation
+    ) -> tuple[RootManifest, ...]:
+        return freeze_default_corpus(expectation=expectation, deadline=deadline)
 
     def runtime_manifest_digest(self, root: Path) -> str:
         return runtime_manifest_digest(root)
 
-    def artifact_tree_digest(self, artifact_root: Path, deadline: Deadline) -> str:
-        return artifact_tree_digest(artifact_root, check=lambda: deadline.check("artifact_tree_digest"))
+    def artifact_tree_digest(self, owner_root: Path, evaluation_root: Path, deadline: Deadline) -> str:
+        return artifact_tree_digest(
+            owner_root, evaluation_root, check=lambda: deadline.check("artifact_tree_digest")
+        )
 
     def cleanup(
-        self, evaluation_root: Path, run_identity: str, stage: str, deadline: Deadline
+        self,
+        owner_root: Path,
+        evaluation_root: Path,
+        run_identity: str,
+        stage: str,
+        deadline: Deadline,
     ) -> tuple[str, ...]:
         """Remove exactly the evaluation-owned partial state this module can create.
 
@@ -395,6 +428,16 @@ class ProductionAdmissionServices:
         partial state admission itself can leave behind is this run's own interrupted
         receipt temporary.
 
+        **The receipts directory is reached component by component, never by pathname.**
+        ``os.open(evaluation_root / "receipts", O_NOFOLLOW)`` guards only the last component,
+        so a symlinked ancestor -- ``.admission-artifacts``, ``backend-eval``, or the
+        evaluation-identity directory itself -- redirected this unlink outside the evaluation
+        root entirely; that escape was reproduced against a decoy outside the root before it
+        was closed.  The walk now starts at the declared owner root's own descriptor and opens
+        every component from its parent with ``O_NOFOLLOW | O_DIRECTORY``, so no swapped
+        ancestor can move the target.  Per-run temporary-name ownership is unchanged: the only
+        name unlinked is this run's own.
+
         Cleanup runs inside the phase ceiling like every other step: it receives the same
         monotonic deadline and checks it cooperatively around each syscall, so a slow or
         wedged filesystem stops the run rather than carrying it past its budget.
@@ -402,14 +445,12 @@ class ProductionAdmissionServices:
 
         del stage
         deadline.check("cleanup:open")
-        try:
-            dir_fd = os.open(evaluation_root / RECEIPTS_DIR_NAME, _NOFOLLOW_DIRECTORY_FLAGS)
-        except FileNotFoundError:
+        relative = _owned_relative_parts(owner_root, evaluation_root, "cleanup_failed")
+        dir_fd = _open_owned_walk(
+            owner_root, (*relative, RECEIPTS_DIR_NAME), "cleanup_failed", deadline, "cleanup:walk"
+        )
+        if dir_fd is None:
             return ()
-        except OSError as exc:
-            raise _fail(
-                "incomplete", "cleanup_failed", f"cannot open {evaluation_root / RECEIPTS_DIR_NAME}: {exc}"
-            ) from exc
         temporary = _receipt_temporary_name(run_identity)
         try:
             deadline.check("cleanup:unlink")
@@ -434,30 +475,107 @@ class ProductionAdmissionServices:
 # --- the artifact tree digest ----------------------------------------------------------
 
 
-def artifact_tree_digest(artifact_root: Path, *, check: Check = _noop_check) -> str:
+def artifact_tree_digest(
+    owner_root: Path, artifact_root: Path, *, check: Check = _noop_check
+) -> str:
     """Digest the evaluation-owned artifact tree by content, refusing anything unhashable.
 
-    The traversal is descriptor relative and ``O_NOFOLLOW`` throughout: every directory is
-    opened from its parent's descriptor, and every file is validated and read through *one*
-    descriptor, so no path is ever reopened after its type was checked.  Only regular files
-    are recorded, by relative path, size, and SHA-256; the resolver cache, the receipts
-    directory, and the publication lock are excluded.  A symlink or special file anywhere
-    below the root fails closed rather than being silently skipped.
+    **The root itself is acquired component by component.**  Opening the whole absolute
+    ``artifact_root`` under one ``O_NOFOLLOW`` guarded only its last component, so a swapped
+    intermediate directory made this function digest another tree and publish that digest as
+    the run's admitted evidence.  Acquisition now walks out from the declared owner root's own
+    descriptor, ``O_NOFOLLOW | O_DIRECTORY`` on every component, so a substituted ancestor
+    fails closed instead of redirecting the evidence.
+
+    The traversal below it is descriptor relative and ``O_NOFOLLOW`` throughout: every
+    directory is opened from its parent's descriptor, and every file is validated and read
+    through *one* descriptor, so no path is ever reopened after its type was checked.  Only
+    regular files are recorded, by relative path, size, and SHA-256; the resolver cache, the
+    receipts directory, and the publication lock are excluded.  A symlink or special file
+    anywhere below the root fails closed rather than being silently skipped.
     """
 
     entries: list[dict[str, object]] = []
-    try:
-        root_fd = os.open(artifact_root, _NOFOLLOW_DIRECTORY_FLAGS)
-    except FileNotFoundError:
+    relative = _owned_relative_parts(owner_root, artifact_root, "artifact_digest_failed")
+    root_fd = _open_owned_walk(owner_root, relative, "artifact_digest_failed", None, "artifact_tree_digest")
+    if root_fd is None:
         return sha256_bytes(canonical_json({"entries": entries}))
-    except OSError as exc:
-        raise _fail("incomplete", "artifact_digest_failed", f"cannot open {artifact_root}: {exc}") from exc
     try:
         _collect_artifact_entries(root_fd, "", artifact_root, entries, check, top_level=True)
     finally:
         os.close(root_fd)
     entries.sort(key=lambda entry: str(entry["path"]))
     return sha256_bytes(canonical_json({"entries": entries}))
+
+
+def _owned_relative_parts(owner_root: Path, target: Path, code: str) -> tuple[str, ...]:
+    """The components between the declared owner root and one path it must contain."""
+
+    try:
+        relative = target.relative_to(owner_root)
+    except ValueError as exc:
+        raise _fail("incomplete", code, f"{target} is not below the declared owner root {owner_root}") from exc
+    parts = tuple(part for part in relative.parts if part not in ("", "."))
+    if ".." in parts:
+        raise _fail("incomplete", code, f"{target} is not an owned path below {owner_root}")
+    return parts
+
+
+def _open_declared_root(owner_root: Path, code: str) -> int | None:
+    """Open the caller-declared owner root itself, the one open with no parent to walk from.
+
+    This is a *guarded* open, not a confined one, and the ownership document says so: the
+    declared root is where confinement starts, so nothing above it has been proven.
+    ``O_DIRECTORY`` still refuses a non-directory before any type-specific open handler runs,
+    and every component below is opened from this descriptor.
+    """
+
+    try:
+        return os.open(owner_root, _DIRECTORY_FLAGS)
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise _fail("incomplete", code, f"cannot open the declared owner root {owner_root}: {exc}") from exc
+
+
+def _open_owned_walk(
+    owner_root: Path, parts: tuple[str, ...], code: str, deadline: Deadline | None, step: str
+) -> int | None:
+    """Open one owned directory by walking every component from the owner root's descriptor.
+
+    ``None`` means the directory does not exist, which every caller here treats as "there was
+    nothing of ours to act on".  Anything else -- a symlinked component, a non-directory, a
+    permission failure -- is a typed failure rather than a silent redirection.
+    """
+
+    if deadline is not None:
+        deadline.check(step)
+    current = _open_declared_root(owner_root, code)
+    if current is None:
+        return None
+    walked = owner_root
+    try:
+        for part in parts:
+            if deadline is not None:
+                deadline.check(step)
+            walked = walked / part
+            try:
+                child = os.open(part, _NOFOLLOW_DIRECTORY_FLAGS, dir_fd=current)
+            except FileNotFoundError:
+                os.close(current)
+                return None
+            except OSError as exc:
+                raise _fail(
+                    "incomplete",
+                    code,
+                    f"cannot open the evaluation-owned component {walked} without following a link: {exc}",
+                ) from exc
+            os.close(current)
+            current = child
+    except BaseException:
+        os.close(current)
+        raise
+    return current
 
 
 def _collect_artifact_entries(
@@ -543,6 +661,7 @@ class _Evidence:
 
     run_identity: str = ""
     evaluator: EvaluatorIdentity | None = None
+    expectation: HelperExpectation | None = None
     bootstrap: BootstrapEnvironmentIdentity | None = None
     production_identity_before: ProductionIdentity | None = None
     production_identity_after: ProductionIdentity | None = None
@@ -577,6 +696,8 @@ def _translated(status: str, code: str) -> Iterator[None]:
         raise _fail("hold", "production_identity_changed", str(exc)) from exc
     except ProductionIdentityError as exc:
         raise _fail("incomplete", "production_identity_capture_failed", str(exc)) from exc
+    except SourceBindingError as exc:
+        raise _fail("hold", "evaluator_source_binding_failed", str(exc)) from exc
     except (
         CandidateLockError,
         IdentityError,
@@ -619,6 +740,7 @@ def run_admission(
     status = _cleanup(request, active, evidence, status, finalize)
     _capture_final_production_identity(request, active, evidence, failure, finalize)
     status = _bracket_cleanup(request, evidence, status)
+    status = _bracket_evaluator_identity(request, active, evidence, status, finalize)
     receipt = _build_receipt(
         request, active, evidence, status=status, started_at=started_at, failure=failure, deadline=finalize
     )
@@ -640,6 +762,11 @@ def _collect(
         "evaluator_identity_capture_failed",
         lambda: services.capture_evaluator_identity(deadline),
     )
+    # The expectation is derived from the identity that was just captured, before any child
+    # has run, and is then the only thing that decides which bytes any child may execute.
+    with _translated("hold", "evaluator_source_binding_failed"):
+        evidence.expectation = HelperExpectation.from_identity(evidence.evaluator)
+    expectation = evidence.expectation
     evidence.bootstrap = _external(
         deadline,
         "capture_bootstrap_environment",
@@ -652,7 +779,7 @@ def _collect(
         "capture_production_identity_before",
         "incomplete",
         "production_identity_capture_failed",
-        lambda: services.capture_production_identity(request.repo_root, deadline),
+        lambda: services.capture_production_identity(request.repo_root, deadline, expectation),
     )
     evidence.identity = evaluation_identity(
         request, evidence.production_identity_before, evidence.evaluator
@@ -666,7 +793,7 @@ def _collect(
         "capture_corpus_before",
         "incomplete",
         "corpus_capture_failed",
-        lambda: services.capture_corpus(deadline),
+        lambda: services.capture_corpus(deadline, expectation),
     )
 
     if evidence.resolutions:  # pragma: no cover - structural guard
@@ -678,7 +805,7 @@ def _collect(
         "compile_candidate_lock",
         "incomplete",
         "candidate_resolution_failed",
-        lambda: services.compile_candidate_lock(lock_request, deadline),
+        lambda: services.compile_candidate_lock(lock_request, deadline, expectation),
     )
 
     runtime_request = _runtime_request(request, evidence.evaluation_root)
@@ -688,7 +815,7 @@ def _collect(
         "prepare_candidate_runtime",
         "incomplete",
         "runtime_preparation_failed",
-        lambda: services.prepare_candidate_runtime(lock, runtime_request, deadline),
+        lambda: services.prepare_candidate_runtime(lock, runtime_request, deadline, expectation),
     )
     evidence.runtime_binding = _bind_runtime(services, deadline, lock, evidence.runtime)
 
@@ -697,10 +824,10 @@ def _collect(
         "capture_corpus_after",
         "incomplete",
         "corpus_capture_failed",
-        lambda: services.capture_corpus(deadline),
+        lambda: services.capture_corpus(deadline, expectation),
     )
     evidence.manifests_after, evidence.write_deltas = _write_deltas(
-        evidence.manifests_before, evidence.manifests_after, deadline
+        evidence.manifests_before, evidence.manifests_after, expectation, deadline
     )
     _require_no_unexpected_writes(evidence.write_deltas)
 
@@ -709,7 +836,7 @@ def _collect(
         "capture_production_identity_after",
         "incomplete",
         "production_identity_capture_failed",
-        lambda: services.capture_production_identity(request.repo_root, deadline),
+        lambda: services.capture_production_identity(request.repo_root, deadline, expectation),
     )
     with _translated("hold", "production_identity_changed"):
         assert_production_identity_unchanged(evidence.production_identity_before, evidence.production_identity_after)
@@ -776,7 +903,10 @@ def _runtime_request(request: AdmissionRequest, evaluation_root: Path) -> Runtim
 
 
 def _write_deltas(
-    before: tuple[RootManifest, ...], after: tuple[RootManifest, ...], deadline: Deadline
+    before: tuple[RootManifest, ...],
+    after: tuple[RootManifest, ...],
+    expectation: HelperExpectation,
+    deadline: Deadline,
 ) -> tuple[tuple[RootManifest, ...], tuple[WriteDelta, ...]]:
     """Enrich, then pair, the two canonical manifest collections root by root.
 
@@ -797,7 +927,7 @@ def _write_deltas(
     for root in sorted(before_by_root):
         with _translated("incomplete", "unstable_corpus_root"):
             manifest = enrich_after_manifest(
-                before_by_root[root], after_by_root[root], deadline=deadline
+                before_by_root[root], after_by_root[root], expectation=expectation, deadline=deadline
             )
             enriched.append(manifest)
             deltas.append(compare_root_manifests(before_by_root[root], manifest))
@@ -831,7 +961,9 @@ def _cleanup(
     if evidence.evaluation_root is None:
         return status
     try:
-        summary = services.cleanup(evidence.evaluation_root, evidence.run_identity, status, deadline)
+        summary = services.cleanup(
+            request.repo_root, evidence.evaluation_root, evidence.run_identity, status, deadline
+        )
     except DeadlineExceeded as exc:
         raise _fail("incomplete", "admission_deadline_exceeded", f"step=cleanup {exc}") from exc
     except AdmissionError as exc:
@@ -862,11 +994,11 @@ def _capture_final_production_identity(
     and fails closed instead.
     """
 
-    if evidence.production_identity_before is None:
+    if evidence.production_identity_before is None or evidence.expectation is None:
         return
     try:
         evidence.production_identity_final = services.capture_production_identity(
-            request.repo_root, deadline
+            request.repo_root, deadline, evidence.expectation
         )
     except (OSError, RuntimeError, ValueError) as exc:
         context = "" if failure is None else f" (after {failure.code})"
@@ -890,6 +1022,70 @@ def _bracket_cleanup(request: AdmissionRequest, evidence: _Evidence, status: str
         evidence.issues.append(_issue(request, "production_identity_changed", str(exc)))
         return "hold" if status == "pass" else status
     return status
+
+
+def _bracket_evaluator_identity(
+    request: AdmissionRequest,
+    services: AdmissionServices,
+    evidence: _Evidence,
+    status: str,
+    deadline: Deadline,
+) -> str:
+    """Re-measure the evaluator after the last evaluation-owned action, before publication.
+
+    The first capture is what every production-helper child was bound to; it happened before
+    any of them ran.  Nothing after it re-read the evaluator's own bytes, so an evaluator
+    module or a production helper edited late in the run -- after the last ordinary helper
+    call, while the receipt was being assembled -- would have been published under an identity
+    that no longer described the code on disk.  This capture closes that window: the identity
+    is measured again after cleanup and the final production identity, and a receipt whose
+    evaluator moved can never be a ``pass``.
+
+    It is inside the same absolute ceiling as every other finalization step, and a capture
+    that cannot be completed at all fails the run closed rather than publishing a receipt
+    whose evaluator was never re-checked.
+    """
+
+    if evidence.evaluator is None:
+        return status
+    with _translated("incomplete", "admission_deadline_exceeded"):
+        deadline.check("recapture_evaluator_identity:before")
+    try:
+        observed = services.capture_evaluator_identity(deadline)
+    except DeadlineExceeded as exc:
+        raise _fail("incomplete", "admission_deadline_exceeded", f"step=recapture_evaluator_identity {exc}") from exc
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise _fail(
+            "incomplete",
+            "evaluator_identity_capture_failed",
+            f"cannot re-measure the evaluator identity before publication: {exc}",
+        ) from exc
+    with _translated("incomplete", "admission_deadline_exceeded"):
+        deadline.check("recapture_evaluator_identity:after")
+    if observed == evidence.evaluator:
+        return status
+    changed = _changed_identity_fields(evidence.evaluator, observed)
+    evidence.issues.append(_issue(request, "evaluator_identity_changed", ", ".join(changed)))
+    return "hold" if status == "pass" else status
+
+
+def _changed_identity_fields(before: EvaluatorIdentity, after: EvaluatorIdentity) -> tuple[str, ...]:
+    """Which parts of the evaluator identity moved, named without publishing their bytes."""
+
+    fields = (
+        "source_digest",
+        "source_commit",
+        "source_clean",
+        "production_root",
+        "production_digest",
+        "production_clean",
+        "host_python_path",
+        "host_python_realpath",
+        "host_python_sha256",
+        "host_python_version",
+    )
+    changed = tuple(name for name in fields if getattr(before, name) != getattr(after, name))
+    return changed or ("evaluator_identity",)
 
 
 def _build_receipt(
@@ -919,7 +1115,7 @@ def _build_receipt(
     assert evidence.evaluation_root is not None
     with _translated("incomplete", "admission_deadline_exceeded"):
         deadline.check("artifact_tree_digest:before")
-    digest = services.artifact_tree_digest(evidence.evaluation_root, deadline)
+    digest = services.artifact_tree_digest(request.repo_root, evidence.evaluation_root, deadline)
     with _translated("incomplete", "admission_deadline_exceeded"):
         deadline.check("artifact_tree_digest:after")
     runtime = evidence.runtime

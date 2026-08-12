@@ -7,7 +7,7 @@ import os
 import subprocess
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from pathlib import Path
 
 import pytest
@@ -30,7 +30,9 @@ from scripts.backend_eval.production_helper import (
     ProductionHelperTimeout,
     run_production_helper,
 )
+from scripts.backend_eval.source_binding import HelperExpectation
 from serena_light.workspace.inventory import git_trust_inventory, observe_file_digest
+from tests.backend_eval.support import real_expectation
 
 
 class _FakeClock:
@@ -118,7 +120,7 @@ def test_git_manifest_hashes_the_closure_and_metadata_scans_the_whole_remainder(
     _git(root, "commit", "-m", "fixture")
 
     request = _git_request(root, required_config_paths=("pyrightconfig.json",))
-    manifest = capture_root_manifest(request)
+    manifest = capture_root_manifest(request, expectation=real_expectation())
 
     assert {record.path for record in manifest.hashed_paths} == {"src/a.py", "pyrightconfig.json"}
     # Every remaining in-scope path is captured, including both ignored cache trees.
@@ -152,7 +154,7 @@ def test_git_manifest_records_head_and_untracked_inventory_disposition(tmp_path:
     _git(root, "commit", "-m", "fixture")
     (root / "src" / "untracked.py").write_text("untracked = True\n", encoding="utf-8")
 
-    manifest = capture_root_manifest(_git_request(root))
+    manifest = capture_root_manifest(_git_request(root), expectation=real_expectation())
 
     assert manifest.source_revision == _git(root, "rev-parse", "HEAD").stdout.decode().strip()
     assert {record.path: record.disposition for record in manifest.hashed_paths} == {
@@ -170,8 +172,8 @@ def test_manifest_is_byte_stable_and_lexically_ordered(tmp_path: Path) -> None:
     _git(root, "commit", "-m", "fixture")
     request = _git_request(root, required_config_paths=("pyrightconfig.json",))
 
-    first = capture_root_manifest(request)
-    second = capture_root_manifest(request)
+    first = capture_root_manifest(request, expectation=real_expectation())
+    second = capture_root_manifest(request, expectation=real_expectation())
 
     assert first == second
     assert first.manifest_digest == second.manifest_digest
@@ -188,7 +190,7 @@ def test_manifest_does_not_follow_symlinked_directory(tmp_path: Path) -> None:
     (outside / "secret.bin").write_bytes(b"outside")
     (root / "model_cache").symlink_to(outside, target_is_directory=True)
 
-    manifest = capture_root_manifest(_git_request(root))
+    manifest = capture_root_manifest(_git_request(root), expectation=real_expectation())
 
     record = next(item for item in manifest.metadata_paths if item.path == "model_cache")
     assert (record.kind, record.symlink_target) == ("symlink", str(outside))
@@ -205,7 +207,7 @@ def test_metadata_leaf_symlink_is_recorded_without_reading_its_target(tmp_path: 
     outside.write_bytes(b"outside")
     (root / "model_cache" / "link.bin").symlink_to(outside)
 
-    manifest = capture_root_manifest(_git_request(root))
+    manifest = capture_root_manifest(_git_request(root), expectation=real_expectation())
 
     record = next(item for item in manifest.metadata_paths if item.path == "model_cache/link.bin")
     assert (record.kind, record.symlink_target, record.content_sha256) == ("symlink", str(outside), None)
@@ -248,7 +250,7 @@ def test_remainder_scan_refuses_a_directory_swapped_to_a_symlink_mid_walk(
     monkeypatch.setattr(manifests, "_metadata_record", racing_record)
 
     with pytest.raises(ManifestError, match="cannot open corpus directory"):
-        capture_root_manifest(_git_request(root))
+        capture_root_manifest(_git_request(root), expectation=real_expectation())
     assert substituted
 
 
@@ -304,10 +306,14 @@ def test_manifest_rejects_a_hashed_path_that_moves_around_the_digest_pass(
     rewritten = False
 
     def racing_digests(
-        digest_root: Path, relatives: object, *, deadline: object
+        digest_root: Path,
+        relatives: Sequence[str],
+        *,
+        expectation: HelperExpectation,
+        deadline: Deadline | None,
     ) -> dict[str, str | None]:
         nonlocal rewritten
-        result = real_digests(digest_root, relatives, deadline=deadline)  # type: ignore[arg-type]
+        result = real_digests(digest_root, relatives, expectation=expectation, deadline=deadline)
         if not rewritten and "module.py" in result:
             rewritten = True
             source.write_bytes(b"y" * 1024)
@@ -316,7 +322,7 @@ def test_manifest_rejects_a_hashed_path_that_moves_around_the_digest_pass(
     monkeypatch.setattr(manifests, "bounded_file_digests", racing_digests)
 
     with pytest.raises(ManifestError, match="unstable"):
-        capture_root_manifest(_git_request(root))
+        capture_root_manifest(_git_request(root), expectation=real_expectation())
     assert rewritten
 
 
@@ -333,7 +339,7 @@ def test_git_manifest_rejects_untracked_source_created_after_records(
     )
 
     with pytest.raises(ManifestError, match="changed while freezing"):
-        capture_root_manifest(_git_request(root))
+        capture_root_manifest(_git_request(root), expectation=real_expectation())
     assert was_mutated()
 
 
@@ -349,7 +355,7 @@ def test_git_manifest_rejects_untracked_source_deleted_after_records(
     was_mutated = _mutate_after_metadata_records(monkeypatch, untracked.unlink)
 
     with pytest.raises(ManifestError, match="changed while freezing"):
-        capture_root_manifest(_git_request(root))
+        capture_root_manifest(_git_request(root), expectation=real_expectation())
     assert was_mutated()
 
 
@@ -369,7 +375,7 @@ def test_git_manifest_rejects_head_changed_after_records(tmp_path: Path, monkeyp
     was_mutated = _mutate_after_metadata_records(monkeypatch, replace_head)
 
     with pytest.raises(ManifestError, match="changed while freezing"):
-        capture_root_manifest(_git_request(root))
+        capture_root_manifest(_git_request(root), expectation=real_expectation())
     assert was_mutated()
 
 
@@ -390,7 +396,10 @@ def test_non_git_manifest_hashes_only_declared_task_paths_without_inventory_walk
         raise AssertionError("exact non-Git task paths must not walk the full environment")
 
     monkeypatch.setattr(manifests, "bounded_non_git_trust_inventory", forbidden_inventory)
-    manifest = capture_root_manifest(_non_git_request(root, fully_hashed_paths=("torchtune/__init__.py",)))
+    manifest = capture_root_manifest(
+                   _non_git_request(root, fully_hashed_paths=("torchtune/__init__.py",)),
+                   expectation=real_expectation(),
+               )
 
     assert manifest.kind == "non_git"
     assert manifest.source_revision is None
@@ -402,7 +411,7 @@ def test_non_git_manifest_hashes_only_declared_task_paths_without_inventory_walk
 def test_manifest_rejects_missing_roots_special_files_duplicate_paths_and_traversal(tmp_path: Path) -> None:
     missing = _non_git_request(tmp_path / "missing", fully_hashed_paths=("needed.py",))
     with pytest.raises(ManifestError, match="missing"):
-        capture_root_manifest(missing)
+        capture_root_manifest(missing, expectation=real_expectation())
 
     root = _repository(tmp_path)
     (root / "src").mkdir()
@@ -413,11 +422,17 @@ def test_manifest_rejects_missing_roots_special_files_duplicate_paths_and_traver
     _git(root, "commit", "-m", "fixture")
 
     with pytest.raises(ManifestError, match="regular"):
-        capture_root_manifest(_git_request(root, required_config_paths=("pyrightconfig.json",)))
+        capture_root_manifest(
+            _git_request(root, required_config_paths=("pyrightconfig.json",)),
+            expectation=real_expectation(),
+        )
     with pytest.raises(ManifestError, match="duplicate"):
-        capture_root_manifest(_git_request(root, fully_hashed_paths=("src/a.py", "src/a.py")))
+        capture_root_manifest(
+            _git_request(root, fully_hashed_paths=("src/a.py", "src/a.py")),
+            expectation=real_expectation(),
+        )
     with pytest.raises(ManifestError, match="traversal"):
-        capture_root_manifest(_git_request(root, fully_hashed_paths=("../outside.py",)))
+        capture_root_manifest(_git_request(root, fully_hashed_paths=("../outside.py",)), expectation=real_expectation())
 
 
 def test_default_corpus_requests_are_fixed_and_do_not_capture_live_roots() -> None:
@@ -457,7 +472,7 @@ def test_bounded_digests_equal_the_production_helper(tmp_path: Path) -> None:
         (root / relative).write_text(f"value = {index}\n", encoding="utf-8")
         relatives.append(relative)
 
-    observed = bounded_file_digests(root, tuple(relatives), deadline=None)
+    observed = bounded_file_digests(root, tuple(relatives), deadline=None, expectation=real_expectation())
 
     assert observed == {relative: observe_file_digest(root / relative) for relative in relatives}
     assert all(digest is not None for digest in observed.values())
@@ -472,7 +487,7 @@ def test_bounded_digests_chunk_a_large_batch(tmp_path: Path) -> None:
     for relative in relatives:
         (root / relative).write_text(f"# {relative}\n", encoding="utf-8")
 
-    observed = bounded_file_digests(root, relatives, deadline=None)
+    observed = bounded_file_digests(root, relatives, deadline=None, expectation=real_expectation())
 
     assert sorted(observed) == sorted(relatives)
     assert observed[relatives[-1]] == observe_file_digest(root / relatives[-1])
@@ -486,7 +501,7 @@ def test_bounded_digests_report_a_fifo_as_unattributable(tmp_path: Path) -> None
     os.mkfifo(root / "blocked.py")
 
     started = time.monotonic()
-    observed = bounded_file_digests(root, ("blocked.py",), deadline=None)
+    observed = bounded_file_digests(root, ("blocked.py",), deadline=None, expectation=real_expectation())
     elapsed = time.monotonic() - started
 
     assert observed == {"blocked.py": None}
@@ -511,7 +526,7 @@ def test_a_hashed_path_that_cannot_be_attributed_is_unstable(tmp_path: Path) -> 
 
     started = time.monotonic()
     with pytest.raises(ManifestError, match="not a regular file"):
-        capture_root_manifest(request)
+        capture_root_manifest(request, expectation=real_expectation())
     assert time.monotonic() - started < 10.0
 
 
@@ -528,7 +543,13 @@ def test_a_corpus_capture_child_is_bounded_and_its_group_is_killed(tmp_path: Pat
 
     started = time.monotonic()
     with pytest.raises(ProductionHelperTimeout, match="process group was killed"):
-        run_production_helper("observe_file_digests", {"paths": []}, deadline=deadline, python=stub)
+        run_production_helper(
+            "observe_file_digests",
+            {"paths": []},
+            expectation=real_expectation(),
+            deadline=deadline,
+            python=stub,
+        )
     assert time.monotonic() - started < 20.0
 
     pid = int(marker.read_text().strip())
@@ -554,7 +575,7 @@ def test_a_capture_with_no_remaining_time_fails_closed(tmp_path: Path) -> None:
     clock.advance(10.0)
 
     with pytest.raises((ManifestError, DeadlineExceeded)):
-        capture_root_manifest(request, deadline=deadline)
+        capture_root_manifest(request, deadline=deadline, expectation=real_expectation())
 
 
 def test_a_forced_swap_during_a_capture_never_hangs(tmp_path: Path) -> None:
@@ -596,7 +617,10 @@ def test_a_forced_swap_during_a_capture_never_hangs(tmp_path: Path) -> None:
     swapper.start()
     try:
         with contextlib.suppress(ManifestError, ProductionHelperError, DeadlineExceeded):
-            capture_root_manifest(request, deadline=Deadline.start(monotonic_clock, 15.0))
+            capture_root_manifest(
+                request, deadline=Deadline.start(monotonic_clock, 15.0),
+                expectation=real_expectation(),
+            )
     finally:
         stop.set()
         swapper.join(timeout=5.0)

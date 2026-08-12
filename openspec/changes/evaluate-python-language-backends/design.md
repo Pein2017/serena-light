@@ -194,6 +194,14 @@ and then wrote the harness payload into that reader's pipe.
 harness performs below a root it opened now walks out from that already-proven descriptor one
 component at a time, `O_NOFOLLOW` on every component, creating and re-opening each
 intermediate directory from its parent's descriptor rather than through `mkdir(parents=True)`.
+Two places claimed that discipline while still opening a whole multi-component absolute path
+under one `O_NOFOLLOW`, which guards only the last component: evaluation cleanup, where a
+symlinked ancestor was reproduced unlinking a decoy outside the evaluation root, and the
+artifact-tree digest, where a substituted ancestor would have published the digest of another
+tree as the run's admitted evidence. Both now acquire their root by walking from the declared
+owner root's own descriptor. The root open itself is `guarded`, not `confined`, and the
+ownership table says so: a declared root is where confinement starts, not something confinement
+covers.
 Leaves are opened `O_NONBLOCK` and proven regular by `fstat` on the same descriptor before any
 byte moves. Write leaves carry no `O_TRUNC`: the file is opened `O_WRONLY | O_NOFOLLOW |
 O_NONBLOCK`, created `O_CREAT | O_EXCL` only if that reports `ENOENT`, proven regular,
@@ -208,14 +216,56 @@ close an evaluation-only exposure changes the semantics the receipt claims to bi
 user's compatibility surface, for the benefit of a harness. Copying the helpers into
 evaluation-owned code forks exactly the semantics the corpus capture exists to measure, and the
 copy decays silently. The third option is taken: run the *exact production bytes* in a child
-the phase deadline can kill. The child is executed by absolute path under `-I` with an explicit
-`src` root and a minimal environment, so no `PYTHONPATH`, user site directory, or ambient
-`scripts` namespace package can shadow it; it reports the byte digest of every `serena_light`
-module it loaded and the parent re-reads and compares each one, so a child that ran another
-checkout's helpers is refused rather than believed; and its request and response are canonical
-JSON bound by the SHA-256 of the request bytes it consumed. Digest batches are chunked, and the
-capture `lstat`s each path before and after its chunk, so the stability window a hashed record
-is bound to stays short.
+the phase deadline can kill, under `-I` with a minimal environment, so no `PYTHONPATH`, user
+site directory, or ambient `scripts` namespace package can shadow it; its request and response
+are canonical JSON bound by the SHA-256 of the request bytes it consumed. Digest batches are
+chunked, which keeps each child's argument list and blast radius small; the stability proof is
+the *whole-pass* `lstat` bracket -- every hashed path is observed before the first chunk and
+again after the last, so a path that moved anywhere inside the pass is refused. That is a wider
+window and a stricter requirement than a per-chunk bracket, and it is stated that way rather
+than claimed to be narrower than it is.
+
+**The identity is the execution expectation, not a record of it.** Recording the executed
+closure after the fact proves nothing about what ran. The evaluator captured its identity --
+the `scripts/backend_eval` closure including `production_child.py`, and the `serena_light`
+helper closure -- and then let the *first* child use pin whatever bytes were on disk at that
+moment, so a helper or child program substituted between the capture and the first use executed
+successfully and was only re-read afterwards. A transient substitution survives that. The
+binding is therefore an *expectation*, derived from the captured `EvaluatorIdentity`, passed
+explicitly into every production-helper call the admission makes -- both corpus captures and
+their enrichment, all three production-identity captures, the candidate-lock and runtime
+identity brackets -- and compared before anything runs. No process-global first-use pin exists,
+so two admissions in one process cannot contaminate each other's truth.
+
+**The bytes that were compared are the bytes that execute.** Both halves run from sealed
+`memfd` images, sealed `F_SEAL_WRITE | F_SEAL_SHRINK | F_SEAL_GROW | F_SEAL_SEAL` and addressed
+by descriptor. The child program is read through a component-wise no-follow walk from the
+evaluator checkout's own descriptor, compared against the expectation, and executed as
+`/proc/self/fd/<image>` -- not as an absolute mutable script path the interpreter would resolve
+again. The production helpers are handled the same way rather than being imported from a
+mutable `src` root: the parent reads each expected file through the same confined walk, refuses
+any byte that is not the expected byte, packs those verified bytes into a second sealed image,
+and passes it by descriptor; the child installs one meta-path finder over that image and puts
+no `src` root on `sys.path` at all. A helper swapped on disk during the import window is
+therefore unreachable rather than merely detected afterwards. Each module keeps the `__file__`
+an ordinary import would have given it, so production semantics that derive a repository root
+from `__file__` are unchanged, and origin is proven by loader identity rather than by that
+pathname.
+
+**Closure membership is exact, and checked at runtime.** `OPERATION_HELPER_CLOSURES` declares
+the modules each child operation may load. Each operation's reported closure is an exact
+allowed *subset* of the declared union, and the union across the supported operations equals
+the declared closure the receipt publishes. The child refuses an unexpected extra module, a
+missing expected module, and any module that arrived through a loader other than the image's;
+the parent independently refuses a reported closure that is not exactly the expected one. A
+static test is not the enforcement -- it is a second opinion on it.
+
+**The evaluator is re-measured before publication.** The first capture bound every child of the
+run and nothing after it re-read the evaluator's own bytes, so an evaluator module or a
+production helper edited after the last ordinary helper call would have been published under an
+identity that no longer described the code on disk. The identity is therefore captured again
+after cleanup and the final production identity, inside the same absolute ceiling; a changed
+evaluator holds the run, and a capture that cannot complete fails it closed.
 
 This does not remove the race -- it bounds it, and the honest statement is that a production
 helper blocked on a substituted node costs the phase its remaining budget and a typed failure
@@ -225,13 +275,37 @@ is likewise left visible rather than papered over: `runtime_source_files` filter
 which changes the build identity and is refused by the identity guard.
 
 **The enumeration.** `tests/backend_eval/test_io_ownership.py` parses every evaluator module
-and requires the complete set of filesystem accesses -- descriptor primitives, every
-pathname-shaped `pathlib` and builtin access, and every production helper call -- to equal a
-declared table with one owner class per row. Grepping for `os.open` flags never found them all,
-because `Path.read_bytes`, `Path.write_text`, `Path.mkdir`, and a helper call are each an
-unguarded open with no flag to grep for. A new read or write fails that test until its owner is
-declared; a removed one fails it until the row goes. `docs/backend-eval-io-ownership.md` is its
-prose companion and states the residual boundaries.
+and requires the complete set of filesystem accesses to equal a declared table with one owner
+class per row. Grepping for `os.open` flags never found them all, because `Path.read_bytes`,
+`Path.write_text`, `Path.mkdir`, and a helper call are each an unguarded open with no flag to
+grep for -- and the first enumeration was itself incomplete, because it stopped at the accesses
+that open or read. The vocabulary is finite and conservative and now also covers namespace
+mutation (`link`, `unlink`, `rename`, `replace`, `rmdir`, `symlink`), descriptor byte movement
+and durability (`read`, `write`, `pread`, `pwrite`, `lseek`, `ftruncate`, `fsync`, `fdatasync`,
+and the stream operations performed through an `os.fdopen` handle), metadata and link
+inspection (`stat`, `lstat`, `fstat`, `readlink`, `access`, `chmod`, `fchmod`, `realpath`, and
+the `pathlib` predicates), descriptor duplication and release, and executable discovery. A new
+read or write fails that test until its owner is declared; a removed one fails it until the row
+goes.
+
+Two owner classes were added to keep the table honest rather than merely complete. `guarded`
+now explicitly covers the root opens that a `confined` walk starts from, so no row claims
+confinement it does not have. `declared-path` names the pathname-shaped *observations* --
+`Path.is_file()`, `Path.lstat()`, `os.access`, `os.path.realpath` -- which are weaker than
+`guarded` because they resolve the name again; every row in that class only ever refuses, and
+the read or write that follows is owned by a row that resolves nothing by name. The
+`descriptor` class is additionally proven mechanically: a test requires every call to a
+descriptor primitive to receive a descriptor-shaped argument rather than a constructed
+pathname, so the class cannot be used to hide one.
+
+`git` is no longer discovered from the ambient `PATH`. `shutil.which("git", ...) or
+shutil.which("git") or "/usr/bin/git"` answered from whatever `PATH` the process happened to
+carry and disagreed with the hard-coded path the evaluator-identity probe already used; both
+now use one declared `GIT_EXECUTABLE`, proven a regular executable file through one descriptor
+before any child starts. The receipt contract binds the CLI host interpreter and the candidate
+executables, not this one, so no receipt field changed.
+`docs/backend-eval-io-ownership.md` is the prose companion and states the residual
+boundaries.
 
 ### Decision 9: Keep raw evidence ignored and summaries reviewable
 

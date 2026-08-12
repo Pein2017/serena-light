@@ -33,6 +33,8 @@ from scripts.backend_eval.candidate_lock import (
 from scripts.backend_eval.models import CandidateLock, ProductionIdentity, canonical_json, sha256_bytes
 from scripts.backend_eval.process import CommandTimeout, Deadline
 from scripts.backend_eval.production_identity import PRODUCTION_IDENTITY_FILES, ProductionIdentityChanged
+from scripts.backend_eval.source_binding import HelperExpectation
+from tests.backend_eval.support import real_expectation
 
 _RUNNER_EVENT = "<runner>"
 _EXCLUDE_NEWER = "2026-08-11T00:00:00Z"
@@ -224,7 +226,7 @@ def _expected_command(request: CandidateLockRequest) -> tuple[str, ...]:
 
 
 def _freeze(request: CandidateLockRequest) -> tuple[CandidateLock, bytes, bytes]:
-    lock = compile_candidate_lock(request, runner=_FakeRunner())
+    lock = compile_candidate_lock(request, runner=_FakeRunner(), expectation=real_expectation())
     return (
         lock,
         (request.artifact_root / LOCK_FILE_NAME).read_bytes(),
@@ -352,7 +354,7 @@ def test_request_accepts_a_nested_evaluation_owned_root(request_: CandidateLockR
 
 def test_compile_builds_the_exact_locked_command(request_: CandidateLockRequest) -> None:
     runner = _FakeRunner()
-    compile_candidate_lock(request_, runner=runner)
+    compile_candidate_lock(request_, runner=runner, expectation=real_expectation())
     assert len(runner.calls) == 1
     command, cwd, _env = runner.calls[0]
     assert command == _expected_command(request_)
@@ -360,7 +362,7 @@ def test_compile_builds_the_exact_locked_command(request_: CandidateLockRequest)
 
 
 def test_compile_writes_the_canonical_candidate_requirements(request_: CandidateLockRequest) -> None:
-    compile_candidate_lock(request_, runner=_FakeRunner())
+    compile_candidate_lock(request_, runner=_FakeRunner(), expectation=real_expectation())
     data = (request_.artifact_root / REQUIREMENTS_IN_NAME).read_bytes()
     assert data == CANONICAL_REQUIREMENTS_BYTES
     assert data == b"pyrefly\nty\n"
@@ -376,7 +378,7 @@ def test_compile_uses_a_service_owned_cache_and_inherits_proxy_settings(
     monkeypatch.setenv("PIP_INDEX_URL", "https://mirror.invalid/simple")
     monkeypatch.setenv("PYTHONPATH", "/data/verl")
     runner = _FakeRunner()
-    compile_candidate_lock(request_, runner=runner)
+    compile_candidate_lock(request_, runner=runner, expectation=real_expectation())
     _command, _cwd, env = runner.calls[0]
     cache_dir = request_.artifact_root / "uv-cache"
     assert env["UV_CACHE_DIR"] == str(cache_dir / "uv")
@@ -396,7 +398,7 @@ def test_compile_uses_a_service_owned_cache_and_inherits_proxy_settings(
 def test_compile_writes_only_below_the_artifact_root(
     request_: CandidateLockRequest, production_root: Path
 ) -> None:
-    compile_candidate_lock(request_, runner=_FakeRunner())
+    compile_candidate_lock(request_, runner=_FakeRunner(), expectation=real_expectation())
     written = {path.relative_to(request_.artifact_root).as_posix() for path in request_.artifact_root.rglob("*")}
     assert written == {
         REQUIREMENTS_IN_NAME,
@@ -421,7 +423,7 @@ def test_compile_writes_only_below_the_artifact_root(
 
 
 def test_compile_returns_every_resolved_distribution_and_two_candidates(request_: CandidateLockRequest) -> None:
-    lock = compile_candidate_lock(request_, runner=_FakeRunner())
+    lock = compile_candidate_lock(request_, runner=_FakeRunner(), expectation=real_expectation())
     lock_bytes = (request_.artifact_root / LOCK_FILE_NAME).read_bytes()
     assert lock.digest == sha256_bytes(lock_bytes)
     assert lock.exclude_newer == _EXCLUDE_NEWER
@@ -439,14 +441,14 @@ def test_compile_returns_every_resolved_distribution_and_two_candidates(request_
 
 def test_compile_keeps_transitive_distributions_out_of_the_candidate_set(request_: CandidateLockRequest) -> None:
     body = _LOCK_BODY + f"typing-extensions==4.12.2 \\\n    --hash=sha256:{'4' * 64}\n"
-    lock = compile_candidate_lock(request_, runner=_FakeRunner(bodies=(body,)))
+    lock = compile_candidate_lock(request_, runner=_FakeRunner(bodies=(body,)), expectation=real_expectation())
     assert [package.name for package in lock.resolved_packages] == ["pyrefly", "ty", "typing-extensions"]
     assert [package.name for package in lock.candidates] == ["pyrefly", "ty"]
 
 
 def test_compile_accepts_an_eligible_zero_zero_x_ty_release(request_: CandidateLockRequest) -> None:
     body = _LOCK_BODY.replace("ty==0.0.24", "ty==0.0.1")
-    lock = compile_candidate_lock(request_, runner=_FakeRunner(bodies=(body,)))
+    lock = compile_candidate_lock(request_, runner=_FakeRunner(bodies=(body,)), expectation=real_expectation())
     assert [package.version for package in lock.candidates] == ["0.30.0", "0.0.1"]
 
 
@@ -477,7 +479,7 @@ def test_compile_accepts_an_eligible_zero_zero_x_ty_release(request_: CandidateL
 )
 def test_compile_rejects_an_unusable_resolution(request_: CandidateLockRequest, body: str, message: str) -> None:
     with pytest.raises(CandidateLockError, match=message):
-        compile_candidate_lock(request_, runner=_FakeRunner(bodies=(body,)))
+        compile_candidate_lock(request_, runner=_FakeRunner(bodies=(body,)), expectation=real_expectation())
 
 
 def test_compile_rejects_a_duplicate_hash_for_one_distribution(request_: CandidateLockRequest) -> None:
@@ -486,7 +488,7 @@ def test_compile_rejects_a_duplicate_hash_for_one_distribution(request_: Candida
         f"ty==0.0.24 \\\n    --hash=sha256:{_HASH_C}\n"
     )
     with pytest.raises(CandidateLockError, match="duplicate"):
-        compile_candidate_lock(request_, runner=_FakeRunner(bodies=(body,)))
+        compile_candidate_lock(request_, runner=_FakeRunner(bodies=(body,)), expectation=real_expectation())
 
 
 # --- artifact path safety -----------------------------------------------------
@@ -498,7 +500,7 @@ def test_compile_rejects_a_symlinked_artifact_root(request_: CandidateLockReques
     request_.artifact_root.parent.mkdir(parents=True, exist_ok=True)
     request_.artifact_root.symlink_to(outside, target_is_directory=True)
     with pytest.raises(CandidateLockError, match="symlink"):
-        compile_candidate_lock(request_, runner=_FakeRunner())
+        compile_candidate_lock(request_, runner=_FakeRunner(), expectation=real_expectation())
     assert list(outside.iterdir()) == []
 
 
@@ -511,7 +513,7 @@ def test_compile_rejects_a_symlinked_artifact_path_component(
     request_.artifact_root.symlink_to(outside, target_is_directory=True)
     nested = replace(request_, artifact_root=request_.artifact_root / "phase-1")
     with pytest.raises(CandidateLockError, match="symlink"):
-        compile_candidate_lock(nested, runner=_FakeRunner())
+        compile_candidate_lock(nested, runner=_FakeRunner(), expectation=real_expectation())
     assert list(outside.iterdir()) == []
 
 
@@ -524,7 +526,7 @@ def test_compile_rejects_a_symlinked_artifact_output(
     request_.artifact_root.mkdir(parents=True)
     (request_.artifact_root / name).symlink_to(outside)
     with pytest.raises(CandidateLockError, match="symlink"):
-        compile_candidate_lock(request_, runner=_FakeRunner())
+        compile_candidate_lock(request_, runner=_FakeRunner(), expectation=real_expectation())
     assert outside.read_text(encoding="utf-8") == "stale\n"
 
 
@@ -532,7 +534,7 @@ def test_compile_rejects_a_special_file_artifact_output(request_: CandidateLockR
     request_.artifact_root.mkdir(parents=True)
     os.mkfifo(request_.artifact_root / LOCK_FILE_NAME)
     with pytest.raises(CandidateLockError, match="regular file"):
-        compile_candidate_lock(request_, runner=_FakeRunner())
+        compile_candidate_lock(request_, runner=_FakeRunner(), expectation=real_expectation())
 
 
 def test_compile_rejects_a_symlinked_cache_directory(request_: CandidateLockRequest, tmp_path: Path) -> None:
@@ -541,7 +543,7 @@ def test_compile_rejects_a_symlinked_cache_directory(request_: CandidateLockRequ
     request_.artifact_root.mkdir(parents=True)
     (request_.artifact_root / "uv-cache").symlink_to(outside, target_is_directory=True)
     with pytest.raises(CandidateLockError, match="symlink"):
-        compile_candidate_lock(request_, runner=_FakeRunner())
+        compile_candidate_lock(request_, runner=_FakeRunner(), expectation=real_expectation())
     assert list(outside.iterdir()) == []
 
 
@@ -551,14 +553,14 @@ def test_compile_rejects_a_symlinked_cache_directory(request_: CandidateLockRequ
 def test_compile_rejects_a_nonzero_command_exit(request_: CandidateLockRequest) -> None:
     runner = _FakeRunner(returncode=2, stderr="no compatible version", write_output=False)
     with pytest.raises(CandidateLockError, match="no compatible version"):
-        compile_candidate_lock(request_, runner=runner)
+        compile_candidate_lock(request_, runner=runner, expectation=real_expectation())
     assert not (request_.artifact_root / LOCK_FILE_NAME).exists()
     assert not (request_.artifact_root / RECEIPT_FILE_NAME).exists()
 
 
 def test_compile_rejects_a_missing_output_file(request_: CandidateLockRequest) -> None:
     with pytest.raises(CandidateLockError, match="did not write"):
-        compile_candidate_lock(request_, runner=_FakeRunner(write_output=False))
+        compile_candidate_lock(request_, runner=_FakeRunner(write_output=False), expectation=real_expectation())
     assert not (request_.artifact_root / LOCK_FILE_NAME).exists()
 
 
@@ -567,7 +569,7 @@ def test_compile_removes_a_partial_output_when_the_first_resolution_fails(
 ) -> None:
     runner = _FakeRunner(bodies=("pyrefly==0.30.0\n",), returncode=1, stderr="interrupted")
     with pytest.raises(CandidateLockError, match="interrupted"):
-        compile_candidate_lock(request_, runner=runner)
+        compile_candidate_lock(request_, runner=runner, expectation=real_expectation())
     assert not (request_.artifact_root / LOCK_FILE_NAME).exists()
     assert not (request_.artifact_root / RECEIPT_FILE_NAME).exists()
 
@@ -577,7 +579,7 @@ def test_compile_rejects_a_symlinked_resolution_output(request_: CandidateLockRe
     outside.write_text(_LOCK_BODY, encoding="utf-8")
     runner = _SymlinkRunner(target=outside)
     with pytest.raises(CandidateLockError, match="symlink"):
-        compile_candidate_lock(request_, runner=runner)
+        compile_candidate_lock(request_, runner=runner, expectation=real_expectation())
     assert runner.calls == 1
     assert not (request_.artifact_root / LOCK_FILE_NAME).exists()
     assert not (request_.artifact_root / LOCK_FILE_NAME).is_symlink()
@@ -591,17 +593,20 @@ def test_recompilation_restores_the_freeze_after_a_symlinked_resolution_output(
     outside = tmp_path / "planted.lock"
     outside.write_text(_LOCK_BODY.replace("0.0.24", "0.0.25"), encoding="utf-8")
     with pytest.raises(CandidateLockError, match="symlink"):
-        compile_candidate_lock(request_, runner=_SymlinkRunner(target=outside), recompile=True)
+        compile_candidate_lock(
+            request_, runner=_SymlinkRunner(target=outside), recompile=True,
+            expectation=real_expectation(),
+        )
     assert not (request_.artifact_root / LOCK_FILE_NAME).is_symlink()
     assert outside.read_text(encoding="utf-8") == _LOCK_BODY.replace("0.0.24", "0.0.25")
     _assert_freeze_intact(request_, lock_bytes, receipt_bytes)
-    assert compile_candidate_lock(request_, runner=_FakeRunner()) == frozen
+    assert compile_candidate_lock(request_, runner=_FakeRunner(), expectation=real_expectation()) == frozen
 
 
 def test_compile_normalizes_a_runner_start_failure(request_: CandidateLockRequest) -> None:
     runner = _RaisingRunner()
     with pytest.raises(CandidateLockError, match="cannot start"):
-        compile_candidate_lock(request_, runner=runner)
+        compile_candidate_lock(request_, runner=runner, expectation=real_expectation())
     assert runner.calls == 1
     assert not (request_.artifact_root / LOCK_FILE_NAME).exists()
 
@@ -615,8 +620,10 @@ def _drifting_capture(
     real = candidate_lock_module.capture_production_identity
     seen: list[int] = []
 
-    def drifting(root: Path, *, deadline: Deadline | None = None) -> ProductionIdentity:
-        identity = real(root, deadline=deadline)
+    def drifting(
+        root: Path, *, expectation: HelperExpectation, deadline: Deadline | None = None
+    ) -> ProductionIdentity:
+        identity = real(root, expectation=expectation, deadline=deadline)
         seen.append(1)
         if len(seen) > after_call:
             return replace(identity, uv_lock_sha256="f" * 64)
@@ -630,7 +637,7 @@ def test_compile_rejects_production_identity_drift(
 ) -> None:
     _drifting_capture(monkeypatch)
     with pytest.raises(ProductionIdentityChanged, match="uv.lock"):
-        compile_candidate_lock(request_, runner=_FakeRunner())
+        compile_candidate_lock(request_, runner=_FakeRunner(), expectation=real_expectation())
 
 
 def test_production_identity_drift_takes_precedence_over_a_runner_failure(
@@ -639,7 +646,7 @@ def test_production_identity_drift_takes_precedence_over_a_runner_failure(
     _drifting_capture(monkeypatch)
     runner = _FakeRunner(returncode=2, stderr="no compatible version", write_output=False)
     with pytest.raises(ProductionIdentityChanged, match="uv.lock") as excinfo:
-        compile_candidate_lock(request_, runner=runner)
+        compile_candidate_lock(request_, runner=runner, expectation=real_expectation())
     cause = excinfo.value.__cause__
     assert isinstance(cause, CandidateLockError)
     assert "no compatible version" in str(cause)
@@ -648,11 +655,11 @@ def test_production_identity_drift_takes_precedence_over_a_runner_failure(
 def test_compile_rechecks_production_identity_when_reusing_a_frozen_lock(
     request_: CandidateLockRequest, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    compile_candidate_lock(request_, runner=_FakeRunner())
+    compile_candidate_lock(request_, runner=_FakeRunner(), expectation=real_expectation())
     _drifting_capture(monkeypatch)
     runner = _FakeRunner()
     with pytest.raises(ProductionIdentityChanged, match="uv.lock"):
-        compile_candidate_lock(request_, runner=runner)
+        compile_candidate_lock(request_, runner=runner, expectation=real_expectation())
     assert runner.calls == []
 
 
@@ -665,7 +672,7 @@ def test_production_identity_is_checked_after_a_rejected_artifact_root(
     request_.artifact_root.symlink_to(outside, target_is_directory=True)
     _drifting_capture(monkeypatch)
     with pytest.raises(ProductionIdentityChanged) as excinfo:
-        compile_candidate_lock(request_, runner=_FakeRunner())
+        compile_candidate_lock(request_, runner=_FakeRunner(), expectation=real_expectation())
     assert isinstance(excinfo.value.__cause__, CandidateLockError)
 
 
@@ -674,23 +681,26 @@ def test_production_identity_is_checked_after_a_rejected_artifact_root(
 
 def test_compile_reuses_an_existing_frozen_lock_without_resolving_again(request_: CandidateLockRequest) -> None:
     runner = _FakeRunner()
-    first = compile_candidate_lock(request_, runner=runner)
-    second = compile_candidate_lock(request_, runner=runner)
+    first = compile_candidate_lock(request_, runner=runner, expectation=real_expectation())
+    second = compile_candidate_lock(request_, runner=runner, expectation=real_expectation())
     assert second == first
     assert len(runner.calls) == 1
 
 
 def test_compile_rejects_reuse_when_the_receipt_does_not_match(request_: CandidateLockRequest) -> None:
-    compile_candidate_lock(request_, runner=_FakeRunner())
+    compile_candidate_lock(request_, runner=_FakeRunner(), expectation=real_expectation())
     with pytest.raises(CandidateLockError, match="receipt"):
-        compile_candidate_lock(replace(request_, exclude_newer="2026-08-10T00:00:00Z"), runner=_FakeRunner())
+        compile_candidate_lock(
+            replace(request_, exclude_newer="2026-08-10T00:00:00Z"), runner=_FakeRunner(),
+            expectation=real_expectation(),
+        )
 
 
 def test_compile_rejects_reuse_when_the_receipt_is_missing(request_: CandidateLockRequest) -> None:
-    compile_candidate_lock(request_, runner=_FakeRunner())
+    compile_candidate_lock(request_, runner=_FakeRunner(), expectation=real_expectation())
     (request_.artifact_root / RECEIPT_FILE_NAME).unlink()
     with pytest.raises(CandidateLockError, match="receipt"):
-        compile_candidate_lock(request_, runner=_FakeRunner())
+        compile_candidate_lock(request_, runner=_FakeRunner(), expectation=real_expectation())
 
 
 @pytest.mark.parametrize(
@@ -700,23 +710,23 @@ def test_compile_rejects_reuse_when_the_receipt_is_missing(request_: CandidateLo
 def test_compile_rejects_reuse_with_a_non_canonical_requirements_input(
     request_: CandidateLockRequest, content: bytes
 ) -> None:
-    compile_candidate_lock(request_, runner=_FakeRunner())
+    compile_candidate_lock(request_, runner=_FakeRunner(), expectation=real_expectation())
     (request_.artifact_root / REQUIREMENTS_IN_NAME).write_bytes(content)
     with pytest.raises(CandidateLockError, match="candidate requirements input"):
-        compile_candidate_lock(request_, runner=_FakeRunner())
+        compile_candidate_lock(request_, runner=_FakeRunner(), expectation=real_expectation())
 
 
 def test_compile_rejects_reuse_when_the_frozen_lock_was_edited(request_: CandidateLockRequest) -> None:
-    compile_candidate_lock(request_, runner=_FakeRunner())
+    compile_candidate_lock(request_, runner=_FakeRunner(), expectation=real_expectation())
     (request_.artifact_root / LOCK_FILE_NAME).write_text(_LOCK_BODY.replace("0.0.24", "0.0.23"), encoding="utf-8")
     with pytest.raises(CandidateLockError, match="receipt"):
-        compile_candidate_lock(request_, runner=_FakeRunner())
+        compile_candidate_lock(request_, runner=_FakeRunner(), expectation=real_expectation())
 
 
 def test_recompilation_accepts_an_identical_second_freeze(request_: CandidateLockRequest) -> None:
     runner = _FakeRunner(bodies=(_LOCK_BODY, _LOCK_BODY))
-    first = compile_candidate_lock(request_, runner=runner)
-    second = compile_candidate_lock(request_, runner=runner, recompile=True)
+    first = compile_candidate_lock(request_, runner=runner, expectation=real_expectation())
+    second = compile_candidate_lock(request_, runner=runner, recompile=True, expectation=real_expectation())
     assert second == first
     assert len(runner.calls) == 2
 
@@ -725,9 +735,9 @@ def test_recompilation_rejects_a_changed_second_freeze_output(request_: Candidat
     frozen, lock_bytes, receipt_bytes = _freeze(request_)
     runner = _FakeRunner(bodies=(_LOCK_BODY.replace("0.0.24", "0.0.25"),))
     with pytest.raises(CandidateLockError, match="changed"):
-        compile_candidate_lock(request_, runner=runner, recompile=True)
+        compile_candidate_lock(request_, runner=runner, recompile=True, expectation=real_expectation())
     _assert_freeze_intact(request_, lock_bytes, receipt_bytes)
-    assert compile_candidate_lock(request_, runner=_FakeRunner()) == frozen
+    assert compile_candidate_lock(request_, runner=_FakeRunner(), expectation=real_expectation()) == frozen
 
 
 def test_recompilation_restores_the_freeze_when_the_runner_writes_nothing(
@@ -735,9 +745,12 @@ def test_recompilation_restores_the_freeze_when_the_runner_writes_nothing(
 ) -> None:
     frozen, lock_bytes, receipt_bytes = _freeze(request_)
     with pytest.raises(CandidateLockError, match="did not write"):
-        compile_candidate_lock(request_, runner=_FakeRunner(write_output=False), recompile=True)
+        compile_candidate_lock(
+            request_, runner=_FakeRunner(write_output=False), recompile=True,
+            expectation=real_expectation(),
+        )
     _assert_freeze_intact(request_, lock_bytes, receipt_bytes)
-    assert compile_candidate_lock(request_, runner=_FakeRunner()) == frozen
+    assert compile_candidate_lock(request_, runner=_FakeRunner(), expectation=real_expectation()) == frozen
 
 
 def test_recompilation_restores_the_freeze_after_a_nonzero_partial_write(
@@ -746,18 +759,18 @@ def test_recompilation_restores_the_freeze_after_a_nonzero_partial_write(
     frozen, lock_bytes, receipt_bytes = _freeze(request_)
     runner = _FakeRunner(bodies=("pyrefly==0.30.0 \\\n",), returncode=1, stderr="interrupted")
     with pytest.raises(CandidateLockError, match="interrupted"):
-        compile_candidate_lock(request_, runner=runner, recompile=True)
+        compile_candidate_lock(request_, runner=runner, recompile=True, expectation=real_expectation())
     _assert_freeze_intact(request_, lock_bytes, receipt_bytes)
-    assert compile_candidate_lock(request_, runner=_FakeRunner()) == frozen
+    assert compile_candidate_lock(request_, runner=_FakeRunner(), expectation=real_expectation()) == frozen
 
 
 def test_recompilation_restores_the_freeze_after_a_parse_failure(request_: CandidateLockRequest) -> None:
     frozen, lock_bytes, receipt_bytes = _freeze(request_)
     runner = _FakeRunner(bodies=("this is not a locked requirement\n",))
     with pytest.raises(CandidateLockError):
-        compile_candidate_lock(request_, runner=runner, recompile=True)
+        compile_candidate_lock(request_, runner=runner, recompile=True, expectation=real_expectation())
     _assert_freeze_intact(request_, lock_bytes, receipt_bytes)
-    assert compile_candidate_lock(request_, runner=_FakeRunner()) == frozen
+    assert compile_candidate_lock(request_, runner=_FakeRunner(), expectation=real_expectation()) == frozen
 
 
 def test_recompilation_restores_the_freeze_after_a_runner_start_failure(
@@ -765,9 +778,9 @@ def test_recompilation_restores_the_freeze_after_a_runner_start_failure(
 ) -> None:
     frozen, lock_bytes, receipt_bytes = _freeze(request_)
     with pytest.raises(CandidateLockError, match="cannot start"):
-        compile_candidate_lock(request_, runner=_RaisingRunner(), recompile=True)
+        compile_candidate_lock(request_, runner=_RaisingRunner(), recompile=True, expectation=real_expectation())
     _assert_freeze_intact(request_, lock_bytes, receipt_bytes)
-    assert compile_candidate_lock(request_, runner=_FakeRunner()) == frozen
+    assert compile_candidate_lock(request_, runner=_FakeRunner(), expectation=real_expectation()) == frozen
 
 
 def test_recompilation_restores_the_freeze_when_the_caller_is_interrupted(
@@ -775,9 +788,9 @@ def test_recompilation_restores_the_freeze_when_the_caller_is_interrupted(
 ) -> None:
     frozen, lock_bytes, receipt_bytes = _freeze(request_)
     with pytest.raises(KeyboardInterrupt):
-        compile_candidate_lock(request_, runner=_InterruptingRunner(), recompile=True)
+        compile_candidate_lock(request_, runner=_InterruptingRunner(), recompile=True, expectation=real_expectation())
     _assert_freeze_intact(request_, lock_bytes, receipt_bytes)
-    assert compile_candidate_lock(request_, runner=_FakeRunner()) == frozen
+    assert compile_candidate_lock(request_, runner=_FakeRunner(), expectation=real_expectation()) == frozen
 
 
 # --- default runner -----------------------------------------------------------
@@ -807,7 +820,7 @@ def test_a_missing_resolver_is_reported_as_a_candidate_lock_failure(
         raise FileNotFoundError("no such file or directory: uv")
 
     with pytest.raises(CandidateLockError, match="cannot start"):
-        compile_candidate_lock(request_, runner=missing_runner)
+        compile_candidate_lock(request_, runner=missing_runner, expectation=real_expectation())
 
 
 def test_a_hung_resolver_is_reported_as_a_candidate_lock_timeout(request_: CandidateLockRequest) -> None:
@@ -818,7 +831,7 @@ def test_a_hung_resolver_is_reported_as_a_candidate_lock_timeout(request_: Candi
         raise CommandTimeout("uv timed out after 1s and its process group was killed")
 
     with pytest.raises(CandidateLockError, match="timed out"):
-        compile_candidate_lock(request_, runner=hanging_runner)
+        compile_candidate_lock(request_, runner=hanging_runner, expectation=real_expectation())
 
 
 # --- transactional artifact safety --------------------------------------------
@@ -827,7 +840,7 @@ def test_a_hung_resolver_is_reported_as_a_candidate_lock_timeout(request_: Candi
 def test_the_prior_freeze_is_durably_backed_up_before_the_runner_runs(request_: CandidateLockRequest) -> None:
     _frozen, lock_bytes, receipt_bytes = _freeze(request_)
     runner = _InspectingRunner()
-    compile_candidate_lock(request_, runner=runner, recompile=True)
+    compile_candidate_lock(request_, runner=runner, recompile=True, expectation=real_expectation())
     assert runner.observed["canonical_lock_exists"] is False
     assert runner.observed["marker_exists"] is True
     assert runner.observed["lock_rollback"] == lock_bytes
@@ -841,10 +854,10 @@ def test_a_fresh_resolution_that_drifts_production_leaves_no_reusable_freeze(
 ) -> None:
     _drifting_capture(monkeypatch)
     with pytest.raises(ProductionIdentityChanged, match="uv.lock"):
-        compile_candidate_lock(request_, runner=_FakeRunner())
+        compile_candidate_lock(request_, runner=_FakeRunner(), expectation=real_expectation())
     _assert_no_reusable_freeze(request_)
     monkeypatch.undo()
-    lock = compile_candidate_lock(request_, runner=_FakeRunner())
+    lock = compile_candidate_lock(request_, runner=_FakeRunner(), expectation=real_expectation())
     assert lock.digest == sha256_bytes(_LOCK_BODY.encode("utf-8"))
 
 
@@ -855,12 +868,12 @@ def test_a_recompilation_that_drifts_production_restores_the_prior_freeze(
     rebound = replace(request_, exclude_newer="2026-08-10T00:00:00Z")
     _drifting_capture(monkeypatch)
     with pytest.raises(ProductionIdentityChanged, match="uv.lock"):
-        compile_candidate_lock(rebound, runner=_FakeRunner(), recompile=True)
+        compile_candidate_lock(rebound, runner=_FakeRunner(), recompile=True, expectation=real_expectation())
     # The receipt still binds the original request, so the drifting run never published one.
     _assert_freeze_intact(request_, lock_bytes, receipt_bytes)
     _assert_transaction_clean(request_)
     monkeypatch.undo()
-    assert compile_candidate_lock(request_, runner=_FakeRunner()) == frozen
+    assert compile_candidate_lock(request_, runner=_FakeRunner(), expectation=real_expectation()) == frozen
 
 
 @pytest.mark.parametrize("populate", [False, True])
@@ -869,10 +882,10 @@ def test_a_directory_resolution_output_is_purged_without_a_freeze(
 ) -> None:
     runner = _DirectoryRunner(populate=populate)
     with pytest.raises(CandidateLockError, match="regular file"):
-        compile_candidate_lock(request_, runner=runner)
+        compile_candidate_lock(request_, runner=runner, expectation=real_expectation())
     assert runner.calls == 1
     _assert_no_reusable_freeze(request_)
-    lock = compile_candidate_lock(request_, runner=_FakeRunner())
+    lock = compile_candidate_lock(request_, runner=_FakeRunner(), expectation=real_expectation())
     assert lock.digest == sha256_bytes(_LOCK_BODY.encode("utf-8"))
 
 
@@ -882,10 +895,13 @@ def test_a_directory_resolution_output_restores_the_prior_freeze(
 ) -> None:
     frozen, lock_bytes, receipt_bytes = _freeze(request_)
     with pytest.raises(CandidateLockError, match="regular file"):
-        compile_candidate_lock(request_, runner=_DirectoryRunner(populate=populate), recompile=True)
+        compile_candidate_lock(
+            request_, runner=_DirectoryRunner(populate=populate), recompile=True,
+            expectation=real_expectation(),
+        )
     _assert_freeze_intact(request_, lock_bytes, receipt_bytes)
     _assert_transaction_clean(request_)
-    assert compile_candidate_lock(request_, runner=_FakeRunner()) == frozen
+    assert compile_candidate_lock(request_, runner=_FakeRunner(), expectation=real_expectation()) == frozen
 
 
 def test_an_interrupted_restore_keeps_the_durable_copy_and_the_next_call_recovers(
@@ -894,12 +910,15 @@ def test_an_interrupted_restore_keeps_the_durable_copy_and_the_next_call_recover
     frozen, lock_bytes, receipt_bytes = _freeze(request_)
     _interrupt_rename(monkeypatch, source=LOCK_ROLLBACK_NAME, target=LOCK_FILE_NAME)
     with pytest.raises(KeyboardInterrupt):
-        compile_candidate_lock(request_, runner=_FakeRunner(write_output=False), recompile=True)
+        compile_candidate_lock(
+            request_, runner=_FakeRunner(write_output=False), recompile=True,
+            expectation=real_expectation(),
+        )
     root = request_.artifact_root
     assert (root / LOCK_ROLLBACK_NAME).read_bytes() == lock_bytes
     assert (root / TRANSACTION_MARKER_NAME).is_file()
     monkeypatch.undo()
-    assert compile_candidate_lock(request_, runner=_FakeRunner()) == frozen
+    assert compile_candidate_lock(request_, runner=_FakeRunner(), expectation=real_expectation()) == frozen
     _assert_freeze_intact(request_, lock_bytes, receipt_bytes)
     _assert_transaction_clean(request_)
 
@@ -911,13 +930,16 @@ def test_an_interrupted_restore_leaves_the_quarantined_output_recoverable(
     changed = _LOCK_BODY.replace("0.0.24", "0.0.25")
     _interrupt_rename(monkeypatch, source=LOCK_ROLLBACK_NAME, target=LOCK_FILE_NAME)
     with pytest.raises(KeyboardInterrupt):
-        compile_candidate_lock(request_, runner=_FakeRunner(bodies=(changed,)), recompile=True)
+        compile_candidate_lock(
+            request_, runner=_FakeRunner(bodies=(changed,)), recompile=True,
+            expectation=real_expectation(),
+        )
     root = request_.artifact_root
     quarantined = [path for path in root.iterdir() if path.name.startswith(QUARANTINE_PREFIX)]
     assert [path.read_bytes() for path in quarantined] == [changed.encode("utf-8")]
     assert (root / LOCK_ROLLBACK_NAME).read_bytes() == lock_bytes
     monkeypatch.undo()
-    assert compile_candidate_lock(request_, runner=_FakeRunner()) == frozen
+    assert compile_candidate_lock(request_, runner=_FakeRunner(), expectation=real_expectation()) == frozen
     _assert_freeze_intact(request_, lock_bytes, receipt_bytes)
     _assert_transaction_clean(request_)
 
@@ -929,7 +951,7 @@ def test_an_interrupted_backup_is_recovered_on_the_next_call(
     _interrupt_rename(monkeypatch, source=RECEIPT_FILE_NAME, target=RECEIPT_ROLLBACK_NAME)
     runner = _FakeRunner()
     with pytest.raises(KeyboardInterrupt):
-        compile_candidate_lock(request_, runner=runner, recompile=True)
+        compile_candidate_lock(request_, runner=runner, recompile=True, expectation=real_expectation())
     root = request_.artifact_root
     assert runner.calls == []
     assert not (root / LOCK_FILE_NAME).exists()
@@ -937,7 +959,7 @@ def test_an_interrupted_backup_is_recovered_on_the_next_call(
     assert (root / RECEIPT_FILE_NAME).read_bytes() == receipt_bytes
     assert (root / TRANSACTION_MARKER_NAME).is_file()
     monkeypatch.undo()
-    assert compile_candidate_lock(request_, runner=_FakeRunner()) == frozen
+    assert compile_candidate_lock(request_, runner=_FakeRunner(), expectation=real_expectation()) == frozen
     _assert_freeze_intact(request_, lock_bytes, receipt_bytes)
     _assert_transaction_clean(request_)
 
@@ -952,7 +974,7 @@ def test_recovery_rolls_back_an_interrupted_commit_consistently(request_: Candid
     (root / LOCK_FILE_NAME).write_text(_LOCK_BODY.replace("0.0.24", "0.0.25"), encoding="utf-8")
     (root / RECEIPT_FILE_NAME).write_bytes(b'{"tampered":true}\n')
     (root / TRANSACTION_MARKER_NAME).write_bytes(canonical_json({"lock": True, "receipt": True}))
-    assert compile_candidate_lock(request_, runner=_FakeRunner()) == frozen
+    assert compile_candidate_lock(request_, runner=_FakeRunner(), expectation=real_expectation()) == frozen
     _assert_freeze_intact(request_, lock_bytes, receipt_bytes)
     _assert_transaction_clean(request_)
 
@@ -964,7 +986,7 @@ def test_recovery_removes_a_partial_output_from_an_interrupted_fresh_resolution(
     root.mkdir(parents=True)
     (root / LOCK_FILE_NAME).write_text("pyrefly==0.30.0 \\\n", encoding="utf-8")
     (root / TRANSACTION_MARKER_NAME).write_bytes(canonical_json({"lock": False, "receipt": False}))
-    lock = compile_candidate_lock(request_, runner=_FakeRunner())
+    lock = compile_candidate_lock(request_, runner=_FakeRunner(), expectation=real_expectation())
     assert lock.digest == sha256_bytes(_LOCK_BODY.encode("utf-8"))
     _assert_transaction_clean(request_)
 
@@ -978,7 +1000,7 @@ def test_recovery_restores_a_rollback_entry_left_without_a_canonical_file(
     (root / RECEIPT_FILE_NAME).rename(root / RECEIPT_ROLLBACK_NAME)
     (root / TRANSACTION_MARKER_NAME).write_bytes(canonical_json({"lock": True, "receipt": True}))
     runner = _FakeRunner()
-    assert compile_candidate_lock(request_, runner=runner) == frozen
+    assert compile_candidate_lock(request_, runner=runner, expectation=real_expectation()) == frozen
     assert runner.calls == []
     _assert_freeze_intact(request_, lock_bytes, receipt_bytes)
     _assert_transaction_clean(request_)
@@ -989,7 +1011,7 @@ def test_stray_rollback_entries_without_a_marker_are_purged(request_: CandidateL
     root = request_.artifact_root
     (root / LOCK_ROLLBACK_NAME).write_bytes(b"stale\n")
     (root / RECEIPT_ROLLBACK_NAME).write_bytes(b"stale\n")
-    assert compile_candidate_lock(request_, runner=_FakeRunner()) == frozen
+    assert compile_candidate_lock(request_, runner=_FakeRunner(), expectation=real_expectation()) == frozen
     _assert_freeze_intact(request_, lock_bytes, receipt_bytes)
     _assert_transaction_clean(request_)
 
@@ -1002,7 +1024,7 @@ def test_stray_quarantined_nodes_are_purged_on_the_next_call(request_: Candidate
     stale_directory.mkdir()
     (stale_directory / "nested").mkdir()
     (stale_directory / "nested" / "deep.txt").write_text("stale\n", encoding="utf-8")
-    assert compile_candidate_lock(request_, runner=_FakeRunner()) == frozen
+    assert compile_candidate_lock(request_, runner=_FakeRunner(), expectation=real_expectation()) == frozen
     _assert_freeze_intact(request_, lock_bytes, receipt_bytes)
     _assert_transaction_clean(request_)
 
@@ -1018,7 +1040,7 @@ def test_recovery_quarantines_an_unexpected_canonical_node_before_restoring(
     (root / LOCK_FILE_NAME / "junk.txt").write_text("junk\n", encoding="utf-8")
     os.mkfifo(root / RECEIPT_FILE_NAME)
     (root / TRANSACTION_MARKER_NAME).write_bytes(canonical_json({"lock": True, "receipt": True}))
-    assert compile_candidate_lock(request_, runner=_FakeRunner()) == frozen
+    assert compile_candidate_lock(request_, runner=_FakeRunner(), expectation=real_expectation()) == frozen
     _assert_freeze_intact(request_, lock_bytes, receipt_bytes)
     _assert_transaction_clean(request_)
 
@@ -1030,7 +1052,7 @@ def test_the_resolved_lock_inode_is_fsynced_after_the_runner_and_before_publicat
     request_: CandidateLockRequest, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     events = _record_fsyncs(monkeypatch)
-    compile_candidate_lock(request_, runner=_FakeRunner(events=events))
+    compile_candidate_lock(request_, runner=_FakeRunner(events=events), expectation=real_expectation())
     names = [name for name, _inode in events]
     receipt_temporary = candidate_lock_module._temporary_name(RECEIPT_FILE_NAME)
     assert names.index(_RUNNER_EVENT) < names.index(LOCK_FILE_NAME) < names.index(receipt_temporary)
@@ -1048,7 +1070,7 @@ def test_both_rollback_inodes_are_fsynced_before_the_runner_starts(
         RECEIPT_ROLLBACK_NAME: (root / RECEIPT_FILE_NAME).stat().st_ino,
     }
     events = _record_fsyncs(monkeypatch)
-    compile_candidate_lock(request_, runner=_FakeRunner(events=events), recompile=True)
+    compile_candidate_lock(request_, runner=_FakeRunner(events=events), recompile=True, expectation=real_expectation())
     names = [name for name, _inode in events]
     for rollback, inode in prior.items():
         assert names.index(rollback) < names.index(_RUNNER_EVENT)
@@ -1062,10 +1084,10 @@ def test_a_failed_lock_fsync_leaves_no_reusable_freeze(
 ) -> None:
     _fail_fsync(monkeypatch, LOCK_FILE_NAME)
     with pytest.raises(CandidateLockError, match="cannot fsync"):
-        compile_candidate_lock(request_, runner=_FakeRunner())
+        compile_candidate_lock(request_, runner=_FakeRunner(), expectation=real_expectation())
     _assert_no_reusable_freeze(request_)
     monkeypatch.undo()
-    lock = compile_candidate_lock(request_, runner=_FakeRunner())
+    lock = compile_candidate_lock(request_, runner=_FakeRunner(), expectation=real_expectation())
     assert lock.digest == sha256_bytes(_LOCK_BODY.encode("utf-8"))
 
 
@@ -1075,11 +1097,11 @@ def test_a_failed_lock_fsync_restores_the_prior_freeze(
     frozen, lock_bytes, receipt_bytes = _freeze(request_)
     _fail_fsync(monkeypatch, LOCK_FILE_NAME)
     with pytest.raises(CandidateLockError, match="cannot fsync"):
-        compile_candidate_lock(request_, runner=_FakeRunner(), recompile=True)
+        compile_candidate_lock(request_, runner=_FakeRunner(), recompile=True, expectation=real_expectation())
     _assert_freeze_intact(request_, lock_bytes, receipt_bytes)
     _assert_transaction_clean(request_)
     monkeypatch.undo()
-    assert compile_candidate_lock(request_, runner=_FakeRunner()) == frozen
+    assert compile_candidate_lock(request_, runner=_FakeRunner(), expectation=real_expectation()) == frozen
 
 
 def test_a_failed_rollback_fsync_keeps_the_sole_durable_copy(
@@ -1089,14 +1111,14 @@ def test_a_failed_rollback_fsync_keeps_the_sole_durable_copy(
     _fail_fsync(monkeypatch, LOCK_ROLLBACK_NAME)
     runner = _FakeRunner()
     with pytest.raises(CandidateLockError, match="cannot fsync"):
-        compile_candidate_lock(request_, runner=runner, recompile=True)
+        compile_candidate_lock(request_, runner=runner, recompile=True, expectation=real_expectation())
     root = request_.artifact_root
     assert runner.calls == []
     assert (root / LOCK_ROLLBACK_NAME).read_bytes() == lock_bytes
     assert not (root / LOCK_FILE_NAME).exists()
     assert (root / TRANSACTION_MARKER_NAME).is_file()
     monkeypatch.undo()
-    assert compile_candidate_lock(request_, runner=_FakeRunner()) == frozen
+    assert compile_candidate_lock(request_, runner=_FakeRunner(), expectation=real_expectation()) == frozen
     _assert_freeze_intact(request_, lock_bytes, receipt_bytes)
     _assert_transaction_clean(request_)
 
@@ -1107,12 +1129,12 @@ def test_a_failed_receipt_rollback_fsync_keeps_both_durable_copies(
     frozen, lock_bytes, receipt_bytes = _freeze(request_)
     _fail_fsync(monkeypatch, RECEIPT_ROLLBACK_NAME)
     with pytest.raises(CandidateLockError, match="cannot fsync"):
-        compile_candidate_lock(request_, runner=_FakeRunner(), recompile=True)
+        compile_candidate_lock(request_, runner=_FakeRunner(), recompile=True, expectation=real_expectation())
     root = request_.artifact_root
     assert (root / LOCK_ROLLBACK_NAME).read_bytes() == lock_bytes
     assert (root / RECEIPT_ROLLBACK_NAME).read_bytes() == receipt_bytes
     monkeypatch.undo()
-    assert compile_candidate_lock(request_, runner=_FakeRunner()) == frozen
+    assert compile_candidate_lock(request_, runner=_FakeRunner(), expectation=real_expectation()) == frozen
     _assert_freeze_intact(request_, lock_bytes, receipt_bytes)
     _assert_transaction_clean(request_)
 
@@ -1133,7 +1155,7 @@ def test_backups_survive_until_the_lock_is_durable(
         real(fd, name)
 
     monkeypatch.setattr(candidate_lock_module, "_fsync_file", patched)
-    compile_candidate_lock(request_, runner=_FakeRunner(), recompile=True)
+    compile_candidate_lock(request_, runner=_FakeRunner(), recompile=True, expectation=real_expectation())
     assert observed == {
         "lock_rollback_present": True,
         "receipt_rollback_present": True,
@@ -1168,13 +1190,13 @@ def test_a_live_concurrent_transaction_is_never_mistaken_for_an_interrupted_one(
 
     def first() -> None:
         try:
-            results["first"] = compile_candidate_lock(request_, runner=blocking_runner)
+            results["first"] = compile_candidate_lock(request_, runner=blocking_runner, expectation=real_expectation())
         except BaseException as error:  # pragma: no cover - surfaced by the assertions
             results["first"] = error
 
     def second() -> None:
         try:
-            results["second"] = compile_candidate_lock(request_, runner=_FakeRunner())
+            results["second"] = compile_candidate_lock(request_, runner=_FakeRunner(), expectation=real_expectation())
         except BaseException as error:  # pragma: no cover - surfaced by the assertions
             results["second"] = error
 

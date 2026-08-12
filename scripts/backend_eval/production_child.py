@@ -12,30 +12,45 @@ in a child whose whole process group the phase deadline can kill.
 
 The child is deliberately small and stdlib-only:
 
-* It is executed by absolute file path under ``-I``, so no ``PYTHONPATH``, user site
-  directory, or ambient ``scripts`` namespace package can shadow anything, and it strips its
-  own directory from ``sys.path`` before importing any non-stdlib module.  ``serena_light``
-  therefore resolves only from the ``src`` root the parent named.
+* **It imports production from a sealed image, never from disk.**  The parent verifies every
+  expected helper file against the admission expectation through a confined component-wise
+  walk and hands *those verified bytes* over as one sealed ``memfd`` image, addressed by
+  descriptor.  This child installs a single meta-path finder over that image and never puts
+  a ``src`` root on ``sys.path`` at all, so the bytes the parent compared are precisely the
+  bytes Python compiles and executes.  A helper swapped on disk during the import window
+  cannot be reached, because no import ever consults the disk.
+* Each module keeps the ``__file__`` its on-disk import would have had, so production
+  semantics that derive a repository root from ``__file__`` are unchanged.  Origin is proven
+  by *loader identity*, not by that pathname: a ``serena_light`` module loaded by anything
+  other than this image's loader is an escape and refuses the request.
 * It reads one canonical-JSON request from ``stdin`` and writes one canonical-JSON response
   to ``stdout``, echoing the SHA-256 of the exact request bytes it consumed, so the parent
   can bind a response to the request that produced it.
 * It reports the byte digest of every ``serena_light`` module it actually loaded, relative to
-  the owner root, in the same shape :mod:`scripts.backend_eval.source_binding` publishes, so
-  the parent can refuse a child that executed helper bytes the receipt does not name.
+  the owner root, and requires that set to equal the image's declared closure exactly -- one
+  module more, or one module fewer, than the operation's declaration refuses here and again
+  in the parent.
 
 Nothing else is computed here, and no evaluation module is importable from here.
 """
 
 from __future__ import annotations
 
+import base64
 import hashlib
+import importlib.abc
+import importlib.machinery
+import importlib.util
 import json
 import os
 import sys
+from collections.abc import Sequence
 from pathlib import Path
+from types import ModuleType
 from typing import Any
 
 PRODUCTION_PACKAGE_NAME = "serena_light"
+PRODUCTION_SOURCE_PREFIX = "src/"
 SUCCESS = 0
 REFUSED = 3
 
@@ -46,43 +61,117 @@ def canonical_json(value: dict[str, Any]) -> bytes:
     return (json.dumps(value, sort_keys=True, ensure_ascii=False, separators=(",", ":")) + "\n").encode("utf-8")
 
 
-def _isolate_import_path(src_root: str) -> str:
-    """Leave exactly one importable non-stdlib location: the ``src`` root the parent named."""
+class _ImageLoader(importlib.abc.Loader):
+    """Execute one production module from the sealed image and from nowhere else."""
+
+    def __init__(self, finder: _ImageFinder, relative: str, source: bytes, filename: str) -> None:
+        self.finder = finder
+        self.relative = relative
+        self.source = source
+        self.filename = filename
+
+    def create_module(self, spec: importlib.machinery.ModuleSpec) -> ModuleType | None:
+        del spec
+        return None
+
+    def exec_module(self, module: ModuleType) -> None:
+        # ``__file__`` is the pathname an ordinary import would have produced, so production
+        # helpers that derive a repository root from it keep their exact semantics.  It is
+        # never used to *find* anything here: the bytes below came from the sealed image.
+        module.__file__ = self.filename
+        exec(compile(self.source, self.filename, "exec", dont_inherit=True), module.__dict__)
+
+    def get_source(self, fullname: str) -> str:
+        del fullname
+        return self.source.decode("utf-8")
+
+
+class _ImageFinder(importlib.abc.MetaPathFinder):
+    """The only way a ``serena_light`` module can enter this interpreter."""
+
+    def __init__(self, modules: dict[str, tuple[str, bytes, bool, str]]) -> None:
+        self.modules = modules
+        self.loaders: dict[str, _ImageLoader] = {}
+
+    def find_spec(
+        self,
+        fullname: str,
+        path: Sequence[str] | None = None,
+        target: ModuleType | None = None,
+    ) -> importlib.machinery.ModuleSpec | None:
+        del path, target
+        entry = self.modules.get(fullname)
+        if entry is None:
+            return None
+        relative, source, is_package, filename = entry
+        loader = _ImageLoader(self, relative, source, filename)
+        self.loaders[fullname] = loader
+        return importlib.util.spec_from_loader(fullname, loader, origin=filename, is_package=is_package)
+
+
+def _module_name(relative: str) -> tuple[str, bool]:
+    """``src/serena_light/workspace/inventory.py`` -> ``serena_light.workspace.inventory``."""
+
+    if not relative.startswith(PRODUCTION_SOURCE_PREFIX) or not relative.endswith(".py"):
+        raise RuntimeError(f"the sealed production image declares a non-source entry: {relative}")
+    parts = relative[len(PRODUCTION_SOURCE_PREFIX) :].split("/")
+    if parts[0] != PRODUCTION_PACKAGE_NAME or any(part in ("", ".", "..") for part in parts):
+        raise RuntimeError(f"the sealed production image declares a foreign module: {relative}")
+    if parts[-1] == "__init__.py":
+        return ".".join(parts[:-1]), True
+    return ".".join(parts)[: -len(".py")], False
+
+
+def _load_image(image_fd: int, owner_root: str) -> _ImageFinder:
+    """Decode the sealed source image the parent verified and built."""
+
+    size = os.fstat(image_fd).st_size
+    payload = os.pread(image_fd, size, 0)
+    declared = json.loads(payload.decode("utf-8"))
+    modules: dict[str, tuple[str, bytes, bool, str]] = {}
+    for entry in declared["modules"]:
+        relative, encoded = entry
+        name, is_package = _module_name(relative)
+        source = base64.b64decode(encoded, validate=True)
+        modules[name] = (relative, source, is_package, os.path.join(owner_root, relative))
+    if not modules:
+        raise RuntimeError("the sealed production image declares no module")
+    return _ImageFinder(modules)
+
+
+def _install_image(finder: _ImageFinder) -> None:
+    """Leave exactly one way to import ``serena_light``: this image, in front of everything."""
 
     here = os.path.dirname(os.path.abspath(__file__))
-    resolved = os.path.realpath(src_root)
-    kept = [entry for entry in sys.path if entry and os.path.abspath(entry) != here]
-    sys.path[:] = [entry for entry in kept if os.path.realpath(entry) != resolved]
-    sys.path.insert(0, resolved)
-    return resolved
+    sys.path[:] = [entry for entry in sys.path if entry and os.path.abspath(entry) != here]
+    sys.meta_path.insert(0, finder)
 
 
-def _require_owned(name: str, path: str, src_root: str) -> None:
-    package_root = os.path.join(src_root, PRODUCTION_PACKAGE_NAME)
-    if path != package_root and not path.startswith(package_root + os.sep):
-        raise RuntimeError(f"production helper {name} is executed from {path}, outside {package_root}")
+def _production_files(finder: _ImageFinder) -> list[list[str]]:
+    """Every loaded production module, as ``[owner-relative path, SHA-256]``, sorted.
 
-
-def _production_files(owner_root: str, src_root: str) -> list[list[str]]:
-    """Every loaded production module, as ``[owner-relative path, SHA-256]``, sorted."""
+    The set must equal the image's declared closure exactly.  A module the operation did not
+    load is as much a refusal as one it loaded and the closure does not name, and a module
+    that arrived through any loader other than this image's is an origin escape.
+    """
 
     digests: dict[str, str] = {}
     for name in sorted(sys.modules):
         if name != PRODUCTION_PACKAGE_NAME and not name.startswith(f"{PRODUCTION_PACKAGE_NAME}."):
             continue
         module = sys.modules[name]
-        origin = getattr(module, "__file__", None)
-        if origin is None:
-            for location in tuple(getattr(module, "__path__", ()) or ()):
-                _require_owned(name, os.path.realpath(location), src_root)
-            continue
-        path = os.path.realpath(origin)
-        _require_owned(name, path, src_root)
-        relative = os.path.relpath(path, owner_root)
-        if relative not in digests:
-            digests[relative] = hashlib.sha256(Path(path).read_bytes()).hexdigest()
-    if not digests:
-        raise RuntimeError(f"no production helper loaded from {src_root}")
+        loader = getattr(module, "__loader__", None)
+        if not isinstance(loader, _ImageLoader) or loader.finder is not finder:
+            raise RuntimeError(
+                f"production helper {name} was loaded from {getattr(module, '__file__', '<unknown>')} "
+                "rather than from the sealed production image this run verified"
+            )
+        digests[loader.relative] = hashlib.sha256(loader.source).hexdigest()
+    declared = {relative for relative, _source, _package, _file in finder.modules.values()}
+    if set(digests) != declared:
+        raise RuntimeError(
+            f"the loaded production closure {sorted(digests)} is not the declared closure {sorted(declared)}"
+        )
     return [[relative, digests[relative]] for relative in sorted(digests)]
 
 
@@ -118,20 +207,21 @@ def main(argv: list[str]) -> int:
     """Answer exactly one request, structurally, and never raise past this boundary."""
 
     if len(argv) != 3:
-        sys.stderr.write("usage: production_child.py <owner-root> <src-root>\n")
+        sys.stderr.write("usage: production_child.py <owner-root> <source-image-fd>\n")
         return REFUSED
     owner_root = os.path.realpath(argv[1])
-    src_root = _isolate_import_path(argv[2])
     payload = sys.stdin.buffer.read()
     response: dict[str, Any] = {"request_sha256": hashlib.sha256(payload).hexdigest()}
     status = SUCCESS
     try:
+        finder = _load_image(int(argv[2]), owner_root)
+        _install_image(finder)
         request = json.loads(payload.decode("utf-8"))
         response["op"] = request["op"]
         result = _dispatch(request)
-        response["production_files"] = _production_files(owner_root, src_root)
+        response["production_files"] = _production_files(finder)
         response["result"] = result
-    except BaseException as error:
+    except BaseException as error:  # a refusal is a response, never a traceback
         response["error_type"] = type(error).__name__
         response["error_message"] = str(error)
         status = REFUSED

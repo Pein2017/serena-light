@@ -99,6 +99,7 @@ from scripts.backend_eval.production_identity import (
     assert_production_identity_unchanged,
     capture_production_identity,
 )
+from scripts.backend_eval.source_binding import HelperExpectation
 
 __all__ = [
     "BACKEND_ENVIRONMENT_KEYS",
@@ -373,6 +374,7 @@ def prepare_candidate_runtime(
     lock: CandidateLock,
     request: RuntimeRequest,
     *,
+    expectation: HelperExpectation,
     runner: CommandRunner = subprocess_runner,
     deadline: Deadline | None = None,
 ) -> CandidateRuntime:
@@ -386,15 +388,19 @@ def prepare_candidate_runtime(
     exit path.
     """
 
-    before = capture_production_identity(request.repo_root, deadline=deadline)
+    before = capture_production_identity(request.repo_root, expectation=expectation, deadline=deadline)
     try:
-        runtime = _prepare(lock, request, runner, before, deadline)
+        runtime = _prepare(lock, request, runner, before, expectation, deadline)
     except BaseException as exc:
         # Drift raised inside the preparation is already the authoritative error.
         if not isinstance(exc, ProductionIdentityError):
-            _assert_production_identity_unchanged(before, request.repo_root, cause=exc, deadline=deadline)
+            _assert_production_identity_unchanged(
+                before, request.repo_root, expectation, cause=exc, deadline=deadline
+            )
         raise
-    _assert_production_identity_unchanged(before, request.repo_root, cause=None, deadline=deadline)
+    _assert_production_identity_unchanged(
+        before, request.repo_root, expectation, cause=None, deadline=deadline
+    )
     return runtime
 
 
@@ -424,6 +430,7 @@ def _prepare(
     request: RuntimeRequest,
     runner: CommandRunner,
     before: ProductionIdentity,
+    expectation: HelperExpectation,
     deadline: Deadline | None,
 ) -> CandidateRuntime:
     # The caller's lock is read and bound to the digest exactly once, through one descriptor.
@@ -448,7 +455,7 @@ def _prepare(
                 _purge_directory_contents(root_fd)
                 try:
                     return _build_runtime(
-                        lock, request, runner, layout, before, source, base_fd, root_fd, deadline
+                        lock, request, runner, layout, before, source, base_fd, root_fd, expectation, deadline
                     )
                 except BaseException:
                     _purge_runtime_root(base_fd, root_fd, logical_root)
@@ -468,6 +475,7 @@ def _build_runtime(
     source: bytes,
     base_fd: int,
     root_fd: int,
+    expectation: HelperExpectation,
     deadline: Deadline | None,
 ) -> CandidateRuntime:
     _create_runtime_directories(root_fd, layout)
@@ -499,7 +507,9 @@ def _build_runtime(
     # Publication happens only for a run whose root was never swapped and that provably left
     # production untouched.
     _require_open_root(base_fd, root_fd, layout.logical_root, "before publication")
-    _assert_production_identity_unchanged(before, request.repo_root, cause=None, deadline=deadline)
+    _assert_production_identity_unchanged(
+        before, request.repo_root, expectation, cause=None, deadline=deadline
+    )
     _publish_manifest(layout, root_fd, payload)
     _require_open_root(base_fd, root_fd, layout.logical_root, "after publication")
     # A freshly built runtime must already satisfy the contract reuse repairs: the ambient
@@ -1809,13 +1819,18 @@ def _require_runtime_base(runtime_base: Path, repo_root: Path) -> None:
 
 
 def _assert_production_identity_unchanged(
-    before: ProductionIdentity, repo_root: Path, *, cause: BaseException | None, deadline: Deadline | None
+    before: ProductionIdentity,
+    repo_root: Path,
+    expectation: HelperExpectation,
+    *,
+    cause: BaseException | None,
+    deadline: Deadline | None,
 ) -> None:
     """Re-check production identity; drift outranks and chains the failure that caused it."""
 
     try:
         assert_production_identity_unchanged(
-            before, capture_production_identity(repo_root, deadline=deadline)
+            before, capture_production_identity(repo_root, expectation=expectation, deadline=deadline)
         )
     except ProductionIdentityError as identity_error:
         if cause is None:

@@ -24,14 +24,28 @@ digest, the build identity, the runtime paths, and the trust-inventory file dige
 the bounded child in :mod:`scripts.backend_eval.production_helper`, so ``sys.modules`` cannot
 see them.  Dropping them from the bound closure would quietly narrow exactly the evidence this
 module exists to publish -- the receipt would stop naming the bytes of the helpers whose
-answers it carries.  :data:`CHILD_EXECUTED_HELPERS` therefore declares the modules that child
-loads, they are digested from this checkout alongside the in-process ones, and a test requires
-the child's own reported closure, for every operation it supports, to be a subset of that
-declaration -- so a helper that starts importing something new fails a test instead of
+answers it carries.  :data:`OPERATION_HELPER_CLOSURES` therefore declares, per child
+operation, the exact modules that child may load; :data:`CHILD_EXECUTED_HELPERS` is their
+union, they are digested from this checkout alongside the in-process ones, and both the child
+at runtime and a test require the child's own reported closure to equal its operation's
+declaration -- so a helper that starts importing something new refuses the run rather than
 silently leaving the receipt.
 
 Changing a helper's bytes, or repointing the ``.pth`` at another checkout, therefore changes
 the published identity or refuses the run, without any change to ``scripts/backend_eval``.
+
+**The identity is the execution expectation, not a record of it.**  Recording a closure after
+the fact proves nothing about what ran: the first child use used to accept whatever bytes were
+on disk at that moment and pin *those*, so a helper swapped between the identity capture and
+the first use executed successfully and was only re-read afterwards.
+:class:`HelperExpectation` closes that window structurally.  It is built *from* the captured
+:class:`~scripts.backend_eval.models.EvaluatorIdentity`, carries the expected child-program
+digest and the expected per-file helper closure, and is passed explicitly into every
+production-helper call.  Before a child starts, the parent re-reads each expected file through
+a confined component-wise walk, refuses any byte that is not the expected byte, and hands the
+child *those verified bytes* in a sealed in-memory image -- so the bytes compared are the bytes
+imported.  No process-global first-use pin exists, so two admissions in one process cannot
+contaminate each other's truth.
 """
 
 from __future__ import annotations
@@ -40,17 +54,22 @@ import os
 import stat
 import sys
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from types import ModuleType
 
-from scripts.backend_eval.models import canonical_json, sha256_bytes
+from scripts.backend_eval.models import EvaluatorIdentity, canonical_json, sha256_bytes
 
 __all__ = [
     "CHILD_EXECUTED_HELPERS",
     "EVALUATION_OWNER_ROOT",
+    "OPERATION_HELPER_CLOSURES",
+    "PRODUCTION_CHILD_NAME",
+    "PRODUCTION_CHILD_RELPATH",
     "PRODUCTION_PACKAGE",
     "PRODUCTION_PACKAGE_NAME",
     "PRODUCTION_SOURCE_ROOT",
+    "HelperExpectation",
     "SourceBindingError",
     "bind_production_source",
     "production_source_digest",
@@ -62,16 +81,33 @@ PRODUCTION_SOURCE_ROOT = EVALUATION_OWNER_ROOT / "src"
 PRODUCTION_PACKAGE_NAME = "serena_light"
 PRODUCTION_PACKAGE = PRODUCTION_SOURCE_ROOT / PRODUCTION_PACKAGE_NAME
 
-# Every production module the bounded child loads, relative to the owner root.  The child
-# executes these instead of this process, so ``sys.modules`` cannot report them; pinned by a
-# test against the child's own reported closure for each operation it supports.
-CHILD_EXECUTED_HELPERS: tuple[str, ...] = (
-    "src/serena_light/__init__.py",
-    "src/serena_light/bootstrap.py",
-    "src/serena_light/build_identity.py",
-    "src/serena_light/workspace/__init__.py",
-    "src/serena_light/workspace/identity.py",
-    "src/serena_light/workspace/inventory.py",
+# The evaluator program the bounded child executes, relative to the owner root.
+PRODUCTION_CHILD_NAME = "production_child.py"
+PRODUCTION_CHILD_RELPATH = f"scripts/backend_eval/{PRODUCTION_CHILD_NAME}"
+
+# The exact production modules each child operation may load, relative to the owner root.
+# The child executes these instead of this process, so ``sys.modules`` cannot report them.
+# Membership is exact in both directions: an operation that loads one module more, or one
+# module fewer, than its declaration refuses inside the child and again in the parent.
+OPERATION_HELPER_CLOSURES: Mapping[str, tuple[str, ...]] = {
+    "production_identity": (
+        "src/serena_light/__init__.py",
+        "src/serena_light/bootstrap.py",
+        "src/serena_light/build_identity.py",
+    ),
+    "observe_file_digests": (
+        "src/serena_light/__init__.py",
+        "src/serena_light/workspace/__init__.py",
+        "src/serena_light/workspace/identity.py",
+        "src/serena_light/workspace/inventory.py",
+    ),
+}
+
+# The union of those closures: every production module the bounded child can load, and
+# therefore every one whose bytes a receipt must name even though this process never
+# imports it.  Each operation's own closure is an exact allowed subset of this union.
+CHILD_EXECUTED_HELPERS: tuple[str, ...] = tuple(
+    sorted({relative for closure in OPERATION_HELPER_CLOSURES.values() for relative in closure})
 )
 
 # O_NONBLOCK keeps a FIFO or other blocking special node from hanging the open; the fstat
@@ -81,6 +117,81 @@ _READ_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
 
 class SourceBindingError(RuntimeError):
     """An executed production helper cannot be bound to this evaluator's own checkout."""
+
+
+@dataclass(frozen=True, slots=True)
+class HelperExpectation:
+    """The exact bytes one admission run requires every production-helper child to execute.
+
+    Built once, from the :class:`~scripts.backend_eval.models.EvaluatorIdentity` the receipt
+    publishes, and then passed explicitly into every production-helper call the run makes.
+    It is an *expectation*, not an observation: the digests come from the identity that was
+    captured before any child ran, so a helper or child program substituted after that
+    capture cannot execute -- the parent's pre-execution comparison fails instead.
+
+    ``closure`` names every module the child may load across all supported operations;
+    :meth:`modules_for` narrows it to the exact subset one operation is allowed to load.
+    """
+
+    owner_root: Path
+    child_digest: str
+    closure: tuple[tuple[str, str], ...]
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.owner_root, Path) or not self.owner_root.is_absolute():
+            raise SourceBindingError("HelperExpectation.owner_root must be an absolute path")
+        _require_digest(self.child_digest, PRODUCTION_CHILD_RELPATH)
+        recorded = tuple(relative for relative, _digest in self.closure)
+        if recorded != CHILD_EXECUTED_HELPERS:
+            raise SourceBindingError(
+                "HelperExpectation.closure must name exactly the declared child-executed helpers "
+                f"{list(CHILD_EXECUTED_HELPERS)}, not {list(recorded)}"
+            )
+        for relative, digest in self.closure:
+            _require_digest(digest, relative)
+
+    @staticmethod
+    def from_identity(
+        identity: EvaluatorIdentity, *, owner_root: Path = EVALUATION_OWNER_ROOT
+    ) -> HelperExpectation:
+        """Derive the execution expectation from the identity a receipt will publish.
+
+        Every digest below is one the identity already carries, so the expectation cannot
+        drift from the published evidence: enforcing it *is* enforcing the receipt.
+        """
+
+        source = dict(identity.source_files)
+        child_digest = source.get(PRODUCTION_CHILD_NAME)
+        if child_digest is None:
+            raise SourceBindingError(
+                f"the evaluator identity does not name {PRODUCTION_CHILD_NAME}; "
+                "no production helper may execute without an expected child program"
+            )
+        production = dict(identity.production_files)
+        missing = [relative for relative in CHILD_EXECUTED_HELPERS if relative not in production]
+        if missing:
+            raise SourceBindingError(
+                f"the evaluator identity does not name every child-executed helper: {missing}"
+            )
+        return HelperExpectation(
+            owner_root=owner_root,
+            child_digest=child_digest,
+            closure=tuple((relative, production[relative]) for relative in CHILD_EXECUTED_HELPERS),
+        )
+
+    def modules_for(self, operation: str) -> tuple[tuple[str, str], ...]:
+        """The exact ``(owner-relative path, SHA-256)`` closure ``operation`` may load."""
+
+        declared = OPERATION_HELPER_CLOSURES.get(operation)
+        if declared is None:
+            raise SourceBindingError(f"unknown production helper operation: {operation!r}")
+        digests = dict(self.closure)
+        return tuple((relative, digests[relative]) for relative in declared)
+
+
+def _require_digest(value: str, label: str) -> None:
+    if not isinstance(value, str) or len(value) != 64 or any(c not in "0123456789abcdef" for c in value):
+        raise SourceBindingError(f"HelperExpectation needs a SHA-256 digest for {label}, not {value!r}")
 
 
 def bind_production_source(

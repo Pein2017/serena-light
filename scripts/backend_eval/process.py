@@ -28,6 +28,7 @@ import ctypes
 import fcntl
 import os
 import signal
+import stat
 import subprocess
 import time
 from collections.abc import Callable, Iterator, Mapping, Sequence
@@ -37,6 +38,7 @@ from pathlib import Path
 from typing import Protocol
 
 __all__ = [
+    "GIT_EXECUTABLE",
     "LOCK_POLL_SECONDS",
     "UNBOUNDED_LOCK_WAIT_SECONDS",
     "Clock",
@@ -46,8 +48,10 @@ __all__ = [
     "CommandTimeout",
     "Deadline",
     "DeadlineExceeded",
+    "ExecutableBindingError",
     "SealedImageError",
     "acquire_exclusive_lock",
+    "bound_executable",
     "descriptor_path",
     "monotonic_clock",
     "run_bounded_bytes",
@@ -58,6 +62,16 @@ __all__ = [
 Clock = Callable[[], float]
 monotonic_clock: Clock = time.monotonic
 Sleep = Callable[[float], None]
+
+# The one Git the evaluation runs.  It is declared, not discovered: ``shutil.which`` answers
+# from whatever ``PATH`` the ambient process happens to carry, which is exactly the kind of
+# ambient control every other input of this evaluation refuses.  A missing or non-regular
+# Git is a typed failure, never a fallback to a different program.
+GIT_EXECUTABLE = Path("/usr/bin/git")
+
+# O_NONBLOCK keeps a FIFO or other blocking special node from hanging the open; the fstat
+# regular-file check then refuses it promptly.
+_EXECUTABLE_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
 
 # How long a killed process group is given to be reaped before the runner gives up.
 _REAP_SECONDS = 20.0
@@ -76,6 +90,10 @@ _MFD_ALLOW_SEALING = 0x0002
 _F_ADD_SEALS = 1033
 _F_GET_SEALS = 1034
 _ALL_SEALS = 0x1 | 0x2 | 0x4 | 0x8
+
+
+class ExecutableBindingError(RuntimeError):
+    """A declared external executable is missing, redirected, or not a regular file."""
 
 
 class SealedImageError(RuntimeError):
@@ -158,6 +176,32 @@ def acquire_exclusive_lock(
                 f"elapsed={bound.elapsed():.3f}s budget={bound.seconds:g}s reserve={bound.reserve:g}s"
             )
         sleep(min(poll_seconds, remaining))
+
+
+def bound_executable(executable: Path = GIT_EXECUTABLE) -> Path:
+    """Prove one declared executable exists as a regular file, through one descriptor.
+
+    This is a *guarded* binding, not a confined one, and the ownership document says so: the
+    program lives outside every root this evaluation owns, so there is no parent descriptor to
+    walk out from.  What it does close is the ambient-discovery hole -- the argv is one
+    declared absolute pathname that is proven to name a regular file before the child starts,
+    rather than whatever the ambient ``PATH`` resolves.
+    """
+
+    if not executable.is_absolute():
+        raise ExecutableBindingError(f"the declared executable must be an absolute path: {executable}")
+    try:
+        fd = os.open(executable, _EXECUTABLE_FLAGS)
+    except OSError as exc:
+        raise ExecutableBindingError(f"cannot open the declared executable {executable}: {exc}") from exc
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise ExecutableBindingError(f"the declared executable must be a regular file: {executable}")
+    finally:
+        os.close(fd)
+    if not os.access(executable, os.X_OK):
+        raise ExecutableBindingError(f"the declared executable is not executable: {executable}")
+    return executable
 
 
 def descriptor_path(fd: int) -> Path:
