@@ -198,7 +198,11 @@ def _require_no_shadowed_module(recorded: Mapping[str, str]) -> None:
     """Every imported evaluator module must be one of the files this closure recorded."""
 
     for name, module in tuple(sys.modules.items()):
-        if name != "scripts" and not name.startswith("scripts.backend_eval"):
+        if (
+            name != "scripts"
+            and name != "scripts.backend_eval"
+            and not name.startswith("scripts.backend_eval.")
+        ):
             continue
         if source_image_active():
             try:

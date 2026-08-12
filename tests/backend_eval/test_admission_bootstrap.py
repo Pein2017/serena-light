@@ -22,6 +22,7 @@ from pathlib import Path
 import pytest
 
 import scripts.backend_eval.admission as admission
+import scripts.backend_eval_bootstrap as bootstrap
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 EVALUATOR_ROOT = REPO_ROOT / "scripts" / "backend_eval"
@@ -191,7 +192,33 @@ def test_admission_transport_refuses_without_direct_shim_provenance(
         check=False,
     )
     assert result.returncode == 2
-    assert b"direct bootstrap provenance" in result.stderr
+    assert b"not a receipt-producing entrypoint" in result.stderr
+    assert b"usage:" not in result.stdout
+
+
+def test_forged_context_loader_and_environment_cannot_enable_disk_admission(tmp_path: Path) -> None:
+    owner = _copy_evaluator(tmp_path)
+    admission_path = owner / "scripts" / "backend_eval" / "admission.py"
+    shim_path = owner / "scripts" / "backend_eval_bootstrap.py"
+    program = (
+        "import os, runpy, sys, types; "
+        "context=types.ModuleType('_serena_light_backend_eval_outer_bootstrap'); "
+        f"context.shim_path={str(shim_path)!r}; context.admission_path={str(admission_path)!r}; "
+        f"context.loader_path={str(shim_path)!r}; context.argv_tail=(); context.capability=object(); "
+        "sys.modules[context.__name__]=context; "
+        "os.environ['SERENA_LIGHT_BACKEND_EVAL_SOURCE_IMAGE_ACTIVE']='1'; "
+        f"runpy.run_path({str(admission_path)!r}, run_name='__main__', "
+        f"init_globals={{'__loader__': types.SimpleNamespace(path={str(shim_path)!r})}})"
+    )
+    result = subprocess.run(
+        [sys.executable, "-I", "-S", "-B", "-c", program],
+        cwd=owner,
+        capture_output=True,
+        timeout=10,
+        check=False,
+    )
+    assert result.returncode == 2
+    assert b"not a receipt-producing entrypoint" in result.stderr
     assert b"usage:" not in result.stdout
 
 
@@ -218,7 +245,7 @@ def test_closed_outer_startup_ignores_hostile_site_and_python_paths(tmp_path: Pa
 
 def test_source_image_contains_the_complete_evaluator_package(tmp_path: Path) -> None:
     owner = _copy_evaluator(tmp_path)
-    builder = getattr(admission, "_build_evaluator_source_image", None)
+    builder = getattr(bootstrap, "_build_evaluator_source_image", None)
     assert builder is not None, "the command needs a pre-import evaluator source-image builder"
 
     image = builder(owner)
@@ -300,7 +327,7 @@ def test_sealed_child_preserves_stdout_and_exit_code_and_ignores_ambient_shadow(
     (shadow.parent / "__init__.py").write_text("", encoding="utf-8")
     (shadow / "__init__.py").write_text("", encoding="utf-8")
     (shadow / "admission.py").write_text("raise SystemExit(99)\n", encoding="utf-8")
-    runner = getattr(admission, "_run_sealed_evaluator", None)
+    runner = getattr(bootstrap, "_run_sealed_evaluator", None)
     assert runner is not None, "the command needs a bounded sealed-evaluator runner"
 
     returncode, stdout, stderr = runner(
@@ -331,8 +358,8 @@ def test_sealed_child_timeout_kills_and_reaps_its_process_group(tmp_path: Path) 
         "    return 0\n",
         encoding="utf-8",
     )
-    runner = getattr(admission, "_run_sealed_evaluator", None)
-    timeout_error = getattr(admission, "EvaluatorBootstrapTimeout", None)
+    runner = getattr(bootstrap, "_run_sealed_evaluator", None)
+    timeout_error = getattr(bootstrap, "EvaluatorBootstrapTimeout", None)
     assert runner is not None and timeout_error is not None
 
     with pytest.raises(timeout_error):
@@ -366,7 +393,7 @@ def test_identity_hashes_the_import_and_restore_bytes_from_the_source_image(
         "    return 0\n",
         encoding="utf-8",
     )
-    runner = getattr(admission, "_run_sealed_evaluator", None)
+    runner = getattr(bootstrap, "_run_sealed_evaluator", None)
     assert runner is not None
 
     returncode, stdout, stderr = runner(owner, (), timeout=30.0, environ=os.environ)
@@ -455,7 +482,7 @@ def test_sealed_child_has_closed_startup_and_only_deliberate_external_inputs(tmp
     )
     proxy = "http://credential-do-not-print.invalid"
     locale = "C.UTF-8"
-    returncode, stdout, stderr = admission._run_sealed_evaluator(
+    returncode, stdout, stderr = bootstrap._run_sealed_evaluator(
         owner, (), timeout=5.0,
         environ={
             "HTTPS_PROXY": proxy, "LANG": locale, "PYTHONPATH": str(shadow),

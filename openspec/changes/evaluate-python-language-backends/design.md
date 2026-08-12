@@ -247,13 +247,13 @@ before/after disk hash can identify Python source that was already compiled.
 That package `-m` form is no longer receipt-producing. The canonical
 `python -I -S -B scripts/backend_eval_bootstrap.py` direct shim executes no package initializer
 before reaching the transport guard. The shim verifies all three CPython flags, the effective
-no-bytecode setting, and an exact standard-library-only `sys.path`, then installs a process-local
-provenance context bound to its exact path, loader, arguments, and admission path. Admission
-consumes that context before any image action, so direct execution and generic `runpy` refuse.
+no-bytecode setting, and an exact standard-library-only `sys.path`, then itself confines and
+reads the source closure, seals the image, starts the bounded child, and relays its result.
+Disk `admission.py` unconditionally refuses `__main__`, so direct execution, package `-m`, and
+generic `runpy` cannot be enabled by forged Python process state.
 Both sealed parent-package initializers are inert -- no
 imports, environment reads, or path mutation -- and their exact bytes are included in the
-image identity and cleanliness witness. The command module then reaches a standard-library-only guard before any semantic
-import. That transport bootstrap opens the checkout component by component without following
+image identity and cleanliness witness. The direct transport script opens the checkout component by component without following
 links, reads both initializers and every Python module in `scripts/backend_eval`, packs the
 complete closure into a deterministic zip image, seals its `memfd`, and launches an isolated
 `-I -S -B` child with that image as its only evaluator import root. The child environment is
@@ -263,6 +263,11 @@ child derives image state, owner, and deadline origin from the verified inherite
 and bootstrap arguments. The outer monotonic origin is passed into `run_admission`, so image
 capture and process startup consume the same frozen 1800-second phase budget rather than
 creating a new pre-deadline step.
+
+The direct shim is the declared minimal transport trust root. It performs no corpus,
+production-helper, admission, or publication semantics. The receipt's exact-executed-byte
+claim begins with the sealed semantic evaluator image; the shim's disk bytes are not described
+as self-authenticating proof of their own execution.
 
 `capture_evaluator_identity()` reads and hashes the evaluator entries from the inherited
 sealed descriptor itself, verifies the full seal set, and requires every loaded

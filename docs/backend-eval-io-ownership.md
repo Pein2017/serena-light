@@ -193,7 +193,7 @@ F_SEAL_SEAL` by this process before it is read back, so no other party can subst
 change it. The child's read of the production source image belongs here too: the descriptor it
 `pread`s was sealed by the parent before the child was started.
 
-The admission command's evaluator zip is owned here as well. The standard-library bootstrap
+The direct bootstrap's evaluator zip is owned here as well. The standard-library transport
 reads the complete evaluator package through a descriptor-confined walk, writes and seals one
 `memfd`, and starts the semantic evaluator with that descriptor as its zip import root.
 `source_image.py` verifies the seal set and hashes the archive from that inherited descriptor;
@@ -217,7 +217,8 @@ executables, not this one, so no receipt field changed.
 | Module | What it owns |
 | --- | --- |
 | `__init__.py` | no filesystem access; both parent-package initializers are inert |
-| `admission.py` | the pre-import evaluator image bootstrap, bounded image child, artifact tree digest, receipt publication, publication lock, and evaluation directory |
+| `admission.py` | artifact tree digest, receipt publication, publication lock, and evaluation directory; disk `__main__` only refuses |
+| `backend_eval_bootstrap.py` | the declared standard-library transport trust root: startup validation, source-image construction/sealing, bounded image child, relay, timeout, and reap; no admission semantics |
 | `candidate_lock.py` | the frozen candidate-lock transaction below the artifact root |
 | `identity.py` | the evaluator's own executed source closure |
 | `manifests.py` | the corpus capture: the Git freeze, the remainder scan, the metadata walk, and the delegation of both inventory helpers |
@@ -288,10 +289,12 @@ claiming a guarantee the kernel does not offer.
    re-capture rather than published as a `pass`.
 9. **The original command process is a transport root of trust.** The closed direct bootstrap
    verifies `-I -S -B`, the effective no-bytecode setting, and the standard-library-only path,
-   then passes one process-local exact-shim provenance context to admission. It runs no package
-   initializer; the image's inert initializers are bound as sealed entries. Python then compiles enough
+   then itself creates, seals, starts, relays, times out, and reaps the evaluator image. Disk
+   admission categorically refuses `__main__`; there is no in-process authentication claim.
+   The shim runs no package initializer; the image's inert initializers are bound as sealed entries. Python then compiles enough
    code to create the first immutable source image. That process imports no evaluator semantic
    module: it only confines and reads the closure, creates and seals the image, starts the
    isolated child, relays bytes and exit status, enforces an outer bound, and kills/reaps the
-   child group on failure. Receipt construction, helper execution, corpus capture, cleanup,
+   child group on failure. The receipt exact-byte claim begins at the sealed evaluator image,
+   not at self-authentication of the shim's own disk bytes. Receipt construction, helper execution, corpus capture, cleanup,
    and publication all run in the image child whose bytes the identity names.
