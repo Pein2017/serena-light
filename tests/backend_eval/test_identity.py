@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import os
 import sys
+import time
 import types
 from pathlib import Path
 
@@ -12,6 +14,7 @@ from scripts.backend_eval.identity import (
     BOOTSTRAP_SERVICE_KEYS,
     EVALUATOR_PACKAGE,
     IdentityError,
+    _read_regular_file,
     bootstrap_environment,
     bootstrap_environment_identity,
     bootstrap_service_values,
@@ -47,6 +50,27 @@ def test_evaluator_identity_refuses_a_shadowed_module(monkeypatch: pytest.Monkey
     monkeypatch.setitem(sys.modules, "scripts.backend_eval.shadow", shadow)
     with pytest.raises(IdentityError, match="not part of the recorded closure"):
         capture_evaluator_identity()
+
+
+def test_read_regular_file_refuses_a_fifo_promptly(tmp_path: Path) -> None:
+    """``O_RDONLY`` on a FIFO with no writer blocks until one appears.
+
+    The evaluator source and production closures are read through this same guarded open, so
+    a FIFO left where a source file belongs must be refused promptly rather than hanging the
+    whole evaluator-identity capture.
+    """
+
+    fifo = tmp_path / "source.py"
+    os.mkfifo(fifo)
+    before_fds = len(os.listdir("/proc/self/fd"))
+
+    started = time.monotonic()
+    with pytest.raises(IdentityError, match="regular file"):
+        _read_regular_file(fifo)
+    elapsed = time.monotonic() - started
+
+    assert elapsed < 2.0
+    assert len(os.listdir("/proc/self/fd")) == before_fds
 
 
 def test_evaluator_source_digest_changes_with_any_source_byte() -> None:

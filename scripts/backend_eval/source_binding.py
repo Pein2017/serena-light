@@ -50,7 +50,9 @@ PRODUCTION_SOURCE_ROOT = EVALUATION_OWNER_ROOT / "src"
 PRODUCTION_PACKAGE_NAME = "serena_light"
 PRODUCTION_PACKAGE = PRODUCTION_SOURCE_ROOT / PRODUCTION_PACKAGE_NAME
 
-_READ_FLAGS = os.O_RDONLY | os.O_NOFOLLOW
+# O_NONBLOCK keeps a FIFO or other blocking special node from hanging the open; the fstat
+# regular-file check below then refuses it promptly rather than reading empty bytes.
+_READ_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
 
 
 class SourceBindingError(RuntimeError):

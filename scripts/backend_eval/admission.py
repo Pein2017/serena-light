@@ -174,7 +174,10 @@ _NOFOLLOW_DIRECTORY_FLAGS = _DIRECTORY_FLAGS | os.O_NOFOLLOW
 _CREATE_FLAGS = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
 # One receipt is tens of megabytes; writing it in chunks keeps the ceiling observable.
 _WRITE_CHUNK_BYTES = 4 * 1024 * 1024
-_READ_FLAGS = os.O_RDONLY | os.O_NOFOLLOW
+# A regular file's read behaviour is unaffected by O_NONBLOCK; a FIFO or other blocking
+# special node left in the tree by a race or a swap returns immediately instead of hanging
+# the guarded open, so the fstat regular-file check below can refuse it promptly.
+_READ_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
 _DIRECTORY_MODE = 0o700
 _FILE_MODE = 0o600
 # The digest traversal checks the ceiling this often rather than on every single file.

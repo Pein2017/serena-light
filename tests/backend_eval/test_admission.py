@@ -25,6 +25,7 @@ from scripts.backend_eval.admission import (
     AdmissionRequest,
     ProductionAdmissionServices,
     _Publication,
+    _read_artifact_bytes,
     admission_receipt_path,
     artifact_tree_digest,
     evaluation_identity,
@@ -690,6 +691,33 @@ def test_artifact_tree_digest_refuses_a_special_file(tmp_path: Path) -> None:
     os.mkfifo(root / "pipe")
     with pytest.raises(AdmissionError, match="special file"):
         artifact_tree_digest(root)
+
+
+def test_read_artifact_bytes_refuses_a_fifo_promptly(tmp_path: Path) -> None:
+    """A regular file swapped for a FIFO between the traversal's ``lstat`` and this open
+    must fail fast rather than block on ``O_RDONLY`` with no writer.
+
+    ``_collect_artifact_entries`` already refuses a FIFO it observes directly via ``lstat``,
+    which the sibling ``test_artifact_tree_digest_refuses_a_special_file`` covers; this test
+    exercises the guarded open itself, which is the only thing that stands between a
+    same-name race and an indefinite hang.
+    """
+
+    root = tmp_path / "artifacts"
+    root.mkdir()
+    os.mkfifo(root / "pipe")
+    before_fds = len(os.listdir("/proc/self/fd"))
+    dir_fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        started = time.monotonic()
+        with pytest.raises(AdmissionError, match="not a regular file"):
+            _read_artifact_bytes(dir_fd, "pipe", root / "pipe")
+        elapsed = time.monotonic() - started
+    finally:
+        os.close(dir_fd)
+
+    assert elapsed < 2.0
+    assert len(os.listdir("/proc/self/fd")) == before_fds
 
 
 def test_artifact_tree_digest_stops_cooperatively(tmp_path: Path) -> None:

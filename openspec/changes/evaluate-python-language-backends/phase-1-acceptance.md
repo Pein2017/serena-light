@@ -4,9 +4,16 @@
 pending two independent re-reviews of *that* receipt.** A second Sol-xhigh re-review
 overruled a passing review of the previous run -- evaluator HEAD `285c203`, evaluation
 identity `207e7521…81e4` -- with executable evidence of three further defects, and completing
-their repair exposed a fourth. All four are repaired, tasks 1.13 and 1.15 were reopened and
-closed for them, and the run recorded below was produced by the repaired evaluator from the
-clean committed checkout `517a451`.
+their repair exposed a fourth. An Opus-max review of the repaired evaluator then found a
+fifth: every guarded regular-file read opened `O_RDONLY | O_NOFOLLOW` with no `O_NONBLOCK`,
+so a FIFO or other blocking special node left where a regular file was expected -- reproduced
+at `runtime-manifest.json` -- hung the open rather than failing closed. It could not produce a
+false `PASS`, since the `fstat` regular-file refusal still ran after any open that returned,
+but it could exceed the whole-phase ceiling with no receipt. All five are repaired, tasks
+1.13 and 1.15 were reopened and closed for them, and the run recorded below was produced by
+the repaired evaluator from the clean committed checkout `517a451` -- unaffected by the fifth
+defect's fix, which changed no evaluator behavior for an ordinary run and is superseded by a
+fresh evidence-only run recorded separately once this repair lands.
 
 **Task 1.8 stays unchecked and on HOLD.** A checked box may never stand for an unreviewed
 run, and neither re-review of this receipt has happened. Nothing else blocks it.
@@ -59,6 +66,18 @@ repair -- each now fixed and covered by adversarial tests:
    came back `0600` -- before being closed. Fixed: both the repair and its verification open
    every component from its parent's descriptor and prove the target regular through that
    same descriptor, and the reproduction is kept as a regression.
+5. **Every guarded regular-file read could hang indefinitely on a FIFO.** `_read_regular_file`
+   in `runtime.py`, `admission.py`, `identity.py`, and `source_binding.py` opened
+   `O_RDONLY | O_NOFOLLOW` with no `O_NONBLOCK` (`candidate_lock.py` already carried it).
+   `open()` on a FIFO with no writer blocks regardless of `O_NOFOLLOW`, and that block is one
+   uninterruptible syscall with no cooperative checkpoint inside it -- reproduced at
+   `runtime-manifest.json`. Fixed: `O_NONBLOCK` added to every guarded read; it has no effect
+   on a regular file's read behavior and changes nothing about `O_NOFOLLOW`, descriptor-relative
+   confinement, or the `fstat` regular-file refusal. Five adversarial regressions (one per
+   guarded-read family) each proved to hang under a bounded `pytest-timeout` override without
+   the fix, then pass in well under a second with it, asserting a typed error and no leaked
+   descriptor: the runtime manifest, the owned-runtime mode-repair walk, the admission
+   artifact-tree read, the evaluator source closure, and the bound production helper closure.
 
 ### The residual boundary, stated rather than papered over
 

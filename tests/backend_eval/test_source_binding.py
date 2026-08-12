@@ -10,8 +10,10 @@ to change or the run to be refused.
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 from types import ModuleType
 
@@ -25,6 +27,7 @@ from scripts.backend_eval.source_binding import (
     PRODUCTION_PACKAGE,
     PRODUCTION_SOURCE_ROOT,
     SourceBindingError,
+    _read_regular_file,
     bind_production_source,
 )
 
@@ -105,6 +108,26 @@ def test_the_admission_cli_loads_no_unbound_non_stdlib_helper() -> None:
         [sys.executable, "-c", program], cwd=_REPO_ROOT, capture_output=True, text=True, timeout=120, check=True
     )
     assert result.stdout.split() == ["scripts", "serena_light"]
+
+
+def test_read_regular_file_refuses_a_fifo_promptly(tmp_path: Path) -> None:
+    """``O_RDONLY`` on a FIFO with no writer blocks until one appears.
+
+    Every executed production helper is read through this same guarded open, so a FIFO left
+    where a helper file belongs must be refused promptly rather than hanging the bind.
+    """
+
+    fifo = tmp_path / "inventory.py"
+    os.mkfifo(fifo)
+    before_fds = len(os.listdir("/proc/self/fd"))
+
+    started = time.monotonic()
+    with pytest.raises(SourceBindingError, match="regular file"):
+        _read_regular_file(fifo)
+    elapsed = time.monotonic() - started
+
+    assert elapsed < 2.0
+    assert len(os.listdir("/proc/self/fd")) == before_fds
 
 
 # --- adversarial: changed bytes, repointed path --------------------------------------

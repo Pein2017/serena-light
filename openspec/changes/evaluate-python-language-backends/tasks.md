@@ -27,6 +27,29 @@
 > pinned structurally, so no future post-link syscall can be added without a ceiling
 > observation after it.
 >
+> **A fifth defect was found by an Opus-max review after that, and task 1.13 is reopened for
+> it.** Every guarded regular-file read opened with `O_RDONLY | O_NOFOLLOW` and no
+> `O_NONBLOCK`. `open()` on a FIFO with no writer blocks indefinitely regardless of
+> `O_NOFOLLOW`, so a FIFO or other blocking special node left where a regular file was
+> expected -- for example a same-name race at `runtime-manifest.json`, or one planted where
+> the artifact-tree traversal's own `lstat` gate does not reach -- hung the guarded open
+> rather than failing closed, which the frozen ceiling cannot bound because the block is
+> inside one uninterruptible syscall in the calling thread. It could not produce a false
+> `PASS`, but it could make an otherwise-correct run exceed the whole-phase ceiling with no
+> receipt, which is what this review found and what task 1.13 promises does not happen.
+> Reproduced at `runtime-manifest.json` and fixed by adding `O_NONBLOCK` to every
+> evaluator-owned guarded read in `runtime.py`, `admission.py`, `identity.py`, and
+> `source_binding.py` (`candidate_lock.py` already carried it); `O_NONBLOCK` has no effect on
+> a regular file's read behaviour, so ordinary reads, `O_NOFOLLOW`, descriptor-relative
+> confinement, and the `fstat` regular-file refusal are all unchanged. Every audited directory
+> open (`O_DIRECTORY`, which refuses a non-directory node before any type-specific open
+> handler runs), `O_CREAT | O_EXCL` create, and `O_RDWR` lock open was confirmed already safe
+> by construction and left unchanged. Five adversarial regressions -- one per guarded read
+> family, each first proven to hang under a bounded `pytest-timeout` override without the fix
+> -- cover the FIFO case at the runtime manifest, the owned-runtime mode-repair walk, the
+> admission artifact-tree read, the evaluator source closure, and the bound production helper
+> closure, each asserting a typed error well under one second and no leaked descriptor.
+>
 > **Task 1.8 background from the first re-review.** The final Sol-xhigh review of the earlier
 > admitting run (evaluator HEAD `7d40d41`, evaluation identity `380aaeb4…9147d`) found three
 > defects that made its PASS untrustworthy as a *gate*, and tasks 1.11, 1.13, and 1.14 were

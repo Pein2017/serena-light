@@ -9,6 +9,7 @@ import re
 import shutil
 import stat
 import threading
+import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, fields, replace
 from pathlib import Path
@@ -48,6 +49,7 @@ from scripts.backend_eval.runtime import (
     owned_runtime_file_relpaths,
     prepare_candidate_runtime,
     runtime_lock_path,
+    runtime_manifest_digest,
 )
 
 _HASH_A = "a" * 64
@@ -1635,3 +1637,51 @@ def test_reuse_refuses_a_symlinked_owned_directory_and_never_chmods_outside(
 
     assert stat.S_IMODE(decoy.stat().st_mode) == 0o644
     assert stat.S_IMODE(outside.stat().st_mode) == 0o755
+
+
+def test_runtime_manifest_digest_refuses_a_fifo_promptly(
+    lock: CandidateLock, request_: RuntimeRequest
+) -> None:
+    """``O_RDONLY`` on a FIFO with no writer blocks until one appears.
+
+    The guarded read adds ``O_NONBLOCK`` so the open returns immediately and the ``fstat``
+    regular-file check refuses it, rather than the admission gate's independent manifest-digest
+    recomputation hanging indefinitely on a FIFO left where ``runtime-manifest.json`` belongs.
+    """
+
+    runtime = prepare_candidate_runtime(lock, request_, runner=_FakeRunner())
+    (runtime.root / MANIFEST_FILE_NAME).unlink()
+    os.mkfifo(runtime.root / MANIFEST_FILE_NAME)
+    before_fds = len(os.listdir("/proc/self/fd"))
+
+    started = time.monotonic()
+    with pytest.raises(RuntimePreparationError, match="must be a regular file"):
+        runtime_manifest_digest(runtime.root)
+    elapsed = time.monotonic() - started
+
+    assert elapsed < 2.0
+    assert len(os.listdir("/proc/self/fd")) == before_fds
+
+
+def test_reuse_refuses_a_harness_owned_path_replaced_by_a_fifo(
+    lock: CandidateLock, request_: RuntimeRequest
+) -> None:
+    """The mode-repair walk opens each owned file to inspect and ``fchmod`` it.
+
+    A FIFO swapped in for one of those files must fail fast rather than hang the reuse path
+    that recomputes the permission contract on every prepare call.
+    """
+
+    runtime = prepare_candidate_runtime(lock, request_, runner=_FakeRunner())
+    target = runtime.config / SERVICE_CONFIG_RELPATHS["ty"]
+    target.unlink()
+    os.mkfifo(target)
+    before_fds = len(os.listdir("/proc/self/fd"))
+
+    started = time.monotonic()
+    with pytest.raises(RuntimePreparationError, match="must be a regular file"):
+        prepare_candidate_runtime(lock, request_, runner=_FakeRunner())
+    elapsed = time.monotonic() - started
+
+    assert elapsed < 2.0
+    assert len(os.listdir("/proc/self/fd")) == before_fds

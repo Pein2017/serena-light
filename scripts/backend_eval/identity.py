@@ -111,7 +111,9 @@ BOOTSTRAP_SERVICE_KEYS: tuple[str, ...] = (
 BOOTSTRAP_SERVICE_PATH = "/usr/bin:/bin"
 
 _GIT_EXECUTABLE = "/usr/bin/git"
-_READ_FLAGS = os.O_RDONLY | os.O_NOFOLLOW
+# O_NONBLOCK keeps a FIFO or other blocking special node from hanging the open; the fstat
+# regular-file check below then refuses it promptly rather than reading empty bytes.
+_READ_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
 
 
 class IdentityError(RuntimeError):

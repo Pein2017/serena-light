@@ -238,6 +238,10 @@ The frozen evaluation contract SHALL cap active wall time at 30 minutes for mani
 - **WHEN** a `link`, `unlink`, or `fsync` the phase has already entered is still running when the ceiling passes
 - **THEN** the deadline is enforced cooperatively at the next boundary rather than preempting the call, so the linked receipt name may exist transiently while that one call completes; it is withdrawn as soon as the expiry is observed and it is never admitted evidence, because a consumer requires successful command completion and canonical digest verification, neither of which an overrun run supplies
 
+#### Scenario: A guarded read finds a FIFO or other blocking special node
+- **WHEN** a guarded read expecting a regular file -- the corpus remainder, the runtime manifest, the owned-runtime mode repair, the evaluator source closure, the bound production helper closure, or the admission artifact-tree digest -- opens a path that is now a FIFO or other node whose open blocks without a peer
+- **THEN** the open returns immediately rather than blocking the calling thread, and the typed domain error the regular-file check already raises is returned promptly, so the FIFO can neither stall the phase past its ceiling nor be read as empty bytes
+
 #### Scenario: Evaluation-owned cleanup runs
 - **WHEN** a phase runs its own cleanup before publishing
 - **THEN** cleanup receives the same monotonic deadline, checks it around each of its own syscalls, and is bracketed by a check on both sides, and a ceiling reached in cleanup fails the phase closed rather than being recorded as an issue on an otherwise passing receipt

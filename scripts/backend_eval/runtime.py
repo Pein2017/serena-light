@@ -164,7 +164,10 @@ _DIRECTORY_MODE = 0o700
 _FILE_MODE = 0o600
 _DIRECTORY_FLAGS = os.O_RDONLY | os.O_DIRECTORY
 _NOFOLLOW_DIRECTORY_FLAGS = _DIRECTORY_FLAGS | os.O_NOFOLLOW
-_READ_FLAGS = os.O_RDONLY | os.O_NOFOLLOW
+# O_NONBLOCK keeps a FIFO or other blocking special node from hanging the open; the fstat
+# regular-file check below then refuses it promptly rather than reading empty bytes or, for
+# the owned-descendant walk, hanging the mode repair on a special node opened for fchmod.
+_READ_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
 _WRITE_FLAGS = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW
 # memfd_create and file seals: the conda interpreter's os/fcntl modules omit these constants.
 _MFD_CLOEXEC = 0x0001
