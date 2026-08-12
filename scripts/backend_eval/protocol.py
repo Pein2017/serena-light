@@ -84,11 +84,13 @@ class ProtocolSession[T]:
     ``raw_providers``/``diagnostic_provider`` and ``position_encoding`` are the validated
     ``initialize`` advertisement (position encoding negotiated exactly as production
     negotiates it; all default/unset if the failure happened before ``initialize``
-    completed). ``stderr_tail`` and ``terminal_errors`` are captured only *after* cleanup
+    completed). ``stderr_tail``, candidate ``terminal_errors``, harness ``cleanup_errors``,
+    and the candidate's post-stop ``exit_status`` are captured only *after* cleanup
     (``client.shutdown()`` and ``provider.stop()``) has finished, so they reflect the
-    process's full lifetime, not just its state before teardown began; ``stderr_tail`` is
-    redacted with production's own secret redaction before being bounded to its last 1024
-    characters -- never a raw unbounded transcript or payload.
+    process's full lifetime without forcing consumers to parse string prefixes to distinguish
+    candidate failures from harness cleanup failures. ``stderr_tail`` is redacted with
+    production's own secret redaction before being bounded to its last 1024 characters --
+    never a raw unbounded transcript or payload.
     """
 
     raw_providers: RawLspProviders
@@ -97,6 +99,8 @@ class ProtocolSession[T]:
     engine: EngineMetadata
     stderr_tail: str
     terminal_errors: tuple[str, ...]
+    cleanup_errors: tuple[str, ...]
+    exit_status: int | None
     result: T
 
 
@@ -177,8 +181,8 @@ def _cleanup(
     clean shutdown. ``provider.stop()`` always still runs regardless of remaining budget or
     of whether the shutdown handshake ran or failed.
 
-    Neither failure is ever silently dropped: each is recorded into the returned
-    ``cleanup_errors`` tuple (the same evidence bucket ``terminal_errors`` feeds), and each
+    Neither failure is ever silently dropped: each is recorded into the returned typed
+    ``cleanup_errors`` tuple, separate from candidate-process ``terminal_errors``, and each
     follows the identical primary-exception precedence rule -- if there is already a primary
     failure in flight, this failure is recorded onto its notes and suppressed; if there is
     none, this failure itself becomes the primary the caller raises, and cleanup still
@@ -249,6 +253,8 @@ def run_protocol_probe[T](
     result: T | None = None
     terminal_errors: list[BaseException] = []
     terminal_error_strings: tuple[str, ...] = ()
+    cleanup_error_strings: tuple[str, ...] = ()
+    exit_status: int | None = None
     stderr_tail = ""
     primary: BaseException | None = None
     provider: SubprocessAdapterRuntimeProvider | None = None
@@ -295,9 +301,11 @@ def run_protocol_probe[T](
         primary = error
     finally:
         if client is not None and provider is not None and adapter_runtime is not None:
-            primary, cleanup_errors = _cleanup(client, provider, adapter_runtime, deadline, primary)
+            primary, cleanup_error_strings = _cleanup(client, provider, adapter_runtime, deadline, primary)
             stderr_tail = _redacted_stderr_tail(adapter_runtime.stderr_capture)
-            terminal_error_strings = tuple(str(error) for error in terminal_errors) + cleanup_errors
+            terminal_error_strings = tuple(str(error) for error in terminal_errors)
+            if adapter_runtime.process is not None:
+                exit_status = adapter_runtime.process.poll()
         if engine is not None:
             session_evidence = ProtocolSession(
                 raw_providers=raw_providers,
@@ -306,6 +314,8 @@ def run_protocol_probe[T](
                 engine=engine,
                 stderr_tail=stderr_tail,
                 terminal_errors=terminal_error_strings,
+                cleanup_errors=cleanup_error_strings,
+                exit_status=exit_status,
                 result=None if primary is not None else result,
             )
             if primary is not None:

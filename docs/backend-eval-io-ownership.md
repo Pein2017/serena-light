@@ -189,6 +189,22 @@ a clean hash. That is a wider window and a stricter requirement than a per-chunk
 a path that held still for its own chunk but moved during another one is refused here and
 would have been accepted there.
 
+### `candidate-child`
+
+The Phase 2 protocol runner delegates one declared candidate process through
+`SubprocessAdapterRuntimeProvider.start()`, which in turn uses production's
+`LanguageServerSubprocessLauncher`. The structural collector records that call as
+`delegated.candidate_process`; any candidate launch from another function therefore requires
+its own explicit ownership row.
+
+This owner class names the process boundary rather than claiming filesystem confinement for
+the candidate. The candidate receives the declared workspace as its working directory and an
+exact minimal environment binding its service-owned HOME, cache, config, interpreter, PATH,
+and TMPDIR. It may still read the evaluated workspace and may attempt writes; the later
+Phase 2 write-guard task owns the before/after mutation proof. The shared runner owns bounded
+shutdown, process-tree reap, redacted stderr, terminal errors, cleanup errors, and post-stop
+exit status. No row here promotes a plumbing probe into evidence of zero workspace mutation.
+
 ### `own-image`
 
 Reads or writes this process's own sealed `memfd`, by descriptor or through `/proc/self/fd`.
@@ -237,7 +253,7 @@ ignore semantics, including `.gitignore` and `.git/info/exclude`, remain authori
 | `process.py` | the bounded runner, the sealed-image primitive, the declared-executable binding |
 | `production_helper.py` | verifying the expected bytes and starting that child |
 | `production_identity.py` | the three declared production lock inputs |
-| `protocol.py` | no direct filesystem access; the Phase 2 protocol runner delegates process and transport ownership to its frozen production primitives |
+| `protocol.py` | no direct filesystem access; one structurally collected `candidate-child` delegation through the frozen production process/transport primitives |
 | `runtime.py` | the service-owned candidate runtime |
 | `source_binding.py` | the executed production helper closure and the execution expectation |
 | `source_image.py` | the sealed evaluator-image descriptor, image-derived source closure, owner root, and loader-origin checks |
@@ -245,7 +261,7 @@ ignore semantics, including `.gitignore` and `.git/info/exclude`, remain authori
 
 `models.py` and `protocol.py` execute no direct filesystem access of their own: the former
 serializes and validates, while the latter reads only the in-memory process environment and
-delegates candidate process/transport ownership to the frozen production primitives.
+declares its candidate process/transport delegation as `candidate-child`.
 `process.py`
 resolves `memfd_create` from the already-loaded process image rather than through
 `ctypes.util.find_library`, which would shell out to `ldconfig` and put an unbounded child

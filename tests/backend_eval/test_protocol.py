@@ -40,6 +40,7 @@ CAPABILITIES = json.loads({capabilities_json!r})
 ECHO_ENVIRONMENT = {echo_environment!r}
 BAD_INITIALIZE_RESULT = {bad_initialize_result!r}
 CRASH_ON_METHOD = json.loads({crash_on_method_json!r})
+EXIT_STATUS_ON_SHUTDOWN = {exit_status_on_shutdown!r}
 STDERR_TEXT = json.loads({stderr_text_json!r})
 
 if STDERR_TEXT is not None:
@@ -82,6 +83,8 @@ while True:
     elif method == "initialized":
         continue
     elif method == "shutdown":
+        if EXIT_STATUS_ON_SHUTDOWN is not None:
+            os._exit(EXIT_STATUS_ON_SHUTDOWN)
         _write(stdout, {{"jsonrpc": "2.0", "id": message["id"], "result": None}})
     elif method == "exit":
         break
@@ -99,6 +102,7 @@ def _fake_server_script(
     echo_environment: bool = False,
     bad_initialize_result: bool = False,
     crash_on_method: str | None = None,
+    exit_status_on_shutdown: int | None = None,
     stderr_text: str | None = None,
 ) -> str:
     """A small fake stdio LSP server script -- never a real candidate backend."""
@@ -109,6 +113,7 @@ def _fake_server_script(
         echo_environment=echo_environment,
         bad_initialize_result=bad_initialize_result,
         crash_on_method_json=json.dumps(crash_on_method),
+        exit_status_on_shutdown=exit_status_on_shutdown,
         stderr_text_json=json.dumps(stderr_text),
     )
 
@@ -275,6 +280,8 @@ def test_run_protocol_probe_initializes_and_runs_session_then_stops(tmp_path: Pa
     assert session_result.position_encoding == PositionEncoding.UTF16
     assert session_result.engine.name == "fake"
     assert session_result.terminal_errors == ()
+    assert session_result.cleanup_errors == ()
+    assert session_result.exit_status == 0
     assert isinstance(session_result.stderr_tail, str)
 
 
@@ -569,6 +576,25 @@ def test_run_protocol_probe_attaches_evidence_with_nonempty_terminal_errors_when
     assert evidence is not None
     assert evidence.result is None
     assert evidence.terminal_errors != ()
+    assert evidence.cleanup_errors == ()
+    assert evidence.exit_status == 1
+
+
+def test_run_protocol_probe_reports_a_nonzero_exit_status_when_shutdown_crashes(
+    tmp_path: Path,
+) -> None:
+    runtime = _fake_runtime(tmp_path)
+    spec = _fake_spec(_fake_server_script(exit_status_on_shutdown=23))
+    deadline = Deadline.start(monotonic_clock, 30.0)
+
+    def session(client: SyncLspClient) -> str:
+        del client
+        return "session-complete"
+
+    session_result = run_protocol_probe(spec, runtime, tmp_path, deadline=deadline, session=session)
+
+    assert session_result.result == "session-complete"
+    assert session_result.exit_status == 23
 
 
 def test_protocol_session_from_error_returns_none_for_an_unrelated_exception() -> None:
@@ -649,7 +675,8 @@ def test_run_protocol_probe_propagates_a_provider_stop_failure_when_there_is_no_
 
     evidence = protocol_session_from_error(excinfo.value)
     assert evidence is not None
-    assert any("stop failed" in error for error in evidence.terminal_errors)
+    assert evidence.terminal_errors == ()
+    assert any("stop failed" in error for error in evidence.cleanup_errors)
 
 
 def test_run_protocol_probe_records_a_provider_stop_failure_onto_the_primary_exception(
@@ -679,7 +706,8 @@ def test_run_protocol_probe_records_a_provider_stop_failure_onto_the_primary_exc
     assert any("stop failed" in note for note in notes)
     evidence = protocol_session_from_error(excinfo.value)
     assert evidence is not None
-    assert any("stop failed" in error for error in evidence.terminal_errors)
+    assert evidence.terminal_errors == ()
+    assert any("stop failed" in error for error in evidence.cleanup_errors)
 
 
 def test_run_protocol_probe_makes_a_graceful_shutdown_failure_the_primary_when_there_is_none(
@@ -716,7 +744,8 @@ def test_run_protocol_probe_makes_a_graceful_shutdown_failure_the_primary_when_t
     assert len(stop_calls) == 1
     evidence = protocol_session_from_error(excinfo.value)
     assert evidence is not None
-    assert any("shutdown failed" in error for error in evidence.terminal_errors)
+    assert evidence.terminal_errors == ()
+    assert any("shutdown failed" in error for error in evidence.cleanup_errors)
 
 
 def test_run_protocol_probe_records_a_shutdown_failure_onto_the_primary_exception(
@@ -742,7 +771,8 @@ def test_run_protocol_probe_records_a_shutdown_failure_onto_the_primary_exceptio
     assert any("shutdown failed" in note for note in notes)
     evidence = protocol_session_from_error(excinfo.value)
     assert evidence is not None
-    assert any("shutdown failed" in error for error in evidence.terminal_errors)
+    assert evidence.terminal_errors == ()
+    assert any("shutdown failed" in error for error in evidence.cleanup_errors)
 
 
 def test_run_protocol_probe_never_launches_when_deadline_already_expired(tmp_path: Path) -> None:

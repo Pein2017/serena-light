@@ -34,7 +34,7 @@ OWNERSHIP_DOC = EVALUATOR_ROOT / "docs" / "backend-eval-io-ownership.md"
 # production helper that reads a file the evaluation does not own.  A helper that only
 # decodes or normalizes strings is not filesystem access and is deliberately absent.
 
-_MODULE_QUALIFIED = ("os", "os.path", "shutil", "subprocess", "_bootstrap_os")
+_MODULE_QUALIFIED = ("os", "os.path", "shutil", "subprocess", "_bootstrap_os", "provider")
 _ACCESS_NAMES = {
     # --- namespace resolution and creation
     "os.open": "os.open",
@@ -134,6 +134,8 @@ _ACCESS_NAMES = {
     "_decode_git_path": "production._decode_git_path",
     # --- and the parent side of that boundary: every delegation to the bounded child.
     "run_production_helper": "delegated.production_child",
+    # --- Phase 2's parent side of the candidate-process boundary.
+    "provider.start": "delegated.candidate_process",
 }
 
 # --- the owner classes -----------------------------------------------------------------
@@ -172,6 +174,9 @@ DESCRIPTOR = "descriptor"
 
 CHILD = "production-child"
 """Exact production semantics, executed in the bounded, killable, source-bound child."""
+
+CANDIDATE_CHILD = "candidate-child"
+"""A declared candidate process launched and reaped through production's process owner."""
 
 OWN_IMAGE = "own-image"
 """Reads or writes this process's own sealed ``memfd``; no attacker surface."""
@@ -328,6 +333,8 @@ OWNERSHIP: frozenset[tuple[str, str, str, str]] = frozenset(
         ("process.py", "sealed_image", "os.close", DESCRIPTOR),
         ("process.py", "sealed_image", "os.pread", OWN_IMAGE),
         ("process.py", "sealed_image", "os.write", OWN_IMAGE),
+        # --- protocol.py
+        ("protocol.py", "run_protocol_probe", "delegated.candidate_process", CANDIDATE_CHILD),
         # --- production_child.py
         ("production_child.py", "_bounded_non_git_inventory", "production.bounded_non_git_trust_inventory", CHILD),
         ("production_child.py", "_git_inventory_from_bytes", "Path.resolve", CHILD),
@@ -509,6 +516,13 @@ def test_the_evaluator_owns_exactly_the_declared_filesystem_accesses() -> None:
     assert declared - observed == set(), "declared evaluator filesystem access no longer exists"
 
 
+def test_candidate_process_delegation_is_structurally_collected_and_owned() -> None:
+    candidate_process = ("protocol.py", "run_protocol_probe", "delegated.candidate_process")
+
+    assert candidate_process in _observed_accesses()
+    assert (*candidate_process, "candidate-child") in OWNERSHIP
+
+
 def test_every_declared_access_has_exactly_one_owner() -> None:
     owners: dict[tuple[str, str, str], set[str]] = {}
     for module, function, access, owner in OWNERSHIP:
@@ -520,6 +534,7 @@ def test_every_declared_access_has_exactly_one_owner() -> None:
         DECLARED,
         DESCRIPTOR,
         CHILD,
+        CANDIDATE_CHILD,
         OWN_IMAGE,
     }
 
@@ -596,7 +611,9 @@ def test_every_descriptor_primitive_receives_a_descriptor_and_never_a_pathname()
     assert offenders == []
 
 
-@pytest.mark.parametrize("owner", [CONFINED, GUARDED, DECLARED, DESCRIPTOR, CHILD, OWN_IMAGE])
+@pytest.mark.parametrize(
+    "owner", [CONFINED, GUARDED, DECLARED, DESCRIPTOR, CHILD, CANDIDATE_CHILD, OWN_IMAGE]
+)
 def test_the_ownership_document_explains_each_owner_class(owner: str) -> None:
     assert OWNERSHIP_DOC.is_file()
     assert owner in OWNERSHIP_DOC.read_text(encoding="utf-8")
@@ -606,7 +623,7 @@ def test_the_ownership_document_names_every_audited_module() -> None:
     text = OWNERSHIP_DOC.read_text(encoding="utf-8")
     modules = {module for module, _function, _access, _owner in OWNERSHIP}
     # These execute no filesystem access of their own; the document says so.
-    without_access = {"__init__.py", "models.py", "protocol.py"}
+    without_access = {"__init__.py", "models.py"}
     assert modules == {path.name for path in EVALUATOR_PACKAGE.glob("*.py")} - without_access
     for module in sorted(modules):
         assert module in text
