@@ -196,16 +196,11 @@ def _run_capability_probe(
     source_text = read_stable_source_text(workspace_root, source, deadline=deadline)
     source_uri = source.as_uri()
     started_elapsed = deadline.elapsed()
-    initialization_options = cast(
-        "dict[str, object]",
-        dict(spec.initialize_params(workspace_root))["initializationOptions"],
-    )
 
-    def session(client: SyncLspClient) -> _PyreflySessionResult:
-        client.notify(
-            "workspace/didChangeConfiguration",
-            {"settings": initialization_options},
-        )
+    def session(
+        client: SyncLspClient,
+        providers: RawLspProviders,
+    ) -> _PyreflySessionResult:
         client.notify(
             "textDocument/didOpen",
             {
@@ -223,45 +218,65 @@ def _run_capability_probe(
                 "position": {"line": line, "character": character},
             }
             observations = (
-                _observe_request(
-                    client,
-                    deadline,
-                    "definition",
-                    "textDocument/definition",
-                    position_params,
-                    _normalize_locations,
+                (
+                    _observe_request(
+                        client,
+                        deadline,
+                        "definition",
+                        "textDocument/definition",
+                        position_params,
+                        _normalize_locations,
+                    )
+                    if providers.definition
+                    else _unadvertised_provider("definition")
                 ),
-                _observe_request(
-                    client,
-                    deadline,
-                    "references",
-                    "textDocument/references",
-                    {**position_params, "context": {"includeDeclaration": True}},
-                    _normalize_locations,
+                (
+                    _observe_request(
+                        client,
+                        deadline,
+                        "references",
+                        "textDocument/references",
+                        {**position_params, "context": {"includeDeclaration": True}},
+                        _normalize_locations,
+                    )
+                    if providers.references
+                    else _unadvertised_provider("references")
                 ),
-                _observe_request(
-                    client,
-                    deadline,
-                    "implementation",
-                    "textDocument/implementation",
-                    position_params,
-                    _normalize_locations,
+                (
+                    _observe_request(
+                        client,
+                        deadline,
+                        "implementation",
+                        "textDocument/implementation",
+                        position_params,
+                        _normalize_locations,
+                    )
+                    if providers.implementation
+                    else _unadvertised_provider("implementation")
                 ),
-                _observe_request(
-                    client,
-                    deadline,
-                    "document_symbols",
-                    "textDocument/documentSymbol",
-                    {"textDocument": {"uri": source_uri}},
-                    lambda value: _normalize_document_symbol_result(value, source_uri),
+                (
+                    _observe_request(
+                        client,
+                        deadline,
+                        "document_symbols",
+                        "textDocument/documentSymbol",
+                        {"textDocument": {"uri": source_uri}},
+                        lambda value: _normalize_document_symbol_result(value, source_uri),
+                    )
+                    if providers.document_symbols
+                    else _unadvertised_provider("document_symbols")
                 ),
-                _observe_request(
-                    client,
-                    deadline,
-                    "workspace_symbols",
-                    "workspace/symbol",
-                    {"query": source.stem},
-                    _normalize_workspace_symbol_result,
+                (
+                    _observe_request(
+                        client,
+                        deadline,
+                        "workspace_symbols",
+                        "workspace/symbol",
+                        {"query": source.stem},
+                        _normalize_workspace_symbol_result,
+                    )
+                    if providers.workspace_symbols
+                    else _unadvertised_provider("workspace_symbols")
                 ),
             )
         except BaseException as primary:
@@ -557,6 +572,15 @@ def _normalize_document_symbol_result(
     return cast(
         "tuple[object, ...]",
         normalize_document_symbols(symbols, document_uri=document_uri),
+    )
+
+
+def _unadvertised_provider(name: str) -> _ObservedCapability:
+    return _ObservedCapability(
+        name=name,
+        accepted=False,
+        normalized_valid=False,
+        notes="",
     )
 
 

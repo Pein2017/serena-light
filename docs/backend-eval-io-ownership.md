@@ -267,16 +267,17 @@ ignore semantics, including `.gitignore` and `.git/info/exclude`, remain authori
 | `production_identity.py` | the three declared production lock inputs |
 | `protocol.py` | no direct filesystem access; one structurally collected `candidate-child` delegation through the frozen production process/transport primitives |
 | `runtime.py` | service-owned candidate runtime preparation and the separate read-only prepared-runtime manifest loader/verifier |
+| `pyrefly_probe.py` | no direct filesystem access; delegates workspace manifests and source bytes to `manifests.py`, consumes the caller-bound prepared runtime, and delegates candidate lifecycle to `protocol.py` |
 | `pyright_probe.py` | no direct filesystem access; delegates source bytes to `manifests.py`, prepared-runtime verification to `runtime.py`, and candidate lifecycle to `protocol.py` |
 | `ty_probe.py` | two `declared-path` workspace-root observations (`Path.resolve()` and `Path.is_dir()`) used only to refuse an invalid caller path; delegates source bytes to `manifests.py`, prepared-runtime verification to `runtime.py`, and candidate lifecycle to `protocol.py` |
 | `source_binding.py` | the executed production helper closure and the execution expectation |
 | `source_image.py` | the sealed evaluator-image descriptor, image-derived source closure, owner root, and loader-origin checks |
 | `write_guard.py` | one `lstat` bracket around a changed remainder record |
 
-`models.py`, `protocol.py`, and `pyright_probe.py` execute no direct filesystem byte access of
-their own: the first serializes and validates, the second declares its candidate
-process/transport delegation as `candidate-child`, and the third delegates its two read-only
-filesystem contracts to the audited `manifests.py` and `runtime.py` seams.
+`models.py`, `protocol.py`, `pyrefly_probe.py`, and `pyright_probe.py` execute no direct filesystem
+byte access of their own: the first serializes and validates, the second declares its candidate
+process/transport delegation as `candidate-child`, and the two candidate probes delegate their
+read-only filesystem contracts to audited evaluator seams.
 `process.py`
 resolves `memfd_create` from the already-loaded process image rather than through
 `ctypes.util.find_library`, which would shell out to `ldconfig` and put an unbounded child

@@ -667,7 +667,8 @@ def test_the_ownership_document_names_every_audited_module() -> None:
     text = OWNERSHIP_DOC.read_text(encoding="utf-8")
     modules = {module for module, _function, _access, _owner in OWNERSHIP}
     # These execute no filesystem access of their own; the document says so.
-    without_access = {"__init__.py", "models.py", "pyright_probe.py"}
-    assert modules == {path.name for path in EVALUATOR_PACKAGE.glob("*.py")} - without_access
-    for module in sorted(modules):
+    without_access = {"__init__.py", "models.py", "pyrefly_probe.py", "pyright_probe.py"}
+    audited_modules = modules | without_access
+    assert audited_modules == {path.name for path in EVALUATOR_PACKAGE.glob("*.py")}
+    for module in sorted(audited_modules):
         assert module in text

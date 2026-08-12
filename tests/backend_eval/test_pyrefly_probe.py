@@ -188,17 +188,19 @@ def _install_fake_runner(
         deadline: Deadline,
         session: Any,
     ) -> ProtocolSession[object]:
+        validated_providers = providers or _providers()
         captured.update(
             spec=spec,
             runtime=runtime,
             workspace_root=workspace_root,
             deadline=deadline,
+            session_providers=validated_providers,
         )
         typed_spec = cast(Any, spec)
-        result = session(client)
+        result = session(client, validated_providers)
         client.clock.advance(after_protocol_advance)
         return ProtocolSession(
-            raw_providers=providers or _providers(),
+            raw_providers=validated_providers,
             diagnostic_provider=diagnostic_provider,
             position_encoding=typed_spec.position_encoding,
             engine=typed_spec.engine(runtime),
@@ -340,28 +342,21 @@ def test_pyrefly_workspace_configuration_rejects_malformed_requests(
         handlers["workspace/configuration"](params)
 
 
-def test_pyrefly_probe_uses_external_configuration_without_workspace_config_creation(
+def test_pyrefly_probe_uses_external_configuration_without_runtime_config_mutation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    outcome, client, _runtime_value, config, captured = _run_fake(tmp_path, monkeypatch)
+    outcome, client, _runtime_value, _config, captured = _run_fake(tmp_path, monkeypatch)
 
     assert cast(Any, outcome).gate_disposition == "pass"
-    assert client.notifications[0] == (
-        "workspace/didChangeConfiguration",
-        {
-            "settings": {
-                "pythonPath": cast(Any, captured["spec"]).engine(captured["runtime"]).interpreter.as_posix(),
-                "pyrefly": {
-                    "configPath": config.config_path,
-                    "diagnosticMode": "workspace",
-                },
-            }
-        },
-    )
-    assert [method for method, _params in client.notifications[1:]] == [
+    assert [method for method, _params in client.notifications] == [
         "textDocument/didOpen",
         "textDocument/didClose",
     ]
+    assert all(
+        method != "workspace/didChangeConfiguration"
+        for method, _params in client.notifications
+    )
+    assert cast(Any, captured["spec"]).request_handlers is not None
     assert captured["manifest_roots"] == [tmp_path, tmp_path]
 
 
@@ -594,18 +589,33 @@ def test_pyrefly_probe_rejects_malformed_provider_results(
 
 
 @pytest.mark.parametrize(
-    "missing",
-    ["definition", "references", "implementation", "document_symbols", "workspace_symbols"],
+    ("missing", "missing_method"),
+    [
+        ("definition", "textDocument/definition"),
+        ("references", "textDocument/references"),
+        ("implementation", "textDocument/implementation"),
+        ("document_symbols", "textDocument/documentSymbol"),
+        ("workspace_symbols", "workspace/symbol"),
+    ],
 )
-def test_pyrefly_gate_requires_every_semantic_provider(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, missing: str
+def test_pyrefly_session_uses_validated_provider_advertisement_and_fails_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    missing: str,
+    missing_method: str,
 ) -> None:
-    outcome, _client, _runtime_value, _config, _captured = _run_fake(
+    providers = _providers(**{missing: False})
+    outcome, client, _runtime_value, _config, captured = _run_fake(
         tmp_path,
         monkeypatch,
-        providers=_providers(**{missing: False}),
+        providers=providers,
     )
 
+    requested_methods = [method for method, _params, _timeout in client.requests]
+    assert captured["session_providers"] is providers
+    assert missing_method not in requested_methods
+    assert len(requested_methods) == 4
+    assert all(requested_methods.count(method) == 1 for method in requested_methods)
     assert cast(Any, outcome).gate_disposition == "fail"
     assert any(missing in issue and "advertise" in issue for issue in cast(Any, outcome).issues)
 
