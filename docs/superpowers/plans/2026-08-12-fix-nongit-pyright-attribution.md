@@ -116,7 +116,7 @@ repository's intended source, install `serena-light@coordexp-local`, start a
 fresh strict client from the site-packages root, exercise activation/status/
 overview/find/release, and verify no owned daemon or LSP process is orphaned.
 
-- [ ] **Step 7: Synchronize and push**
+- [x] **Step 7: Synchronize and push**
 
 Fetch `origin`, verify `main` has not advanced or rebase only if needed and
 clean, rerun merge-sensitive gates, then push
