@@ -118,6 +118,8 @@ __all__ = [
     "RuntimePreparationError",
     "RuntimeRequest",
     "minimal_backend_environment",
+    "owned_runtime_directory_relpaths",
+    "owned_runtime_file_relpaths",
     "prepare_candidate_runtime",
     "runtime_lock_path",
     "runtime_manifest_digest",
@@ -252,9 +254,17 @@ class CandidateRuntime:
     service_configs: tuple[ServiceConfigIdentity, ...]
     manifest_path: Path
     manifest_sha256: str
+    permission_repairs: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         _require_absolute(self.root, "CandidateRuntime.root")
+        owned = set(owned_runtime_file_relpaths())
+        if tuple(self.permission_repairs) != tuple(sorted(self.permission_repairs)) or not owned.issuperset(
+            self.permission_repairs
+        ):
+            raise ValueError(
+                "CandidateRuntime.permission_repairs must be a sorted subset of the harness-owned runtime files"
+            )
         if self.manifest_path != self.root / MANIFEST_FILE_NAME:
             raise ValueError(f"CandidateRuntime.manifest_path must be {self.root / MANIFEST_FILE_NAME}")
         if len(self.manifest_sha256) != 64 or self.manifest_sha256 != self.manifest_sha256.lower().strip():
@@ -482,6 +492,9 @@ def _build_runtime(
     _assert_production_identity_unchanged(before, request.repo_root, cause=None)
     _publish_manifest(layout, root_fd, payload)
     _require_open_root(base_fd, root_fd, layout.logical_root, "after publication")
+    # A freshly built runtime must already satisfy the contract reuse repairs: the ambient
+    # umask never gets to widen a harness-written file.
+    _require_owned_modes(root_fd, layout.logical_root)
     return runtime
 
 
@@ -492,6 +505,7 @@ def _runtime(
     environments: tuple[EnvironmentIdentity, ...],
     service_configs: tuple[ServiceConfigIdentity, ...],
     manifest_sha256: str,
+    permission_repairs: tuple[str, ...] = (),
 ) -> CandidateRuntime:
     logical = layout.logical()
     return CandidateRuntime(
@@ -508,6 +522,7 @@ def _runtime(
         service_configs=service_configs,
         manifest_path=logical.root / MANIFEST_FILE_NAME,
         manifest_sha256=manifest_sha256,
+        permission_repairs=permission_repairs,
     )
 
 
@@ -963,6 +978,11 @@ def _verify_published_runtime(
     _require_only_declared_entries(root_fd, root, published=True)
     for name in RUNTIME_DIRECTORY_NAMES:
         _require_owned_directory(layout.root / name, create=False)
+    # Still under the per-digest lock, and before anything reads the published bytes: repair
+    # the mode of any harness-written file left behind by a runtime built before the contract
+    # was enforced, then re-assert the whole contract.  Modes only -- no byte moves.
+    permission_repairs = _normalize_owned_modes(root_fd, root)
+    _require_owned_modes(root_fd, root)
     _require_snapshot(layout, lock.digest)
     _require_venv_interpreter(layout, request)
     executables = _verify_published_executables(lock, layout, manifest)
@@ -978,7 +998,9 @@ def _verify_published_runtime(
     service_configs = _verify_published_service_configs(layout, manifest)
     # The returned runtime is expressed in logical paths, so they must still be ours.
     _require_open_root(base_fd, root_fd, root, "before reuse return")
-    return _runtime(lock, layout, executables, environments, service_configs, sha256_bytes(payload))
+    return _runtime(
+        lock, layout, executables, environments, service_configs, sha256_bytes(payload), permission_repairs
+    )
 
 
 def _verify_published_executables(
@@ -1350,6 +1372,132 @@ def _own_directory_mode(path: Path) -> None:
         raise RuntimePreparationError(f"cannot own the evaluation-owned directory {path}: {exc}") from exc
     finally:
         os.close(fd)
+
+
+# --- the harness-owned permission contract --------------------------------------------
+#
+# The 0600/0700 contract is scoped, deliberately, to what *this harness* writes: its own
+# regular files (the installed lock snapshot, the published manifest, the three service
+# configurations), its own lock files, and every service-owned ancestor directory.  It does
+# not extend to the interiors of third-party trees.  ``uv`` and ``virtualenv`` create their
+# own cache and environment files -- including a world-writable ``.lock`` -- and rewriting
+# those modes would mean recursively chmod-ing a tool's private cache, breaking its own
+# assumptions for no confidentiality gain: they already sit behind service-owned ``0700``
+# ancestors, and they are excluded from the receipt's artifact-tree digest.  The boundary is
+# therefore ownership, not location, and it is pinned by test.
+
+
+def owned_runtime_file_relpaths() -> tuple[str, ...]:
+    """Every harness-written regular file inside one runtime root, in canonical order."""
+
+    configs = tuple(SERVICE_CONFIG_RELPATHS[backend] for backend in sorted(SERVICE_CONFIG_RELPATHS))
+    return tuple(sorted((REQUIREMENTS_SNAPSHOT_NAME, MANIFEST_FILE_NAME, *(f"config/{name}" for name in configs))))
+
+
+def owned_runtime_directory_relpaths() -> tuple[str, ...]:
+    """Every service-owned directory inside one runtime root, the root itself first."""
+
+    return ("", *RUNTIME_DIRECTORY_NAMES, *(f"config/{backend}" for backend in sorted(SERVICE_CONFIG_RELPATHS)))
+
+
+def _open_owned_descendant(root_fd: int, relpath: str, root: Path, *, directory: bool) -> int:
+    """Open one harness-owned path under the runtime root without following any link.
+
+    ``O_NOFOLLOW`` guards only the *last* component, so a single
+    ``open("config/ty/ty.toml", O_NOFOLLOW)`` still traverses a symlinked ``config`` or
+    ``config/ty`` -- and an ``fchmod`` on the descriptor it returns would land on a file
+    outside the root.  Every component is therefore opened from its parent's descriptor with
+    ``O_NOFOLLOW``, starting at the already-proven open root, so the returned descriptor can
+    only name something the runtime root physically contains.
+    """
+
+    current = os.dup(root_fd)
+    try:
+        parts = tuple(part for part in relpath.split("/") if part)
+        for index, part in enumerate(parts):
+            last = index == len(parts) - 1
+            flags = _READ_FLAGS if last and not directory else _NOFOLLOW_DIRECTORY_FLAGS
+            try:
+                child = os.open(part, flags, dir_fd=current)
+            except FileNotFoundError as exc:
+                raise RuntimePreparationError(f"published runtime {root} is missing {relpath}") from exc
+            except OSError as exc:
+                raise RuntimePreparationError(
+                    f"cannot open {root / relpath} without following a link: {exc}"
+                ) from exc
+            os.close(current)
+            current = child
+    except BaseException:
+        os.close(current)
+        raise
+    return current
+
+
+def _normalize_owned_modes(root_fd: int, root: Path) -> tuple[str, ...]:
+    """Repair the mode of every harness-written file in a published runtime to ``0600``.
+
+    Runtimes published before the mode contract was enforced carry ``0660`` files created
+    under the ambient umask.  Reuse happens under the per-digest runtime lock, which is the
+    only safe place to correct them, so the repair is done here: ``fchmod`` on a descriptor
+    whose every component was opened ``O_NOFOLLOW`` from the open runtime root and which is
+    proven to be a regular file *through that same descriptor*.  No byte is written, so
+    neither the installed snapshot digest nor the published manifest digest can change; a
+    symlink anywhere on the path, a special file, or anything outside the open root is
+    refused rather than repaired.  The returned relative paths are the repair record.
+    """
+
+    repaired: list[str] = []
+    for relpath in owned_runtime_file_relpaths():
+        fd = _open_owned_descendant(root_fd, relpath, root, directory=False)
+        try:
+            info = os.fstat(fd)
+            if not stat.S_ISREG(info.st_mode):
+                raise RuntimePreparationError(f"harness-owned runtime path must be a regular file: {root / relpath}")
+            if stat.S_IMODE(info.st_mode) == _FILE_MODE:
+                continue
+            try:
+                os.fchmod(fd, _FILE_MODE)
+            except OSError as exc:
+                raise RuntimePreparationError(f"cannot own {root / relpath} at {_FILE_MODE:04o}: {exc}") from exc
+            observed = stat.S_IMODE(os.fstat(fd).st_mode)
+            if observed != _FILE_MODE:
+                raise RuntimePreparationError(
+                    f"{root / relpath} is {observed:04o} after repair, not {_FILE_MODE:04o}"
+                )
+            repaired.append(relpath)
+        finally:
+            os.close(fd)
+    return tuple(repaired)
+
+
+def _require_owned_modes(root_fd: int, root: Path) -> None:
+    """Every harness-written file and service-owned directory is ``0600``/``0700``.
+
+    Read through the same link-free descriptor walk the repair uses, so the mode this
+    accepts is the mode of an inode the runtime root actually contains.
+    """
+
+    for relpath in owned_runtime_file_relpaths():
+        fd = _open_owned_descendant(root_fd, relpath, root, directory=False)
+        try:
+            info = os.fstat(fd)
+        finally:
+            os.close(fd)
+        if not stat.S_ISREG(info.st_mode):
+            raise RuntimePreparationError(f"harness-owned runtime path must be a regular file: {root / relpath}")
+        observed = stat.S_IMODE(info.st_mode)
+        if observed != _FILE_MODE:
+            raise RuntimePreparationError(f"harness-owned {root / relpath} is {observed:04o}, not {_FILE_MODE:04o}")
+    for relpath in owned_runtime_directory_relpaths():
+        fd = _open_owned_descendant(root_fd, relpath, root, directory=True)
+        try:
+            observed = stat.S_IMODE(os.fstat(fd).st_mode)
+        finally:
+            os.close(fd)
+        if observed != _DIRECTORY_MODE:
+            raise RuntimePreparationError(
+                f"service-owned directory {root / relpath} is {observed:04o}, not {_DIRECTORY_MODE:04o}"
+            )
 
 
 def _write_file(path: Path, payload: bytes) -> None:

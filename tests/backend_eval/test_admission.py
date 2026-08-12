@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import ast
 import fcntl
+import inspect
+import itertools
 import json
 import os
 import stat
@@ -21,7 +24,7 @@ from scripts.backend_eval.admission import (
     AdmissionError,
     AdmissionRequest,
     ProductionAdmissionServices,
-    _require_published_before_ceiling,
+    _Publication,
     admission_receipt_path,
     artifact_tree_digest,
     evaluation_identity,
@@ -52,7 +55,7 @@ from scripts.backend_eval.models import (
     canonical_json,
     sha256_bytes,
 )
-from scripts.backend_eval.process import Deadline
+from scripts.backend_eval.process import Deadline, DeadlineExceeded
 from scripts.backend_eval.production_identity import ProductionIdentityChanged, ProductionIdentityError
 from scripts.backend_eval.runtime import (
     SERVICE_CONFIG_RELPATHS,
@@ -314,8 +317,12 @@ class FakeServices:
         self._enter("artifact_digest")
         return artifact_tree_digest(artifact_root)
 
-    def cleanup(self, evaluation_root: Path, run_identity: str, stage: str) -> tuple[str, ...]:
+    def cleanup(
+        self, evaluation_root: Path, run_identity: str, stage: str, deadline: Deadline
+    ) -> tuple[str, ...]:
         assert len(run_identity) == 64
+        assert isinstance(deadline, Deadline)
+        self.clock.advance(self.step_seconds.get("cleanup", 0.0))
         self.cleanup_stages.append(stage)
         self.order.append("cleanup")
         if self.cleanup_mutates is not None:
@@ -363,8 +370,10 @@ class _DriftingServices:
     def artifact_tree_digest(self, artifact_root: Path, deadline: Deadline) -> str:
         return self.inner.artifact_tree_digest(artifact_root, deadline)
 
-    def cleanup(self, evaluation_root: Path, run_identity: str, stage: str) -> tuple[str, ...]:
-        summary = self.inner.cleanup(evaluation_root, run_identity, stage)
+    def cleanup(
+        self, evaluation_root: Path, run_identity: str, stage: str, deadline: Deadline
+    ) -> tuple[str, ...]:
+        summary = self.inner.cleanup(evaluation_root, run_identity, stage, deadline)
         self.inner.clock.drift = self.drift
         return summary
 
@@ -616,6 +625,45 @@ def test_artifact_tree_digest_excludes_the_receipts_and_the_resolver_cache(tmp_p
     assert artifact_tree_digest(root) != baseline
 
 
+def test_a_third_party_cache_file_keeps_its_tool_mode_behind_owned_ancestors(tmp_path: Path) -> None:
+    """The exact 0600/0700 boundary: harness-owned artifacts versus uv's private cache.
+
+    ``uv`` creates its own world-writable ``.lock`` inside the resolver cache.  The harness
+    does not rewrite it: it is third-party, it sits behind a service-owned ``0700`` ancestor,
+    and the receipt's artifact-tree digest excludes the cache entirely -- so its mode is
+    outside the evidence the receipt binds.  Harness-owned artifacts get no such latitude.
+    """
+
+    root = tmp_path / "artifacts"
+    (root / CACHE_DIR_NAME / "uv").mkdir(parents=True)
+    (root / LOCK_FILE_NAME).write_bytes(b"ty==0.0.70\n")
+    baseline = artifact_tree_digest(root)
+
+    tool_lock = root / CACHE_DIR_NAME / "uv" / ".lock"
+    tool_lock.write_bytes(b"")
+    os.chmod(tool_lock, 0o777)
+
+    assert artifact_tree_digest(root) == baseline
+    assert stat.S_IMODE(tool_lock.stat().st_mode) == 0o777
+
+
+def test_a_published_run_owns_its_artifacts_at_0600_and_its_directories_at_0700(
+    request_: AdmissionRequest, services: FakeServices, clock: FakeClock
+) -> None:
+    """Everything the harness writes is 0600/0700, whatever the ambient umask was."""
+
+    receipt = run_admission(request_, services=services, clock=clock)
+    evaluation_root = request_.artifact_root / receipt.evaluation_identity
+
+    for path in evaluation_root.rglob("*"):
+        if CACHE_DIR_NAME in path.relative_to(evaluation_root).parts:
+            continue  # third-party resolver cache: tool-defined modes, excluded from the digest
+        expected = 0o700 if path.is_dir() else 0o600
+        assert stat.S_IMODE(path.stat().st_mode) == expected, path
+    for ancestor in (request_.artifact_root, evaluation_root, evaluation_root / RECEIPTS_DIR_NAME):
+        assert stat.S_IMODE(ancestor.stat().st_mode) == 0o700, ancestor
+
+
 def test_artifact_tree_digest_refuses_a_symlinked_artifact(tmp_path: Path) -> None:
     root = tmp_path / "artifacts"
     root.mkdir()
@@ -711,8 +759,10 @@ def test_a_cleanup_that_starts_past_the_ceiling_fails_closed(
     request_: AdmissionRequest, services: FakeServices, clock: FakeClock
 ) -> None:
     services.step_seconds["corpus_after"] = float(ADMISSION_BUDGET_SECONDS)
-    with pytest.raises(AdmissionError, match="admission_deadline_exceeded"):
+    with pytest.raises(AdmissionError, match="admission_deadline_exceeded") as error:
         run_admission(request_, services=services, clock=clock)
+    # The bracket in front of cleanup owns this refusal, so cleanup never starts at all.
+    assert "cleanup:before" in error.value.failure.detail
     assert not services.cleanup_called
 
 
@@ -747,10 +797,18 @@ def test_a_pass_is_not_published_when_the_ceiling_arrives_before_the_link(
     assert not receipts.exists() or list(receipts.iterdir()) == []
 
 
+@pytest.mark.parametrize(
+    "step", ["link_synced", "temporary_unlinked", "temporary_unlink_synced", "return"]
+)
 def test_a_pass_published_exactly_at_the_ceiling_is_withdrawn(
-    request_: AdmissionRequest, services: FakeServices, clock: FakeClock
+    request_: AdmissionRequest, services: FakeServices, clock: FakeClock, step: str
 ) -> None:
-    """If the ceiling arrives during the link itself, this run's own link is removed."""
+    """Every post-link checkpoint withdraws this run's own link, the last one included.
+
+    The final checkpoint sits immediately before the return, where only descriptor closes
+    remain, so it is the one that decides whether an overrun can still be returned as a
+    pass -- it must withdraw exactly like the earlier ones.
+    """
 
     receipt = run_admission(request_, services=services, clock=clock)
     published = _receipt_path(request_, receipt)
@@ -762,15 +820,202 @@ def test_a_pass_published_exactly_at_the_ceiling_is_withdrawn(
     try:
         expired = Deadline.start(clock, 10.0)
         clock.advance(11.0)
+        publication = _Publication(receipts_fd, published.parent, published.name, temporary.name, expired)
         with pytest.raises(AdmissionError, match="admission_deadline_exceeded") as error:
-            _require_published_before_ceiling(
-                receipts_fd, published.parent, published.name, temporary.name, expired
-            )
+            publication.checkpoint(step)
     finally:
         os.close(receipts_fd)
     assert error.value.failure.status == "incomplete"
+    assert f"publish_receipt:{step}" in error.value.failure.detail
     assert not published.exists()
     assert not temporary.exists()
+
+
+# The publication steps that move the namespace or force durability after the atomic link.
+# Each one has to be *followed* by a ceiling observation, or a run can earn its pass with
+# work it did after the ceiling -- which is exactly the defect this pins closed.
+_POST_LINK_OPERATIONS = ("_sync_directory", "_replace_temporary")
+
+
+def _publication_step_order() -> tuple[str, ...]:
+    """The post-link operations and checkpoints of ``_publish_receipt``, in source order."""
+
+    import scripts.backend_eval.admission as admission_module
+
+    module = ast.parse(inspect.getsource(admission_module))
+    publish = next(
+        node
+        for node in ast.walk(module)
+        if isinstance(node, ast.FunctionDef) and node.name == "_publish_receipt"
+    )
+    link = next(
+        node.lineno
+        for node in ast.walk(publish)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "link"
+    )
+    steps: list[tuple[int, str]] = []
+    for node in ast.walk(publish):
+        if not isinstance(node, ast.Call) or node.lineno <= link:
+            continue
+        if isinstance(node.func, ast.Name) and node.func.id in _POST_LINK_OPERATIONS:
+            steps.append((node.lineno, node.func.id))
+        elif isinstance(node.func, ast.Attribute) and node.func.attr == "checkpoint":
+            steps.append((node.lineno, "checkpoint"))
+    return tuple(name for _, name in sorted(steps))
+
+
+def test_no_post_link_publication_step_is_left_unchecked() -> None:
+    """Structural pin: after the link, no mutation or barrier may be the last word.
+
+    Behaviour tests can only slow the barriers that exist today.  This asserts the shape
+    the whole argument rests on: every post-link namespace mutation and durability barrier
+    is immediately followed by a ceiling observation, and the very last statement before the
+    return is one too -- so there is no step whose cost a later pass can absorb.
+    """
+
+    steps = _publication_step_order()
+
+    assert steps.count("checkpoint") == 4
+    assert steps[-1] == "checkpoint", steps
+    assert all(
+        later == "checkpoint" for earlier, later in itertools.pairwise(steps) if earlier != "checkpoint"
+    ), steps
+    assert steps == (
+        "_sync_directory",
+        "checkpoint",
+        "_replace_temporary",
+        "checkpoint",
+        "_sync_directory",
+        "checkpoint",
+        "checkpoint",
+    )
+
+
+def test_a_checkpoint_inside_the_ceiling_keeps_the_published_receipt(
+    request_: AdmissionRequest, services: FakeServices, clock: FakeClock
+) -> None:
+    """The withdrawal is driven by expiry alone; a live deadline never touches the link."""
+
+    receipt = run_admission(request_, services=services, clock=clock)
+    published = _receipt_path(request_, receipt)
+    receipts_fd = os.open(published.parent, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        live = Deadline.start(clock, 100.0)
+        _Publication(receipts_fd, published.parent, published.name, ".absent.tmp", live).checkpoint("return")
+    finally:
+        os.close(receipts_fd)
+    assert published.is_file()
+
+
+@pytest.mark.parametrize(
+    ("boundary", "step"),
+    [(1, "link_synced"), (2, "temporary_unlink_synced")],
+)
+def test_a_slow_post_link_directory_sync_returns_no_pass_and_leaves_none(
+    request_: AdmissionRequest,
+    services: FakeServices,
+    clock: FakeClock,
+    monkeypatch: pytest.MonkeyPatch,
+    boundary: int,
+    step: str,
+) -> None:
+    """The exact regression: delay a post-link ``fsync`` and the pass must not survive it.
+
+    Both post-link durability barriers are covered -- the one right after the link and the
+    one after the temporary is unlinked -- because a check that happens *before* the last
+    barrier would let a run return a pass it earned only after the ceiling.
+    """
+
+    import scripts.backend_eval.admission as admission_module
+
+    real_sync = admission_module._sync_directory
+    calls = {"n": 0}
+
+    def slow_sync(dir_fd: int, evaluation_root: Path) -> None:
+        calls["n"] += 1
+        # Barrier 1 is the post-link sync; barrier 2 follows the temporary unlink.
+        if calls["n"] == boundary:
+            clock.advance(float(ADMISSION_BUDGET_SECONDS))
+        real_sync(dir_fd, evaluation_root)
+
+    monkeypatch.setattr(admission_module, "_sync_directory", slow_sync)
+    with pytest.raises(AdmissionError, match="admission_deadline_exceeded") as error:
+        run_admission(request_, services=services, clock=clock)
+    assert error.value.failure.status == "incomplete"
+    assert f"publish_receipt:{step}" in error.value.failure.detail
+
+    identity = evaluation_identity(request_, services.identities[0], _evaluator())
+    receipts = request_.artifact_root / identity / RECEIPTS_DIR_NAME
+    assert not receipts.exists() or list(receipts.iterdir()) == []
+
+
+def test_a_slow_post_link_temporary_unlink_returns_no_pass_and_leaves_none(
+    request_: AdmissionRequest, services: FakeServices, clock: FakeClock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A namespace mutation after the link is a checkpoint boundary too, not just a sync."""
+
+    import scripts.backend_eval.admission as admission_module
+
+    real_replace = admission_module._replace_temporary
+    seen: list[str] = []
+
+    def slow_replace(dir_fd: int, evaluation_root: Path, temporary: str) -> None:
+        seen.append(temporary)
+        real_replace(dir_fd, evaluation_root, temporary)
+        # Only the post-link unlink is slowed; the pre-write one must stay inside the budget.
+        if len(seen) == 2:
+            clock.advance(float(ADMISSION_BUDGET_SECONDS))
+
+    monkeypatch.setattr(admission_module, "_replace_temporary", slow_replace)
+    with pytest.raises(AdmissionError, match="admission_deadline_exceeded") as error:
+        run_admission(request_, services=services, clock=clock)
+    assert "publish_receipt:temporary_unlinked" in error.value.failure.detail
+
+    identity = evaluation_identity(request_, services.identities[0], _evaluator())
+    receipts = request_.artifact_root / identity / RECEIPTS_DIR_NAME
+    assert not receipts.exists() or list(receipts.iterdir()) == []
+
+
+def test_a_cleanup_that_overruns_the_ceiling_returns_no_pass(
+    request_: AdmissionRequest, services: FakeServices, clock: FakeClock
+) -> None:
+    """Cleanup is inside the ceiling: spending the budget there cannot yield a later pass."""
+
+    services.step_seconds["cleanup"] = float(ADMISSION_BUDGET_SECONDS)
+    with pytest.raises(AdmissionError, match="admission_deadline_exceeded") as error:
+        run_admission(request_, services=services, clock=clock)
+    assert error.value.failure.status == "incomplete"
+    assert "cleanup:after" in error.value.failure.detail
+    assert services.cleanup_called
+
+    identity = evaluation_identity(request_, services.identities[0], _evaluator())
+    receipts = request_.artifact_root / identity / RECEIPTS_DIR_NAME
+    assert not receipts.exists() or not any(entry.suffix == ".json" for entry in receipts.iterdir())
+
+
+def test_the_production_cleanup_receives_and_honours_the_deadline(tmp_path: Path) -> None:
+    """The real cleanup implementation checks the ceiling around its own syscalls."""
+
+    evaluation_root = tmp_path / "evaluation"
+    (evaluation_root / RECEIPTS_DIR_NAME).mkdir(parents=True)
+    run_identity = "b" * 64
+    (evaluation_root / RECEIPTS_DIR_NAME / f".{run_identity}.json.tmp").write_bytes(b"{}")
+
+    clock = FakeClock()
+    expired = Deadline.start(clock, 10.0)
+    clock.advance(11.0)
+    with pytest.raises(DeadlineExceeded, match="cleanup:open"):
+        ProductionAdmissionServices().cleanup(evaluation_root, run_identity, "pass", expired)
+    # Refusing early means the temporary is still there for a run that has budget left.
+    assert (evaluation_root / RECEIPTS_DIR_NAME / f".{run_identity}.json.tmp").is_file()
+
+    live = Deadline.start(FakeClock(), 100.0)
+    assert ProductionAdmissionServices().cleanup(evaluation_root, run_identity, "pass", live) == (
+        "removed_temporary_receipt",
+    )
+    assert not (evaluation_root / RECEIPTS_DIR_NAME / f".{run_identity}.json.tmp").exists()
 
 
 def test_a_held_publication_lock_cannot_carry_a_run_past_its_ceiling(
@@ -994,7 +1239,8 @@ def test_production_cleanup_removes_only_this_runs_temporary_receipt(tmp_path: P
     (receipts / f"{other}.json").write_bytes(b"{}\n")
     (receipts / f".{other}.json.tmp").write_bytes(b"another run's partial state")
 
-    summary = ProductionAdmissionServices().cleanup(evaluation_root, mine, "incomplete")
+    live = Deadline.start(FakeClock(), 100.0)
+    summary = ProductionAdmissionServices().cleanup(evaluation_root, mine, "incomplete", live)
 
     assert summary == ("removed_temporary_receipt",)
     assert not (receipts / f".{mine}.json.tmp").exists()
@@ -1002,11 +1248,12 @@ def test_production_cleanup_removes_only_this_runs_temporary_receipt(tmp_path: P
     assert (receipts / f"{other}.json").is_file()
     assert (receipts / f".{other}.json.tmp").is_file()
     assert (evaluation_root / LOCK_FILE_NAME).is_file()
-    assert ProductionAdmissionServices().cleanup(evaluation_root, mine, "pass") == ()
+    assert ProductionAdmissionServices().cleanup(evaluation_root, mine, "pass", live) == ()
 
 
 def test_production_cleanup_tolerates_a_missing_evaluation_root(tmp_path: Path) -> None:
-    assert ProductionAdmissionServices().cleanup(tmp_path / "absent", "1" * 64, "incomplete") == ()
+    live = Deadline.start(FakeClock(), 100.0)
+    assert ProductionAdmissionServices().cleanup(tmp_path / "absent", "1" * 64, "incomplete", live) == ()
 
 
 # --- issues ------------------------------------------------------------------------

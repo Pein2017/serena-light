@@ -44,6 +44,8 @@ from scripts.backend_eval.runtime import (
     RuntimePreparationError,
     RuntimeRequest,
     minimal_backend_environment,
+    owned_runtime_directory_relpaths,
+    owned_runtime_file_relpaths,
     prepare_candidate_runtime,
     runtime_lock_path,
 )
@@ -1462,3 +1464,174 @@ class _RecordingTimeoutRunner:
     ) -> CommandResult:
         self.timeouts.append(timeout)
         return self.delegate(command, cwd=cwd, env=env, timeout=timeout)
+
+
+# --- the harness-owned permission contract --------------------------------------------
+
+
+def _modes(root: Path, relpaths: tuple[str, ...]) -> dict[str, int]:
+    return {relpath: stat.S_IMODE((root / relpath).stat().st_mode) for relpath in relpaths}
+
+
+def test_owned_runtime_directories_are_the_root_and_every_service_owned_child() -> None:
+    assert owned_runtime_directory_relpaths() == (
+        "",
+        "cache",
+        "config",
+        "home",
+        "tmp",
+        "venv",
+        "config/pyrefly",
+        "config/pyright",
+        "config/ty",
+    )
+
+
+def test_owned_runtime_files_are_the_five_harness_written_paths() -> None:
+    assert owned_runtime_file_relpaths() == (
+        "candidate-requirements.lock",
+        "config/pyrefly/pyrefly.toml",
+        "config/pyright/pyrightconfig.json",
+        "config/ty/ty.toml",
+        "runtime-manifest.json",
+    )
+
+
+def test_a_fresh_runtime_already_satisfies_the_owned_permission_contract(
+    lock: CandidateLock, request_: RuntimeRequest
+) -> None:
+    runtime = prepare_candidate_runtime(lock, request_, runner=_FakeRunner())
+
+    assert set(_modes(runtime.root, owned_runtime_file_relpaths()).values()) == {0o600}
+    for name in owned_runtime_directory_relpaths():
+        assert stat.S_IMODE((runtime.root / name).stat().st_mode) == 0o700
+    assert runtime.permission_repairs == ()
+
+
+def test_reuse_repairs_stale_harness_written_modes_without_touching_bytes(
+    lock: CandidateLock, request_: RuntimeRequest
+) -> None:
+    """A runtime published before the contract carries 0660 files; reuse corrects them."""
+
+    runtime = prepare_candidate_runtime(lock, request_, runner=_FakeRunner())
+    owned = owned_runtime_file_relpaths()
+    before_bytes = {relpath: (runtime.root / relpath).read_bytes() for relpath in owned}
+    for relpath in owned:
+        os.chmod(runtime.root / relpath, 0o660)
+
+    reused = prepare_candidate_runtime(lock, request_, runner=_FakeRunner())
+
+    assert reused.permission_repairs == owned
+    assert set(_modes(reused.root, owned).values()) == {0o600}
+    assert {relpath: (reused.root / relpath).read_bytes() for relpath in owned} == before_bytes
+    # The published manifest digest is a function of bytes alone, so it cannot have moved.
+    assert reused.manifest_sha256 == runtime.manifest_sha256
+
+
+def test_a_second_reuse_reports_no_repair_once_the_modes_are_correct(
+    lock: CandidateLock, request_: RuntimeRequest
+) -> None:
+    prepare_candidate_runtime(lock, request_, runner=_FakeRunner())
+    os.chmod(request_.runtime_base / lock.digest / MANIFEST_FILE_NAME, 0o660)
+
+    first = prepare_candidate_runtime(lock, request_, runner=_FakeRunner())
+    second = prepare_candidate_runtime(lock, request_, runner=_FakeRunner())
+
+    assert first.permission_repairs == (MANIFEST_FILE_NAME,)
+    assert second.permission_repairs == ()
+
+
+def test_reuse_leaves_third_party_cache_internals_at_their_tool_defined_modes(
+    lock: CandidateLock, request_: RuntimeRequest
+) -> None:
+    """The contract is ownership-scoped: uv's own cache files keep uv's modes.
+
+    They are third-party, they live behind a service-owned ``0700`` ancestor, and the
+    receipt's artifact-tree digest excludes the cache entirely, so rewriting them would buy
+    nothing and would break the tool's own assumptions.
+    """
+
+    runtime = prepare_candidate_runtime(lock, request_, runner=_FakeRunner())
+    cache_lock = runtime.cache / ".lock"
+    cache_lock.write_bytes(b"")
+    os.chmod(cache_lock, 0o777)
+    venv_file = runtime.root / "venv" / ".lock"
+    venv_file.write_bytes(b"")
+    os.chmod(venv_file, 0o777)
+
+    reused = prepare_candidate_runtime(lock, request_, runner=_FakeRunner())
+
+    assert reused.permission_repairs == ()
+    assert stat.S_IMODE(cache_lock.stat().st_mode) == 0o777
+    assert stat.S_IMODE(venv_file.stat().st_mode) == 0o777
+    # ...and they are still confined behind service-owned 0700 ancestors.
+    assert stat.S_IMODE(runtime.cache.stat().st_mode) == 0o700
+    assert stat.S_IMODE((runtime.root / "venv").stat().st_mode) == 0o700
+
+
+def test_reuse_refuses_a_harness_owned_path_replaced_by_a_symlink(
+    lock: CandidateLock, request_: RuntimeRequest, tmp_path: Path
+) -> None:
+    """A repair never follows a link, so it can never chmod a target outside the root."""
+
+    runtime = prepare_candidate_runtime(lock, request_, runner=_FakeRunner())
+    outside = tmp_path / "outside.toml"
+    outside.write_bytes(b"outside\n")
+    os.chmod(outside, 0o644)
+    target = runtime.root / "config" / SERVICE_CONFIG_RELPATHS["ty"]
+    target.unlink()
+    target.symlink_to(outside)
+
+    with pytest.raises(RuntimePreparationError, match="without following a link"):
+        prepare_candidate_runtime(lock, request_, runner=_FakeRunner())
+
+    assert stat.S_IMODE(outside.stat().st_mode) == 0o644
+
+
+def test_reuse_refuses_a_widened_service_owned_directory(
+    lock: CandidateLock, request_: RuntimeRequest
+) -> None:
+    runtime = prepare_candidate_runtime(lock, request_, runner=_FakeRunner())
+    os.chmod(runtime.config / "ty", 0o750)
+
+    with pytest.raises(RuntimePreparationError, match="is 0750, not 0700"):
+        prepare_candidate_runtime(lock, request_, runner=_FakeRunner())
+
+
+def test_the_permission_repair_does_not_touch_production(
+    lock: CandidateLock, request_: RuntimeRequest
+) -> None:
+    before = {name: (request_.repo_root / name).stat().st_mode for name in PRODUCTION_IDENTITY_FILES}
+    prepare_candidate_runtime(lock, request_, runner=_FakeRunner())
+    for relpath in owned_runtime_file_relpaths():
+        os.chmod(request_.runtime_base / lock.digest / relpath, 0o660)
+    prepare_candidate_runtime(lock, request_, runner=_FakeRunner())
+
+    assert {name: (request_.repo_root / name).stat().st_mode for name in PRODUCTION_IDENTITY_FILES} == before
+
+
+def test_reuse_refuses_a_symlinked_owned_directory_and_never_chmods_outside(
+    lock: CandidateLock, request_: RuntimeRequest, tmp_path: Path
+) -> None:
+    """An intermediate symlink is refused too: ``O_NOFOLLOW`` only guards the last component.
+
+    Opening ``config/ty/ty.toml`` in one call follows a symlinked ``config/ty``, so a repair
+    that named the whole relative path at once could ``fchmod`` a file outside the runtime
+    root.  Every component is opened from its parent's descriptor instead.
+    """
+
+    runtime = prepare_candidate_runtime(lock, request_, runner=_FakeRunner())
+    outside = tmp_path / "outside-config"
+    outside.mkdir()
+    decoy = outside / "ty.toml"
+    decoy.write_bytes(b"outside\n")
+    os.chmod(decoy, 0o644)
+    os.chmod(outside, 0o755)
+    shutil.rmtree(runtime.config / "ty")
+    (runtime.config / "ty").symlink_to(outside)
+
+    with pytest.raises(RuntimePreparationError, match="without following a link"):
+        prepare_candidate_runtime(lock, request_, runner=_FakeRunner())
+
+    assert stat.S_IMODE(decoy.stat().st_mode) == 0o644
+    assert stat.S_IMODE(outside.stat().st_mode) == 0o755

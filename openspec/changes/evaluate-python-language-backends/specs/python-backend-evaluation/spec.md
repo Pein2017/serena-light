@@ -34,6 +34,18 @@ The evaluation SHALL keep candidate selection, candidate dependencies, temporary
 - **WHEN** a temporary Agent comparison exposes an evaluation MCP
 - **THEN** every arm receives the same MCP name, tool schemas, initialize guidance, shell allowance, model route, effort, task prompt, and budgets while backend identity remains absent from Agent-visible context
 
+#### Scenario: Service-owned state is written
+- **WHEN** the evaluation writes a file, lock, configuration, or receipt it owns, or creates a directory it owns
+- **THEN** that regular file is `0600` and that directory is `0700` regardless of the ambient umask, and the contract covers every harness-written file and every service-owned ancestor directory
+
+#### Scenario: A third-party tool writes inside a service-owned tree
+- **WHEN** a resolver, installer, or candidate creates its own cache or environment files inside a service-owned directory
+- **THEN** those files keep their tool-defined modes rather than being recursively rewritten, remain confined behind `0700` service-owned ancestors, and are excluded from the receipt's artifact-tree digest, so they are outside the evidence the receipt binds
+
+#### Scenario: A retained runtime was built before the permission contract
+- **WHEN** a published runtime is reused and one of its harness-written files still carries a wider mode from an earlier build
+- **THEN** the mode is repaired to `0600` under the same per-digest runtime lock through a descriptor whose every component was opened from its parent without following a link and which is proven regular through that same descriptor, without changing any byte, without altering the published manifest digest, and the whole contract is re-verified before the runtime may be returned
+
 #### Scenario: Evaluation cleanup completes
 - **WHEN** a phase or the full evaluation ends
 - **THEN** temporary registrations, processes, leases, configuration, and service-owned candidate state are retired without changing canonical Serena or the installed Serena Light registration
@@ -217,6 +229,18 @@ The frozen evaluation contract SHALL cap active wall time at 30 minutes for mani
 #### Scenario: Receipt publication itself reaches the ceiling
 - **WHEN** serializing, writing, linking, or synchronizing a phase receipt would finish at or after the frozen ceiling
 - **THEN** the phase publishes no receipt at the final path and fails closed, withdrawing its own link if the ceiling arrived during it, so no `pass` is published or returned after the ceiling
+
+#### Scenario: A step after the receipt link overruns the ceiling
+- **WHEN** any namespace mutation or durability barrier that follows the atomic link -- including the last one before the phase returns -- completes at or after the frozen ceiling
+- **THEN** the expiry is observed at the next boundary, the phase withdraws its own link and its own temporary, and it returns no receipt, so a `pass` can never be earned by work done after the ceiling
+
+#### Scenario: The ceiling arrives while a filesystem call is in flight
+- **WHEN** a `link`, `unlink`, or `fsync` the phase has already entered is still running when the ceiling passes
+- **THEN** the deadline is enforced cooperatively at the next boundary rather than preempting the call, so the linked receipt name may exist transiently while that one call completes; it is withdrawn as soon as the expiry is observed and it is never admitted evidence, because a consumer requires successful command completion and canonical digest verification, neither of which an overrun run supplies
+
+#### Scenario: Evaluation-owned cleanup runs
+- **WHEN** a phase runs its own cleanup before publishing
+- **THEN** cleanup receives the same monotonic deadline, checks it around each of its own syscalls, and is bracketed by a check on both sides, and a ceiling reached in cleanup fails the phase closed rather than being recorded as an issue on an otherwise passing receipt
 
 #### Scenario: A receipt claims a ceiling it was not run under
 - **WHEN** a passing phase receipt carries a phase budget whose seconds differ from the frozen contract value, whether it is constructed in memory or parsed from published bytes

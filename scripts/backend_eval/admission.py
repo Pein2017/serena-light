@@ -26,15 +26,19 @@ timeout receipt; finalization itself is checked against the same absolute ceilin
 closed, without a receipt, rather than publishing evidence it could not complete.  Every
 subprocess receives the remaining time and has its process group killed on expiry, and every
 lock is acquired non-blockingly against the same deadline, so no step can wait past the
-ceiling on another process.
+ceiling on another process.  Cleanup is not an exception: it receives the same deadline and
+checks it around each of its own syscalls.
 
 **Immutable per-execution receipts.**  Each execution has its own ``run_identity`` and
 publishes to ``receipts/<run-identity>.json`` with an exclusive link, so a repeated or
 concurrent run can never delete or replace another run's receipt.  Publication is
 serialized on a per-identity ``O_NOFOLLOW`` lock, writes the payload in deadline-checked
-chunks, links only while a publication reserve remains, and withdraws its own link if the
-ceiling still arrives -- a run that exceeded its budget never leaves a receipt, and never a
-``pass``, at the final path.
+chunks, links only while a publication reserve remains, and re-observes the ceiling after
+every later mutation and durability barrier -- including immediately before it returns --
+withdrawing its own link on the first observed expiry.  A run that exceeded its budget never
+returns a ``pass`` and leaves no receipt at the final path.  The enforcement is cooperative,
+between syscalls: :func:`_publish_receipt` documents the one in-flight-``fsync`` window that
+cannot be preempted, and why that window is not admitted evidence.
 
 **Fail-closed statuses.**  ``pass`` requires equal production identity before and after
 cleanup, one delta per root bound to both manifest digests, no unexpected path, no changed
@@ -59,7 +63,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Protocol
+from typing import NoReturn, Protocol
 
 from scripts.backend_eval.candidate_lock import (
     ARTIFACT_ROOT_BASE_PARTS,
@@ -332,12 +336,23 @@ class AdmissionServices(Protocol):
 
     def artifact_tree_digest(self, artifact_root: Path, deadline: Deadline) -> str: ...
 
-    def cleanup(self, evaluation_root: Path, run_identity: str, stage: str) -> tuple[str, ...]: ...
+    def cleanup(
+        self, evaluation_root: Path, run_identity: str, stage: str, deadline: Deadline
+    ) -> tuple[str, ...]: ...
 
 
 @dataclass(frozen=True, slots=True)
 class ProductionAdmissionServices:
-    """Bind the admission orchestration to the real Task 1-5 implementations."""
+    """Bind the admission orchestration to the real Task 1-5 implementations.
+
+    ``runtime_permission_repairs`` is the one piece of state this binding keeps: the
+    harness-owned runtime files whose mode the serialized reuse had to correct.  The repair
+    itself is verified inside the runtime lock -- a runtime that still violates the contract
+    is never returned, so no run can pass on one -- and this list only carries the record out
+    to the command's summary.
+    """
+
+    runtime_permission_repairs: list[str] = field(default_factory=list)
 
     def capture_production_identity(self, repo_root: Path) -> ProductionIdentity:
         return capture_production_identity(repo_root)
@@ -354,7 +369,9 @@ class ProductionAdmissionServices:
     def prepare_candidate_runtime(
         self, lock: CandidateLock, request: RuntimeRequest, deadline: Deadline
     ) -> CandidateRuntime:
-        return prepare_candidate_runtime(lock, request, deadline=deadline)
+        runtime = prepare_candidate_runtime(lock, request, deadline=deadline)
+        self.runtime_permission_repairs.extend(runtime.permission_repairs)
+        return runtime
 
     def capture_corpus(self, deadline: Deadline) -> tuple[RootManifest, ...]:
         return freeze_default_corpus(deadline=deadline)
@@ -365,16 +382,23 @@ class ProductionAdmissionServices:
     def artifact_tree_digest(self, artifact_root: Path, deadline: Deadline) -> str:
         return artifact_tree_digest(artifact_root, check=lambda: deadline.check("artifact_tree_digest"))
 
-    def cleanup(self, evaluation_root: Path, run_identity: str, stage: str) -> tuple[str, ...]:
+    def cleanup(
+        self, evaluation_root: Path, run_identity: str, stage: str, deadline: Deadline
+    ) -> tuple[str, ...]:
         """Remove exactly the evaluation-owned partial state this module can create.
 
         The frozen candidate lock, the prepared runtime, and every *other* execution's
         receipt are durable evidence owned elsewhere and are never removed here; the only
         partial state admission itself can leave behind is this run's own interrupted
         receipt temporary.
+
+        Cleanup runs inside the phase ceiling like every other step: it receives the same
+        monotonic deadline and checks it cooperatively around each syscall, so a slow or
+        wedged filesystem stops the run rather than carrying it past its budget.
         """
 
         del stage
+        deadline.check("cleanup:open")
         try:
             dir_fd = os.open(evaluation_root / RECEIPTS_DIR_NAME, _NOFOLLOW_DIRECTORY_FLAGS)
         except FileNotFoundError:
@@ -385,6 +409,7 @@ class ProductionAdmissionServices:
             ) from exc
         temporary = _receipt_temporary_name(run_identity)
         try:
+            deadline.check("cleanup:unlink")
             try:
                 os.unlink(temporary, dir_fd=dir_fd)
             except FileNotFoundError:
@@ -395,7 +420,9 @@ class ProductionAdmissionServices:
                     "cleanup_failed",
                     f"cannot remove {evaluation_root / RECEIPTS_DIR_NAME / temporary}: {exc}",
                 ) from exc
+            deadline.check("cleanup:sync")
             os.fsync(dir_fd)
+            deadline.check("cleanup:synced")
         finally:
             os.close(dir_fd)
         return ("removed_temporary_receipt",)
@@ -586,9 +613,7 @@ def run_admission(
         failure = exc.failure
         evidence.issues.append(_issue(request, failure.code, failure.detail))
     status = "pass" if failure is None else failure.status
-    with _translated("incomplete", "admission_deadline_exceeded"):
-        finalize.check("cleanup")
-    status = _cleanup(request, active, evidence, status)
+    status = _cleanup(request, active, evidence, status, finalize)
     _capture_final_production_identity(request, active, evidence, failure)
     status = _bracket_cleanup(request, evidence, status)
     receipt = _build_receipt(
@@ -782,20 +807,36 @@ def _require_no_unexpected_writes(deltas: tuple[WriteDelta, ...]) -> None:
 
 
 def _cleanup(
-    request: AdmissionRequest, services: AdmissionServices, evidence: _Evidence, status: str
+    request: AdmissionRequest,
+    services: AdmissionServices,
+    evidence: _Evidence,
+    status: str,
+    deadline: Deadline,
 ) -> str:
-    """Run the exact evaluation-owned cleanup; a dirty or failed cleanup can never pass."""
+    """Run the exact evaluation-owned cleanup; a dirty or failed cleanup can never pass.
 
+    Cleanup is bracketed by the ceiling on both sides and receives the deadline itself, so
+    an implementation that blocks, traverses, or otherwise spends the remaining budget stops
+    the run.  A ceiling reached here is never downgraded to an issue on an otherwise passing
+    receipt: it raises, and the run publishes nothing.
+    """
+
+    with _translated("incomplete", "admission_deadline_exceeded"):
+        deadline.check("cleanup:before")
     if evidence.evaluation_root is None:
         return status
     try:
-        summary = services.cleanup(evidence.evaluation_root, evidence.run_identity, status)
+        summary = services.cleanup(evidence.evaluation_root, evidence.run_identity, status, deadline)
+    except DeadlineExceeded as exc:
+        raise _fail("incomplete", "admission_deadline_exceeded", f"step=cleanup {exc}") from exc
     except AdmissionError as exc:
         evidence.issues.append(_issue(request, "cleanup_failed", exc.failure.detail))
         return "incomplete"
     except (OSError, RuntimeError, ValueError) as exc:
         evidence.issues.append(_issue(request, "cleanup_failed", str(exc)))
         return "incomplete"
+    with _translated("incomplete", "admission_deadline_exceeded"):
+        deadline.check("cleanup:after")
     if summary:
         evidence.issues.append(_issue(request, "cleanup_removed_partial_state", ", ".join(sorted(summary))))
         return "incomplete"
@@ -921,10 +962,26 @@ def _publish_receipt(
     to serialize, write, ``fsync``, and link, and the publication lock can be held by another
     run.  Every one of those steps is therefore checked against the same absolute deadline:
     acquisition polls without blocking, the payload is written in deadline-checked chunks,
-    and the atomic ``link`` runs only while a small publication reserve is still left.  If
-    the ceiling arrives anyway, the just-created link is removed inside the same lock, so a
-    run that exceeded its budget leaves no receipt -- and never a ``pass`` -- at the final
-    path.  Immutability is unaffected: the only name ever unlinked is this run's own, which
+    and the atomic ``link`` runs only while a small publication reserve is still left.
+
+    After the link, every remaining namespace mutation and every durability barrier is
+    followed by a :class:`_Publication` checkpoint, including one immediately before this
+    function returns, while withdrawal is still possible; only descriptor closes follow it,
+    and they touch neither the namespace nor storage.  Any checkpoint that observes expiry
+    withdraws this run's own link and fails, so no ``pass`` is ever returned after the
+    ceiling and no final receipt is left behind once an overrun has been observed.
+
+    **What that does and does not promise.**  The deadline is enforced *cooperatively*, at
+    the boundaries between syscalls; a filesystem call already in flight is not preemptible.
+    Between ``link`` returning and the next checkpoint -- that is, for as long as one
+    in-flight ``fsync`` takes to complete -- the final name exists in the directory even if
+    the ceiling has already passed.  That entry is withdrawn as soon as expiry is observed,
+    and it is not admitted evidence: a consumer of this gate requires the command to have
+    completed successfully and the receipt to verify canonically against its own digest, and
+    an overrun run supplies neither.  This is a kernel boundary, not a guarantee of zero
+    transient visibility.
+
+    Immutability is unaffected: the only name ever unlinked is this run's own, which
     ``O_EXCL`` and the failing ``link`` prove no other run published.
     """
 
@@ -949,7 +1006,7 @@ def _publish_receipt(
                     # A half-written receipt is never left behind, not even under a dot name.
                     os.close(file_fd)
                     _replace_temporary(receipts_fd, evidence.evaluation_root, temporary)
-                    os.fsync(receipts_fd)
+                    _sync_directory(receipts_fd, evidence.evaluation_root)
                     raise
                 else:
                     os.close(file_fd)
@@ -968,10 +1025,20 @@ def _publish_receipt(
                         "receipt_publication_failed",
                         f"cannot publish the receipt below {evidence.evaluation_root}: {exc}",
                     ) from exc
-                os.fsync(receipts_fd)
-                _require_published_before_ceiling(receipts_fd, evidence.evaluation_root, final, temporary, deadline)
+                # From here the final name exists.  Every remaining namespace mutation and
+                # every durability barrier is followed by an expiry observation, and each
+                # observation can still withdraw this run's own link, so no step after the
+                # link can carry a published pass past the ceiling.
+                published = _Publication(receipts_fd, evidence.evaluation_root, final, temporary, deadline)
+                _sync_directory(receipts_fd, evidence.evaluation_root)
+                published.checkpoint("link_synced")
                 _replace_temporary(receipts_fd, evidence.evaluation_root, temporary)
-                os.fsync(receipts_fd)
+                published.checkpoint("temporary_unlinked")
+                _sync_directory(receipts_fd, evidence.evaluation_root)
+                published.checkpoint("temporary_unlink_synced")
+                # Immediately before returning, while withdrawal is still possible: only
+                # descriptor closes remain, and they touch neither the namespace nor storage.
+                published.checkpoint("return")
             finally:
                 os.close(receipts_fd)
     finally:
@@ -987,7 +1054,7 @@ def _require_publication_window(
     if deadline.remaining() > PUBLICATION_RESERVE_SECONDS:
         return
     _replace_temporary(receipts_fd, evaluation_root, temporary)
-    os.fsync(receipts_fd)
+    _sync_directory(receipts_fd, evaluation_root)
     raise _fail(
         "incomplete",
         "admission_deadline_exceeded",
@@ -996,32 +1063,67 @@ def _require_publication_window(
     )
 
 
-def _require_published_before_ceiling(
-    receipts_fd: int, evaluation_root: Path, final: str, temporary: str, deadline: Deadline
-) -> None:
-    """Undo this run's own publication if the ceiling arrived during the link."""
+@dataclass(frozen=True, slots=True)
+class _Publication:
+    """One linked receipt this run owns, and the ceiling every later step is judged by.
 
-    if not deadline.expired():
-        return
-    for name in (final, temporary):
-        try:
-            os.unlink(name, dir_fd=receipts_fd)
-        except FileNotFoundError:
-            continue
-        except OSError as exc:
-            raise _fail(
-                "incomplete",
-                "receipt_publication_failed",
-                f"the ceiling was reached during publication and {name} below {evaluation_root} "
-                f"could not be withdrawn: {exc}",
-            ) from exc
-    os.fsync(receipts_fd)
-    raise _fail(
-        "incomplete",
-        "admission_deadline_exceeded",
-        f"step=publish_receipt:published elapsed={deadline.elapsed():.3f}s budget={deadline.seconds:g}s; "
-        "the receipt was withdrawn and no evidence was published",
-    )
+    A checkpoint is the only thing that happens between two post-link operations.  It asks
+    the same monotonic deadline whether the ceiling has arrived and, if it has, withdraws
+    the very link this run created before failing, so a run that overran leaves no receipt
+    and returns none.
+    """
+
+    receipts_fd: int
+    evaluation_root: Path
+    final: str
+    temporary: str
+    deadline: Deadline
+
+    def checkpoint(self, step: str) -> None:
+        if not self.deadline.expired():
+            return
+        self.withdraw(step)
+
+    def withdraw(self, step: str) -> NoReturn:
+        """Remove this run's own names -- and only its own -- then fail closed."""
+
+        for name in (self.final, self.temporary):
+            try:
+                os.unlink(name, dir_fd=self.receipts_fd)
+            except FileNotFoundError:
+                continue
+            except OSError as exc:
+                raise _fail(
+                    "incomplete",
+                    "receipt_publication_failed",
+                    f"the ceiling was reached during publication and {name} below "
+                    f"{self.evaluation_root} could not be withdrawn: {exc}",
+                ) from exc
+        _sync_directory(self.receipts_fd, self.evaluation_root)
+        raise _fail(
+            "incomplete",
+            "admission_deadline_exceeded",
+            f"step=publish_receipt:{step} elapsed={self.deadline.elapsed():.3f}s "
+            f"budget={self.deadline.seconds:g}s; the receipt was withdrawn and none was published",
+        )
+
+
+def _sync_directory(dir_fd: int, evaluation_root: Path) -> None:
+    """One durability barrier for a receipts-directory mutation.
+
+    Named rather than inlined so that a test can make exactly this barrier slow and prove
+    the checkpoint after it still refuses -- and withdraws -- a receipt that crossed the
+    ceiling while the barrier was running.
+    """
+
+    try:
+        os.fsync(dir_fd)
+    except OSError as exc:
+        raise _fail(
+            "incomplete",
+            "receipt_publication_failed",
+            f"cannot synchronize the receipts directory below {evaluation_root}: {exc}",
+        ) from exc
 
 
 @contextmanager
@@ -1205,19 +1307,23 @@ def main(
     except ValueError as exc:
         print(f"status=incomplete code=invalid_request detail={exc}")
         return 2
+    active = ProductionAdmissionServices() if services is None else services
     try:
-        receipt = run_admission(request, services=services, clock=clock)
+        receipt = run_admission(request, services=active, clock=clock)
     except AdmissionError as exc:
         print(f"status={exc.failure.status}")
         print(f"issue={_issue(request, exc.failure.code, exc.failure.detail)}")
         print(f"next_action={NEXT_ACTION_HOLD}")
         return 2
-    for line in _summary(request, receipt):
+    repairs = tuple(active.runtime_permission_repairs) if isinstance(active, ProductionAdmissionServices) else ()
+    for line in _summary(request, receipt, repairs):
         print(line)
     return 0 if receipt.status == "pass" else 2
 
 
-def _summary(request: AdmissionRequest, receipt: AdmissionReceipt) -> tuple[str, ...]:
+def _summary(
+    request: AdmissionRequest, receipt: AdmissionReceipt, runtime_permission_repairs: tuple[str, ...] = ()
+) -> tuple[str, ...]:
     unexpected = sum(len(delta.unexpected) for delta in receipt.write_deltas)
     controls = sum(len(delta.control_changes) for delta in receipt.write_deltas)
     evaluator = receipt.evaluator
@@ -1239,6 +1345,7 @@ def _summary(request: AdmissionRequest, receipt: AdmissionReceipt) -> tuple[str,
         f"candidate_versions={','.join(f'{p.name}=={p.version}' for p in receipt.candidate_lock.candidates)}",
         f"runtime_root={'-' if binding is None else binding.root}",
         f"runtime_manifest_sha256={'-' if binding is None else binding.manifest_sha256}",
+        f"runtime_permission_repairs={','.join(sorted(runtime_permission_repairs)) or 'none'}",
         f"artifact_tree_digest={receipt.artifact_tree_digest}",
         f"production_build_identity_before={receipt.production_identity_before.build_identity}",
         f"production_build_identity_after={receipt.production_identity_after.build_identity}",
