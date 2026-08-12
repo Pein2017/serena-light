@@ -9,12 +9,20 @@ and cannot keep a pipe open long enough to block cleanup.
 :class:`Deadline` is the single monotonic ceiling.  ``reserve`` splits one budget into a
 collecting window and a finalization window: the collecting phase stops early enough that
 the run can still publish a trustworthy timeout receipt, while :meth:`Deadline.finalization`
-keeps the same origin and the same absolute ceiling with no reserve.  Nothing in this module
-sleeps, retries, or extends a budget.
+keeps the same origin and the same absolute ceiling with no reserve.  A budget is never
+extended here.
+
+:func:`acquire_exclusive_lock` is the one waiting primitive.  A blocking ``flock`` is the
+last way a bounded phase can silently exceed its ceiling: it waits on another process for
+however long that process holds the lock, outside every deadline check.  Acquisition is
+therefore non-blocking and retried against the same monotonic deadline, in the calling
+thread, with no helper thread, no signal, and no alarm; a lock that is still held when the
+ceiling arrives raises :class:`DeadlineExceeded` like any other expired step.
 """
 
 from __future__ import annotations
 
+import fcntl
 import os
 import signal
 import subprocess
@@ -25,6 +33,8 @@ from pathlib import Path
 from typing import Protocol
 
 __all__ = [
+    "LOCK_POLL_SECONDS",
+    "UNBOUNDED_LOCK_WAIT_SECONDS",
     "Clock",
     "CommandBytesResult",
     "CommandResult",
@@ -32,6 +42,7 @@ __all__ = [
     "CommandTimeout",
     "Deadline",
     "DeadlineExceeded",
+    "acquire_exclusive_lock",
     "monotonic_clock",
     "run_bounded_bytes",
     "subprocess_runner",
@@ -39,9 +50,17 @@ __all__ = [
 
 Clock = Callable[[], float]
 monotonic_clock: Clock = time.monotonic
+Sleep = Callable[[float], None]
 
 # How long a killed process group is given to be reaped before the runner gives up.
 _REAP_SECONDS = 20.0
+
+# How often a contended lock is retried.  Short enough that a released lock is taken
+# promptly, long enough that a long wait costs a negligible number of syscalls.
+LOCK_POLL_SECONDS = 0.05
+
+# A caller with no phase ceiling still never waits forever on another process.
+UNBOUNDED_LOCK_WAIT_SECONDS = 120.0
 
 
 class DeadlineExceeded(RuntimeError):
@@ -88,6 +107,38 @@ class Deadline:
             raise DeadlineExceeded(
                 f"step={step} elapsed={self.elapsed():.3f}s budget={self.seconds:g}s reserve={self.reserve:g}s"
             )
+
+
+def acquire_exclusive_lock(
+    fd: int,
+    *,
+    deadline: Deadline | None,
+    step: str,
+    sleep: Sleep = time.sleep,
+    poll_seconds: float = LOCK_POLL_SECONDS,
+) -> None:
+    """Take an exclusive ``flock`` without ever waiting past the monotonic ceiling.
+
+    A caller that has no deadline still gets a bounded wait: an evaluation step may fail,
+    but it may not hang on another process's lock.
+    """
+
+    bound = deadline
+    if bound is None:
+        bound = Deadline.start(monotonic_clock, UNBOUNDED_LOCK_WAIT_SECONDS)
+    while True:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return
+        except BlockingIOError:
+            pass
+        remaining = bound.remaining()
+        if remaining <= 0.0:
+            raise DeadlineExceeded(
+                f"step={step} could not acquire an exclusive lock before the ceiling: "
+                f"elapsed={bound.elapsed():.3f}s budget={bound.seconds:g}s reserve={bound.reserve:g}s"
+            )
+        sleep(min(poll_seconds, remaining))
 
 
 @dataclass(frozen=True, slots=True)

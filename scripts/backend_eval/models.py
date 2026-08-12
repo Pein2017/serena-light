@@ -339,30 +339,31 @@ class EvaluatorIdentity:
     ``source_digest`` is recomputed from ``source_files``, so a receipt cannot claim a
     source closure it does not carry.  ``source_commit`` is recorded when the checkout is
     a clean Git tree, as corroboration -- never instead of the executed bytes.
+
+    The evaluator is not only ``scripts/backend_eval``.  Manifests, the write guard, and the
+    production-identity capture execute ``serena_light`` helpers, which a CLI host virtual
+    environment can resolve into another checkout entirely.  ``production_files`` therefore
+    carries the bytes of every executed production helper, ``production_root`` names the
+    checkout they were loaded from, and ``production_clean`` records whether that source was
+    clean at ``source_commit``.  Both closures feed the evaluation identity, so a changed or
+    repointed helper produces different evidence rather than silently different behaviour.
     """
 
     source_digest: str
     source_files: tuple[tuple[str, str], ...]
     source_commit: str | None
     source_clean: bool
+    production_root: str
+    production_digest: str
+    production_files: tuple[tuple[str, str], ...]
+    production_clean: bool
     host_python_path: str
     host_python_realpath: str
     host_python_sha256: str
     host_python_version: str
 
     def __post_init__(self) -> None:
-        files = _validate_tuple(self.source_files, "EvaluatorIdentity.source_files")
-        if not files:
-            raise ValueError("EvaluatorIdentity.source_files must not be empty")
-        names: list[str] = []
-        for entry in files:
-            if not isinstance(entry, tuple) or len(entry) != 2:
-                raise ValueError("EvaluatorIdentity.source_files entries must be (relative path, digest) tuples")
-            name, digest = entry
-            _validate_relative_path(name, "EvaluatorIdentity.source_files path")
-            _validate_sha256(digest, f"EvaluatorIdentity.source_files[{name}]")
-            names.append(name)
-        _validate_sorted_unique(names, "EvaluatorIdentity.source_files")
+        _validate_digest_pairs(self.source_files, "EvaluatorIdentity.source_files")
         _validate_sha256(self.source_digest, "EvaluatorIdentity.source_digest")
         if self.source_digest != _evaluator_source_digest(self.source_files):
             raise ValueError("EvaluatorIdentity.source_digest must be recomputable from source_files")
@@ -372,6 +373,15 @@ class EvaluatorIdentity:
             raise ValueError("EvaluatorIdentity.source_clean must be a boolean")
         if self.source_commit is None and self.source_clean:
             raise ValueError("EvaluatorIdentity.source_clean requires a recorded source_commit")
+        _validate_absolute_path(self.production_root, "EvaluatorIdentity.production_root")
+        _validate_digest_pairs(self.production_files, "EvaluatorIdentity.production_files")
+        _validate_sha256(self.production_digest, "EvaluatorIdentity.production_digest")
+        if self.production_digest != _production_source_digest(self.production_files):
+            raise ValueError("EvaluatorIdentity.production_digest must be recomputable from production_files")
+        if not isinstance(self.production_clean, bool):
+            raise ValueError("EvaluatorIdentity.production_clean must be a boolean")
+        if self.source_commit is None and self.production_clean:
+            raise ValueError("EvaluatorIdentity.production_clean requires a recorded source_commit")
         _validate_absolute_path(self.host_python_path, "EvaluatorIdentity.host_python_path")
         _validate_absolute_path(self.host_python_realpath, "EvaluatorIdentity.host_python_realpath")
         _validate_sha256(self.host_python_sha256, "EvaluatorIdentity.host_python_sha256")
@@ -383,6 +393,9 @@ class EvaluatorIdentity:
         source_files: tuple[tuple[str, str], ...],
         source_commit: str | None,
         source_clean: bool,
+        production_root: str,
+        production_files: tuple[tuple[str, str], ...],
+        production_clean: bool,
         host_python_path: str,
         host_python_realpath: str,
         host_python_sha256: str,
@@ -393,6 +406,10 @@ class EvaluatorIdentity:
             source_files=source_files,
             source_commit=source_commit,
             source_clean=source_clean,
+            production_root=production_root,
+            production_digest=_production_source_digest(production_files),
+            production_files=production_files,
+            production_clean=production_clean,
             host_python_path=host_python_path,
             host_python_realpath=host_python_realpath,
             host_python_sha256=host_python_sha256,
@@ -407,12 +424,37 @@ def _evaluator_source_digest(source_files: tuple[tuple[str, str], ...]) -> str:
     return sha256_bytes(canonical_json({"source_files": [list(entry) for entry in source_files]}))
 
 
+def _production_source_digest(production_files: tuple[tuple[str, str], ...]) -> str:
+    return sha256_bytes(canonical_json({"production_files": [list(entry) for entry in production_files]}))
+
+
+def _validate_digest_pairs(files: object, label: str) -> None:
+    """One non-empty, canonically sorted closure of ``(relative path, SHA-256)`` pairs."""
+
+    entries = _validate_tuple(files, label)
+    if not entries:
+        raise ValueError(f"{label} must not be empty")
+    names: list[str] = []
+    for entry in entries:
+        if not isinstance(entry, tuple) or len(entry) != 2:
+            raise ValueError(f"{label} entries must be (relative path, digest) tuples")
+        name, digest = entry
+        _validate_relative_path(name, f"{label} path")
+        _validate_sha256(digest, f"{label}[{name}]")
+        names.append(name)
+    _validate_sorted_unique(names, label)
+
+
 _EVALUATOR_IDENTITY_FIELDS = frozenset(
     {
         "source_digest",
         "source_files",
         "source_commit",
         "source_clean",
+        "production_root",
+        "production_digest",
+        "production_files",
+        "production_clean",
         "host_python_path",
         "host_python_realpath",
         "host_python_sha256",
@@ -427,6 +469,10 @@ def _evaluator_identity_to_dict(identity: EvaluatorIdentity) -> dict[str, object
         "source_files": [list(entry) for entry in identity.source_files],
         "source_commit": identity.source_commit,
         "source_clean": identity.source_clean,
+        "production_root": identity.production_root,
+        "production_digest": identity.production_digest,
+        "production_files": [list(entry) for entry in identity.production_files],
+        "production_clean": identity.production_clean,
         "host_python_path": identity.host_python_path,
         "host_python_realpath": identity.host_python_realpath,
         "host_python_sha256": identity.host_python_sha256,
@@ -442,6 +488,10 @@ def _evaluator_identity_from_dict(value: object) -> EvaluatorIdentity:
         source_files=_expect_pair_list(mapping["source_files"], "EvaluatorIdentity.source_files"),
         source_commit=_optional_str(mapping["source_commit"], "EvaluatorIdentity.source_commit"),
         source_clean=_expect_bool(mapping["source_clean"], "EvaluatorIdentity.source_clean"),
+        production_root=_expect_str(mapping["production_root"], "EvaluatorIdentity.production_root"),
+        production_digest=_expect_str(mapping["production_digest"], "EvaluatorIdentity.production_digest"),
+        production_files=_expect_pair_list(mapping["production_files"], "EvaluatorIdentity.production_files"),
+        production_clean=_expect_bool(mapping["production_clean"], "EvaluatorIdentity.production_clean"),
         host_python_path=_expect_str(mapping["host_python_path"], "EvaluatorIdentity.host_python_path"),
         host_python_realpath=_expect_str(mapping["host_python_realpath"], "EvaluatorIdentity.host_python_realpath"),
         host_python_sha256=_expect_str(mapping["host_python_sha256"], "EvaluatorIdentity.host_python_sha256"),
@@ -1319,14 +1369,13 @@ class AdmissionReceipt:
         ended = _validate_utc_timestamp(self.ended_at, "AdmissionReceipt.ended_at")
         if ended < started:
             raise ValueError("AdmissionReceipt.ended_at must not precede started_at")
-        budget_names = {budget.name for budget in budgets}
-        if budget_names != set(DEFAULT_PHASE_BUDGETS):
+        # Every frozen budget, by name *and* by exact seconds: a pass may not silently
+        # widen the admission ceiling or any later phase's ceiling.
+        if tuple(sorted(budgets, key=lambda budget: budget.name)) != default_phase_budgets():
+            observed = sorted((budget.name, budget.seconds) for budget in budgets)
             raise ValueError(
-                f"AdmissionReceipt status is pass but budgets are not the frozen Phase 1 set: {sorted(budget_names)}"
+                f"AdmissionReceipt status is pass but budgets are not the frozen Phase 1 set: {observed}"
             )
-        admission = next(budget for budget in budgets if budget.name == "admission")
-        if admission.seconds <= 0:
-            raise ValueError("AdmissionReceipt status is pass but the admission budget is not positive")
         if self.evaluator is None:
             raise ValueError("AdmissionReceipt status is pass but no evaluator identity is bound")
         if self.bootstrap_environment is None:

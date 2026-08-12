@@ -48,7 +48,10 @@ from scripts.backend_eval.models import PathRecord, RootManifest, canonical_json
 from scripts.backend_eval.process import CommandTimeout, Deadline, run_bounded_bytes
 from serena_light.workspace.identity import open_guarded_directory
 
-# Evaluation-only reuse of production's *pure* inventory helpers.  Neither touches a
+# Evaluation-only reuse of production's *pure* inventory helpers.  These are executed
+# production semantics, so :mod:`scripts.backend_eval.source_binding` resolves them from this
+# evaluator's own checkout and binds their bytes into every receipt.
+#  Neither touches a
 # subprocess: they only decode, normalize, and inspect candidate paths through guarded
 # descriptors.  Importing them is what lets the evaluation bound the one Git command
 # ``git_trust_inventory`` would otherwise start for itself while keeping byte-identical

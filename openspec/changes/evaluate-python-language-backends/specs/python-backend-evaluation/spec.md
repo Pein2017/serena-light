@@ -74,11 +74,19 @@ Candidate language servers SHALL use service-owned HOME, configuration, cache, e
 - **THEN** the mutation occurs only in a disposable snapshot, the intended mutation is declared separately from backend side effects, and the snapshot is destroyed after evidence capture
 
 ### Requirement: Every receipt binds its evaluator, host, environment, and runtime
-Every phase receipt SHALL be bound to the exact evaluator source closure that produced it, the CLI host interpreter that executed it, the environment its bootstrap downloads received, and the service-owned candidate runtime it evaluated, and each execution SHALL publish immutable evidence that no later execution can replace.
+Every phase receipt SHALL be bound to the exact evaluator source closure that produced it, the exact production helpers that closure executed, the CLI host interpreter that executed it, the environment its bootstrap downloads received, and the service-owned candidate runtime it evaluated, and each execution SHALL publish immutable evidence that no later execution can replace.
 
 #### Scenario: A receipt is published
 - **WHEN** any phase publishes a receipt
 - **THEN** it records the digest of the executed evaluation source closure, the source Git commit and whether that source was clean, the CLI host interpreter's configured path, realpath, SHA-256, and version, and the candidate runtime's logical root and canonical runtime-manifest SHA-256 recomputed from disk before the gate can pass
+
+#### Scenario: A phase executes a production helper
+- **WHEN** evaluation code imports and runs a non-stdlib production helper for manifests, write detection, or production identity
+- **THEN** the receipt records that helper's origin root, per-file byte digest, recomputed closure digest, and cleanliness at the recorded commit, and both the evaluator and the production closure are part of the reproducible evaluation identity
+
+#### Scenario: An executed helper resolves outside the evaluator's own checkout
+- **WHEN** a loaded production helper resolves, by realpath, to another checkout, to installed site-packages, or to any path outside the evaluator checkout's own source tree
+- **THEN** the phase fails closed without publishing a receipt, rather than executing code whose bytes its identity does not name
 
 #### Scenario: Evaluation code or the CLI host changes
 - **WHEN** the evaluation source closure, the CLI host interpreter, or the artifact root differs from an earlier run
@@ -188,7 +196,7 @@ The frozen evaluation contract SHALL cap active wall time at 30 minutes for mani
 
 #### Scenario: A phase ceiling is measured
 - **WHEN** a phase measures its own wall time
-- **THEN** the ceiling covers every step the phase performs, including resolution, preparation, each snapshot capture, cleanup, final identity checks, artifact digests, and receipt publication, and is not limited to the phase's expensive middle
+- **THEN** the ceiling covers every step the phase performs, including resolution, preparation, each snapshot capture, cleanup, final identity checks, artifact digests, lock acquisition, and receipt publication, and is not limited to the phase's expensive middle
 
 #### Scenario: A child process does not return
 - **WHEN** an evaluation-started subprocess exceeds the phase's remaining time
@@ -201,6 +209,18 @@ The frozen evaluation contract SHALL cap active wall time at 30 minutes for mani
 #### Scenario: A phase reaches its ceiling with usable evidence
 - **WHEN** collection reaches the ceiling but the phase already holds the identities and frozen inputs a timeout receipt requires
 - **THEN** a reserved finalization window publishes that timeout receipt, and a phase that cannot complete even that evidence fails closed without publishing a receipt
+
+#### Scenario: A lock the phase needs is held by another process
+- **WHEN** a phase waits for the candidate-resolution, candidate-runtime, or receipt-publication lock
+- **THEN** acquisition is non-blocking and retried against the same monotonic ceiling, and a lock still held at the ceiling raises the phase's typed timeout instead of waiting outside the budget
+
+#### Scenario: Receipt publication itself reaches the ceiling
+- **WHEN** serializing, writing, linking, or synchronizing a phase receipt would finish at or after the frozen ceiling
+- **THEN** the phase publishes no receipt at the final path and fails closed, withdrawing its own link if the ceiling arrived during it, so no `pass` is published or returned after the ceiling
+
+#### Scenario: A receipt claims a ceiling it was not run under
+- **WHEN** a passing phase receipt carries a phase budget whose seconds differ from the frozen contract value, whether it is constructed in memory or parsed from published bytes
+- **THEN** the receipt is refused, so a `pass` can never be published against a widened or narrowed ceiling
 
 #### Scenario: The total ceiling is reached
 - **WHEN** cumulative active evaluation time reaches 16 hours

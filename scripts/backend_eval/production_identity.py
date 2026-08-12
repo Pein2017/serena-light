@@ -41,7 +41,9 @@ def capture_production_identity(repo_root: Path) -> ProductionIdentity:
     """Return the byte-exact production identity of ``repo_root``.
 
     The dependency-lock digest, build identity, and runtime paths come from the
-    production implementations; only the per-file digests are computed here.
+    production implementations; only the per-file digests are computed here.  Those
+    implementations are executed evaluator code, so
+    :mod:`scripts.backend_eval.source_binding` binds their bytes into every receipt.
     """
 
     root = repo_root.resolve()

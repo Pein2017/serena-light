@@ -50,7 +50,6 @@ other process seam.
 
 from __future__ import annotations
 
-import fcntl
 import json
 import os
 import re
@@ -76,6 +75,7 @@ from scripts.backend_eval.process import (
     CommandRunner,
     CommandTimeout,
     Deadline,
+    acquire_exclusive_lock,
     subprocess_runner,
 )
 from scripts.backend_eval.production_identity import (
@@ -185,7 +185,10 @@ def compile_candidate_lock(
 
     before = capture_production_identity(request.repo_root)
     try:
-        with _artifact_directory(request) as dir_fd, _resolution_lock(dir_fd, request.artifact_root):
+        with (
+            _artifact_directory(request) as dir_fd,
+            _resolution_lock(dir_fd, request.artifact_root, deadline),
+        ):
             # Under the exclusive lock, any marker still present belongs to a caller that
             # has already exited: a live concurrent transaction can never be rolled back.
             _recover_interrupted_transaction(dir_fd)
@@ -383,8 +386,12 @@ def _run(
 
 
 @contextmanager
-def _resolution_lock(dir_fd: int, artifact_root: Path) -> Iterator[None]:
-    """Serialize every caller of one artifact identity on an ``O_NOFOLLOW`` lock file."""
+def _resolution_lock(dir_fd: int, artifact_root: Path, deadline: Deadline | None) -> Iterator[None]:
+    """Serialize every caller of one artifact identity on an ``O_NOFOLLOW`` lock file.
+
+    Acquisition is bounded by the phase deadline: waiting for another resolver is a step
+    like any other and may not push the run past its ceiling.
+    """
 
     try:
         fd = os.open(
@@ -397,7 +404,7 @@ def _resolution_lock(dir_fd: int, artifact_root: Path) -> Iterator[None]:
     try:
         os.fchmod(fd, 0o600)
         try:
-            fcntl.flock(fd, fcntl.LOCK_EX)
+            acquire_exclusive_lock(fd, deadline=deadline, step="candidate_resolution_lock")
         except OSError as exc:
             raise CandidateLockError(f"cannot lock {artifact_root / RESOLUTION_LOCK_NAME}: {exc}") from exc
         yield

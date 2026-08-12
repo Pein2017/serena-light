@@ -19,17 +19,22 @@ is constructed, so every delta is bound to the two manifest digests it was deriv
 
 **One ceiling for the whole gate.**  The frozen 1800-second admission budget covers
 resolution, runtime preparation, both corpus captures, cleanup, the final production
-identity, the artifact digest, and receipt publication.  Collection stops early enough to
-leave a reserved finalization window, so a run that reaches the ceiling can still publish a
-trustworthy timeout receipt; finalization itself is checked against the same absolute
-ceiling and fails closed, without a receipt, rather than publishing evidence it could not
-complete.  Every subprocess receives the remaining time and has its process group killed on
-expiry.
+identity, the artifact digest, and receipt publication -- *including* the waiting and the
+I/O publication itself performs.  Collection stops early enough to leave a reserved
+finalization window, so a run that reaches the ceiling can still publish a trustworthy
+timeout receipt; finalization itself is checked against the same absolute ceiling and fails
+closed, without a receipt, rather than publishing evidence it could not complete.  Every
+subprocess receives the remaining time and has its process group killed on expiry, and every
+lock is acquired non-blockingly against the same deadline, so no step can wait past the
+ceiling on another process.
 
 **Immutable per-execution receipts.**  Each execution has its own ``run_identity`` and
 publishes to ``receipts/<run-identity>.json`` with an exclusive link, so a repeated or
 concurrent run can never delete or replace another run's receipt.  Publication is
-serialized on a per-identity ``O_NOFOLLOW`` lock.
+serialized on a per-identity ``O_NOFOLLOW`` lock, writes the payload in deadline-checked
+chunks, links only while a publication reserve remains, and withdraws its own link if the
+ceiling still arrives -- a run that exceeded its budget never leaves a receipt, and never a
+``pass``, at the final path.
 
 **Fail-closed statuses.**  ``pass`` requires equal production identity before and after
 cleanup, one delta per root bound to both manifest digests, no unexpected path, no changed
@@ -44,7 +49,6 @@ run raises instead of publishing a receipt that would understate what is unknown
 from __future__ import annotations
 
 import argparse
-import fcntl
 import os
 import re
 import secrets
@@ -92,6 +96,7 @@ from scripts.backend_eval.process import (
     Clock,
     Deadline,
     DeadlineExceeded,
+    acquire_exclusive_lock,
     monotonic_clock,
 )
 from scripts.backend_eval.production_identity import (
@@ -122,6 +127,7 @@ __all__ = [
     "NEXT_ACTION_HOLD",
     "NEXT_ACTION_PASS",
     "PUBLICATION_LOCK_NAME",
+    "PUBLICATION_RESERVE_SECONDS",
     "RECEIPTS_DIR_NAME",
     "AdmissionError",
     "AdmissionFailure",
@@ -144,6 +150,8 @@ ADMISSION_BUDGET_SECONDS = next(
 )
 # Collection stops this far before the ceiling so a timeout receipt can still be published.
 FINALIZATION_RESERVE_SECONDS = 300
+# The window the atomic link and its directory ``fsync`` must still have in front of them.
+PUBLICATION_RESERVE_SECONDS = 5.0
 RECEIPTS_DIR_NAME = "receipts"
 PUBLICATION_LOCK_NAME = ".admission-publication.lock"
 MAX_ISSUES = 20
@@ -160,6 +168,8 @@ _TRUNCATION_MARKER = "...(truncated)"
 _DIRECTORY_FLAGS = os.O_RDONLY | os.O_DIRECTORY
 _NOFOLLOW_DIRECTORY_FLAGS = _DIRECTORY_FLAGS | os.O_NOFOLLOW
 _CREATE_FLAGS = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
+# One receipt is tens of megabytes; writing it in chunks keeps the ceiling observable.
+_WRITE_CHUNK_BYTES = 4 * 1024 * 1024
 _READ_FLAGS = os.O_RDONLY | os.O_NOFOLLOW
 _DIRECTORY_MODE = 0o700
 _FILE_MODE = 0o600
@@ -586,7 +596,7 @@ def run_admission(
     )
     with _translated("incomplete", "admission_deadline_exceeded"):
         finalize.check("publish_receipt")
-    _publish_receipt(request, evidence, receipt)
+    _publish_receipt(request, evidence, receipt, finalize)
     return receipt
 
 
@@ -898,31 +908,52 @@ def _sorted_manifests(manifests: tuple[RootManifest, ...]) -> tuple[RootManifest
 # --- receipt publication ----------------------------------------------------------------
 
 
-def _publish_receipt(request: AdmissionRequest, evidence: _Evidence, receipt: AdmissionReceipt) -> Path:
+def _publish_receipt(
+    request: AdmissionRequest, evidence: _Evidence, receipt: AdmissionReceipt, deadline: Deadline
+) -> Path:
     """Write this run's receipt exclusively and durably, never replacing another run's.
 
     The temporary is created with ``O_EXCL`` and linked -- not renamed -- onto the canonical
     per-run name, so an existing receipt is never overwritten even by an identical run
     identity.  Publication holds the per-identity ``O_NOFOLLOW`` lock.
+
+    **Publication is inside the ceiling, not after it.**  A 39.7 MB receipt takes real time
+    to serialize, write, ``fsync``, and link, and the publication lock can be held by another
+    run.  Every one of those steps is therefore checked against the same absolute deadline:
+    acquisition polls without blocking, the payload is written in deadline-checked chunks,
+    and the atomic ``link`` runs only while a small publication reserve is still left.  If
+    the ceiling arrives anyway, the just-created link is removed inside the same lock, so a
+    run that exceeded its budget leaves no receipt -- and never a ``pass`` -- at the final
+    path.  Immutability is unaffected: the only name ever unlinked is this run's own, which
+    ``O_EXCL`` and the failing ``link`` prove no other run published.
     """
 
     assert evidence.evaluation_root is not None
+    with _translated("incomplete", "admission_deadline_exceeded"):
+        deadline.check("publish_receipt:serialize")
     payload = canonical_json(receipt.to_dict())
     temporary = _receipt_temporary_name(receipt.run_identity)
     final = f"{receipt.run_identity}.json"
     evaluation_fd = _open_evaluation_directory(request.repo_root, evidence.evaluation_root)
     try:
-        with _publication_lock(evaluation_fd, evidence.evaluation_root):
+        with _publication_lock(evaluation_fd, evidence.evaluation_root, deadline):
             receipts_fd = _open_owned_child(evaluation_fd, RECEIPTS_DIR_NAME, evidence.evaluation_root)
             try:
                 _replace_temporary(receipts_fd, evidence.evaluation_root, temporary)
                 file_fd = os.open(temporary, _CREATE_FLAGS, _FILE_MODE, dir_fd=receipts_fd)
                 try:
                     os.fchmod(file_fd, _FILE_MODE)
-                    _write_all(file_fd, payload, evidence.evaluation_root)
+                    _write_all(file_fd, payload, evidence.evaluation_root, deadline)
                     os.fsync(file_fd)
-                finally:
+                except BaseException:
+                    # A half-written receipt is never left behind, not even under a dot name.
                     os.close(file_fd)
+                    _replace_temporary(receipts_fd, evidence.evaluation_root, temporary)
+                    os.fsync(receipts_fd)
+                    raise
+                else:
+                    os.close(file_fd)
+                _require_publication_window(receipts_fd, evidence.evaluation_root, temporary, deadline)
                 try:
                     os.link(temporary, final, src_dir_fd=receipts_fd, dst_dir_fd=receipts_fd, follow_symlinks=False)
                 except FileExistsError as exc:
@@ -938,6 +969,7 @@ def _publish_receipt(request: AdmissionRequest, evidence: _Evidence, receipt: Ad
                         f"cannot publish the receipt below {evidence.evaluation_root}: {exc}",
                     ) from exc
                 os.fsync(receipts_fd)
+                _require_published_before_ceiling(receipts_fd, evidence.evaluation_root, final, temporary, deadline)
                 _replace_temporary(receipts_fd, evidence.evaluation_root, temporary)
                 os.fsync(receipts_fd)
             finally:
@@ -947,8 +979,53 @@ def _publish_receipt(request: AdmissionRequest, evidence: _Evidence, receipt: Ad
     return admission_receipt_path(request.artifact_root, receipt.evaluation_identity, receipt.run_identity)
 
 
+def _require_publication_window(
+    receipts_fd: int, evaluation_root: Path, temporary: str, deadline: Deadline
+) -> None:
+    """Refuse to link a receipt that cannot be completed inside the ceiling."""
+
+    if deadline.remaining() > PUBLICATION_RESERVE_SECONDS:
+        return
+    _replace_temporary(receipts_fd, evaluation_root, temporary)
+    os.fsync(receipts_fd)
+    raise _fail(
+        "incomplete",
+        "admission_deadline_exceeded",
+        f"step=publish_receipt:link elapsed={deadline.elapsed():.3f}s budget={deadline.seconds:g}s "
+        f"reserve={PUBLICATION_RESERVE_SECONDS:g}s; the receipt was not published",
+    )
+
+
+def _require_published_before_ceiling(
+    receipts_fd: int, evaluation_root: Path, final: str, temporary: str, deadline: Deadline
+) -> None:
+    """Undo this run's own publication if the ceiling arrived during the link."""
+
+    if not deadline.expired():
+        return
+    for name in (final, temporary):
+        try:
+            os.unlink(name, dir_fd=receipts_fd)
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            raise _fail(
+                "incomplete",
+                "receipt_publication_failed",
+                f"the ceiling was reached during publication and {name} below {evaluation_root} "
+                f"could not be withdrawn: {exc}",
+            ) from exc
+    os.fsync(receipts_fd)
+    raise _fail(
+        "incomplete",
+        "admission_deadline_exceeded",
+        f"step=publish_receipt:published elapsed={deadline.elapsed():.3f}s budget={deadline.seconds:g}s; "
+        "the receipt was withdrawn and no evidence was published",
+    )
+
+
 @contextmanager
-def _publication_lock(evaluation_fd: int, evaluation_root: Path) -> Iterator[None]:
+def _publication_lock(evaluation_fd: int, evaluation_root: Path, deadline: Deadline) -> Iterator[None]:
     try:
         fd = os.open(
             PUBLICATION_LOCK_NAME,
@@ -964,7 +1041,8 @@ def _publication_lock(evaluation_fd: int, evaluation_root: Path) -> Iterator[Non
         ) from exc
     try:
         os.fchmod(fd, _FILE_MODE)
-        fcntl.flock(fd, fcntl.LOCK_EX)
+        with _translated("incomplete", "admission_deadline_exceeded"):
+            acquire_exclusive_lock(fd, deadline=deadline, step="publish_receipt:lock")
         yield
     except OSError as exc:
         raise _fail(
@@ -987,11 +1065,15 @@ def _replace_temporary(dir_fd: int, evaluation_root: Path, temporary: str) -> No
         ) from exc
 
 
-def _write_all(file_fd: int, payload: bytes, evaluation_root: Path) -> None:
+def _write_all(file_fd: int, payload: bytes, evaluation_root: Path, deadline: Deadline) -> None:
+    """Write the payload in bounded chunks, checking the ceiling between each one."""
+
     written = 0
     while written < len(payload):
+        with _translated("incomplete", "admission_deadline_exceeded"):
+            deadline.check("publish_receipt:write")
         try:
-            written += os.write(file_fd, payload[written:])
+            written += os.write(file_fd, payload[written : written + _WRITE_CHUNK_BYTES])
         except OSError as exc:
             raise _fail(
                 "incomplete", "receipt_publication_failed", f"cannot write the receipt below {evaluation_root}: {exc}"

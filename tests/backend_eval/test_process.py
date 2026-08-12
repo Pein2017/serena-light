@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import fcntl
 import os
 import signal
 import time
@@ -13,6 +14,7 @@ from scripts.backend_eval.process import (
     CommandTimeout,
     Deadline,
     DeadlineExceeded,
+    acquire_exclusive_lock,
     run_bounded_bytes,
     subprocess_runner,
 )
@@ -113,3 +115,82 @@ def test_subprocess_runner_starts_a_new_session_so_signals_stay_contained(tmp_pa
     assert pid == pgid
     assert pgid != os.getpgid(0)
     assert signal.SIGKILL is not None
+
+
+# --- deadline-aware lock acquisition -------------------------------------------------
+
+
+def _lock_fd(path: Path) -> int:
+    return os.open(path, os.O_RDWR | os.O_CREAT | os.O_CLOEXEC, 0o600)
+
+
+def test_acquire_exclusive_lock_takes_a_free_lock_without_waiting(tmp_path: Path) -> None:
+    clock = _Clock()
+    fd = _lock_fd(tmp_path / "free.lock")
+    try:
+        slept: list[float] = []
+        acquire_exclusive_lock(fd, deadline=Deadline.start(clock, 100), step="free", sleep=slept.append)
+        assert slept == []
+    finally:
+        os.close(fd)
+
+
+def test_acquire_exclusive_lock_stops_at_the_ceiling_instead_of_blocking(tmp_path: Path) -> None:
+    """A contended lock is the last way a bounded phase can silently overrun its ceiling."""
+
+    path = tmp_path / "contended.lock"
+    holder = _lock_fd(path)
+    fcntl.flock(holder, fcntl.LOCK_EX)
+    waiter = _lock_fd(path)
+    clock = _Clock()
+    deadline = Deadline.start(clock, 1.0)
+    started = time.monotonic()
+    try:
+        with pytest.raises(DeadlineExceeded, match="step=contended"):
+            acquire_exclusive_lock(waiter, deadline=deadline, step="contended", sleep=clock.advance)
+    finally:
+        os.close(waiter)
+        os.close(holder)
+    # The wall clock never moved: waiting was accounted against the deadline, not slept away.
+    assert time.monotonic() - started < 5.0
+    assert clock.now == pytest.approx(1.0)
+
+
+def test_acquire_exclusive_lock_acquires_as_soon_as_the_holder_releases(tmp_path: Path) -> None:
+    path = tmp_path / "released.lock"
+    holder = _lock_fd(path)
+    fcntl.flock(holder, fcntl.LOCK_EX)
+    waiter = _lock_fd(path)
+    clock = _Clock()
+    releases: list[float] = []
+
+    def sleep(seconds: float) -> None:
+        releases.append(seconds)
+        clock.advance(seconds)
+        if len(releases) == 2:
+            fcntl.flock(holder, fcntl.LOCK_UN)
+
+    try:
+        acquire_exclusive_lock(waiter, deadline=Deadline.start(clock, 100), step="released", sleep=sleep)
+    finally:
+        os.close(waiter)
+        os.close(holder)
+    assert len(releases) == 2
+
+
+def test_acquire_exclusive_lock_is_bounded_even_without_a_phase_deadline(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("scripts.backend_eval.process.UNBOUNDED_LOCK_WAIT_SECONDS", 0.2)
+    path = tmp_path / "unbounded.lock"
+    holder = _lock_fd(path)
+    fcntl.flock(holder, fcntl.LOCK_EX)
+    waiter = _lock_fd(path)
+    started = time.monotonic()
+    try:
+        with pytest.raises(DeadlineExceeded, match="step=no_deadline"):
+            acquire_exclusive_lock(waiter, deadline=None, step="no_deadline")
+    finally:
+        os.close(waiter)
+        os.close(holder)
+    assert time.monotonic() - started < 5.0

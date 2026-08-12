@@ -89,6 +89,7 @@ from scripts.backend_eval.process import (
     CommandRunner,
     CommandTimeout,
     Deadline,
+    acquire_exclusive_lock,
     subprocess_runner,
 )
 from scripts.backend_eval.production_identity import (
@@ -412,7 +413,7 @@ def _prepare(
     try:
         _require_physical_identity(base_fd, request.runtime_base)
         _require_outside_protected(request.runtime_base, request.repo_root, RuntimePreparationError)
-        with _runtime_lock(base_fd, request.runtime_base, lock.digest):
+        with _runtime_lock(base_fd, request.runtime_base, lock.digest, deadline):
             # Opened once with O_NOFOLLOW and held open: every later path resolves through it.
             root_fd = _open_confined_child(base_fd, logical_root.name, logical_root)
             try:
@@ -781,11 +782,13 @@ def _run(
 
 
 @contextmanager
-def _runtime_lock(base_fd: int, runtime_base: Path, digest: str) -> Iterator[None]:
+def _runtime_lock(base_fd: int, runtime_base: Path, digest: str, deadline: Deadline | None) -> Iterator[None]:
     """Hold the exclusive per-digest lock across read, verify, purge, build, and publish.
 
     ``flock`` is held on an open file description, so two threads and two processes
-    contend identically; closing the descriptor releases it on every exit path.
+    contend identically; closing the descriptor releases it on every exit path.  Waiting
+    for it is bounded by the phase deadline, so a runtime another process is still
+    preparing cannot carry this run past its ceiling.
     """
 
     name = runtime_lock_path(runtime_base, digest).name
@@ -797,7 +800,7 @@ def _runtime_lock(base_fd: int, runtime_base: Path, digest: str) -> Iterator[Non
         ) from exc
     try:
         try:
-            fcntl.flock(fd, fcntl.LOCK_EX)
+            acquire_exclusive_lock(fd, deadline=deadline, step="candidate_runtime_lock")
         except OSError as exc:
             raise RuntimePreparationError(f"cannot lock {runtime_base / name}: {exc}") from exc
         yield

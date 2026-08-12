@@ -7,8 +7,10 @@ from typing import Any, cast
 
 import pytest
 
+from scripts.backend_eval.admission import ADMISSION_BUDGET_SECONDS
 from scripts.backend_eval.models import (
     ADMISSION_RECEIPT_SCHEMA_VERSION,
+    DEFAULT_PHASE_BUDGETS,
     EVALUATION_CONTRACT_VERSION,
     NEXT_ACTION_HOLD,
     NEXT_ACTION_PASS,
@@ -20,6 +22,7 @@ from scripts.backend_eval.models import (
     EvaluatorIdentity,
     LockEvidence,
     PathRecord,
+    PhaseBudget,
     ProductionIdentity,
     ResolvedPackage,
     RootManifest,
@@ -52,6 +55,9 @@ def _evaluator() -> EvaluatorIdentity:
         source_files=(("admission.py", "a" * 64), ("models.py", "b" * 64)),
         source_commit="9" * 40,
         source_clean=True,
+        production_root="/data/CoordExp/serena-light/src",
+        production_files=(("src/serena_light/workspace/inventory.py", "d" * 64),),
+        production_clean=True,
         host_python_path="/root/miniconda3/envs/ms/bin/python",
         host_python_realpath="/root/miniconda3/envs/ms/bin/python3.12",
         host_python_sha256="c" * 64,
@@ -345,6 +351,38 @@ def test_pass_requires_the_exact_phase_budget_set() -> None:
         _receipt(budgets=budgets)
 
 
+@pytest.mark.parametrize("name", sorted(DEFAULT_PHASE_BUDGETS))
+@pytest.mark.parametrize("delta", [1, -1, 3600])
+def test_pass_requires_every_budget_to_equal_its_frozen_seconds(name: str, delta: int) -> None:
+    """The frozen ceilings are the contract: a pass may not widen or narrow any of them."""
+
+    mutated = tuple(
+        PhaseBudget(budget.name, budget.seconds + delta) if budget.name == name else budget
+        for budget in default_phase_budgets()
+    )
+    with pytest.raises(ValueError, match="budgets are not the frozen Phase 1 set"):
+        _receipt(budgets=mutated)
+
+
+def test_a_parsed_pass_receipt_rejects_a_widened_admission_ceiling() -> None:
+    """The same mutation is refused when it arrives as published bytes, not as a dataclass."""
+
+    payload = _receipt().to_dict()
+    budgets = cast("list[dict[str, object]]", payload["budgets"])
+    for budget in budgets:
+        if budget["name"] == "admission":
+            budget["seconds"] = ADMISSION_BUDGET_SECONDS * 2
+    with pytest.raises(ValueError, match="budgets are not the frozen Phase 1 set"):
+        AdmissionReceipt.from_dict(payload)
+
+
+def test_a_pass_receipt_carries_exactly_the_frozen_budgets() -> None:
+    assert _receipt().budgets == default_phase_budgets()
+    assert {budget.name: budget.seconds for budget in default_phase_budgets()} == {
+        name: budget.seconds for name, budget in DEFAULT_PHASE_BUDGETS.items()
+    }
+
+
 def test_pass_requires_the_exact_environment_and_service_config_names() -> None:
     receipt = _receipt()
     with pytest.raises(ValueError, match="environments"):
@@ -382,6 +420,9 @@ def test_evaluator_source_digest_is_recomputed_from_its_file_digests() -> None:
         source_files=(("admission.py", "a" * 64), ("models.py", "0" * 64)),
         source_commit="9" * 40,
         source_clean=True,
+        production_root=evaluator.production_root,
+        production_files=evaluator.production_files,
+        production_clean=evaluator.production_clean,
         host_python_path=evaluator.host_python_path,
         host_python_realpath=evaluator.host_python_realpath,
         host_python_sha256=evaluator.host_python_sha256,

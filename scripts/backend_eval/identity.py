@@ -1,14 +1,19 @@
 """Bind one admission run to the evaluator code, the CLI host, and the bootstrap environment.
 
-Three facts decide whether a receipt is reproducible evidence of *this* evaluator:
+Four facts decide whether a receipt is reproducible evidence of *this* evaluator:
 
 * the digest of the executed ``scripts/backend_eval`` source closure, measured from the
   bytes actually imported rather than from a commit;
+* the digest of the executed *production* helper closure -- the ``serena_light`` modules
+  this evaluator runs for manifests, the write guard, and the production identity -- taken
+  from :mod:`scripts.backend_eval.source_binding`, which refuses any helper resolved outside
+  this checkout, so a CLI host virtual environment cannot silently supply another worktree's
+  semantics behind an unchanged ``scripts/backend_eval`` digest;
 * the source Git commit, recorded as corroboration when the checkout is available, plus
-  whether the evaluator source was clean at that commit;
+  whether the evaluator source and the production source were clean at that commit;
 * the CLI host interpreter's configured path, realpath, SHA-256, and version.
 
-The bootstrap environment is the fourth.  Resolver and installer calls keep the user's
+The bootstrap environment is the fifth.  Resolver and installer calls keep the user's
 external-network proxy, CA bundle, and locale -- nothing else.  Ambient package-index,
 source, ``PATH``, and ``PYTHONPATH`` controls are refused by name, and the receipt records
 only key names plus SHA-256 digests of values, so a proxy URL carrying a credential is
@@ -30,6 +35,11 @@ from scripts.backend_eval.models import (
     sha256_bytes,
 )
 from scripts.backend_eval.process import CommandTimeout, Deadline, run_bounded_bytes
+from scripts.backend_eval.source_binding import (
+    PRODUCTION_SOURCE_ROOT,
+    SourceBindingError,
+    bind_production_source,
+)
 
 __all__ = [
     "BOOTSTRAP_INHERITED_KEYS",
@@ -112,11 +122,13 @@ class IdentityError(RuntimeError):
 
 
 def capture_evaluator_identity(*, deadline: Deadline | None = None) -> EvaluatorIdentity:
-    """Measure the executed evaluator source closure and the CLI host interpreter."""
+    """Measure the executed evaluator and production closures and the CLI host interpreter."""
 
     source_files = _source_closure()
     _require_no_shadowed_module(dict(source_files))
+    production_files = _production_closure()
     commit, clean = _source_commit(deadline)
+    production_clean = commit is not None and _is_clean(PRODUCTION_SOURCE_ROOT, deadline)
     executable = Path(sys.executable)
     if not executable.is_absolute():
         raise IdentityError(f"the CLI host interpreter is not an absolute path: {executable}")
@@ -125,6 +137,9 @@ def capture_evaluator_identity(*, deadline: Deadline | None = None) -> Evaluator
         source_files=source_files,
         source_commit=commit,
         source_clean=clean,
+        production_root=str(PRODUCTION_SOURCE_ROOT),
+        production_files=production_files,
+        production_clean=production_clean,
         host_python_path=str(executable),
         host_python_realpath=str(realpath),
         host_python_sha256=sha256_bytes(_read_regular_file(realpath)),
@@ -142,6 +157,15 @@ def _source_closure() -> tuple[tuple[str, str], ...]:
     if not names:
         raise IdentityError(f"the evaluator source closure is empty: {EVALUATOR_PACKAGE}")
     return tuple((name, sha256_bytes(_read_regular_file(EVALUATOR_PACKAGE / name))) for name in names)
+
+
+def _production_closure() -> tuple[tuple[str, str], ...]:
+    """Digest every executed production helper, refusing one loaded from another checkout."""
+
+    try:
+        return bind_production_source()
+    except SourceBindingError as error:
+        raise IdentityError(str(error)) from error
 
 
 def _require_no_shadowed_module(recorded: Mapping[str, str]) -> None:
@@ -167,8 +191,14 @@ def _source_commit(deadline: Deadline | None) -> tuple[str | None, bool]:
     commit = revision.decode("utf-8", "replace").strip()
     if len(commit) not in {40, 64} or any(character not in "0123456789abcdef" for character in commit):
         return None, False
-    status = _git(("status", "--porcelain", "--", str(EVALUATOR_PACKAGE)), deadline)
-    return commit, status is not None and not status.strip()
+    return commit, _is_clean(EVALUATOR_PACKAGE, deadline)
+
+
+def _is_clean(subtree: Path, deadline: Deadline | None) -> bool:
+    """Whether the evaluator checkout has no tracked or untracked change below ``subtree``."""
+
+    status = _git(("status", "--porcelain", "--", str(subtree)), deadline)
+    return status is not None and not status.strip()
 
 
 def _git(args: tuple[str, ...], deadline: Deadline | None) -> bytes | None:

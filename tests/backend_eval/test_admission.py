@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import stat
+import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -19,6 +21,7 @@ from scripts.backend_eval.admission import (
     AdmissionError,
     AdmissionRequest,
     ProductionAdmissionServices,
+    _require_published_before_ceiling,
     admission_receipt_path,
     artifact_tree_digest,
     evaluation_identity,
@@ -84,6 +87,9 @@ def _evaluator(*, source_digest_seed: str = "9") -> EvaluatorIdentity:
         source_files=(("admission.py", source_digest_seed * 64), ("models.py", "8" * 64)),
         source_commit="7" * 40,
         source_clean=True,
+        production_root="/data/CoordExp/serena-light/src",
+        production_files=(("src/serena_light/workspace/inventory.py", "5" * 64),),
+        production_clean=True,
         host_python_path="/data/CoordExp/.worktrees/serena-light-backend-eval/.venv/bin/python",
         host_python_realpath="/root/miniconda3/envs/ms/bin/python3.12",
         host_python_sha256="6" * 64,
@@ -201,11 +207,17 @@ def _corpus() -> tuple[RootManifest, ...]:
 
 @dataclass(slots=True)
 class FakeClock:
-    """A monotonic clock the fake services advance by an exact per-step amount."""
+    """A monotonic clock the fake services advance by an exact per-step amount.
+
+    ``drift`` makes every *read* cost time, which is how a polling wait is charged against
+    the ceiling without spending real wall-clock seconds in a test.
+    """
 
     now: float = 0.0
+    drift: float = 0.0
 
     def __call__(self) -> float:
+        self.now += self.drift
         return self.now
 
     def advance(self, seconds: float) -> None:
@@ -312,6 +324,49 @@ class FakeServices:
         if self.cleanup_error is not None:
             raise self.cleanup_error
         return self.cleanup_summary
+
+
+@dataclass(slots=True)
+class _DriftingServices:
+    """``FakeServices`` whose clock starts moving on every read once cleanup has run.
+
+    Contention is measured, not slept away: the drift lets a held publication lock consume
+    the remaining ceiling in a few polls instead of in real wall-clock seconds.
+    """
+
+    inner: FakeServices
+    drift: float
+
+    def capture_evaluator_identity(self, deadline: Deadline) -> EvaluatorIdentity:
+        return self.inner.capture_evaluator_identity(deadline)
+
+    def capture_bootstrap_environment(self) -> BootstrapEnvironmentIdentity:
+        return self.inner.capture_bootstrap_environment()
+
+    def capture_production_identity(self, repo_root: Path) -> ProductionIdentity:
+        return self.inner.capture_production_identity(repo_root)
+
+    def compile_candidate_lock(self, request: CandidateLockRequest, deadline: Deadline) -> CandidateLock:
+        return self.inner.compile_candidate_lock(request, deadline)
+
+    def prepare_candidate_runtime(
+        self, lock: CandidateLock, request: RuntimeRequest, deadline: Deadline
+    ) -> CandidateRuntime:
+        return self.inner.prepare_candidate_runtime(lock, request, deadline)
+
+    def runtime_manifest_digest(self, root: Path) -> str:
+        return self.inner.runtime_manifest_digest(root)
+
+    def capture_corpus(self, deadline: Deadline) -> tuple[RootManifest, ...]:
+        return self.inner.capture_corpus(deadline)
+
+    def artifact_tree_digest(self, artifact_root: Path, deadline: Deadline) -> str:
+        return self.inner.artifact_tree_digest(artifact_root, deadline)
+
+    def cleanup(self, evaluation_root: Path, run_identity: str, stage: str) -> tuple[str, ...]:
+        summary = self.inner.cleanup(evaluation_root, run_identity, stage)
+        self.inner.clock.drift = self.drift
+        return summary
 
 
 def _request(tmp_path: Path) -> AdmissionRequest:
@@ -659,6 +714,88 @@ def test_a_cleanup_that_starts_past_the_ceiling_fails_closed(
     with pytest.raises(AdmissionError, match="admission_deadline_exceeded"):
         run_admission(request_, services=services, clock=clock)
     assert not services.cleanup_called
+
+
+# --- the ceiling covers publication ------------------------------------------------
+
+
+# Ten fake steps advance the clock by one second each before the artifact digest runs, and
+# nothing after it advances the clock on its own.
+_STEPS_BEFORE_ARTIFACT_DIGEST = 10.0
+
+
+def _publication_window_seconds(remaining: float) -> float:
+    """The artifact-digest cost that leaves exactly ``remaining`` seconds for publication."""
+
+    return ADMISSION_BUDGET_SECONDS - remaining - _STEPS_BEFORE_ARTIFACT_DIGEST
+
+
+def test_a_pass_is_not_published_when_the_ceiling_arrives_before_the_link(
+    request_: AdmissionRequest, services: FakeServices, clock: FakeClock
+) -> None:
+    """``ended_at`` is not the end of the run: linking the receipt is inside the ceiling too."""
+
+    services.step_seconds["artifact_digest"] = _publication_window_seconds(3.0)
+    with pytest.raises(AdmissionError, match="admission_deadline_exceeded") as error:
+        run_admission(request_, services=services, clock=clock)
+    assert error.value.failure.status == "incomplete"
+    assert "publish_receipt:link" in error.value.failure.detail
+
+    identity = evaluation_identity(request_, services.identities[0], _evaluator())
+    receipts = request_.artifact_root / identity / RECEIPTS_DIR_NAME
+    # Neither a published receipt nor a half-written temporary survives the refusal.
+    assert not receipts.exists() or list(receipts.iterdir()) == []
+
+
+def test_a_pass_published_exactly_at_the_ceiling_is_withdrawn(
+    request_: AdmissionRequest, services: FakeServices, clock: FakeClock
+) -> None:
+    """If the ceiling arrives during the link itself, this run's own link is removed."""
+
+    receipt = run_admission(request_, services=services, clock=clock)
+    published = _receipt_path(request_, receipt)
+    assert published.is_file()
+
+    temporary = published.parent / f".{receipt.run_identity}.json.tmp"
+    temporary.write_bytes(b"{}")
+    receipts_fd = os.open(published.parent, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        expired = Deadline.start(clock, 10.0)
+        clock.advance(11.0)
+        with pytest.raises(AdmissionError, match="admission_deadline_exceeded") as error:
+            _require_published_before_ceiling(
+                receipts_fd, published.parent, published.name, temporary.name, expired
+            )
+    finally:
+        os.close(receipts_fd)
+    assert error.value.failure.status == "incomplete"
+    assert not published.exists()
+    assert not temporary.exists()
+
+
+def test_a_held_publication_lock_cannot_carry_a_run_past_its_ceiling(
+    request_: AdmissionRequest, clock: FakeClock
+) -> None:
+    """Waiting for another run's publication is bounded by the same ceiling."""
+
+    identity = evaluation_identity(request_, _production_identity(), _evaluator())
+    evaluation_root = request_.artifact_root / identity
+    evaluation_root.mkdir(parents=True)
+    lock_path = evaluation_root / PUBLICATION_LOCK_NAME
+    holder = os.open(lock_path, os.O_RDWR | os.O_CREAT | os.O_CLOEXEC, 0o600)
+    fcntl.flock(holder, fcntl.LOCK_EX)
+    services = _DriftingServices(_services(request_, clock), drift=200.0)
+    started = time.monotonic()
+    try:
+        with pytest.raises(AdmissionError, match="admission_deadline_exceeded") as error:
+            run_admission(request_, services=services, clock=clock)
+    finally:
+        os.close(holder)
+    assert "publish_receipt:lock" in error.value.failure.detail
+    # A blocking flock would have waited for the holder forever.
+    assert time.monotonic() - started < 20.0
+    receipts = evaluation_root / RECEIPTS_DIR_NAME
+    assert not receipts.exists() or not any(entry.suffix == ".json" for entry in receipts.iterdir())
 
 
 # --- typed failures --------------------------------------------------------------

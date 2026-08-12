@@ -1,25 +1,58 @@
 # Phase 1 acceptance: admission gate
 
-**Admission gate disposition: PASS. Phase 1 completion remains pending the two
-independent final reviews of this receipt.** The admitting run below was produced by the
-current evaluator at committed HEAD `7d40d41`, with the evaluator source digest, source
-commit, cleanliness, and CLI host bound into its evaluation identity. It is a canonical
-PASS: every setup operation is inside the measurement window, all five corpus roots report
-zero unexpected paths, zero declared mutations, and zero changed manifest controls across
-68,059 in-scope paths, production identity is byte-identical before the work and after
-evaluation-owned cleanup, and no evaluation-owned process survived.
+**Admission gate disposition: HOLD. The gate has no admitting run at this commit.** The
+final Sol-xhigh review of the previous run -- evaluator HEAD `7d40d41`, evaluation identity
+`380aaeb4…9147d` -- found three defects that make its PASS untrustworthy *as a gate*, and the
+instrument has been repaired for all three. The repaired evaluator has not yet produced a
+run, so nothing here claims a PASS. Task 1.8 stays **unchecked** and on HOLD; tasks 1.11,
+1.13, and 1.14 were reopened for the repair.
 
-Tasks 1.7 and 1.8 stay **unchecked**. A checked box must never stand for an unreviewed run,
-and the Sol-xhigh and Opus-max reviews of *this* receipt have not happened yet. The lead may
-check them once those reviews approve it; nothing else blocks them.
-
-Three runs are on record and **none has been erased**: the original attempted run
-(instrument-limited), the repaired-instrument run (superseded when the last unbounded Git
-child was removed), and this admitting run. Both earlier receipts were verified
-byte-for-byte and stat-for-stat unchanged immediately before and after this run.
+**No receipt has been erased.** Three runs remain on record byte-for-byte: the original
+attempted run (instrument-limited), the repaired-instrument run (superseded when the last
+unbounded Git child was removed), and the reviewed run below (superseded by this repair).
+Their internal consistency is unchanged; what changed is what a *gate* may conclude from
+them.
 
 
-## The admitting run
+## What the final review held on
+
+Three defects, each now repaired and covered by adversarial tests:
+
+1. **The 1800 s ceiling did not cover publication or waiting, so the whole gate could
+   report a false PASS.** `ended_at` was recorded before publication; the publication lock,
+   the write, the `fsync`, the link, and the directory `fsync` of a 39.7 MB receipt had no
+   deadline and no post-check; and the candidate-resolution and candidate-runtime `flock`s
+   were blocking, so another process could hold a run past its ceiling with no deadline ever
+   consulted. Repaired: every lock is acquired non-blockingly against the same monotonic
+   deadline with no background thread; publication checks the ceiling before it starts,
+   writes in deadline-checked chunks, links only while a 5 s publication reserve remains,
+   and withdraws its own link inside the lock if the ceiling arrives during it. A PASS can no
+   longer be published or returned after the ceiling, and a failed publication leaves nothing
+   at the final path. Atomicity and immutability are unchanged: the only name ever unlinked
+   is the one this run's `O_EXCL` temporary and failing `link` prove no other run published.
+2. **The receipt hashed only `scripts/backend_eval` while executing `serena_light` helpers
+   from an older parent checkout.** The CLI host was the parent evaluation `.venv`, whose
+   editable `.pth` points at `/data/CoordExp/.worktrees/serena-light-backend-eval/src`; the
+   corpus manifests, the write guard, and the production-identity capture therefore ran that
+   worktree's trust-inventory normalization, guarded directory opener, dependency-lock
+   digest, build identity, and runtime paths, none of which the evaluation identity named.
+   Repaired: the evaluator binds `serena_light` to *its own* checkout's `src` before any
+   helper import, refuses by realpath any loaded `serena_light` module that resolves outside
+   that checkout, and records the executed production closure -- origin root, per-file byte
+   digest, recomputed closure digest, and cleanliness at the recorded commit -- inside the
+   evaluator identity and therefore inside the evaluation identity. An adversarial test
+   changes helper bytes and repoints a helper's path without touching `scripts/backend_eval`
+   and requires the identity to change or the run to be refused; a second test proves the
+   bound set is *complete* by showing the admission CLI loads no non-stdlib module other
+   than `scripts` and `serena_light`. The recorded host deviation therefore no longer imports
+   unbound parent source.
+3. **Strict PASS accepted any positive admission budget.** It checked only the frozen budget
+   *names* plus `admission.seconds > 0`, so a receipt could claim a pass against a widened
+   ceiling. Repaired: every budget must equal its frozen `DEFAULT_PHASE_BUDGETS` seconds, in
+   construction and in parsing, with a mutation test per budget.
+
+
+## Superseded but retained (3): the reviewed run
 
 | Field | Value |
 | --- | --- |
@@ -144,13 +177,16 @@ captured after evaluation-owned cleanup, and independently re-measured after the
 
 ### Deadline, process, and cleanup evidence
 
-The 1800 s ceiling covers resolution, runtime preparation, both captures, cleanup, the final
-production identity, the artifact digest, and publication; collection reserves 300 s so a
-timeout could still publish a receipt. This run used 10 s of it. Every child -- the resolver
-and every Git invocation of a capture, nine bounded Git children per Git root capture -- ran
-in its own session with the phase's remaining time as its bound. Cleanup ran once on the
-passing path and removed nothing. A post-run scan for `uv`, `ty`, or `pyrefly` processes found
-none.
+**Corrected by the final review.** The ceiling this run enforced covered resolution, runtime
+preparation, both captures, cleanup, the final production identity, and the artifact digest,
+but *not* publication and *not* lock acquisition: `ended_at` was stamped before the receipt
+was serialized, written, `fsync`-ed, and linked, and every `flock` was blocking. The 10 s this
+run reports is therefore the pre-publication window, not the whole gate, and its PASS could
+not have been refused had publication overrun. Collection did reserve 300 s so a timeout could
+still publish a receipt. Every child -- the resolver and every Git invocation of a capture,
+nine bounded Git children per Git root capture -- ran in its own session with the phase's
+remaining time as its bound. Cleanup ran once on the passing path and removed nothing. A
+post-run scan for `uv`, `ty`, or `pyrefly` processes found none.
 
 ### Independent re-verification
 
@@ -158,9 +194,12 @@ From the published bytes alone, after the run: the canonical round trip holds, a
 `RootManifest.manifest_digest` values recompute from their own canonical fields, every delta's
 before and after digest equals its manifest, the runtime manifest digest re-read from disk
 matches the receipt, and the live production identity equals both receipt sides. Parsing
-re-runs the full PASS invariant set and succeeds.
+re-ran the PASS invariant set *of that schema* and succeeded; that invariant set has since
+been tightened -- exact budget seconds, and a bound production closure the receipt does not
+carry -- so those bytes are retained evidence of what the run observed, not a receipt the
+current gate would admit.
 
-### Preservation of both earlier runs
+### Preservation of both earlier runs at the time of that run
 
 Captured immediately before the run and re-captured immediately after; identical in content
 *and* in inode, size, mtime, ctime, and mode:
@@ -177,7 +216,7 @@ Captured immediately before the run and re-captured immediately after; identical
 The run published under its own evaluation identity and its own per-run receipt path, so it
 shared no name with either earlier record.
 
-## What the reviews held on
+## What the earlier reviews held on
 
 The attempted run's instrument could not have seen the writes it claimed were absent, and
 its receipt could not name the code that produced it:
@@ -481,6 +520,13 @@ could not have replaced them.
 - The corpus roots are live worktrees other lanes may write. A concurrent write during a
   future phase will hold rather than pass. That is the instrument working; it must not be
   compensated for by narrowing the sweep.
+- The evaluator's own checkout must contain the production source it executes. The binding
+  refuses a foreign `serena_light`, so a CLI host installed from another worktree fails the
+  run closed rather than silently changing semantics; the operator's remedy is to run from a
+  host whose module search resolves this checkout, which the package bootstrap arranges.
+- The publication reserve is 5 s. A filesystem whose single `link` plus directory `fsync`
+  exceeds that would fail closed rather than publish late; that is the intended direction of
+  the error, but it is a bound, not an absence of one.
 - Every Git child of a corpus capture is now bounded without exception. The evaluation no
   longer calls `git_trust_inventory`; it reads the identical combined
   `git ls-files --cached --others --exclude-standard -z` through the bounded runner and
