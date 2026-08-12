@@ -1008,16 +1008,263 @@ def load_prepared_candidate_runtime(
                     "prepared runtime manifest digest changed: "
                     f"{observed_manifest} != {expected_manifest_sha256}"
                 )
+            identity_before = _observe_prepared_runtime_identity(layout, manifest)
             runtime = _load_verified_manifest_runtime(
                 layout,
                 manifest,
                 observed_manifest,
                 expected_lock_digest,
             )
+            identity_after = _observe_prepared_runtime_identity(layout, manifest)
+            if identity_after != identity_before:
+                raise RuntimePreparationError(
+                    "prepared runtime identity-bearing paths changed during read-only verification"
+                )
             _require_open_root(parent_fd, root_fd, root, "read-only load return")
             return runtime
         finally:
             os.close(root_fd)
+    finally:
+        os.close(parent_fd)
+
+
+@dataclass(frozen=True)
+class _RuntimeEntryObservation:
+    label: str
+    kind: str
+    stat_fields: tuple[int, ...]
+    content_or_target: str
+
+
+@dataclass(frozen=True)
+class _PreparedRuntimeObservation:
+    root_entries: tuple[str, ...]
+    entries: tuple[_RuntimeEntryObservation, ...]
+
+
+def _observe_prepared_runtime_identity(
+    layout: _Layout, manifest: Mapping[str, Any]
+) -> _PreparedRuntimeObservation:
+    """Observe the complete identity-bearing set bracketing read-only verification."""
+
+    root_fd = layout.bound_root_fd()
+    root = layout.logical_root
+    entries: list[_RuntimeEntryObservation] = []
+    directory_relpaths = set(owned_runtime_directory_relpaths())
+    directory_relpaths.add("venv/bin")
+    for relpath in sorted(directory_relpaths):
+        entries.append(_observe_runtime_directory(root_fd, relpath, root))
+
+    regular_relpaths = {
+        MANIFEST_FILE_NAME,
+        REQUIREMENTS_SNAPSHOT_NAME,
+        "venv/bin/pyrefly",
+        "venv/bin/ty",
+        *(f"config/{relpath}" for relpath in SERVICE_CONFIG_RELPATHS.values()),
+    }
+    for relpath in sorted(regular_relpaths):
+        entries.append(_observe_runtime_regular_file(root_fd, relpath, root))
+    entries.append(_observe_runtime_symlink(root_fd, "venv/bin/python", root))
+
+    external_groups = (
+        ("tool", _expect_mapping(manifest.get("tools"), "tools")),
+        (
+            "environment interpreter",
+            _expect_mapping(manifest.get("environment_executables"), "environment_executables"),
+        ),
+    )
+    for group_label, records in external_groups:
+        for name in sorted(records):
+            record = _expect_mapping(records[name], f"{name} {group_label}")
+            path = record.get("path")
+            realpath = record.get("realpath")
+            if not isinstance(path, str) or not isinstance(realpath, str):
+                raise RuntimePreparationError(
+                    f"published runtime manifest has a malformed {name} {group_label} identity"
+                )
+            entries.append(_observe_external_path_entry(Path(path), f"{name} {group_label} path"))
+            entries.append(
+                _observe_external_regular_file(Path(realpath), f"{name} {group_label} target")
+            )
+    return _PreparedRuntimeObservation(
+        root_entries=tuple(sorted(_scandir_names(root_fd, root))),
+        entries=tuple(entries),
+    )
+
+
+def _observation_stat(info: os.stat_result) -> tuple[int, ...]:
+    return (
+        info.st_dev,
+        info.st_ino,
+        info.st_mode,
+        info.st_nlink,
+        info.st_uid,
+        info.st_gid,
+        info.st_size,
+        info.st_mtime_ns,
+        info.st_ctime_ns,
+    )
+
+
+def _observe_runtime_directory(root_fd: int, relpath: str, root: Path) -> _RuntimeEntryObservation:
+    expected = root if not relpath else root / relpath
+    fd = _open_owned_descendant(root_fd, relpath, root, directory=True)
+    try:
+        _require_physical_identity(fd, expected)
+        before = os.fstat(fd)
+        if not stat.S_ISDIR(before.st_mode):
+            raise RuntimePreparationError(f"prepared runtime directory changed identity: {expected}")
+        _require_physical_identity(fd, expected)
+        after = os.fstat(fd)
+        if _observation_stat(after) != _observation_stat(before):
+            raise RuntimePreparationError(f"prepared runtime directory changed while observed: {expected}")
+        return _RuntimeEntryObservation(
+            label=f"runtime:{relpath or '.'}",
+            kind="directory",
+            stat_fields=_observation_stat(after),
+            content_or_target="",
+        )
+    finally:
+        os.close(fd)
+
+
+def _open_stable_observation_parent(path: Path) -> int:
+    parent_fd = _open_existing_confined_directory(path.parent)
+    try:
+        _require_physical_identity(parent_fd, path.parent)
+    except BaseException:
+        os.close(parent_fd)
+        raise
+    return parent_fd
+
+
+def _observe_regular_entry(path: Path, label: str) -> _RuntimeEntryObservation:
+    parent_fd = _open_stable_observation_parent(path)
+    try:
+        return _observe_regular_from_parent(parent_fd, path, label)
+    finally:
+        os.close(parent_fd)
+
+
+def _observe_regular_from_parent(
+    parent_fd: int, path: Path, label: str
+) -> _RuntimeEntryObservation:
+    fd: int | None = None
+    try:
+        try:
+            entry_before = os.stat(path.name, dir_fd=parent_fd, follow_symlinks=False)
+            fd = os.open(path.name, _READ_FLAGS, dir_fd=parent_fd)
+        except FileNotFoundError as exc:
+            raise RuntimePreparationError(f"published runtime is missing {label}: {path}") from exc
+        except OSError as exc:
+            raise RuntimePreparationError(f"cannot observe {label} {path}: {exc}") from exc
+        opened_before = os.fstat(fd)
+        if (
+            not stat.S_ISREG(entry_before.st_mode)
+            or not stat.S_ISREG(opened_before.st_mode)
+            or (entry_before.st_dev, entry_before.st_ino)
+            != (opened_before.st_dev, opened_before.st_ino)
+        ):
+            raise RuntimePreparationError(f"{label} must remain a regular file: {path}")
+        payload = _read_owned_descriptor(fd, label, path)
+        opened_after = os.fstat(fd)
+        entry_after = os.stat(path.name, dir_fd=parent_fd, follow_symlinks=False)
+        _require_physical_identity(parent_fd, path.parent)
+        if (
+            _observation_stat(opened_after) != _observation_stat(opened_before)
+            or not stat.S_ISREG(entry_after.st_mode)
+            or (entry_after.st_dev, entry_after.st_ino)
+            != (opened_after.st_dev, opened_after.st_ino)
+        ):
+            raise RuntimePreparationError(f"{label} changed while observed: {path}")
+        return _RuntimeEntryObservation(
+            label=label,
+            kind="regular",
+            stat_fields=_observation_stat(opened_after),
+            content_or_target=sha256_bytes(payload),
+        )
+    except OSError as exc:
+        raise RuntimePreparationError(f"cannot observe {label} {path}: {exc}") from exc
+    finally:
+        if fd is not None:
+            os.close(fd)
+
+
+def _observe_runtime_regular_file(
+    root_fd: int, relpath: str, root: Path
+) -> _RuntimeEntryObservation:
+    path = root / relpath
+    parent_relpath = relpath.rsplit("/", 1)[0] if "/" in relpath else ""
+    parent_fd = _open_confined_relpath(
+        root_fd,
+        parent_relpath,
+        root,
+        leaf_flags=_NOFOLLOW_DIRECTORY_FLAGS,
+    )
+    try:
+        _require_physical_identity(parent_fd, path.parent)
+        return _observe_regular_from_parent(parent_fd, path, f"runtime:{relpath}")
+    finally:
+        os.close(parent_fd)
+
+
+def _observe_external_regular_file(path: Path, label: str) -> _RuntimeEntryObservation:
+    if not path.is_absolute():
+        raise RuntimePreparationError(f"published runtime {label} path must be absolute")
+    return _observe_regular_entry(path, label)
+
+
+def _observe_external_path_entry(path: Path, label: str) -> _RuntimeEntryObservation:
+    if not path.is_absolute():
+        raise RuntimePreparationError(f"published runtime {label} path must be absolute")
+    parent_fd = _open_stable_observation_parent(path)
+    try:
+        try:
+            before = os.stat(path.name, dir_fd=parent_fd, follow_symlinks=False)
+            target = os.readlink(path.name, dir_fd=parent_fd) if stat.S_ISLNK(before.st_mode) else ""
+            after = os.stat(path.name, dir_fd=parent_fd, follow_symlinks=False)
+        except OSError as exc:
+            raise RuntimePreparationError(f"cannot observe {label} {path}: {exc}") from exc
+        _require_physical_identity(parent_fd, path.parent)
+        if _observation_stat(after) != _observation_stat(before) or not (
+            stat.S_ISREG(after.st_mode) or stat.S_ISLNK(after.st_mode)
+        ):
+            raise RuntimePreparationError(f"published runtime {label} changed identity: {path}")
+        return _RuntimeEntryObservation(
+            label=label,
+            kind="symlink" if stat.S_ISLNK(after.st_mode) else "regular",
+            stat_fields=_observation_stat(after),
+            content_or_target=target,
+        )
+    finally:
+        os.close(parent_fd)
+
+
+def _observe_runtime_symlink(root_fd: int, relpath: str, root: Path) -> _RuntimeEntryObservation:
+    path = root / relpath
+    parent_fd = _open_confined_relpath(
+        root_fd,
+        relpath.rsplit("/", 1)[0],
+        root,
+        leaf_flags=_NOFOLLOW_DIRECTORY_FLAGS,
+    )
+    try:
+        _require_physical_identity(parent_fd, path.parent)
+        try:
+            before = os.stat(path.name, dir_fd=parent_fd, follow_symlinks=False)
+            target = os.readlink(path.name, dir_fd=parent_fd)
+            after = os.stat(path.name, dir_fd=parent_fd, follow_symlinks=False)
+        except OSError as exc:
+            raise RuntimePreparationError(f"cannot observe selected python link {path}: {exc}") from exc
+        _require_physical_identity(parent_fd, path.parent)
+        if not stat.S_ISLNK(after.st_mode) or _observation_stat(after) != _observation_stat(before):
+            raise RuntimePreparationError(f"prepared runtime selected python link changed identity: {path}")
+        return _RuntimeEntryObservation(
+            label=f"runtime:{relpath}",
+            kind="symlink",
+            stat_fields=_observation_stat(after),
+            content_or_target=target,
+        )
     finally:
         os.close(parent_fd)
 

@@ -106,6 +106,7 @@ _DIRECTORY_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
 _SOURCE_READ_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
 _SOURCE_READ_CHUNK = 64 * 1024
 MAX_SOURCE_BYTES = 4 * 1024 * 1024
+_MAX_SOURCE_COMPONENTS = 128
 # Git receives an explicit environment: no ambient GIT_* control may steer the corpus scan.
 _GIT_ENVIRONMENT_PATH = "/usr/bin:/bin"
 
@@ -134,24 +135,44 @@ def read_stable_source_text(
         raise ManifestError(f"source target must be lexically inside {workspace_root}: {source}") from exc
     if not relative.parts or any(part in {"", ".", ".."} for part in relative.parts):
         raise ManifestError(f"source target contains traversal outside {workspace_root}: {source}")
+    if len(relative.parts) > _MAX_SOURCE_COMPONENTS:
+        raise ManifestError(
+            f"source target exceeds the maximum component depth of {_MAX_SOURCE_COMPONENTS}: {source}"
+        )
     if isinstance(max_bytes, bool) or not isinstance(max_bytes, int) or max_bytes <= 0:
         raise ValueError("max_bytes must be a positive integer")
 
     parent_fd, root_fd = _open_stable_source_root(workspace_root, deadline)
-    leaf_parent = os.dup(root_fd)
+    directory_fds = [root_fd]
+    directory_bindings: list[tuple[int, str, int, os.stat_result]] = []
     leaf_fd: int | None = None
     try:
         _require_stable_source_root(parent_fd, root_fd, workspace_root, deadline)
         for component in relative.parts[:-1]:
             deadline.check("open source directory")
             try:
-                child = os.open(component, _DIRECTORY_FLAGS, dir_fd=leaf_parent)
+                child = os.open(component, _DIRECTORY_FLAGS, dir_fd=directory_fds[-1])
             except OSError as exc:
                 raise ManifestError(
                     f"cannot open source directory component {component!r} without following a link: {exc}"
                 ) from exc
-            os.close(leaf_parent)
-            leaf_parent = child
+            try:
+                opened = os.fstat(child)
+                entry = os.stat(component, dir_fd=directory_fds[-1], follow_symlinks=False)
+                if (
+                    not stat.S_ISDIR(opened.st_mode)
+                    or not stat.S_ISDIR(entry.st_mode)
+                    or (opened.st_dev, opened.st_ino) != (entry.st_dev, entry.st_ino)
+                ):
+                    raise ManifestError(
+                        f"source directory component {component!r} changed before it could be read"
+                    )
+            except BaseException:
+                os.close(child)
+                raise
+            directory_bindings.append((directory_fds[-1], component, child, opened))
+            directory_fds.append(child)
+        leaf_parent = directory_fds[-1]
         deadline.check("open source file")
         try:
             leaf_fd = os.open(relative.parts[-1], _SOURCE_READ_FLAGS, dir_fd=leaf_parent)
@@ -190,6 +211,7 @@ def read_stable_source_text(
             after.st_ino,
         ) != (entry_after.st_dev, entry_after.st_ino):
             raise ManifestError(f"source target changed while it was read: {source}")
+        _require_stable_source_directories(directory_bindings, source, deadline)
         _require_stable_source_root(parent_fd, root_fd, workspace_root, deadline)
         try:
             return b"".join(chunks).decode("utf-8")
@@ -198,8 +220,8 @@ def read_stable_source_text(
     finally:
         if leaf_fd is not None:
             os.close(leaf_fd)
-        os.close(leaf_parent)
-        os.close(root_fd)
+        for directory_fd in reversed(directory_fds):
+            os.close(directory_fd)
         os.close(parent_fd)
 
 
@@ -218,9 +240,13 @@ def _open_stable_source_root(root: Path, deadline: Deadline) -> tuple[int, int]:
             current = child
         deadline.check("open source workspace root")
         root_fd = os.open(root.name, _DIRECTORY_FLAGS, dir_fd=current)
-    except OSError as exc:
+    except BaseException as exc:
         os.close(current)
-        raise ManifestError(f"cannot open source workspace {root} without following a link: {exc}") from exc
+        if isinstance(exc, OSError):
+            raise ManifestError(
+                f"cannot open source workspace {root} without following a link: {exc}"
+            ) from exc
+        raise
     return current, root_fd
 
 
@@ -247,6 +273,32 @@ def _require_stable_source_root(parent_fd: int, root_fd: int, root: Path, deadli
         or physical != root
     ):
         raise ManifestError(f"source workspace root changed while reading {root}")
+
+
+def _require_stable_source_directories(
+    bindings: list[tuple[int, str, int, os.stat_result]], source: Path, deadline: Deadline
+) -> None:
+    """Re-prove every retained lexical directory edge before source bytes are returned."""
+
+    stable_fields = ("st_dev", "st_ino", "st_mode", "st_size", "st_mtime_ns", "st_ctime_ns")
+    for parent_fd, component, child_fd, before in bindings:
+        deadline.check("verify source directory")
+        try:
+            entry = os.stat(component, dir_fd=parent_fd, follow_symlinks=False)
+            opened = os.fstat(child_fd)
+        except OSError as exc:
+            raise ManifestError(
+                f"source directory component {component!r} changed while reading {source}: {exc}"
+            ) from exc
+        if (
+            not stat.S_ISDIR(entry.st_mode)
+            or not stat.S_ISDIR(opened.st_mode)
+            or (entry.st_dev, entry.st_ino) != (opened.st_dev, opened.st_ino)
+            or any(getattr(before, name) != getattr(opened, name) for name in stable_fields)
+        ):
+            raise ManifestError(
+                f"source directory component {component!r} changed while reading {source}"
+            )
 
 
 @dataclass(frozen=True, slots=True)

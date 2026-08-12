@@ -157,6 +157,69 @@ def test_stable_source_reader_rejects_a_leaf_replaced_during_read(
     assert replaced
 
 
+def test_stable_source_reader_rejects_an_intermediate_directory_replaced_during_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    package = tmp_path / "pkg"
+    package.mkdir()
+    source = package / "module.py"
+    source.write_text("old_bytes = True\n", encoding="utf-8")
+    original_read = manifests_module.os.read
+    replaced = False
+
+    def replacing_read(fd: int, size: int) -> bytes:
+        nonlocal replaced
+        chunk = original_read(fd, size)
+        if chunk and not replaced:
+            replaced = True
+            package.rename(tmp_path / "old_pkg")
+            package.mkdir()
+            source.write_text("new_path = True\n", encoding="utf-8")
+        return chunk
+
+    monkeypatch.setattr(manifests_module.os, "read", replacing_read)
+
+    with pytest.raises(ManifestError, match="changed"):
+        manifests_module.read_stable_source_text(
+            tmp_path, source, deadline=Deadline.start(monotonic_clock, 10.0)
+        )
+    assert replaced
+    assert source.read_text(encoding="utf-8") == "new_path = True\n"
+
+
+def test_stable_source_reader_closes_descriptors_when_component_deadline_expires(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "pkg" / "module.py"
+    source.parent.mkdir()
+    source.write_text("answer = 42\n", encoding="utf-8")
+    clock = _FakeClock()
+    deadline = Deadline.start(clock, 1.0)
+    original_open_root = manifests_module._open_source_filesystem_root
+
+    def open_root_then_expire() -> int:
+        fd = original_open_root()
+        clock.advance(1.0)
+        return fd
+
+    monkeypatch.setattr(manifests_module, "_open_source_filesystem_root", open_root_then_expire)
+    descriptors_before = set(os.listdir("/proc/self/fd"))
+
+    with pytest.raises(DeadlineExceeded):
+        manifests_module.read_stable_source_text(tmp_path, source, deadline=deadline)
+
+    assert set(os.listdir("/proc/self/fd")) == descriptors_before
+
+
+def test_stable_source_reader_rejects_excessive_component_depth(tmp_path: Path) -> None:
+    target = tmp_path.joinpath(*(f"d{index}" for index in range(129)), "module.py")
+
+    with pytest.raises(ManifestError, match="depth"):
+        manifests_module.read_stable_source_text(
+            tmp_path, target, deadline=Deadline.start(monotonic_clock, 10.0)
+        )
+
+
 def test_git_child_uses_only_exact_root_trust_and_config_free_environment(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

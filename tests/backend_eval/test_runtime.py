@@ -547,6 +547,29 @@ def test_read_only_loader_refuses_a_retargeted_selected_python_link(
         _load_prepared(runtime)
 
 
+def test_read_only_loader_refuses_candidate_replaced_after_later_verification(
+    lock: CandidateLock, request_: RuntimeRequest, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runtime = prepare_candidate_runtime(lock, request_, runner=_FakeRunner(), expectation=real_expectation())
+    original_verify = runtime_module._verify_published_service_configs
+    replacement = b"#!/bin/sh\nexit 23\n"
+
+    def verify_then_replace(
+        layout: runtime_module._Layout, manifest: Mapping[str, Any]
+    ) -> tuple[ServiceConfigIdentity, ...]:
+        identities = original_verify(layout, manifest)
+        runtime.ty.unlink()
+        runtime.ty.write_bytes(replacement)
+        runtime.ty.chmod(0o700)
+        return identities
+
+    monkeypatch.setattr(runtime_module, "_verify_published_service_configs", verify_then_replace)
+
+    with pytest.raises(RuntimePreparationError, match="changed|stability"):
+        _load_prepared(runtime)
+    assert runtime.ty.read_bytes() == replacement
+
+
 def test_read_only_loader_never_writes_or_repairs_the_runtime(
     lock: CandidateLock, request_: RuntimeRequest
 ) -> None:
