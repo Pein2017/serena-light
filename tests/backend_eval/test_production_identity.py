@@ -547,6 +547,8 @@ def test_the_declared_child_closure_covers_what_the_child_actually_loads(repo_ro
     requests: tuple[tuple[str, dict[str, Any]], ...] = (
         ("production_identity", {"root": str(repo_root)}),
         ("observe_file_digests", {"paths": []}),
+        ("bounded_non_git_inventory", {"root": str(repo_root / "scripts" / "backend_eval")}),
+        ("git_inventory_from_bytes", {"root": str(repo_root), "candidates_b64": ""}),
     )
     for operation, payload in requests:
         run_production_helper(operation, payload, expectation=expectation)

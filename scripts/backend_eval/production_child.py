@@ -31,6 +31,17 @@ The child is deliberately small and stdlib-only:
   module more, or one module fewer, than the operation's declaration refuses here and again
   in the parent.
 
+**Every production helper the evaluation executes runs here, and only here.**  The corpus
+capture used to import ``bounded_non_git_trust_inventory``, ``_decode_git_path``,
+``_inventory_from_candidates``, and ``open_guarded_directory`` into the *evaluator* process.
+Those imports compiled whatever bytes were on disk at import time, and the evaluator identity
+re-read the same paths afterwards -- so bytes swapped between the import and the capture would
+have produced a receipt naming one closure while the parent's corpus evidence was computed by
+another.  The two inventory helpers therefore execute here, from the sealed image, under the
+same expectation as every other operation; the directory traversal is evaluator-owned code in
+:mod:`scripts.backend_eval.manifests` rather than production's opener.  Only the evidence a
+``RootManifest`` is built from crosses the boundary, as canonical JSON.
+
 Nothing else is computed here, and no evaluation module is importable from here.
 """
 
@@ -194,12 +205,67 @@ def _observe_file_digests(paths: list[str]) -> dict[str, Any]:
     return {"digests": [[path, observe_file_digest(Path(path))] for path in paths]}
 
 
+def _inventory_evidence(inventory: Any) -> dict[str, Any]:
+    """The exact trust-inventory evidence the evaluator consumes, canonically ordered.
+
+    Only what a ``RootManifest`` is built from crosses the boundary: the resolved root, the
+    inventory kind, the accepted relative paths, the digest production computed, and the
+    rejections with production's own reasons.  The count is ``len(paths)`` and is not sent.
+    The query tree, the absolute-path materializer, and every method stay here -- the
+    evaluator never uses them, and shipping a live production object into the parent would
+    mean importing production code there again.
+
+    ``rejected`` is sorted.  Production already sorts it, and sorting again here makes the
+    serialization canonical regardless, without changing which candidates were rejected or
+    why.  A path carrying surrogate-escaped invalid bytes cannot be serialized as canonical
+    JSON at all: the encode fails here, the child refuses, and the parent reports a typed
+    incomplete capture.  That is the existing fail-closed disposition -- such a path could
+    never have reached a ``RootManifest`` either -- and it is left exactly as it is.
+    """
+
+    return {
+        "root": str(inventory.root),
+        "kind": inventory.kind,
+        "digest": inventory.digest,
+        "paths": list(inventory.paths),
+        "rejected": sorted([entry.path, entry.reason] for entry in inventory.rejected),
+    }
+
+
+def _bounded_non_git_inventory(root: str) -> dict[str, Any]:
+    from serena_light.workspace.inventory import bounded_non_git_trust_inventory
+
+    return _inventory_evidence(bounded_non_git_trust_inventory(Path(root)))
+
+
+def _git_inventory_from_bytes(root: str, candidates_b64: str) -> dict[str, Any]:
+    """Production's Git inventory, built from bytes the *parent* already bounded.
+
+    ``git_trust_inventory`` differs from this in exactly one respect: it starts its own
+    unbounded ``git ls-files``.  The evaluator reads that same command through the bounded
+    runner and hands the bytes here, so the decode, the normalization, the extension filter,
+    the guarded candidate inspection, the rejection reasons, and the digest are all
+    production's own code, executed from the sealed image.
+    """
+
+    payload = base64.b64decode(candidates_b64, validate=True)
+    from serena_light.workspace.inventory import _decode_git_path, _inventory_from_candidates
+
+    resolved = Path(root).resolve(strict=True)
+    candidates = (_decode_git_path(item) for item in payload.split(b"\0") if item)
+    return _inventory_evidence(_inventory_from_candidates(resolved, candidates, kind="git"))
+
+
 def _dispatch(request: dict[str, Any]) -> dict[str, Any]:
     operation = request["op"]
     if operation == "production_identity":
         return _production_identity(request["root"])
     if operation == "observe_file_digests":
         return _observe_file_digests(list(request["paths"]))
+    if operation == "bounded_non_git_inventory":
+        return _bounded_non_git_inventory(request["root"])
+    if operation == "git_inventory_from_bytes":
+        return _git_inventory_from_bytes(request["root"], request["candidates_b64"])
     raise RuntimeError(f"unknown production helper operation: {operation!r}")
 
 

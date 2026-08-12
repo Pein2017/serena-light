@@ -3,10 +3,12 @@
 The evaluation may not modify `src/serena_light`, and
 `serena_light.workspace.inventory.git_trust_inventory` starts its own unbounded
 `git ls-files`.  Rather than leaving that one call outside the phase deadline, the
-evaluation reads the same command through the bounded runner and reuses production's *pure*
-normalization and inspection helpers.  These tests own the two claims that makes: the
-resulting inventory is exactly production's, and no evaluation path starts a Git child any
-other way.
+evaluation reads the same command through the bounded runner and hands those bytes to
+production's *own* normalization and inspection helpers -- executed in the source-bound
+sealed child, never in the evaluator process.  These tests own the three claims that makes:
+the resulting inventory is field-for-field exactly production's, no evaluation path starts a
+Git child any other way, and importing the evaluator leaves no production module behind in
+the parent.
 """
 
 from __future__ import annotations
@@ -21,14 +23,22 @@ import pytest
 import scripts.backend_eval.manifests as manifests
 import scripts.backend_eval.production_helper as production_helper
 from scripts.backend_eval.manifests import (
+    BoundedTrustInventory,
     RootManifestRequest,
+    _bounded_non_git_inventory,
     _git_environment,
     _git_trust_inventory_from_bounded_bytes,
     capture_root_manifest,
 )
 from scripts.backend_eval.process import CommandBytesResult, Deadline, monotonic_clock, run_bounded_bytes
-from serena_light.workspace.inventory import git_trust_inventory
 from tests.backend_eval.support import real_expectation
+
+# The evaluator must not import production; a *test* comparing the child's answer with
+# production's own must, so it does so here and nowhere in ``scripts/backend_eval``.
+from serena_light.workspace.inventory import (  # isort: skip
+    bounded_non_git_trust_inventory,
+    git_trust_inventory,
+)
 
 COMBINED_LS_FILES = ("ls-files", "--cached", "--others", "--exclude-standard", "-z")
 
@@ -74,6 +84,12 @@ def _request(root: Path) -> RootManifestRequest:
     )
 
 
+def _bounded_inventory(root: Path) -> BoundedTrustInventory:
+    return _git_trust_inventory_from_bounded_bytes(
+        root, _bounded_combined(root), real_expectation(), None
+    )
+
+
 def _bounded_combined(root: Path) -> bytes:
     result = run_bounded_bytes(
         ["/usr/bin/git", *COMBINED_LS_FILES], cwd=root, env=_git_environment(), timeout=60.0
@@ -90,34 +106,68 @@ def test_the_bounded_inventory_equals_productions_in_every_field(tmp_path: Path,
     root = _repository(tmp_path) if fixture == "plain" else _rejecting_repository(tmp_path)
 
     expected = git_trust_inventory(root)
-    observed = _git_trust_inventory_from_bounded_bytes(root, _bounded_combined(root))
+    observed = _bounded_inventory(root)
 
-    assert observed.root == expected.root
+    assert observed.root == str(expected.root)
     assert observed.kind == expected.kind == "git"
     assert observed.paths == expected.paths
     assert observed.count == expected.count
     assert observed.digest == expected.digest
-    assert observed.rejected == expected.rejected
-    assert tuple(observed.tree.iter_prefix()) == tuple(expected.tree.iter_prefix())
+    assert observed.rejected == tuple(sorted((entry.path, entry.reason) for entry in expected.rejected))
+
+
+def test_the_bounded_non_git_inventory_equals_productions_in_every_field(tmp_path: Path) -> None:
+    """The other delegated helper, on a disposable fixture, field for field.
+
+    ``bounded_non_git_trust_inventory`` used to run in the evaluator process.  It now runs in
+    the sealed child, so this equality is what proves the move preserved production's exact
+    answer -- the bounded walk's pruning, the extension filter, the symlink rejections, the
+    root resolution, and the digest.
+    """
+
+    root = tmp_path / "site-packages"
+    (root / "pkg" / "sub").mkdir(parents=True)
+    (root / "pkg" / "__init__.py").write_text("A = 1\n", encoding="utf-8")
+    (root / "pkg" / "sub" / "mod.py").write_text("B = 2\n", encoding="utf-8")
+    (root / "pkg" / "notes.md").write_text("unsupported extension\n", encoding="utf-8")
+    (root / ".hidden").mkdir()
+    (root / ".hidden" / "skipped.py").write_text("C = 3\n", encoding="utf-8")
+    outside = tmp_path / "outside.py"
+    outside.write_text("D = 4\n", encoding="utf-8")
+    (root / "pkg" / "escape.py").symlink_to(outside)
+
+    expected = bounded_non_git_trust_inventory(root)
+    observed = _bounded_non_git_inventory(root, real_expectation(), None)
+
+    assert observed.root == str(expected.root)
+    assert observed.kind == expected.kind == "bounded_no_symlink"
+    assert observed.paths == expected.paths
+    assert observed.count == expected.count
+    assert observed.digest == expected.digest
+    assert observed.rejected == tuple(sorted((entry.path, entry.reason) for entry in expected.rejected))
+    assert "pkg/__init__.py" in observed.paths
+    assert "pkg/sub/mod.py" in observed.paths
+    assert "pkg/notes.md" not in observed.paths
+    assert ".hidden/skipped.py" not in observed.paths
 
 
 def test_the_rejecting_fixture_actually_exercises_rejections(tmp_path: Path) -> None:
     """Guard the test above: an equality that compared two empty tuples would prove nothing."""
 
     root = _rejecting_repository(tmp_path)
-    inventory = _git_trust_inventory_from_bounded_bytes(root, _bounded_combined(root))
+    inventory = _bounded_inventory(root)
     assert inventory.rejected, "the fixture must produce at least one rejected candidate"
-    assert {entry.path for entry in inventory.rejected} == {"broken.py", "escape.py", "internal.py"}
+    assert {path for path, _reason in inventory.rejected} == {"broken.py", "escape.py", "internal.py"}
     assert inventory.paths, "the fixture must also accept candidates"
     assert "src/pkg/owner.py" in inventory.paths
     # Unsupported extensions are filtered, never rejected.
     assert "README.md" not in inventory.paths
-    assert "README.md" not in {entry.path for entry in inventory.rejected}
+    assert "README.md" not in {path for path, _reason in inventory.rejected}
 
 
 def test_unicode_and_spaced_candidates_survive_the_bounded_decode(tmp_path: Path) -> None:
     root = _repository(tmp_path)
-    inventory = _git_trust_inventory_from_bounded_bytes(root, _bounded_combined(root))
+    inventory = _bounded_inventory(root)
     assert "with space.py" in inventory.paths
     assert "unicode_é.py" in inventory.paths
     assert inventory.digest == git_trust_inventory(root).digest
@@ -230,12 +280,16 @@ def test_every_child_of_a_capture_comes_through_the_bounded_runner(
             COMBINED_LS_FILES,
         ],
     ]
-    # Exactly one bounded digest child, executing the production helper under -I.
+    # Three bounded production-helper children, each executing the sealed program under -I:
+    # one inventory child per freeze state, and one digest child for the hashed closure.
     helpers = [command for command, _timeout in bounded if command[0] != str(manifests.GIT_EXECUTABLE)]
-    assert len(helpers) == 1
-    assert helpers[0][1:3] == ("-I", "-B")
-    # The program is a sealed in-memory image addressed by descriptor, never a pathname.
-    assert re.fullmatch(r"/proc/self/fd/\d+", helpers[0][3])
+    assert len(helpers) == 3
+    for helper in helpers:
+        assert helper[1:3] == ("-I", "-B")
+        # The program is a sealed in-memory image addressed by descriptor, never a pathname.
+        assert re.fullmatch(r"/proc/self/fd/\d+", helper[3])
+        # The production source it imports is the second sealed image, also by descriptor.
+        assert helper[-1].isdigit()
     # Every child, of either family, carries the phase's own remaining time.
     for _command, timeout in bounded:
         assert timeout is not None and 0 < timeout <= 1500

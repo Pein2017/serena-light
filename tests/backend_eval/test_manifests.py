@@ -392,10 +392,10 @@ def test_non_git_manifest_hashes_only_declared_task_paths_without_inventory_walk
 
     import scripts.backend_eval.manifests as manifests
 
-    def forbidden_inventory(_root: Path) -> object:
+    def forbidden_inventory(*_args: object, **_kwargs: object) -> object:
         raise AssertionError("exact non-Git task paths must not walk the full environment")
 
-    monkeypatch.setattr(manifests, "bounded_non_git_trust_inventory", forbidden_inventory)
+    monkeypatch.setattr(manifests, "_bounded_non_git_inventory", forbidden_inventory)
     manifest = capture_root_manifest(
                    _non_git_request(root, fully_hashed_paths=("torchtune/__init__.py",)),
                    expectation=real_expectation(),

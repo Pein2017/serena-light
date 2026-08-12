@@ -237,6 +237,22 @@ their enrichment, all three production-identity captures, the candidate-lock and
 identity brackets -- and compared before anything runs. No process-global first-use pin exists,
 so two admissions in one process cannot contaminate each other's truth.
 
+**No production code runs in the evaluator process.** The first cut of this repair still
+imported `bounded_non_git_trust_inventory`, `_decode_git_path`, `_inventory_from_candidates`,
+and `open_guarded_directory` into the *evaluator* for the corpus capture. That is the same
+defect one level up: Python compiled whatever bytes were on disk at import time, and the
+identity that names them was captured afterwards, so bytes swapped between the two would have
+published a receipt naming one closure while the parent's corpus evidence was computed by
+another. Both inventory helpers now execute in the sealed child under the same expectation as
+every other production helper, and only the evidence a `RootManifest` is built from -- resolved
+root, kind, accepted paths, production's digest, and the rejections with production's own
+reasons -- crosses back as canonical JSON, validated field by field on arrival and cross-checked
+against production's own `sha256("\0".join(paths))` formula. The directory traversal the
+metadata scan needs is evaluator-owned code instead: a walk is not a semantic the receipt binds,
+so the honest repair is to own it, with a `guarded` declared-root open and `confined`
+descendants stated as such. A fresh-interpreter regression and an AST rule keep the evaluator
+free of production imports.
+
 **The bytes that were compared are the bytes that execute.** Both halves run from sealed
 `memfd` images, sealed `F_SEAL_WRITE | F_SEAL_SHRINK | F_SEAL_GROW | F_SEAL_SEAL` and addressed
 by descriptor. The child program is read through a component-wise no-follow walk from the

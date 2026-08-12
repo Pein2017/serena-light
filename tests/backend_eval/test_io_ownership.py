@@ -43,6 +43,7 @@ _ACCESS_NAMES = {
     "os.makedirs": "os.makedirs",
     "os.scandir": "os.scandir",
     "os.listdir": "os.listdir",
+    "os.walk": "os.walk",
     "open": "open",
     # --- namespace mutation
     "os.link": "os.link",
@@ -117,7 +118,11 @@ _ACCESS_NAMES = {
     "replace": "Path.replace",
     "chmod": "Path.chmod",
     "readlink": "Path.readlink",
-    # --- production helpers that read a file the evaluation does not own
+    # --- production helpers that read a file the evaluation does not own.  Every one of
+    # these now appears only inside ``production_child.py``, which runs in its own
+    # interpreter from a sealed image; a call to any of them anywhere else in the evaluator
+    # fails the table, because an in-process call would compile production bytes the
+    # evaluator identity has not yet named.
     "observe_file_digest": "production.observe_file_digest",
     "dependency_lock_digest": "production.dependency_lock_digest",
     "compute_build_identity": "production.compute_build_identity",
@@ -125,6 +130,10 @@ _ACCESS_NAMES = {
     "bounded_non_git_trust_inventory": "production.bounded_non_git_trust_inventory",
     "git_trust_inventory": "production.git_trust_inventory",
     "open_guarded_directory": "production.open_guarded_directory",
+    "_inventory_from_candidates": "production._inventory_from_candidates",
+    "_decode_git_path": "production._decode_git_path",
+    # --- and the parent side of that boundary: every delegation to the bounded child.
+    "run_production_helper": "delegated.production_child",
 }
 
 # --- the owner classes -----------------------------------------------------------------
@@ -293,17 +302,19 @@ OWNERSHIP: frozenset[tuple[str, str, str, str]] = frozenset(
         ("identity.py", "_source_closure", "os.scandir", DESCRIPTOR),
         ("identity.py", "capture_evaluator_identity", "os.path.realpath", DECLARED),
         # --- manifests.py
-        ("manifests.py", "_capture_transformers_manifest", "production.bounded_non_git_trust_inventory", CHILD),
-        ("manifests.py", "_git_trust_inventory_from_bounded_bytes", "Path.resolve", DECLARED),
+        ("manifests.py", "_child_inventory", "delegated.production_child", CHILD),
+        ("manifests.py", "_digest_chunk", "delegated.production_child", CHILD),
+        ("manifests.py", "_open_declared_corpus_root", "os.open", GUARDED),
+        ("manifests.py", "_open_metadata_directory", "os.close", DESCRIPTOR),
+        ("manifests.py", "_open_metadata_directory", "os.open", CONFINED),
+        ("manifests.py", "_resolved", "Path.resolve", DECLARED),
         ("manifests.py", "_lstat", "Path.lstat", DECLARED),
         ("manifests.py", "_require_directory", "Path.lstat", DECLARED),
         ("manifests.py", "_scan_remainder", "os.close", DESCRIPTOR),
-        ("manifests.py", "_scan_remainder", "os.open", GUARDED),
         ("manifests.py", "_walk_metadata_root", "os.close", DESCRIPTOR),
         ("manifests.py", "_walk_metadata_root", "os.lstat", CONFINED),
         ("manifests.py", "_walk_metadata_root", "os.readlink", CONFINED),
         ("manifests.py", "_walk_metadata_root", "os.scandir", DESCRIPTOR),
-        ("manifests.py", "_walk_metadata_root", "production.open_guarded_directory", CONFINED),
         ("manifests.py", "_walk_remainder", "os.close", DESCRIPTOR),
         ("manifests.py", "_walk_remainder", "os.lstat", CONFINED),
         ("manifests.py", "_walk_remainder", "os.open", CONFINED),
@@ -318,6 +329,10 @@ OWNERSHIP: frozenset[tuple[str, str, str, str]] = frozenset(
         ("process.py", "sealed_image", "os.pread", OWN_IMAGE),
         ("process.py", "sealed_image", "os.write", OWN_IMAGE),
         # --- production_child.py
+        ("production_child.py", "_bounded_non_git_inventory", "production.bounded_non_git_trust_inventory", CHILD),
+        ("production_child.py", "_git_inventory_from_bytes", "Path.resolve", CHILD),
+        ("production_child.py", "_git_inventory_from_bytes", "production._decode_git_path", CHILD),
+        ("production_child.py", "_git_inventory_from_bytes", "production._inventory_from_candidates", CHILD),
         ("production_child.py", "_load_image", "os.fstat", OWN_IMAGE),
         ("production_child.py", "_load_image", "os.pread", OWN_IMAGE),
         ("production_child.py", "_observe_file_digests", "production.observe_file_digest", CHILD),
@@ -338,6 +353,7 @@ OWNERSHIP: frozenset[tuple[str, str, str, str]] = frozenset(
         ("production_helper.py", "_read_owned_file", "stream.read", DESCRIPTOR),
         ("production_helper.py", "run_production_helper", "os.close", DESCRIPTOR),
         # --- production_identity.py
+        ("production_identity.py", "_run_production_helpers", "delegated.production_child", CHILD),
         ("production_identity.py", "_read_guarded", "os.close", DESCRIPTOR),
         ("production_identity.py", "_read_guarded", "os.fdopen", DESCRIPTOR),
         ("production_identity.py", "_read_guarded", "os.fstat", DESCRIPTOR),

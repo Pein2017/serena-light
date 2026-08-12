@@ -1,13 +1,12 @@
 """Bind the production semantic helpers the evaluator actually executes.
 
 ``scripts/backend_eval`` is not the whole executed evaluator.  Manifests, the corpus write
-guard, and the production-identity capture run *production* code -- the trust-inventory
-normalization, the guarded directory opener, the dependency-lock digest, the build identity,
-and the runtime paths -- imported as ``serena_light``.  A CLI host virtual environment
-resolves that name through whatever editable ``.pth`` installed it, so the executed helper
-bytes can come from a different checkout than the one whose ``scripts/backend_eval`` digest
-the receipt publishes.  A receipt bound only to the evaluator package would then name code
-that did not produce it.
+guard, and the production-identity capture depend on *production* code -- the trust-inventory
+normalization and bounded indexing, the dependency-lock digest, the build identity, and the
+runtime paths -- named ``serena_light``.  A CLI host virtual environment resolves that name
+through whatever editable ``.pth`` installed it, so the executed helper bytes can come from a
+different checkout than the one whose ``scripts/backend_eval`` digest the receipt publishes.
+A receipt bound only to the evaluator package would then name code that did not produce it.
 
 This module closes that gap in two steps:
 
@@ -15,12 +14,16 @@ This module closes that gap in two steps:
   module and requires each one to resolve *inside this checkout's* ``src/serena_light``.  A
   module imported from another worktree, from site-packages, or through a symlink out of the
   owner tree is a refused binding, not a warning -- the run fails closed rather than
-  publishing evidence about code it cannot name.
+  publishing evidence about code it cannot name.  That walk is now a *backstop*: the evaluator
+  process imports no production module at all, which a regression proves in a fresh
+  interpreter, so an empty ``sys.modules`` contribution is the expected case rather than a
+  narrowing.
 * it then digests the bytes of every bound module, so the receipt carries the executed
   production source closure the same way it already carries the evaluator source closure.
 
-Some production helpers are no longer executed *in this process* at all: the dependency-lock
-digest, the build identity, the runtime paths, and the trust-inventory file digest run inside
+No production helper is executed *in this process* at all any more.  The dependency-lock
+digest, the build identity, the runtime paths, the trust-inventory file digest, the bounded
+non-Git inventory, and the normalization of already-bounded Git candidate bytes all run inside
 the bounded child in :mod:`scripts.backend_eval.production_helper`, so ``sys.modules`` cannot
 see them.  Dropping them from the bound closure would quietly narrow exactly the evidence this
 module exists to publish -- the receipt would stop naming the bytes of the helpers whose
@@ -96,6 +99,18 @@ OPERATION_HELPER_CLOSURES: Mapping[str, tuple[str, ...]] = {
         "src/serena_light/build_identity.py",
     ),
     "observe_file_digests": (
+        "src/serena_light/__init__.py",
+        "src/serena_light/workspace/__init__.py",
+        "src/serena_light/workspace/identity.py",
+        "src/serena_light/workspace/inventory.py",
+    ),
+    "bounded_non_git_inventory": (
+        "src/serena_light/__init__.py",
+        "src/serena_light/workspace/__init__.py",
+        "src/serena_light/workspace/identity.py",
+        "src/serena_light/workspace/inventory.py",
+    ),
+    "git_inventory_from_bytes": (
         "src/serena_light/__init__.py",
         "src/serena_light/workspace/__init__.py",
         "src/serena_light/workspace/identity.py",

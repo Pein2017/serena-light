@@ -24,10 +24,23 @@ unbounded ``git ls-files``, this module reads the *same* combined
 ``git ls-files --cached --others --exclude-standard -z`` through the bounded runner and
 hands those bytes to production's own pure candidate normalization and inspection helpers.
 Decoding, normalization, extension filtering, guarded candidate inspection, rejection
-reasons, the path digest, and the query tree are therefore production's code, unchanged, and
-the resulting inventory is identical to the one production would have built --
+reasons, and the path digest are therefore production's code, unchanged, and the resulting
+inventory is identical to the one production would have built --
 :func:`_git_trust_inventory_from_bounded_bytes` and its equivalence test own that claim.
 No evaluation code path calls ``git_trust_inventory``.
+
+**This module imports no production code.**  It used to import
+``bounded_non_git_trust_inventory``, ``_decode_git_path``, ``_inventory_from_candidates``,
+and ``open_guarded_directory`` into the *evaluator* process.  Python compiled whatever bytes
+were on disk at import time, and :func:`~scripts.backend_eval.identity.capture_evaluator_identity`
+re-read those same paths afterwards -- so bytes swapped between the import and the capture
+would have published a receipt naming one closure while the corpus evidence in it was computed
+by another.  Both inventory helpers now execute in the source-bound sealed child, under the
+same expectation as every other production helper, and only the evidence a
+:class:`~scripts.backend_eval.models.RootManifest` is built from crosses back as canonical
+JSON.  The directory traversal is evaluator-owned code here rather than production's opener:
+it is a walk, not a semantic the receipt binds.  A regression proves in a fresh interpreter
+that importing this module leaves no ``serena_light`` module in the evaluator process.
 
 **Fail-closed individual freezes.**  One capture re-reads every Git-derived control after
 its records exist; a revision, inventory, or tracked/untracked change observed while
@@ -37,11 +50,14 @@ different filesystem states.
 
 from __future__ import annotations
 
+import base64
 import os
+import re
 import stat
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from typing import cast
 
 from scripts.backend_eval.models import PathRecord, RootManifest, canonical_json, sha256_bytes
 from scripts.backend_eval.process import (
@@ -54,24 +70,6 @@ from scripts.backend_eval.process import (
 )
 from scripts.backend_eval.production_helper import ProductionHelperError, run_production_helper
 from scripts.backend_eval.source_binding import HelperExpectation, SourceBindingError
-from serena_light.workspace.identity import open_guarded_directory
-
-# Evaluation-only reuse of production's *pure* inventory helpers.  These are executed
-# production semantics, so :mod:`scripts.backend_eval.source_binding` resolves them from this
-# evaluator's own checkout and binds their bytes into every receipt.
-#  Neither touches a
-# subprocess: they only decode, normalize, and inspect candidate paths through guarded
-# descriptors.  Importing them is what lets the evaluation bound the one Git command
-# ``git_trust_inventory`` would otherwise start for itself while keeping byte-identical
-# inventory semantics; `_git_trust_inventory_from_bounded_bytes` is tested against
-# ``git_trust_inventory`` for exact equality of root, kind, paths, count, digest, and
-# rejections.
-from serena_light.workspace.inventory import (
-    TrustInventory,
-    _decode_git_path,
-    _inventory_from_candidates,
-    bounded_non_git_trust_inventory,
-)
 
 SERENA_LIGHT_ROOT = Path("/data/CoordExp/serena-light")
 MS_SWIFT_ROOT = Path("/data/ms-swift")
@@ -92,6 +90,9 @@ EXCLUDED_DIRECTORY_NAMES: tuple[str, ...] = (".admission-artifacts", ".git", ".v
 # refuses a path that moved at any point during the pass, not merely during its own chunk.
 DIGEST_CHUNK_SIZE = 512
 
+_SHA256_RE = re.compile(r"[0-9a-f]{64}")
+# The exact inventory kind each delegated operation must report back.
+_INVENTORY_KINDS = {"git_inventory_from_bytes": "git", "bounded_non_git_inventory": "bounded_no_symlink"}
 _MAX_SCAN_DEPTH = 128
 _DIRECTORY_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
 # Git receives an explicit environment: no ambient GIT_* control may steer the corpus scan.
@@ -102,6 +103,30 @@ Check = Callable[[], None]
 
 class ManifestError(RuntimeError):
     """The requested root cannot be frozen without weakening its boundary."""
+
+
+@dataclass(frozen=True, slots=True)
+class BoundedTrustInventory:
+    """The trust-inventory evidence one bounded child computed with production's own bytes.
+
+    This is deliberately *not* production's ``TrustInventory``.  Importing that class would
+    put production code back in the evaluator process, which is exactly the exposure this
+    module closed: an import compiles whatever is on disk at import time, before the identity
+    that names it is captured.  Only the fields a
+    :class:`~scripts.backend_eval.models.RootManifest` is built from cross the boundary, and
+    they cross as canonical JSON validated on arrival.  The accepted paths, the count, the
+    digest, and every rejection reason are production's; nothing here recomputes them.
+    """
+
+    root: str
+    kind: str
+    digest: str
+    paths: tuple[str, ...]
+    rejected: tuple[tuple[str, str], ...]
+
+    @property
+    def count(self) -> int:
+        return len(self.paths)
 
 
 def _noop_check() -> None:
@@ -257,14 +282,14 @@ def _capture_git_manifest(
     deadline: Deadline | None,
 ) -> RootManifest:
     _require_git_root(root, deadline)
-    before, inventory = _git_freeze_state(root, deadline)
+    before, inventory = _git_freeze_state(root, expectation, deadline)
     _reject_inventory_rejections(inventory)
     hashed_names = set(inventory.paths) | set(request.fully_hashed_paths) | set(request.required_config_paths)
     disposition_for = _git_disposition_reader(before)
     records = _hashed_records(root, sorted(hashed_names), disposition_for, expectation, deadline)
     remainder, excluded = _scan_remainder(root, hashed_names, disposition_for, stop)
     _require_disjoint_records(records, remainder)
-    after, _ = _git_freeze_state(root, deadline)
+    after, _ = _git_freeze_state(root, expectation, deadline)
     if after != before:
         raise ManifestError("Git manifest inputs changed while freezing")
     return RootManifest.build(
@@ -314,10 +339,7 @@ def _capture_transformers_manifest(
     expectation: HelperExpectation,
     deadline: Deadline | None,
 ) -> RootManifest:
-    try:
-        inventory = bounded_non_git_trust_inventory(root)
-    except (OSError, ValueError) as error:
-        raise ManifestError(f"cannot capture bounded transformers inventory: {error}") from error
+    inventory = _bounded_non_git_inventory(root, expectation, deadline)
     _reject_inventory_rejections(inventory)
     hashed_paths = set(inventory.paths) | set(request.fully_hashed_paths) | set(request.required_config_paths)
     records = _hashed_records(root, sorted(hashed_paths), lambda _relative: "declared", expectation, deadline)
@@ -353,10 +375,7 @@ def _scan_remainder(
 
     records: list[PathRecord] = []
     excluded: list[str] = []
-    try:
-        root_fd = os.open(root, _DIRECTORY_FLAGS)
-    except OSError as error:
-        raise ManifestError(f"cannot open corpus root {root}: {error}") from error
+    root_fd = _open_declared_corpus_root(root)
     try:
         _walk_remainder(root_fd, "", root, hashed_names, disposition_for, stop, records, excluded, 0)
     finally:
@@ -480,6 +499,55 @@ def _ancestor_directories(paths: frozenset[str]) -> frozenset[str]:
 # --- declared metadata roots (non-Git only) --------------------------------------
 
 
+def _open_declared_corpus_root(root: Path) -> int:
+    """Open one caller-declared corpus root: the guarded open confinement starts from.
+
+    ``O_DIRECTORY`` refuses a non-directory before any type-specific open handler runs.  It
+    proves nothing about the components *above* the root, and the ownership table records it
+    as ``guarded`` rather than ``confined`` for exactly that reason.
+    """
+
+    try:
+        return os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+    except OSError as error:
+        raise ManifestError(f"cannot open the corpus root {root}: {error}") from error
+
+
+def _open_metadata_directory(root: Path, parts: tuple[str, ...]) -> int:
+    """Open one in-root metadata directory without traversing a symlinked component.
+
+    Evaluator-owned on purpose.  Production's ``open_guarded_directory`` does exactly this,
+    but calling it here would mean importing production code into the evaluator process --
+    compiled from whatever is on disk at import time, before the identity that names it is
+    captured.  A directory walk is not a semantic the receipt binds, so the honest repair is
+    to own the walk rather than to delegate it.
+
+    The boundary, stated exactly: the declared corpus root is opened as given, which is a
+    *guarded* open -- ``O_DIRECTORY`` refuses a non-directory, and nothing above the root is
+    proven, because the root is where confinement starts.  Every component below it is
+    opened from its parent's descriptor with ``O_NOFOLLOW``, so a symlinked component fails
+    with ``ELOOP`` and a non-directory with ``ENOTDIR`` before anything is read.
+    """
+
+    directory_fd = _open_declared_corpus_root(root)
+    try:
+        for part in parts:
+            if part in {"", ".", ".."}:
+                raise ManifestError(f"metadata path component is not normalized: {part!r}")
+            child_fd = os.open(part, _DIRECTORY_FLAGS, dir_fd=directory_fd)
+            os.close(directory_fd)
+            directory_fd = child_fd
+    except OSError as error:
+        os.close(directory_fd)
+        raise ManifestError(
+            f"metadata directory is a symlink or unreadable: {'/'.join(parts)}: {error}"
+        ) from error
+    except BaseException:
+        os.close(directory_fd)
+        raise
+    return directory_fd
+
+
 def _metadata_records(
     root: Path,
     metadata_roots: tuple[str, ...],
@@ -507,10 +575,7 @@ def _walk_metadata_root(
     disposition_for: Callable[[str], str],
     stop: Check,
 ) -> list[PathRecord]:
-    try:
-        directory_fd = open_guarded_directory(root, tuple(relative_directory.split("/")))
-    except OSError as error:
-        raise ManifestError(f"metadata directory is a symlink or unreadable: {relative_directory}: {error}") from error
+    directory_fd = _open_metadata_directory(root, tuple(relative_directory.split("/")))
     try:
         try:
             with os.scandir(directory_fd) as scan:
@@ -704,30 +769,129 @@ def _git_path_set(root: Path, args: tuple[str, ...], deadline: Deadline | None) 
     return frozenset(item.decode("utf-8", "surrogateescape") for item in payload.split(b"\0") if item)
 
 
-def _git_trust_inventory_from_bounded_bytes(root: Path, payload: bytes) -> TrustInventory:
+def _git_trust_inventory_from_bounded_bytes(
+    root: Path, payload: bytes, expectation: HelperExpectation, deadline: Deadline | None
+) -> BoundedTrustInventory:
     """Build production's Git trust inventory from bytes this module already bounded.
 
     ``git_trust_inventory`` differs from this function in exactly one respect: it starts its
     own unbounded ``git ls-files --cached --others --exclude-standard -z``, while the
-    evaluation reads that same command through :func:`run_bounded_bytes` and passes the
-    bytes here.  The root is resolved the same way, the bytes are split and decoded by
-    production's ``_decode_git_path``, and the candidates go through production's
-    ``_inventory_from_candidates``, so the accepted paths, their digest, the rejected
-    entries and reasons, the query tree, and the recorded kind are all production's.
+    evaluation reads that same command through :func:`run_bounded_bytes` and passes the bytes
+    to the child.  There, and only there, the root is resolved the same way, the bytes are
+    split and decoded by production's ``_decode_git_path``, and the candidates go through
+    production's ``_inventory_from_candidates``, so the accepted paths, their digest, and the
+    rejected entries and reasons are all production's -- executed from the sealed image the
+    run's own captured identity names.
     """
 
+    return _child_inventory(
+        "git_inventory_from_bytes",
+        {"root": str(root), "candidates_b64": base64.b64encode(payload).decode("ascii")},
+        root,
+        expectation,
+        deadline,
+    )
+
+
+def _bounded_non_git_inventory(
+    root: Path, expectation: HelperExpectation, deadline: Deadline | None
+) -> BoundedTrustInventory:
+    """Production's bounded non-Git indexing of one exact root, in the sealed child."""
+
+    return _child_inventory(
+        "bounded_non_git_inventory", {"root": str(root)}, root, expectation, deadline
+    )
+
+
+def _child_inventory(
+    operation: str,
+    payload: dict[str, str],
+    root: Path,
+    expectation: HelperExpectation,
+    deadline: Deadline | None,
+) -> BoundedTrustInventory:
+    """Run one inventory helper in the bounded child and validate the evidence it returns."""
+
     try:
-        resolved_root = root.resolve(strict=True)
+        result = run_production_helper(operation, payload, expectation=expectation, deadline=deadline)
+    except (ProductionHelperError, SourceBindingError) as error:
+        raise ManifestError(f"cannot capture the trust inventory below {root}: {error}") from error
+    return _parse_inventory_evidence(operation, result, root)
+
+
+def _parse_inventory_evidence(
+    operation: str, result: dict[str, object], root: Path
+) -> BoundedTrustInventory:
+    """Accept only fully typed inventory evidence; anything else is an incomplete capture."""
+
+    resolved = _expect_text(operation, result, "root", root)
+    kind = _expect_text(operation, result, "kind", root)
+    digest = _expect_text(operation, result, "digest", root)
+    if _SHA256_RE.fullmatch(digest) is None:
+        raise ManifestError(f"the {operation} helper returned a malformed digest below {root}")
+    if resolved != str(_resolved(root, operation)):
+        raise ManifestError(f"the {operation} helper indexed {resolved}, not {root}")
+    if kind != _INVENTORY_KINDS[operation]:
+        raise ManifestError(f"the {operation} helper reported the kind {kind!r} below {root}")
+    raw_paths = result.get("paths")
+    if not isinstance(raw_paths, list) or not all(isinstance(item, str) for item in raw_paths):
+        raise ManifestError(f"the {operation} helper returned malformed inventory paths below {root}")
+    paths = tuple(cast("list[str]", raw_paths))
+    if list(paths) != sorted(set(paths)):
+        raise ManifestError(f"the {operation} helper returned unsorted or duplicated paths below {root}")
+    if _path_digest(paths) != digest:
+        raise ManifestError(f"the {operation} helper's digest does not name the paths it returned below {root}")
+    raw_rejected = result.get("rejected")
+    if not isinstance(raw_rejected, list):
+        raise ManifestError(f"the {operation} helper returned malformed rejections below {root}")
+    rejected: list[tuple[str, str]] = []
+    for entry in cast("list[object]", raw_rejected):
+        if not isinstance(entry, list) or len(cast("list[object]", entry)) != 2:
+            raise ManifestError(f"the {operation} helper returned a malformed rejection below {root}")
+        path, reason = cast("list[object]", entry)
+        if not isinstance(path, str) or not isinstance(reason, str):
+            raise ManifestError(f"the {operation} helper returned a malformed rejection below {root}")
+        rejected.append((path, reason))
+    if list(rejected) != sorted(set(rejected)):
+        raise ManifestError(f"the {operation} helper returned unsorted or duplicated rejections below {root}")
+    return BoundedTrustInventory(
+        root=resolved,
+        kind=kind,
+        digest=digest,
+        paths=paths,
+        rejected=tuple(rejected),
+    )
+
+
+def _resolved(root: Path, operation: str) -> Path:
+    try:
+        return root.resolve(strict=True)
     except OSError as error:
-        raise ManifestError(f"cannot resolve the Git corpus root {root}: {error}") from error
-    candidates = (_decode_git_path(item) for item in payload.split(b"\0") if item)
-    try:
-        return _inventory_from_candidates(resolved_root, candidates, kind="git")
-    except (OSError, ValueError) as error:
-        raise ManifestError(f"cannot capture Git trust inventory: {error}") from error
+        raise ManifestError(f"cannot resolve the corpus root for {operation}: {root}: {error}") from error
 
 
-def _git_freeze_state(root: Path, deadline: Deadline | None) -> tuple[_GitFreezeState, TrustInventory]:
+def _path_digest(paths: tuple[str, ...]) -> str:
+    """Production's own inventory digest formula, recomputed here as an independent check.
+
+    This is not a reimplementation of the inventory: which paths are accepted, and why the
+    rest are rejected, is production's answer and is never recomputed.  This one line only
+    proves the digest the child returned names exactly the path list it returned alongside it,
+    so a malformed or mismatched response is refused rather than published.
+    """
+
+    return sha256_bytes("\0".join(paths).encode("utf-8", "surrogateescape"))
+
+
+def _expect_text(operation: str, result: dict[str, object], name: str, root: Path) -> str:
+    value = result.get(name)
+    if not isinstance(value, str) or not value:
+        raise ManifestError(f"the {operation} helper did not report {name} below {root}")
+    return value
+
+
+def _git_freeze_state(
+    root: Path, expectation: HelperExpectation, deadline: Deadline | None
+) -> tuple[_GitFreezeState, BoundedTrustInventory]:
     """Capture every Git-derived closure fact used by one manifest pass.
 
     Four bounded Git children, and no others: the revision, the tracked set, the untracked
@@ -738,14 +902,14 @@ def _git_freeze_state(root: Path, deadline: Deadline | None) -> tuple[_GitFreeze
     tracked = _git_path_set(root, ("ls-files", "--cached", "-z"), deadline)
     untracked = _git_path_set(root, ("ls-files", "--others", "--exclude-standard", "-z"), deadline)
     combined = _git_bytes(root, ("ls-files", "--cached", "--others", "--exclude-standard", "-z"), deadline)
-    inventory = _git_trust_inventory_from_bounded_bytes(root, combined)
+    inventory = _git_trust_inventory_from_bounded_bytes(root, combined, expectation, deadline)
     return (
         _GitFreezeState(
             source_revision=source_revision,
             inventory_digest=inventory.digest,
             inventory_count=inventory.count,
             inventory_paths=inventory.paths,
-            inventory_rejections=tuple((entry.path, entry.reason) for entry in inventory.rejected),
+            inventory_rejections=inventory.rejected,
             tracked_paths=tracked,
             untracked_paths=untracked,
         ),
@@ -753,10 +917,10 @@ def _git_freeze_state(root: Path, deadline: Deadline | None) -> tuple[_GitFreeze
     )
 
 
-def _reject_inventory_rejections(inventory: TrustInventory) -> None:
+def _reject_inventory_rejections(inventory: BoundedTrustInventory) -> None:
     if inventory.rejected:
-        first = inventory.rejected[0]
-        raise ManifestError(f"trust inventory rejected {first.path}: {first.reason}")
+        path, reason = inventory.rejected[0]
+        raise ManifestError(f"trust inventory rejected {path}: {reason}")
 
 
 def _require_disjoint_records(hashed: tuple[PathRecord, ...], metadata: tuple[PathRecord, ...]) -> None:

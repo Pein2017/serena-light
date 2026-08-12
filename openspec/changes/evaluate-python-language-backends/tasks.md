@@ -167,6 +167,22 @@
 > descriptor before any child starts, with its ownership declared. No receipt field changed:
 > the receipt contract binds the CLI host interpreter and the candidate executables, not Git.
 >
+> **A focused correction round closed the last parent-side execution of production code.**
+> The first cut of (a) left `manifests.py` importing `bounded_non_git_trust_inventory`,
+> `_decode_git_path`, `_inventory_from_candidates`, and `open_guarded_directory` into the
+> evaluator process, which is the same defect one level up: an import compiles whatever bytes
+> are on disk at import time, and the identity naming them is captured afterwards, so a swap
+> between the two would have published a receipt naming one closure while the parent's corpus
+> evidence was computed by another. Both inventory helpers now execute in the sealed child, as
+> two further operations with the same exact declared closure, returning only the evidence a
+> `RootManifest` is built from as canonical JSON that the parent validates field by field and
+> cross-checks against production's own path-digest formula. The metadata traversal is
+> evaluator-owned code with a guarded declared-root open and confined descendants, rather than
+> a delegated production call. A fresh-interpreter regression and an AST rule prove no
+> `serena_light` module is imported into the evaluator at all, the ownership table records the
+> delegated child operations on both sides of the boundary, and `os.walk` is now matched by the
+> collector's qualified vocabulary.
+>
 > Prose corrected with the code: design Decision 8d now states that the child program runs from
 > a sealed `memfd` `/proc/self/fd/...` rather than an absolute mutable script path and how the
 > production helper bytes are executed from the identity-bound source image; the digest-chunk

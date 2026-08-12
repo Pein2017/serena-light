@@ -16,8 +16,10 @@ vocabulary now also covers namespace mutation (`link`, `unlink`, `rename`, `repl
 `pwrite`, `lseek`, `ftruncate`, `fsync`, `fdatasync`, and the stream `read`/`write`/`flush`
 performed through an `os.fdopen` handle), metadata and link inspection (`stat`, `lstat`,
 `fstat`, `readlink`, `access`, `chmod`, `fchmod`, `realpath`, and the `pathlib` predicates),
-descriptor duplication and release (`dup`, `close`), and executable discovery (`shutil.which`,
-which the evaluator no longer performs at all). Descriptor primitives are enumerated as rows
+descriptor duplication and release (`dup`, `close`), executable discovery (`shutil.which`,
+which the evaluator no longer performs at all), and -- on the parent side of the child
+boundary -- every delegation to the bounded child (`delegated.production_child`), so a
+production helper is enumerated both where it runs and where it is asked for. Descriptor primitives are enumerated as rows
 *and* proven mechanically: a dedicated test walks every call to one and requires its first
 argument to be a descriptor-shaped expression, never a constructed pathname, so the
 `descriptor` class cannot be used to hide a pathname-shaped access.
@@ -104,15 +106,34 @@ descriptor-shaped argument rather than a constructed pathname.
 ### `production-child`
 
 Exact production semantics, executed in `scripts/backend_eval/production_child.py` under the
-phase's own monotonic deadline.
+phase's own monotonic deadline. **Every production helper the evaluation executes is in this
+class. The evaluator process imports no `serena_light` module at all**, which a regression
+proves in a fresh interpreter and an AST rule proves structurally.
 
-`dependency_lock_digest`, `compute_build_identity`, `runtime_paths`, and `observe_file_digest`
-live in `src/serena_light`, which is production and is not edited to close an evaluation-only
-exposure. All four check a path's type and then reopen it by name -- the first three through
-`Path.is_file()` and `Path.read_bytes()`, the fourth through `O_RDONLY | O_NOFOLLOW` with no
-`O_NONBLOCK` -- so a node substituted in that window blocks them. Reimplementing them in the
-evaluator would drift from the semantics the receipt claims to bind, so the evaluation runs
-their exact bytes and bounds the blast radius instead.
+That completeness is the point, not a tidiness preference. An import compiles whatever bytes
+are on disk *at import time*, and the evaluator identity is captured afterwards, so a
+production module imported into the evaluator could have been substituted between the two: the
+receipt would name one closure while the parent's own evidence was computed by another. Six
+helpers are delegated. `dependency_lock_digest`, `compute_build_identity`, `runtime_paths`, and
+`observe_file_digest` were always here. `bounded_non_git_trust_inventory` and the pair
+`_decode_git_path` / `_inventory_from_candidates` used to run in the corpus capture and moved
+here for exactly the reason above; only the evidence a `RootManifest` is built from -- the
+resolved root, the kind, the accepted paths, production's digest, and the rejections with
+production's own reasons -- crosses back, as canonical JSON validated on arrival. The parent
+recomputes production's own `sha256("\0".join(paths))` over the returned path list, so a digest
+that does not name the paths beside it is refused; it never recomputes *which* paths are
+accepted or why the rest are rejected, because that is production's answer.
+
+A path carrying surrogate-escaped invalid bytes cannot be serialized as canonical JSON, so the
+child refuses and the parent reports a typed incomplete capture. That is the pre-existing
+fail-closed disposition -- such a path could never have reached a `RootManifest` either -- and
+it is left exactly as it was rather than turned into an encoding redesign.
+
+The four originally delegated helpers check a path's type and then reopen it by name -- the
+first three through `Path.is_file()` and `Path.read_bytes()`, the fourth through
+`O_RDONLY | O_NOFOLLOW` with no `O_NONBLOCK` -- so a node substituted in that window blocks
+them. Reimplementing them in the evaluator would drift from the semantics the receipt claims to
+bind, so the evaluation runs their exact bytes and bounds the blast radius instead.
 
 The child guarantees:
 
@@ -192,7 +213,7 @@ executables, not this one, so no receipt field changed.
 | `admission.py` | the artifact tree digest, the receipt publication, the publication lock, the evaluation directory |
 | `candidate_lock.py` | the frozen candidate-lock transaction below the artifact root |
 | `identity.py` | the evaluator's own executed source closure |
-| `manifests.py` | the corpus capture: the Git freeze, the remainder scan, the hashed closure |
+| `manifests.py` | the corpus capture: the Git freeze, the remainder scan, the metadata walk, and the delegation of both inventory helpers |
 | `production_child.py` | the bounded child that executes production helpers |
 | `process.py` | the bounded runner, the sealed-image primitive, the declared-executable binding |
 | `production_helper.py` | verifying the expected bytes and starting that child |
@@ -238,11 +259,19 @@ claiming a guarantee the kernel does not offer.
    the physical path is what is opened; components above the root are not re-proven. The same
    holds for the evaluator owner root the confined helper reads walk out from: it is derived
    from `source_binding`'s own resolved `__file__`, and its ancestors are not re-proven.
-6. **`declared-path` observations can be raced.** They resolve a name a second time, so a node
+6. **The metadata traversal is evaluator-owned, and its root open is only guarded.** It used
+   to call production's `open_guarded_directory`; that call is gone, because it would put
+   production code back in the evaluator process. The replacement does the same thing --
+   declared corpus root opened `O_RDONLY | O_DIRECTORY`, every component below it opened from
+   its parent's descriptor with `O_NOFOLLOW` -- and is stated for what it is: a walk, not a
+   semantic the receipt binds, with a `guarded` root and `confined` descendants. Nothing above
+   the declared root is proven, and the traversal remains bounded by the same stop callback and
+   phase deadline as the rest of the capture.
+7. **`declared-path` observations can be raced.** They resolve a name a second time, so a node
    substituted after the observation is not caught by it. They are only ever used to refuse,
    never to authorize a byte to move, and the access that follows resolves nothing by name --
    but the observation itself is not a guard and is not described as one.
-7. **The expectation binds bytes, not the whole filesystem.** A helper or child program that
+8. **The expectation binds bytes, not the whole filesystem.** A helper or child program that
    differs from the captured evaluator identity is refused before it can execute, and the
    verified bytes are the imported bytes. That is not a claim that the file on disk cannot
    change: it is a claim that a changed file cannot run, in this run or in any other run in

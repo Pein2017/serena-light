@@ -10,6 +10,8 @@ to change or the run to be refused.
 
 from __future__ import annotations
 
+import ast
+import json
 import os
 import subprocess
 import sys
@@ -97,19 +99,76 @@ def test_every_loaded_serena_light_module_resolves_inside_this_checkout() -> Non
         )
 
 
-def test_the_admission_cli_loads_no_unbound_non_stdlib_helper() -> None:
-    """The bound closure is *complete*: nothing else non-stdlib is executed by the CLI."""
+def _fresh_import_report(module: str) -> dict[str, list[str]]:
+    """Import one evaluator module in a *fresh* interpreter and report what it loaded.
+
+    A fresh subprocess is the only honest instrument here.  Inside pytest, this session has
+    already imported ``serena_light`` -- the equivalence tests need production's own answer to
+    compare against -- so an in-process ``sys.modules`` check would pass or fail for reasons
+    that have nothing to do with the evaluator.
+    """
 
     program = (
-        "import sys; import scripts.backend_eval.admission;"
+        f"import sys; import {module};"
         "top = sorted({name.split('.')[0] for name in sys.modules"
         " if not name.startswith('_') and name.split('.')[0] not in sys.stdlib_module_names});"
-        "print(' '.join(top))"
+        "production = sorted(name for name in sys.modules"
+        " if name == 'serena_light' or name.startswith('serena_light.'));"
+        "import json; print(json.dumps({'top': top, 'production': production,"
+        " 'evaluator': __import__('scripts.backend_eval', fromlist=['x']).__file__}))"
     )
     result = subprocess.run(
         [sys.executable, "-c", program], cwd=_REPO_ROOT, capture_output=True, text=True, timeout=120, check=True
     )
-    assert result.stdout.split() == ["scripts", "serena_light"]
+    report = json.loads(result.stdout)
+    # If the subprocess resolved another checkout's ``scripts``, this test would be vacuous.
+    assert Path(report["evaluator"]).resolve().is_relative_to(_REPO_ROOT), report["evaluator"]
+    return report
+
+
+@pytest.mark.parametrize(
+    "module",
+    ["scripts.backend_eval.admission", "scripts.backend_eval.manifests", "scripts.backend_eval"],
+)
+def test_importing_the_evaluator_loads_no_production_module_into_the_parent(module: str) -> None:
+    """No ``serena_light`` module is ever compiled in the evaluator process.
+
+    This is the structural half of the byte-execution guarantee.  An import compiles whatever
+    is on disk *at import time*, and the evaluator identity is captured afterwards, so a
+    production module imported here could have been substituted between the two: the receipt
+    would name one closure while the parent's evidence was computed by another.  Every
+    production helper therefore executes in the sealed child, and this test is what keeps it
+    that way -- a reintroduced parent import fails here rather than in a review.
+    """
+
+    report = _fresh_import_report(module)
+
+    assert report["production"] == []
+    assert report["top"] == ["scripts"]
+
+
+def test_no_evaluator_module_imports_production_at_all() -> None:
+    """The same claim structurally, so a lazily-deferred import cannot hide from the above."""
+
+    offenders: list[str] = []
+    for module in sorted((_REPO_ROOT / "scripts" / "backend_eval").glob("*.py")):
+        if module.name == "production_child.py":
+            # The child is a *program*, never imported by the evaluator; it is executed from a
+            # sealed image in its own interpreter, which is where production belongs.
+            continue
+        tree = ast.parse(module.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                offenders += [
+                    f"{module.name}:{node.lineno}"
+                    for alias in node.names
+                    if alias.name == "serena_light" or alias.name.startswith("serena_light.")
+                ]
+            elif isinstance(node, ast.ImportFrom) and node.module is not None and (
+                node.module == "serena_light" or node.module.startswith("serena_light.")
+            ):
+                offenders.append(f"{module.name}:{node.lineno}")
+    assert offenders == []
 
 
 def test_read_regular_file_refuses_a_fifo_promptly(tmp_path: Path) -> None:

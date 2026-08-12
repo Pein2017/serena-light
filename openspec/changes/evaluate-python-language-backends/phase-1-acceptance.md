@@ -29,6 +29,21 @@ step after review, and Task 1.8 stays unchecked until then.
    before publication so a late mutation can never yield a `pass`; and `_PINNED_CHILD_DIGESTS`
    is gone, so two admissions in one process cannot contaminate each other.
 
+1b. **Production helpers still executed in the evaluator process.** Found by a focused review
+   of the first repair: `manifests.py` imported `bounded_non_git_trust_inventory`,
+   `_decode_git_path`, `_inventory_from_candidates`, and `open_guarded_directory` from the
+   mutable `src/serena_light` into the *evaluator*. Python compiled those bytes at import time
+   and `capture_evaluator_identity()` re-read the same paths afterwards, so a swap between the
+   two would have published a receipt naming one closure while the parent's corpus evidence was
+   computed by another -- the same defect as (1), one level up.
+
+   Repaired: both inventory helpers execute in the sealed child as two further operations with
+   the same exact declared closure, returning only the evidence a `RootManifest` is built from
+   as canonical JSON that the parent validates field by field and cross-checks against
+   production's own path-digest formula; the metadata traversal is evaluator-owned code with a
+   guarded declared-root open and confined descendants; and a fresh-interpreter regression plus
+   an AST rule prove that importing the evaluator leaves no `serena_light` module in the parent.
+
 2. **Two filesystem-ownership claims were false.** `ProductionAdmissionServices.cleanup()` was
    reproduced following a symlinked ancestor and unlinking a decoy *outside* the evaluation
    root: it opened `evaluation_root / receipts` as one absolute pathname under `O_NOFOLLOW`,
@@ -297,7 +312,12 @@ Three defects, each repaired and covered by adversarial tests:
    construction and in parsing, with a mutation test per budget.
 
 
-## The admitting run
+## The rejected run `59a38137…d73f`, recorded exactly as it was published
+
+*This section is the retained record of the run the final review rejected. Every number in it
+was true of that run at HEAD `82651d0`. It is not an admitted PASS, and the language below --
+including its own use of "admitting run" for itself and for its predecessors -- describes the
+disposition that section carried before the rejection, not the current one.*
 
 | Field | Value |
 | --- | --- |
@@ -371,7 +391,7 @@ helper import, which the receipt's `production_root` confirms.
 | evaluator source closure | 13 files of `scripts/backend_eval`, digest `9205f879093d0d3c089386d98df8a89475ae8ad89338984d6bc1b6a8f2a01a26` |
 | evaluator source commit | `82651d0dd66a72fc39f31f54c6b9ab03d5be8113`, source clean |
 | executed production closure | 6 files, digest `d7ed23955949067b932e9b18e5818ca6bece52797cbd2b2241fb84981331966b` (unchanged), clean at that commit -- the three the bounded child executes are declared by `CHILD_EXECUTED_HELPERS` and pinned against the child's own report |
-| bounded child program | `production_child.py`, digest `3e48b129b6bf0873697f5155bf8845d180101f32b0db794dd6872e050b60a749`, equal to `production_child_digest()` read through the confined walk |
+| bounded child program | `production_child.py`, digest `3e48b129b6bf0873697f5155bf8845d180101f32b0db794dd6872e050b60a749`, equal to the digest that run's `production_child_digest()` probe read through the confined walk. *That probe was removed in the final-review repair: the equality is now the execution path itself -- a helper may run only when the program on disk is byte-for-byte the one the captured identity names.* |
 | CLI host interpreter | `/root/miniconda3/envs/ms/bin/python3.12`, sha256 `068d88ca469ae96121a1a220eb9e0ac3e1a6400b193e3b9cc7c14f54f9ed28e4` |
 | environments | `llm-framework-study` (3.12.13), `ms` (3.12.11) |
 | service configurations | `pyrefly`, `pyright`, `ty` |
@@ -423,7 +443,8 @@ strict parsing succeeds and the budget set equals `DEFAULT_PHASE_BUDGETS` exactl
 `artifact_tree_digest` recomputed over the evaluation root equals `2944f882…`; the runtime
 manifest digest re-read from disk equals the receipt's `e578bf4d…`; the child program digest
 read through the confined walk equals the `production_child.py` entry in the receipt's own
-evaluator closure; and the live production identity equals both receipt sides (above). All
+evaluator closure (through the `production_child_digest()` probe that run still had); and the
+live production identity equals both receipt sides (above). All
 seven receipt-bearing identities -- this one and the six earlier ones -- recompute their
 recorded `artifact_tree_digest` exactly.
 

@@ -283,6 +283,51 @@ def test_a_helper_reaching_disk_instead_of_the_image_is_an_origin_escape(
         run_production_helper("production_identity", {"root": str(owner)}, expectation=expectation)
 
 
+def test_a_helper_swapped_after_the_capture_cannot_serve_the_corpus_inventory(
+    tmp_path: Path, repo_root: Path
+) -> None:
+    """The corpus inventory helpers are held to the expectation like every other one.
+
+    They used to be imported into the evaluator process, where the compiled bytes were fixed
+    before the identity that names them was captured.  Now they execute in the child under the
+    same expectation, so a post-capture swap refuses instead of answering.
+    """
+
+    owner = _owner_copy(tmp_path, repo_root)
+    expectation = expectation_for(owner)
+    target = owner / "src" / "serena_light" / "workspace" / "inventory.py"
+    target.write_text("def bounded_non_git_trust_inventory(root):\n    return None\n", encoding="utf-8")
+
+    for operation, payload in (
+        ("bounded_non_git_inventory", {"root": str(owner)}),
+        ("git_inventory_from_bytes", {"root": str(owner), "candidates_b64": ""}),
+        ("observe_file_digests", {"paths": []}),
+    ):
+        with pytest.raises(SourceBindingError, match="not the .* this evaluator's identity names"):
+            run_production_helper(operation, payload, expectation=expectation)
+
+
+def test_the_corpus_inventory_helpers_run_under_the_same_sealed_image(
+    tmp_path: Path, repo_root: Path
+) -> None:
+    """Both new operations execute, and report exactly their declared closure."""
+
+    owner = _owner_copy(tmp_path, repo_root)
+    expectation = expectation_for(owner)
+
+    bounded = run_production_helper(
+        "bounded_non_git_inventory", {"root": str(owner / "src")}, expectation=expectation
+    )
+    assert bounded["kind"] == "bounded_no_symlink"
+    assert "serena_light/build_identity.py" in bounded["paths"]
+
+    empty = run_production_helper(
+        "git_inventory_from_bytes", {"root": str(owner), "candidates_b64": ""}, expectation=expectation
+    )
+    assert empty["kind"] == "git"
+    assert empty["paths"] == []
+
+
 # --- no process-global truth --------------------------------------------------------------
 
 
@@ -314,11 +359,23 @@ def test_two_checkouts_in_one_process_never_contaminate_each_others_truth(
     assert second_result["dependency_lock_digest"] == dependency_lock_digest(second)
     assert first_result["dependency_lock_digest"] != second_result["dependency_lock_digest"]
 
-    # And the first run's bytes cannot authorize the second checkout, in either direction.
+    # And one checkout's expectation cannot authorize the other's bytes.  The helper closures
+    # have to actually differ for that to mean anything, so make them differ.
+    (second / _BUILD_IDENTITY_RELPATH).write_text(
+        (second / _BUILD_IDENTITY_RELPATH).read_text(encoding="utf-8") + "\n# second checkout\n",
+        encoding="utf-8",
+    )
+    diverged = expectation_for(second)
+    assert dict(diverged.closure) != dict(first_expectation.closure)
+
     crossed = replace(first_expectation, owner_root=second)
-    if dict(first_expectation.closure) != dict(second_expectation.closure):  # pragma: no cover
-        with pytest.raises(SourceBindingError):
-            run_production_helper("production_identity", {"root": str(second)}, expectation=crossed)
+    with pytest.raises(SourceBindingError, match="not the .* this evaluator's identity names"):
+        run_production_helper("production_identity", {"root": str(second)}, expectation=crossed)
+
+    # The second checkout still runs perfectly well under its *own* expectation.
+    assert run_production_helper(
+        "production_identity", {"root": str(second)}, expectation=diverged
+    )["dependency_lock_digest"] == second_result["dependency_lock_digest"]
 
 
 def test_no_process_global_pin_survives_in_the_production_helper() -> None:
