@@ -9,24 +9,30 @@ every guarded regular-file read opened `O_RDONLY | O_NOFOLLOW` with no `O_NONBLO
 FIFO or other blocking special node left where a regular file was expected -- reproduced at
 `runtime-manifest.json` -- hung the open rather than failing closed. It could not produce a
 false `PASS`, since the `fstat` regular-file refusal still ran after any open that returned,
-but it could exceed the whole-phase ceiling with no receipt. All five are repaired, tasks
-1.13 and 1.15 were reopened and closed for them, and the run recorded below is a fresh
-evidence-only run from the repaired, committed evaluator at HEAD `2503f85`, proving the fifth
-defect's fix changes nothing about ordinary-file behavior on the real corpus and runtime.
+but it could exceed the whole-phase ceiling with no receipt. A sixth review then found that
+the audit which produced that fix was flag-shaped -- it searched `os.open` constants, which
+cannot see `Path.read_bytes`, `Path.write_text`, `Path.mkdir`, or a production helper call --
+and three whole families of read and write had survived it: every harness-owned write in
+`runtime.py`, the production-identity inputs and the production helpers behind them, and the
+corpus content digest. All six are repaired, tasks 1.13 and 1.15 were reopened and closed for
+them, and the run recorded below is a fresh run from the repaired, committed evaluator at
+HEAD `40eb2af`.
 
 **Task 1.8 stays unchecked and on HOLD.** A checked box may never stand for an unreviewed
 run, and neither re-review of this receipt has happened. Nothing else blocks it.
 
-**No receipt has been erased.** Six runs are now on record byte-for-byte: the original
+**No receipt has been erased.** Seven runs are now on record byte-for-byte: the original
 attempted run (instrument-limited), the repaired-instrument run (superseded when the last
 unbounded Git child was removed), the reviewed run (superseded by the first repair), the
-run admitted by the ceiling-and-mode repair, the run admitted before the guarded-read repair
-(superseded by this one), and the admitting run below. All 89 artifact files of the five
-earlier runs were captured immediately before this run and re-captured immediately after:
-**89 files, 0 changed** in content, inode, size, `mtime`, or mode, and 80 of the 81 earlier
-directories unchanged in every one of those fields. The single exception is the artifact
-root's own `mtime`, which advanced because it gained the new evaluation-identity child; every
-one of the 16 new entries is under that child alone.
+run admitted by the ceiling-and-mode repair, the run admitted by the guarded-read repair, the
+run admitted before the descriptor-ownership repair (superseded by this one), and the
+admitting run below. All 94 artifact files and 96 artifact directories of the six earlier runs
+were captured immediately before this run and re-captured after it: **94 files, 0 changed** in
+content, inode, size, `mtime`, or mode, and **96 directories, 0 changed** in every one of those
+fields. The only entry that moved at all is the artifact root's own `mtime`, which advanced
+because it gained the new evaluation-identity child -- same inode, same mode; every one of the
+16 new files and 17 new directories is under that child alone. All six earlier
+receipt-bearing identities still recompute their recorded `artifact_tree_digest` exactly.
 
 
 ## What the second re-review held on
@@ -138,6 +144,19 @@ repair -- each now fixed and covered by adversarial tests:
    bounded-runner accounting test then caught -- `ctypes.util.find_library("c")` shells out to
    `ldconfig` -- so `memfd_create` is resolved from the already-loaded process image instead.
 
+7. **The repair's own receipt verification found a seventh defect: the bound production
+   closure silently narrowed.** Moving three helpers into the bounded child stopped this
+   process from importing `serena_light.bootstrap` and `serena_light.build_identity`, so
+   `sys.modules` no longer saw them and the published `production_files` dropped from six
+   entries to four. The receipt would have carried those helpers' *answers* while no longer
+   naming their *bytes*, which is exactly the binding the "a phase executes a production
+   helper" scenario requires. Fixed before the admitting run: `CHILD_EXECUTED_HELPERS` declares
+   the modules the child loads, they are digested from this checkout alongside the in-process
+   ones, and a test requires the child's own reported closure -- for every operation it
+   supports -- to equal that declaration, so a helper that starts importing something new fails
+   a test instead of quietly leaving the receipt. The closure and its digest are byte-identical
+   to the previous admitting run's again.
+
 ### The residual boundaries, stated rather than papered over
 
 **Confinement is claimed only where a root descriptor owns it.** A `guarded` read -- the
@@ -205,28 +224,48 @@ Three defects, each repaired and covered by adversarial tests:
 
 | Field | Value |
 | --- | --- |
-| `evaluation_identity` | `35b85d4efe3ee95f6219a89f5158c96bec56a4c4e3cad841481dbf52d33cd334` |
-| `run_identity` | `ddfe7d4913ec0041f80fef7f76ba71af489d699620ef0f8a575d7516fe1b8562` |
+| `evaluation_identity` | `7ca37592647a147a8728d86052cdafe14495cad62ff4103f38571b5404e51900` |
+| `run_identity` | `c9a2456d9280dfde941e17c4ffa3e7b66049af2bc14b47b24c6660e9305d9b63` |
 | receipt | `<repo>/.admission-artifacts/backend-eval/<evaluation-identity>/receipts/<run-identity>.json` |
-| receipt `sha256` | `80401b6e7b2e06e3db137d127fed9598868994082dcdeee805efd74bdb8d1fe8` (39,745,560 bytes, inode `125835009`, mode `0600`) |
+| receipt `sha256` | `8166f6f7a3fc72aa5195b3f9069da98e81a8380022e22227eda6720bf3455c4b` (39,749,106 bytes, inode `125835123`, mode `0600`) |
 | `schema_version` / contract | `2` / `python-backend-evaluation-v1` |
 | `status` / `next_action` | `pass` / `begin_protocol_probe_planning` |
 | `issues` | none |
-| window | `started_at=2026-08-12T02:09:33Z`, `ended_at=2026-08-12T02:09:45Z` -- **12 s** of the 1800 s ceiling |
-| `artifact_tree_digest` | `7287a79def7d5fa9855e9a2903adbef5c852621afa24ed2ca6618611eb75902d` |
+| window | `started_at=2026-08-12T03:52:29Z`, `ended_at=2026-08-12T03:52:40Z` -- **11 s** of the 1800 s ceiling |
+| `artifact_tree_digest` | `98f30aa42639e45b44ec5ded065498a1e25ce2ba7108029f7641723549b91cf6` |
+| evaluator source | commit `40eb2afa00fc2be63a0cd36d4a479d3ae18f121a`, clean, closure `36d811bb9e5620f8d1cff2ab9ab070b1801871ce5e8a4ea24b45a4bf2cf07c15` |
+| candidate lock | `6cd570324d1a35aa0f4c30b60fd3005fe0953e8efe230915fb19ad24184b9062` -- `pyrefly==1.2.0`, `ty==0.0.70`, unchanged from every earlier run |
+| runtime | `runtime_manifest_sha256=e578bf4d6f1d98df96140d6c03b793a26af60658e49ea03b6810581898a6b4ec`, `runtime_permission_repairs=none` |
+| corpus | 68,066 in-scope paths in 5 roots, 31 declared exclusions, 0 unexpected paths, 0 declared mutations, 0 changed controls |
+| production identity | build identity and dependency-lock digest identical before and after |
 
-This is the fresh run from the `O_NONBLOCK` guarded-read repair, produced by the clean
-committed checkout `2503f85`. Its purpose is evidence-only: it proves the fix changes nothing
-about ordinary-file behavior on the real corpus and runtime, not that the fifth defect itself
-needed the ceiling machinery to observe it -- that defect could not produce a false `PASS`,
-only an unbounded hang, which does not happen inside a real run with no FIFO present. Task 1.8
-stays unchecked pending the same two independent re-reviews as before.
+This is the fresh run from the descriptor-ownership repair, produced by the clean committed
+checkout `40eb2af` with `git status --porcelain` empty before it. It is the first run in which
+the production helpers -- the dependency-lock digest, the build identity, the runtime paths,
+and every corpus content digest -- executed inside the bounded, source-bound child rather than
+in the evaluator process, and in which every harness-owned read below the runtime root went
+through the component-wise descriptor walk. Task 1.8 stays unchecked pending the same two
+independent re-reviews as before.
+
+**What this run did and did not exercise.** The candidate lock was accepted from its existing
+freeze and the runtime at that digest was *reused*, so the run exercised the confined
+verification reads, the mode contract, and the independent manifest-digest recomputation --
+not the confined *write* path, which only a fresh build reaches. That path was therefore
+exercised separately against real `uv venv` and `uv pip sync`, into a throwaway runtime base
+outside the artifact tree and every protected root: it built the runtime in 215.6 s with all
+five harness-written files at `0600`, all nine service-owned directories at `0700`, no
+permission repairs, a manifest digest that recomputes from disk, and byte-identical service
+configurations, installed snapshot digest, and candidate executable digests to the published
+runtime (`pyrefly 8ff3120d…`, `ty a0f425a3…`). The probe base was removed afterwards, and the
+artifact tree was re-captured before and after it: **0 of 110 files and 0 of 113 directories
+changed**, and all six receipt-bearing identities still recompute their recorded
+`artifact_tree_digest` exactly.
 
 ### Exact command
 
 ```bash
 cd /data/CoordExp/.worktrees/serena-light-backend-eval-final-fix
-backend_eval_freeze_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"   # resolved to 2026-08-12T02:09:33Z
+backend_eval_freeze_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"   # resolved to 2026-08-12T03:52:29Z
 /data/CoordExp/.worktrees/serena-light-backend-eval/.venv/bin/python -m scripts.backend_eval.admission \
   --repo-root /data/CoordExp/serena-light \
   --artifact-root /data/CoordExp/serena-light/.admission-artifacts/backend-eval \
@@ -236,8 +275,9 @@ backend_eval_freeze_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"   # resolved to 2026-08-
   --exclude-newer "$backend_eval_freeze_at"
 ```
 
-Exit status `0`, empty stderr. Run once, from the clean committed checkout `2503f85`, with
-`git status --porcelain` empty before the run.
+Exit status `0`, empty stderr. Run once, from the clean committed checkout `40eb2af`, with
+`git status --porcelain` empty before the run. No evaluation process, child, or descriptor
+outlived it.
 
 **Recorded deviation, unchanged and receipt-bound.** Same as every earlier run: the CLI host
 is the sibling worktree's `.venv` (`import scripts` under bare `ms` still shadows this

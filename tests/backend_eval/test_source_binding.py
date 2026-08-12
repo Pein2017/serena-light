@@ -57,8 +57,10 @@ def test_the_evaluator_binds_the_production_helpers_of_its_own_checkout() -> Non
     for relative in bound:
         assert relative.startswith("src/serena_light/")
         assert (_REPO_ROOT / relative).is_file()
-    # The helpers the manifests, write guard, and production identity actually import.
+    # The helpers the manifests, write guard, and production identity actually execute --
+    # in this process for the first two, in the bounded child for the identity capture.
     assert {
+        "src/serena_light/bootstrap.py",
         "src/serena_light/build_identity.py",
         "src/serena_light/workspace/identity.py",
         "src/serena_light/workspace/inventory.py",
@@ -138,11 +140,11 @@ def test_changed_helper_bytes_change_the_bound_digest(tmp_path: Path) -> None:
 
     owner = tmp_path / "owner"
     module = _checkout(owner, body="VALUE = 1\n")
-    before = bind_production_source(modules={module.__name__: module}, owner_root=owner)
+    before = bind_production_source(modules={module.__name__: module}, owner_root=owner, child_helpers=())
     assert before == (("src/serena_light/workspace/inventory.py", before[0][1]),)
 
     Path(str(module.__file__)).write_text("VALUE = 2\n")
-    after = bind_production_source(modules={module.__name__: module}, owner_root=owner)
+    after = bind_production_source(modules={module.__name__: module}, owner_root=owner, child_helpers=())
     assert after[0][0] == before[0][0]
     assert after[0][1] != before[0][1]
 
@@ -150,9 +152,9 @@ def test_changed_helper_bytes_change_the_bound_digest(tmp_path: Path) -> None:
 def test_changed_helper_bytes_change_the_evaluation_identity(tmp_path: Path) -> None:
     owner = tmp_path / "owner"
     module = _checkout(owner, body="VALUE = 1\n")
-    first = bind_production_source(modules={module.__name__: module}, owner_root=owner)
+    first = bind_production_source(modules={module.__name__: module}, owner_root=owner, child_helpers=())
     Path(str(module.__file__)).write_text("VALUE = 2\n")
-    second = bind_production_source(modules={module.__name__: module}, owner_root=owner)
+    second = bind_production_source(modules={module.__name__: module}, owner_root=owner, child_helpers=())
 
     identities = tuple(
         evaluation_identity(_request(), _production_identity(), _evaluator(production_files=files))
@@ -168,7 +170,7 @@ def test_a_helper_from_another_checkout_is_refused(tmp_path: Path) -> None:
     _checkout(owner, body="VALUE = 1\n")
     other = _checkout(tmp_path / "other", body="VALUE = 1\n")
     with pytest.raises(SourceBindingError, match="outside this evaluator's own production source"):
-        bind_production_source(modules={other.__name__: other}, owner_root=owner)
+        bind_production_source(modules={other.__name__: other}, owner_root=owner, child_helpers=())
 
 
 def test_a_repointed_helper_fails_the_evaluator_identity_closed(
@@ -189,12 +191,12 @@ def test_a_namespace_helper_outside_the_owner_is_refused(tmp_path: Path) -> None
     namespace.__path__ = [str(tmp_path / "other" / "src" / "serena_light" / "workspace")]
     (tmp_path / "other" / "src" / "serena_light" / "workspace").mkdir(parents=True)
     with pytest.raises(SourceBindingError, match="outside this evaluator's own production source"):
-        bind_production_source(modules={namespace.__name__: namespace}, owner_root=owner)
+        bind_production_source(modules={namespace.__name__: namespace}, owner_root=owner, child_helpers=())
 
 
 def test_binding_nothing_is_refused(tmp_path: Path) -> None:
     with pytest.raises(SourceBindingError, match="no production helper is loaded"):
-        bind_production_source(modules={}, owner_root=tmp_path)
+        bind_production_source(modules={}, owner_root=tmp_path, child_helpers=())
 
 
 def test_a_symlinked_helper_outside_the_owner_is_refused(tmp_path: Path) -> None:
@@ -209,7 +211,7 @@ def test_a_symlinked_helper_outside_the_owner_is_refused(tmp_path: Path) -> None
     module = ModuleType("serena_light.linked")
     module.__file__ = str(link)
     with pytest.raises(SourceBindingError, match="outside this evaluator's own production source"):
-        bind_production_source(modules={module.__name__: module}, owner_root=owner)
+        bind_production_source(modules={module.__name__: module}, owner_root=owner, child_helpers=())
 
 
 # --- fixtures -------------------------------------------------------------------------

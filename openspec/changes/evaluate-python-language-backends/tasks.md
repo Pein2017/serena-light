@@ -111,6 +111,19 @@
 > out to `ldconfig`, so `memfd_create` is resolved from the already-loaded process image
 > instead, and the sealed-image primitive now has one owner in `process.py`.
 >
+> **A seventh defect was found by this repair's own receipt verification, and is fixed here.**
+> Moving the dependency-lock digest, the build identity, and the runtime paths into the bounded
+> child stopped this process from importing `serena_light.bootstrap` and
+> `serena_light.build_identity`, so `sys.modules` no longer saw them and the receipt's bound
+> production closure silently narrowed from six files to four -- the receipt stopped naming the
+> bytes of helpers whose answers it still published, which the spec's "a phase executes a
+> production helper" scenario forbids. Fixed: `source_binding.CHILD_EXECUTED_HELPERS` declares
+> the modules the child loads, they are digested from this checkout alongside the in-process
+> ones, and a test requires the child's *own reported* closure -- for every operation it
+> supports -- to equal that declaration, so a helper that starts importing something new fails a
+> test rather than quietly leaving the receipt. The bound closure and its digest
+> (`d7ed2395…966b`) are byte-identical to the previous admitting run's again.
+>
 > **Task 1.8 background from the first re-review.** The final Sol-xhigh review of the earlier
 > admitting run (evaluator HEAD `7d40d41`, evaluation identity `380aaeb4…9147d`) found three
 > defects that made its PASS untrustworthy as a *gate*, and tasks 1.11, 1.13, and 1.14 were

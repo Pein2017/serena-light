@@ -19,6 +19,17 @@ This module closes that gap in two steps:
 * it then digests the bytes of every bound module, so the receipt carries the executed
   production source closure the same way it already carries the evaluator source closure.
 
+Some production helpers are no longer executed *in this process* at all: the dependency-lock
+digest, the build identity, the runtime paths, and the trust-inventory file digest run inside
+the bounded child in :mod:`scripts.backend_eval.production_helper`, so ``sys.modules`` cannot
+see them.  Dropping them from the bound closure would quietly narrow exactly the evidence this
+module exists to publish -- the receipt would stop naming the bytes of the helpers whose
+answers it carries.  :data:`CHILD_EXECUTED_HELPERS` therefore declares the modules that child
+loads, they are digested from this checkout alongside the in-process ones, and a test requires
+the child's own reported closure, for every operation it supports, to be a subset of that
+declaration -- so a helper that starts importing something new fails a test instead of
+silently leaving the receipt.
+
 Changing a helper's bytes, or repointing the ``.pth`` at another checkout, therefore changes
 the published identity or refuses the run, without any change to ``scripts/backend_eval``.
 """
@@ -28,13 +39,14 @@ from __future__ import annotations
 import os
 import stat
 import sys
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from types import ModuleType
 
 from scripts.backend_eval.models import canonical_json, sha256_bytes
 
 __all__ = [
+    "CHILD_EXECUTED_HELPERS",
     "EVALUATION_OWNER_ROOT",
     "PRODUCTION_PACKAGE",
     "PRODUCTION_PACKAGE_NAME",
@@ -50,6 +62,18 @@ PRODUCTION_SOURCE_ROOT = EVALUATION_OWNER_ROOT / "src"
 PRODUCTION_PACKAGE_NAME = "serena_light"
 PRODUCTION_PACKAGE = PRODUCTION_SOURCE_ROOT / PRODUCTION_PACKAGE_NAME
 
+# Every production module the bounded child loads, relative to the owner root.  The child
+# executes these instead of this process, so ``sys.modules`` cannot report them; pinned by a
+# test against the child's own reported closure for each operation it supports.
+CHILD_EXECUTED_HELPERS: tuple[str, ...] = (
+    "src/serena_light/__init__.py",
+    "src/serena_light/bootstrap.py",
+    "src/serena_light/build_identity.py",
+    "src/serena_light/workspace/__init__.py",
+    "src/serena_light/workspace/identity.py",
+    "src/serena_light/workspace/inventory.py",
+)
+
 # O_NONBLOCK keeps a FIFO or other blocking special node from hanging the open; the fstat
 # regular-file check below then refuses it promptly rather than reading empty bytes.
 _READ_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
@@ -63,8 +87,15 @@ def bind_production_source(
     *,
     modules: Mapping[str, ModuleType] | None = None,
     owner_root: Path = EVALUATION_OWNER_ROOT,
+    child_helpers: Sequence[str] = CHILD_EXECUTED_HELPERS,
 ) -> tuple[tuple[str, str], ...]:
-    """Digest every loaded production helper, refusing any that is not owned by ``owner_root``.
+    """Digest every executed production helper, refusing any not owned by ``owner_root``.
+
+    "Executed" covers both what this process loaded and what the bounded child loads: the
+    latter never reaches ``sys.modules`` here, and leaving it out would narrow the receipt to
+    stop naming the bytes of the helpers whose answers it carries.  ``child_helpers`` exists so
+    a synthetic single-module checkout can be bound in a test; every real caller takes the
+    declared :data:`CHILD_EXECUTED_HELPERS`, which a test pins against the child's own report.
 
     The returned pairs are ``(path relative to the owner root, SHA-256)`` in canonical sorted
     order -- for example ``("src/serena_light/workspace/inventory.py", "...")``.
@@ -73,6 +104,10 @@ def bind_production_source(
     loaded = sys.modules if modules is None else modules
     package_root = (owner_root / "src" / PRODUCTION_PACKAGE_NAME).resolve()
     digests: dict[str, str] = {}
+    for relative in child_helpers:
+        path = Path(os.path.realpath(owner_root / relative))
+        _require_owned(relative, path, package_root)
+        digests[relative] = sha256_bytes(_read_regular_file(path))
     for name in sorted(loaded):
         if name != PRODUCTION_PACKAGE_NAME and not name.startswith(f"{PRODUCTION_PACKAGE_NAME}."):
             continue

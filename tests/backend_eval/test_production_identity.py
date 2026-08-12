@@ -2,18 +2,21 @@
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
+import sys
 import time
 from dataclasses import replace
 from pathlib import Path
+from typing import Any, cast
 
 import pytest
 
 import scripts.backend_eval.production_identity as production_identity_module
 from scripts.backend_eval.identity import capture_evaluator_identity
-from scripts.backend_eval.models import ProductionIdentity, sha256_bytes
-from scripts.backend_eval.process import Deadline, monotonic_clock
+from scripts.backend_eval.models import ProductionIdentity, canonical_json, sha256_bytes
+from scripts.backend_eval.process import Deadline, monotonic_clock, run_bounded_bytes, sealed_image
 from scripts.backend_eval.production_helper import (
     PRODUCTION_CHILD_PATH,
     PRODUCTION_CHILD_RELPATH,
@@ -31,7 +34,12 @@ from scripts.backend_eval.production_identity import (
     assert_production_identity_unchanged,
     capture_production_identity,
 )
-from scripts.backend_eval.source_binding import SourceBindingError
+from scripts.backend_eval.source_binding import (
+    CHILD_EXECUTED_HELPERS,
+    EVALUATION_OWNER_ROOT,
+    SourceBindingError,
+    bind_production_source,
+)
 from serena_light.bootstrap import runtime_paths
 from serena_light.build_identity import compute_build_identity, dependency_lock_digest
 
@@ -496,3 +504,60 @@ def test_the_child_program_read_is_confined_to_the_owner_root(tmp_path: Path, re
 
     with pytest.raises(SourceBindingError, match="without following a link"):
         run_production_helper("production_identity", {"root": str(owner)}, owner_root=owner)
+
+
+def test_the_declared_child_closure_covers_what_the_child_actually_loads(repo_root: Path) -> None:
+    """The receipt must keep naming the bytes of every helper it carries an answer from.
+
+    Those helpers run in the bounded child, so ``sys.modules`` cannot see them and the bound
+    closure declares them instead.  A declaration is only evidence while it matches reality,
+    so the child's own reported closure -- for every operation it supports -- must be a subset
+    of it, and a helper that starts importing something new fails here rather than silently
+    leaving the receipt.
+    """
+
+    reported: set[str] = set()
+    requests: tuple[tuple[str, dict[str, Any]], ...] = (
+        ("production_identity", {"root": str(repo_root)}),
+        ("observe_file_digests", {"paths": []}),
+    )
+    for operation, payload in requests:
+        response = _child_response(operation, payload)
+        loaded = {entry[0] for entry in response["production_files"]}
+        assert loaded, f"the child reported no production closure for {operation}"
+        reported |= loaded
+
+    assert reported <= set(CHILD_EXECUTED_HELPERS)
+    assert set(CHILD_EXECUTED_HELPERS) == reported
+
+
+def test_the_bound_production_closure_names_every_child_executed_helper() -> None:
+    """The published closure covers the child's helpers even though this process never loads them."""
+
+    bound = dict(bind_production_source())
+
+    for relative in CHILD_EXECUTED_HELPERS:
+        assert relative in bound
+        assert bound[relative] == sha256_bytes((EVALUATION_OWNER_ROOT / relative).read_bytes())
+
+
+def _child_response(operation: str, payload: dict[str, Any]) -> dict[str, Any]:
+    """Run the child exactly as the helper does and return its whole structured response."""
+
+    owner = EVALUATION_OWNER_ROOT
+    owner_fd = _open_owner_root(owner, "test")
+    try:
+        program = _read_owned_file(owner_fd, PRODUCTION_CHILD_RELPATH, owner, "test")
+    finally:
+        os.close(owner_fd)
+    with sealed_image("test-production-child", program) as image_fd:
+        result = run_bounded_bytes(
+            [sys.executable, "-I", "-B", f"/proc/self/fd/{image_fd}", str(owner), str(owner / "src")],
+            cwd=owner,
+            env={"LC_ALL": "C"},
+            timeout=120.0,
+            stdin=canonical_json({"op": operation, **payload}),
+            pass_fds=(image_fd,),
+        )
+    assert result.returncode == 0, result.stdout
+    return cast("dict[str, Any]", json.loads(result.stdout))
