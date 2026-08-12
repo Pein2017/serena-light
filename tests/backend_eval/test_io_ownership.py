@@ -605,8 +605,8 @@ def test_the_ownership_document_explains_each_owner_class(owner: str) -> None:
 def test_the_ownership_document_names_every_audited_module() -> None:
     text = OWNERSHIP_DOC.read_text(encoding="utf-8")
     modules = {module for module, _function, _access, _owner in OWNERSHIP}
-    # Only this one executes no filesystem access of its own; the document says so.
-    without_access = {"__init__.py", "models.py"}
+    # These execute no filesystem access of their own; the document says so.
+    without_access = {"__init__.py", "models.py", "protocol.py"}
     assert modules == {path.name for path in EVALUATOR_PACKAGE.glob("*.py")} - without_access
     for module in sorted(modules):
         assert module in text

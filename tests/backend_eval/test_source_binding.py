@@ -16,6 +16,8 @@ import os
 import subprocess
 import sys
 import time
+from collections import Counter
+from collections.abc import Mapping
 from pathlib import Path
 from types import ModuleType
 
@@ -147,28 +149,87 @@ def test_importing_the_evaluator_loads_no_production_module_into_the_parent(modu
     assert report["top"] == ["scripts"]
 
 
-def test_no_evaluator_module_imports_production_at_all() -> None:
-    """The same claim structurally, so a lazily-deferred import cannot hide from the above."""
+ProductionImport = tuple[str, str, str | None]
 
-    offenders: list[str] = []
-    for module in sorted((_REPO_ROOT / "scripts" / "backend_eval").glob("*.py")):
-        if module.name == "production_child.py":
-            # The child is a *program*, never imported by the evaluator; it is executed from a
-            # sealed image in its own interpreter, which is where production belongs.
-            continue
-        tree = ast.parse(module.read_text(encoding="utf-8"))
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Import):
-                offenders += [
-                    f"{module.name}:{node.lineno}"
-                    for alias in node.names
-                    if alias.name == "serena_light" or alias.name.startswith("serena_light.")
-                ]
-            elif isinstance(node, ast.ImportFrom) and node.module is not None and (
-                node.module == "serena_light" or node.module.startswith("serena_light.")
-            ):
-                offenders.append(f"{module.name}:{node.lineno}")
-    assert offenders == []
+
+def _production_imports(source: str) -> Counter[ProductionImport]:
+    """Return every production import, including duplicate and function-local imports."""
+
+    imports: Counter[ProductionImport] = Counter()
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.Import):
+            imports.update(
+                (alias.name, "", alias.asname)
+                for alias in node.names
+                if alias.name == "serena_light" or alias.name.startswith("serena_light.")
+            )
+        elif isinstance(node, ast.ImportFrom) and node.module is not None and (
+            node.module == "serena_light" or node.module.startswith("serena_light.")
+        ):
+            imports.update((node.module, alias.name, alias.asname) for alias in node.names)
+    return imports
+
+
+def _assert_exact_phase2_production_imports(sources: Mapping[str, str]) -> None:
+    observed = {
+        module: imports
+        for module, source in sorted(sources.items())
+        if module != "production_child.py" and (imports := _production_imports(source))
+    }
+    assert observed == _PHASE2_PRODUCTION_IMPORTS
+
+
+def _evaluator_sources() -> dict[str, str]:
+    return {
+        module.name: module.read_text(encoding="utf-8")
+        for module in sorted((_REPO_ROOT / "scripts" / "backend_eval").glob("*.py"))
+    }
+
+
+_PHASE2_PRODUCTION_IMPORTS: dict[str, Counter[ProductionImport]] = {
+    "models.py": Counter(
+        {
+            ("serena_light.lsp.adapter", "RawLspProviders", None): 3,
+        }
+    ),
+    "protocol.py": Counter(
+        {
+            ("serena_light.debug_logging", "_redact", None): 1,
+            ("serena_light.lsp.adapter", "AdapterRuntime", None): 1,
+            ("serena_light.lsp.adapter", "BoundedStderrCapture", None): 1,
+            ("serena_light.lsp.adapter", "EngineMetadata", None): 1,
+            ("serena_light.lsp.adapter", "RawLspProviders", None): 1,
+            ("serena_light.lsp.adapter", "SubprocessAdapterRuntimeProvider", None): 1,
+            ("serena_light.lsp.adapter", "_provider_enabled", None): 1,
+            ("serena_light.lsp.adapter", "_selected_position_encoding", None): 1,
+            ("serena_light.lsp.client", "SyncLspClient", None): 1,
+            ("serena_light.lsp.positions", "PositionEncoding", None): 1,
+            ("serena_light.processes", "LanguageServerSubprocessLauncher", None): 1,
+        }
+    ),
+}
+
+
+def test_only_the_exact_phase2_surface_imports_production_in_the_evaluator() -> None:
+    """Phase 1 stays production-free; Phase 2 gets only its frozen direct protocol surface."""
+
+    _assert_exact_phase2_production_imports(_evaluator_sources())
+
+
+def test_an_unauthorized_production_import_is_rejected() -> None:
+    sources = _evaluator_sources()
+    sources["admission.py"] += "from serena_light.workspace.runtime import WorkspaceRuntime\n"
+
+    with pytest.raises(AssertionError):
+        _assert_exact_phase2_production_imports(sources)
+
+
+def test_the_phase2_allowlist_rejects_a_duplicate_of_an_allowed_import() -> None:
+    sources = _evaluator_sources()
+    sources["models.py"] += "from serena_light.lsp.adapter import RawLspProviders\n"
+
+    with pytest.raises(AssertionError):
+        _assert_exact_phase2_production_imports(sources)
 
 
 def test_read_regular_file_refuses_a_fifo_promptly(tmp_path: Path) -> None:

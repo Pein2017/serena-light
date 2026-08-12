@@ -1,8 +1,8 @@
 # Backend-evaluation I/O ownership
 
-Every read and write the Phase 1 admission gate executes has exactly one owner, and the set
-of them is finite and enumerated. `tests/backend_eval/test_io_ownership.py` is the
-authority: it parses every module under `scripts/backend_eval/`, collects every call that
+Every read and write the evaluation package executes has exactly one owner, and the set of
+them is finite and enumerated. `tests/backend_eval/test_io_ownership.py` is the authority:
+it parses every module under `scripts/backend_eval/`, collects every call that
 opens, creates, enumerates, reads, or writes a filesystem object, and fails until each one
 appears in its `OWNERSHIP` table with an owner class. A new access anywhere in the evaluator
 fails that test until it is declared; a removed one fails it until the row goes. This
@@ -105,10 +105,14 @@ descriptor-shaped argument rather than a constructed pathname.
 
 ### `production-child`
 
-Exact production semantics, executed in `scripts/backend_eval/production_child.py` under the
-phase's own monotonic deadline. **Every production helper the evaluation executes is in this
-class. The evaluator process imports no `serena_light` module at all**, which a regression
-proves in a fresh interpreter and an AST rule proves structurally.
+Exact production semantics for the Phase 1 admission gate, executed in
+`scripts/backend_eval/production_child.py` under the phase's own monotonic deadline.
+**Every production helper the admission gate executes is in this class. The sealed Phase 1
+admission/import graph imports no `serena_light` module at all**, which regressions prove in a
+fresh interpreter and structurally. Phase 2's protocol plane deliberately imports a frozen,
+exact allowlist of production LSP/process primitives in `protocol.py`, plus the corresponding
+receipt type in `models.py`; a fail-closed AST regression rejects every other production
+import and any silent widening or duplicate of that allowlist.
 
 That completeness is the point, not a tidiness preference. An import compiles whatever bytes
 are on disk *at import time*, and the evaluator identity is captured afterwards, so a
@@ -233,12 +237,16 @@ ignore semantics, including `.gitignore` and `.git/info/exclude`, remain authori
 | `process.py` | the bounded runner, the sealed-image primitive, the declared-executable binding |
 | `production_helper.py` | verifying the expected bytes and starting that child |
 | `production_identity.py` | the three declared production lock inputs |
+| `protocol.py` | no direct filesystem access; the Phase 2 protocol runner delegates process and transport ownership to its frozen production primitives |
 | `runtime.py` | the service-owned candidate runtime |
 | `source_binding.py` | the executed production helper closure and the execution expectation |
 | `source_image.py` | the sealed evaluator-image descriptor, image-derived source closure, owner root, and loader-origin checks |
 | `write_guard.py` | one `lstat` bracket around a changed remainder record |
 
-`models.py` executes no filesystem access of its own: it serializes and validates. `process.py`
+`models.py` and `protocol.py` execute no direct filesystem access of their own: the former
+serializes and validates, while the latter reads only the in-memory process environment and
+delegates candidate process/transport ownership to the frozen production primitives.
+`process.py`
 resolves `memfd_create` from the already-loaded process image rather than through
 `ctypes.util.find_library`, which would shell out to `ldconfig` and put an unbounded child
 inside a phase whose contract is that every child it starts is bounded and killable.
