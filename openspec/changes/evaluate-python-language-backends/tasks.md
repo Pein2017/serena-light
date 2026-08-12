@@ -36,12 +36,13 @@
 > budget rather than the frozen seconds. That receipt and both earlier ones are retained
 > unchanged as evidence; none of them is the admitting run any more. The admitting run
 > recorded in `phase-1-acceptance.md` is the fresh one from the repaired, committed evaluator
-> at HEAD `285c203`: evaluation identity `207e7521…81e4`, run `2f9e7a08…507b`, `status=pass`,
+> at HEAD `517a451`: evaluation identity `0960ec13…7025`, run `991c9866…cff33`, `status=pass`,
 > 0 unexpected paths / 0 declared mutations / 0 changed controls across 68,059 in-scope corpus
 > paths in five roots, 7 s of the 1800 s ceiling with publication inside it, equal
-> post-cleanup production identity, no leaked process, and all 46 earlier artifact files
-> unchanged. Task 1.8 may be checked only after two independent re-reviews approve *that*
-> receipt: a checked box may never stand for an unreviewed run.
+> post-cleanup production identity, no leaked process, the five pre-contract runtime files
+> repaired from `0660` to `0600` with byte, size, inode, and manifest digest unchanged, and
+> all 62 earlier artifact files unchanged. Task 1.8 may be checked only after two independent
+> re-reviews approve *that* receipt: a checked box may never stand for an unreviewed run.
 >
 > Task 1.7 is checked: its write-detection instrument is unchanged by this repair and the
 > final review raised no finding against it.

@@ -1,27 +1,83 @@
 # Phase 1 acceptance: admission gate
 
 **Admission gate disposition: PASS on the run below. Phase 1 completion remains on HOLD
-pending two independent re-reviews of *that* receipt.** The final Sol-xhigh review of the
-previous run -- evaluator HEAD `7d40d41`, evaluation identity `380aaeb4…9147d` -- found three
-defects that made its PASS untrustworthy *as a gate*. All three are repaired, tasks 1.11,
-1.13, and 1.14 were reopened and closed for them, and the run recorded below was produced by
-the repaired evaluator from the clean committed checkout `285c203`.
+pending two independent re-reviews of *that* receipt.** A second Sol-xhigh re-review
+overruled a passing review of the previous run -- evaluator HEAD `285c203`, evaluation
+identity `207e7521…81e4` -- with executable evidence of three further defects, and completing
+their repair exposed a fourth. All four are repaired, tasks 1.13 and 1.15 were reopened and
+closed for them, and the run recorded below was produced by the repaired evaluator from the
+clean committed checkout `517a451`.
 
 **Task 1.8 stays unchecked and on HOLD.** A checked box may never stand for an unreviewed
 run, and neither re-review of this receipt has happened. Nothing else blocks it.
 
-**No receipt has been erased.** Four runs are now on record byte-for-byte: the original
+**No receipt has been erased.** Five runs are now on record byte-for-byte: the original
 attempted run (instrument-limited), the repaired-instrument run (superseded when the last
-unbounded Git child was removed), the reviewed run (superseded by this repair), and the
-admitting run below. All 46 artifact files of the three earlier runs were captured
-immediately before this run and re-captured immediately after: identical in content *and* in
-inode, size, `mtime`, and mode, with every one of the 16 new files under the new evaluation
-identity alone.
+unbounded Git child was removed), the reviewed run (superseded by the first repair), the
+previously admitting run (superseded by this one), and the admitting run below. All 62
+artifact files of the four earlier runs were captured immediately before this run and
+re-captured immediately after: **62 files, 0 changed** in content, inode, size, `mtime`, or
+mode, and 62 of the 63 earlier directories unchanged in every one of those fields. The single
+exception is the artifact root's own `mtime`, which advanced because it gained the new
+evaluation-identity child; every one of the 33 new entries is under that child alone.
 
 
-## What the final review held on
+## What the second re-review held on
 
-Three defects, each now repaired and covered by adversarial tests:
+Three defects it found with executable evidence, plus a fourth found while completing the
+repair -- each now fixed and covered by adversarial tests:
+
+1. **A delayed post-link directory `fsync` let a run return `pass` after the ceiling with
+   the final receipt present.** The ceiling was re-observed once after the atomic `link`,
+   but the temporary unlink and the *last* directory `fsync` came after that observation
+   with no further check, so a run could earn its pass with work done past 1800 s -- the
+   re-review demonstrated a `pass` returned at 1811 s. Fixed: every post-link namespace
+   mutation and every durability barrier is followed by its own ceiling observation,
+   including one immediately before the function returns, while withdrawal is still
+   possible; only descriptor closes follow it. The first observation that sees expiry
+   withdraws this run's own link and its own temporary and fails closed. A FakeClock
+   regression makes each post-link barrier slow in turn and requires that no `pass` is
+   returned and no receipt is left, and the alternation itself is pinned structurally so no
+   post-link syscall can be added later without an observation after it.
+2. **Cleanup received no deadline and could spend the whole budget.** Fixed: the cleanup
+   protocol and the real implementation both take the same monotonic deadline, the
+   implementation checks it around each of its own syscalls, and the call is bracketed by one
+   owner on both sides. A ceiling reached in cleanup raises rather than being downgraded to
+   an issue on an otherwise passing receipt.
+3. **A retained runtime still carried five harness-written files at `0660` from a
+   pre-contract build.** Fixed: serialized reuse repairs them under the per-digest runtime
+   lock and then re-verifies the whole contract, so a violating runtime is never returned.
+   The repair is mode-only -- no byte moves, so neither the installed snapshot digest nor
+   the published manifest digest can change -- and the contract is scoped by *ownership*:
+   third-party resolver and environment internals keep their tool-defined modes behind
+   `0700` service-owned ancestors and stay outside the artifact-tree digest, pinned by test
+   on both sides. No recursive chmod exists anywhere in the harness.
+4. **The first cut of that repair could `fchmod` a file outside the runtime root.** It
+   opened each harness-written file by its whole relative path under a single `O_NOFOLLOW`,
+   which constrains only the *last* component; a symlinked `config/ty` therefore carried the
+   `fchmod` outside the root. The escape was reproduced -- a decoy at `0644` outside the root
+   came back `0600` -- before being closed. Fixed: both the repair and its verification open
+   every component from its parent's descriptor and prove the target regular through that
+   same descriptor, and the reproduction is kept as a regression.
+
+### The residual boundary, stated rather than papered over
+
+The ceiling is enforced *cooperatively*, at the boundaries between syscalls, in the calling
+thread. A `link`, `unlink`, or `fsync` already in flight is not preemptible, and a watchdog
+thread that interrupted one would trade a bounded, observable overrun for an unbounded
+correctness hazard in the middle of a durability barrier. The consequence: for as long as one
+in-flight post-link `fsync` takes to complete, the final receipt name can exist in the
+directory after the ceiling has passed. It is withdrawn at the next boundary, and it is not
+admitted evidence -- every consumer of this gate requires the command to have exited
+successfully *and* the receipt to verify canonically against its own digest and artifact-tree
+digest, and an overrun run supplies neither. The two invariants that are actually guaranteed
+are the ones that matter: no `pass` is ever returned after the ceiling, and no final receipt
+remains once an overrun has been observed. No claim of preemption is made.
+
+
+## What the first final review held on
+
+Three defects, each repaired and covered by adversarial tests:
 
 1. **The 1800 s ceiling did not cover publication or waiting, so the whole gate could
    report a false PASS.** `ended_at` was recorded before publication; the publication lock,
@@ -58,6 +114,153 @@ Three defects, each now repaired and covered by adversarial tests:
 
 
 ## The admitting run
+
+| Field | Value |
+| --- | --- |
+| `evaluation_identity` | `0960ec132cd77fbc70d881bbba9af54ad93f40029312869fe0f9f7a1d9037025` |
+| `run_identity` | `991c9866327d9c57de11e35d8e5e82c82459ed92d72ab84a0a9d970b514cff33` |
+| receipt | `<repo>/.admission-artifacts/backend-eval/<evaluation-identity>/receipts/<run-identity>.json` |
+| receipt `sha256` | `a0b1ff57dde7a8ec1e205793f1a15e4e7bda61a7e65e6e61e565e87b96367dfd` (39,745,560 bytes, inode `125834957`, mode `0600`) |
+| `schema_version` / contract | `2` / `python-backend-evaluation-v1` |
+| `status` / `next_action` | `pass` / `begin_protocol_probe_planning` |
+| `issues` | none |
+| window | `started_at=2026-08-12T01:23:33Z`, `ended_at=2026-08-12T01:23:40Z` -- **7 s** of the 1800 s ceiling |
+| `artifact_tree_digest` | `5794c162acb4fca6ea20d41489f48ddcdfbadcc04a0985b9a55293ec04de5d0f` |
+
+### Exact command
+
+```bash
+cd /data/CoordExp/.worktrees/serena-light-backend-eval-final-fix
+backend_eval_freeze_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"   # resolved to 2026-08-12T01:23:33Z
+/data/CoordExp/.worktrees/serena-light-backend-eval/.venv/bin/python -m scripts.backend_eval.admission \
+  --repo-root /data/CoordExp/serena-light \
+  --artifact-root /data/CoordExp/serena-light/.admission-artifacts/backend-eval \
+  --runtime-base /data/CoordExp/.codex/runtime/serena-light/backend-eval \
+  --uv /root/miniconda3/envs/ms/bin/uv \
+  --python /root/miniconda3/envs/ms/bin/python \
+  --exclude-newer "$backend_eval_freeze_at"
+```
+
+Exit status `0`, empty stderr. Run once, from the clean committed checkout `517a451`, with
+`git status --porcelain` empty before the run.
+
+**Recorded deviation, unchanged and receipt-bound.** The declared
+`conda run -n ms python -m scripts.backend_eval.admission ...` form still fails before the
+module is reached: in the `ms` environment `import scripts` resolves to
+`/data/verl/scripts/__init__.py`, a regular package that shadows this repository's `scripts`
+namespace package. Neither environment was altered and nothing was installed globally. The
+CLI host was the parent evaluation `.venv`, whose interpreter is recorded *in the receipt*
+and is part of the evaluation identity; the evaluator binds `serena_light` to its own
+checkout before any helper import and records that closure. The evaluated `ms` `uv` and `ms`
+interpreter were passed explicitly through `--uv` and `--python`.
+
+### Evaluator, production helpers, host, and bootstrap environment
+
+| Field | Value |
+| --- | --- |
+| evaluator source closure | 11 files of `scripts/backend_eval`, digest `efc736bd4b7036149af288c377c13aba9fc98c8bfe34a7dd125c18d81623fe65` |
+| evaluator source commit | `517a45197aae2978da728d7f12cb2a5129c68fff`, source clean |
+| executed production closure | digest `d7ed23955949067b932e9b18e5818ca6bece52797cbd2b2241fb84981331966b`, clean at that commit |
+| CLI host interpreter | `/root/miniconda3/envs/ms/bin/python3.12` |
+| environments | `llm-framework-study`, `ms` |
+| service configurations | `pyrefly`, `pyright`, `ty` |
+
+### Candidate lock and runtime
+
+| Field | Value |
+| --- | --- |
+| candidate lock digest | `6cd570324d1a35aa0f4c30b60fd3005fe0953e8efe230915fb19ad24184b9062` |
+| candidates | `pyrefly==1.2.0`, `ty==0.0.70` (production Pyright `1.1.403` retained) |
+| runtime root | `/data/CoordExp/.codex/runtime/serena-light/backend-eval/6cd570324d1a35aa0f4c30b60fd3005fe0953e8efe230915fb19ad24184b9062` |
+| runtime manifest `sha256` | `e578bf4d6f1d98df96140d6c03b793a26af60658e49ea03b6810581898a6b4ec` |
+
+The lock digest is unchanged from the previous run, so this run *reused* the retained runtime
+-- which is exactly the path the mode repair had to survive.
+
+### The pre-contract runtime repair, measured on both sides
+
+`runtime_permission_repairs=candidate-requirements.lock,config/pyrefly/pyrefly.toml,config/pyright/pyrightconfig.json,config/ty/ty.toml,runtime-manifest.json`
+
+Captured immediately before and immediately after the run, under the same per-digest runtime
+lock the reuse holds:
+
+| Harness-written file | mode before | mode after | size | inode | `sha256` |
+| --- | --- | --- | --- | --- | --- |
+| `candidate-requirements.lock` | `0660` | `0600` | 2,576 | `129273354` | `6cd570324d1a35aa0f4c30b60fd3005fe0953e8efe230915fb19ad24184b9062` |
+| `runtime-manifest.json` | `0660` | `0600` | 5,210 | `129273453` | `e578bf4d6f1d98df96140d6c03b793a26af60658e49ea03b6810581898a6b4ec` |
+| `config/pyrefly/pyrefly.toml` | `0660` | `0600` | 81 | `129273450` | `9cbcaf9b661d0f873cece8e71ee2bc5900ddd5687720f357687a6571d61ad914` |
+| `config/pyright/pyrightconfig.json` | `0660` | `0600` | 160 | `129273452` | `eff18e93bdb98237d0a00f3a4df8c900402433601a510f5f9f149e11ac3b539f` |
+| `config/ty/ty.toml` | `0660` | `0600` | 93 | `129398425` | `a67784aafa3a72c8dc706ef26339509845ceebe84f7a3e1bb20abf40748c03d1` |
+
+Size, inode, and `sha256` are identical on both sides for all five: the mode is the only
+field that moved. The published manifest digest the receipt binds is therefore the same
+`e578bf4d…` value it was before the repair. The runtime root and all eight service-owned
+directories below it were `0700` before and after. `uv`'s own cache interior was not touched.
+
+The new evaluation root observes the same contract: `.admission-publication.lock`,
+`.candidate-lock.lock`, `candidate-lock-receipt.json`, `candidate-requirements.in`,
+`candidate-requirements.lock`, and the receipt are all `0600`; the evaluation root, `receipts`,
+and `uv-cache` are all `0700`; and the only wider mode anywhere below it is `uv-cache/uv/.lock`
+at `0777` -- `uv`'s own file, behind `0700` ancestors and excluded from the artifact-tree
+digest, which is the documented boundary rather than an exception to it.
+
+### The measurement window and the corpus
+
+Five roots, ten manifests (before and after), **68,059 in-scope paths**, 31 declared excluded
+paths. `unexpected_write_paths=0`, `manifest_control_changes=0`, declared mutations `0`. One
+write delta per root, each bound to both of its own manifest digests.
+
+### Production identity invariant
+
+`production_build_identity` and `production_dependency_lock` are equal on both sides and equal
+to a fresh live capture taken after the run:
+`77e0ff6e7b74c3e100e75a3b81bb025a8e906642a089d0c81c755aaba6d183aa` and
+`eff6ebdf252faff7f77cb3a2f3894d17b9a0dfc89b46bd193fafdaa9e9ab4941`.
+
+### Deadline, process, and cleanup evidence
+
+The run used 7 s of the 1800 s ceiling and completed publication inside it: the receipt is
+returned only after the link, the temporary unlink, and *both* directory `fsync`s have
+happened below the ceiling, each followed by its own observation. Cleanup ran once on the
+passing path, under the same deadline, and removed nothing. A post-run scan for `uv`, `ty`,
+`pyright`, or `pyrefly` processes found none.
+
+### Independent re-verification
+
+From the published bytes alone, after the run: strict parsing succeeds and the canonical
+round trip is byte-identical; the budget set equals `DEFAULT_PHASE_BUDGETS` exactly; all ten
+`RootManifest.manifest_digest` values recompute from their own canonical fields; there is one
+delta per root and each is bound to both of its manifest digests; `artifact_tree_digest`
+recomputed over the evaluation root equals `5794c162…`; the runtime manifest digest re-read
+from disk equals the receipt's `e578bf4d…`; and the live production identity equals both
+receipt sides.
+
+### Preservation of all four earlier runs
+
+Captured immediately before this run and re-captured immediately after: **62 artifact files,
+0 changed** in content, inode, size, `mtime`, or mode, and 62 of the 63 earlier directories
+unchanged in all of those fields. The one exception is the artifact root directory's own
+`mtime`, which advanced because it gained the new evaluation-identity child -- the same
+behaviour every earlier run showed. Thirty-three entries were created, all of them under
+`0960ec13…7025/`. The run published under its own evaluation identity and its own per-run
+receipt path, so it shared no name with any earlier record.
+
+| Artifact | `sha256` | size | inode |
+| --- | --- | --- | --- |
+| `36696159…99335/admission-receipt.json` | `de6d1a93c089f209cdc9e4e618ff0614f55faf3e9d02e31d295c8d295fe9c348` | 2,367,756 | `125834110` |
+| `1d00793b…a36297/receipts/c7136711…166767.json` | `29ed04ed65a447100064265b7540dfec1a13bd5174a198d2f526a56971b6f45e` | 39,744,615 | `125834210` |
+| `380aaeb4…9147d/receipts/7749b4f9…74be4.json` | `830705ebee286d49d64df18ede84de803d632cadb9292537631b587a212709ae` | 39,744,615 | `125834243` |
+| `207e7521…81e4/receipts/2f9e7a08…507b.json` | `3ef7be84035c01538be7ad73722fb82e4373e2464a0cabe9ffa5906a850dcdc9` | 39,745,560 | `125834277` |
+
+### Repository gates at this commit
+
+`pytest -q tests`: 1422 passed, 35 skipped (the 35 skips are the external-root snapshot gates,
+unchanged; the count rose from 1400 with the new regressions). `ruff check src tests scripts`:
+clean. `ty check --python <eval venv>`: clean. `openspec validate --all --strict`: 5 passed,
+0 failed. `git diff --check`: clean.
+
+
+## Superseded but retained (4): the previously admitting run
 
 | Field | Value |
 | --- | --- |
@@ -688,6 +891,21 @@ could not have replaced them.
 - The publication reserve is 5 s. A filesystem whose single `link` plus directory `fsync`
   exceeds that would fail closed rather than publish late; that is the intended direction of
   the error, but it is a bound, not an absence of one.
+- **The ceiling is cooperative, and one syscall-width window remains.** A `link`, `unlink`,
+  or `fsync` already in flight cannot be interrupted from the calling thread, so the final
+  receipt name can exist in the directory for the duration of one in-flight post-link
+  `fsync` after the ceiling has passed. It is withdrawn at the next boundary. No `pass` is
+  ever returned after the ceiling and no final receipt survives an observed overrun, and a
+  transient namespace entry is not admitted evidence because every consumer requires a
+  successful CLI exit *and* canonical plus artifact-digest verification. Closing the window
+  itself would require preempting a durability barrier from another thread, which trades a
+  bounded, observable overrun for an unbounded correctness hazard; that trade is declined
+  deliberately and is a user-owned decision if it is ever revisited.
+- The mode contract is scoped by ownership, not by location. Third-party resolver and
+  environment internals -- notably `uv`'s world-writable `.lock` -- keep their tool-defined
+  modes. They are confined behind `0700` service-owned ancestors and excluded from the
+  artifact-tree digest, so they are outside the evidence a receipt binds, but they are not
+  `0600`.
 - Every Git child of a corpus capture is now bounded without exception. The evaluation no
   longer calls `git_trust_inventory`; it reads the identical combined
   `git ls-files --cached --others --exclude-standard -z` through the bounded runner and
