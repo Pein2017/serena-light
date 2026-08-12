@@ -2,10 +2,8 @@
 
 from __future__ import annotations
 
-import ast
+import errno
 import fcntl
-import inspect
-import itertools
 import json
 import os
 import shutil
@@ -21,12 +19,12 @@ from scripts.backend_eval.admission import (
     ADMISSION_BUDGET_SECONDS,
     FINALIZATION_RESERVE_SECONDS,
     PUBLICATION_LOCK_NAME,
+    PUBLICATION_RESERVE_SECONDS,
     RECEIPTS_DIR_NAME,
     AdmissionError,
     AdmissionRequest,
     ProductionAdmissionServices,
     _Evidence,
-    _Publication,
     _publish_receipt,
     _read_artifact_bytes,
     admission_receipt_path,
@@ -61,6 +59,13 @@ from scripts.backend_eval.models import (
 )
 from scripts.backend_eval.process import Deadline, DeadlineExceeded
 from scripts.backend_eval.production_identity import ProductionIdentityChanged, ProductionIdentityError
+from scripts.backend_eval.publish import (
+    PUBLICATION_DEADLINE_EXCEEDED,
+    PUBLICATION_FAILED,
+    PublicationError,
+    PublicationFailure,
+    PublicationRequest,
+)
 from scripts.backend_eval.runtime import (
     SERVICE_CONFIG_RELPATHS,
     CandidateRuntime,
@@ -903,116 +908,100 @@ def test_a_pass_is_not_published_when_the_ceiling_arrives_before_the_link(
     assert not receipts.exists() or list(receipts.iterdir()) == []
 
 
-@pytest.mark.parametrize(
-    "step", ["link_synced", "temporary_unlinked", "temporary_unlink_synced", "return"]
-)
-def test_a_pass_published_exactly_at_the_ceiling_is_withdrawn(
-    request_: AdmissionRequest, services: FakeServices, clock: FakeClock, step: str
-) -> None:
-    """Every post-link checkpoint withdraws this run's own link, the last one included.
+# --- the publication adapter -----------------------------------------------------
+#
+# The publication primitive itself is characterized in ``test_publish.py``.  What admission
+# owns is the translation: every typed publication failure has to arrive as the exact status,
+# code, and detail this gate published before the primitive was extracted.
 
-    The final checkpoint sits immediately before the return, where only descriptor closes
-    remain, so it is the one that decides whether an overrun can still be returned as a
-    pass -- it must withdraw exactly like the earlier ones.
+
+def test_every_publication_code_translates_to_its_admission_disposition() -> None:
+    """The adapter is total over the primitive's codes, and loses no detail.
+
+    A code the primitive grows and the adapter does not know would otherwise escape as a
+    ``PublicationError`` -- an untyped failure this gate never publishes.  The mapping is
+    asserted against the primitive's own declared codes rather than a copy of them.
     """
 
+    from scripts.backend_eval.admission import _PUBLICATION_DISPOSITIONS, _translated_publication
+
+    assert set(_PUBLICATION_DISPOSITIONS) == {PUBLICATION_FAILED, PUBLICATION_DEADLINE_EXCEEDED}
+    assert _PUBLICATION_DISPOSITIONS[PUBLICATION_FAILED] == ("incomplete", "receipt_publication_failed")
+    assert _PUBLICATION_DISPOSITIONS[PUBLICATION_DEADLINE_EXCEEDED] == (
+        "incomplete",
+        "admission_deadline_exceeded",
+    )
+
+    for code, (status, admission_code) in _PUBLICATION_DISPOSITIONS.items():
+        detail = f"a verbatim {code} detail below /data/x: [Errno 5] Input/output error"
+        with pytest.raises(AdmissionError) as error, _translated_publication():
+            raise PublicationError(PublicationFailure(code=code, detail=detail))
+        assert error.value.failure.status == status
+        assert error.value.failure.code == admission_code
+        # The detail is passed through, not re-phrased: the published text is unchanged.
+        assert error.value.failure.detail == detail
+        assert isinstance(error.value.__cause__, PublicationError)
+
+
+def test_the_adapter_names_the_receipt_surface_the_gate_has_always_published(
+    request_: AdmissionRequest, services: FakeServices, clock: FakeClock
+) -> None:
+    """The adapter, not the primitive, chooses the lock, directory, and file names."""
+
+    from scripts.backend_eval.admission import _PUBLICATION_DISPOSITIONS  # noqa: F401  (import proof)
+
     receipt = run_admission(request_, services=services, clock=clock)
-    published = _receipt_path(request_, receipt)
-    assert published.is_file()
+    evaluation_root = request_.artifact_root / receipt.evaluation_identity
 
-    temporary = published.parent / f".{receipt.run_identity}.json.tmp"
-    temporary.write_bytes(b"{}")
-    receipts_fd = os.open(published.parent, os.O_RDONLY | os.O_DIRECTORY)
-    try:
-        expired = Deadline.start(clock, 10.0)
-        clock.advance(11.0)
-        publication = _Publication(receipts_fd, published.parent, published.name, temporary.name, expired)
-        with pytest.raises(AdmissionError, match="admission_deadline_exceeded") as error:
-            publication.checkpoint(step)
-    finally:
-        os.close(receipts_fd)
-    assert error.value.failure.status == "incomplete"
-    assert f"publish_receipt:{step}" in error.value.failure.detail
-    assert not published.exists()
-    assert not temporary.exists()
+    assert (evaluation_root / PUBLICATION_LOCK_NAME).is_file()
+    assert (evaluation_root / RECEIPTS_DIR_NAME / f"{receipt.run_identity}.json").is_file()
+    assert not (evaluation_root / RECEIPTS_DIR_NAME / f".{receipt.run_identity}.json.tmp").exists()
+    assert _publish_receipt(
+        request_,
+        _Evidence(run_identity=receipt.run_identity, evaluation_root=evaluation_root),
+        replace(receipt, run_identity="c" * 64),
+        Deadline(clock=clock, seconds=ADMISSION_BUDGET_SECONDS, started=0.0),
+    ) == evaluation_root / RECEIPTS_DIR_NAME / f"{'c' * 64}.json"
 
 
-# The publication steps that move the namespace or force durability after the atomic link.
-# Each one has to be *followed* by a ceiling observation, or a run can earn its pass with
-# work it did after the ceiling -- which is exactly the defect this pins closed.
-_POST_LINK_OPERATIONS = ("_sync_directory", "_replace_temporary")
+def test_the_publication_primitive_receives_the_gates_own_names_and_deadline(
+    request_: AdmissionRequest, services: FakeServices, clock: FakeClock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The whole seam, pinned: the exact request admission builds and the exact ceiling.
 
-
-def _publication_step_order() -> tuple[str, ...]:
-    """The post-link operations and checkpoints of ``_publish_receipt``, in source order."""
+    Every failure detail the primitive renders is a template over these fields, so a changed
+    ``noun``, ``step_prefix``, or ``directory_name`` would silently reword text this gate's
+    receipt contract publishes.  No fresh budget is minted at the seam either: publication
+    spends the phase's own ceiling, from the same origin.
+    """
 
     import scripts.backend_eval.admission as admission_module
 
-    module = ast.parse(inspect.getsource(admission_module))
-    publish = next(
-        node
-        for node in ast.walk(module)
-        if isinstance(node, ast.FunctionDef) and node.name == "_publish_receipt"
-    )
-    link = next(
-        node.lineno
-        for node in ast.walk(publish)
-        if isinstance(node, ast.Call)
-        and isinstance(node.func, ast.Attribute)
-        and node.func.attr == "link"
-    )
-    steps: list[tuple[int, str]] = []
-    for node in ast.walk(publish):
-        if not isinstance(node, ast.Call) or node.lineno <= link:
-            continue
-        if isinstance(node.func, ast.Name) and node.func.id in _POST_LINK_OPERATIONS:
-            steps.append((node.lineno, node.func.id))
-        elif isinstance(node.func, ast.Attribute) and node.func.attr == "checkpoint":
-            steps.append((node.lineno, "checkpoint"))
-    return tuple(name for _, name in sorted(steps))
+    seen: list[tuple[PublicationRequest, Deadline]] = []
+    real = admission_module.publish_immutable_record
 
+    def record(publication: PublicationRequest, deadline: Deadline) -> Path:
+        seen.append((publication, deadline))
+        return real(publication, deadline)
 
-def test_no_post_link_publication_step_is_left_unchecked() -> None:
-    """Structural pin: after the link, no mutation or barrier may be the last word.
-
-    Behaviour tests can only slow the barriers that exist today.  This asserts the shape
-    the whole argument rests on: every post-link namespace mutation and durability barrier
-    is immediately followed by a ceiling observation, and the very last statement before the
-    return is one too -- so there is no step whose cost a later pass can absorb.
-    """
-
-    steps = _publication_step_order()
-
-    assert steps.count("checkpoint") == 4
-    assert steps[-1] == "checkpoint", steps
-    assert all(
-        later == "checkpoint" for earlier, later in itertools.pairwise(steps) if earlier != "checkpoint"
-    ), steps
-    assert steps == (
-        "_sync_directory",
-        "checkpoint",
-        "_replace_temporary",
-        "checkpoint",
-        "_sync_directory",
-        "checkpoint",
-        "checkpoint",
-    )
-
-
-def test_a_checkpoint_inside_the_ceiling_keeps_the_published_receipt(
-    request_: AdmissionRequest, services: FakeServices, clock: FakeClock
-) -> None:
-    """The withdrawal is driven by expiry alone; a live deadline never touches the link."""
-
+    monkeypatch.setattr(admission_module, "publish_immutable_record", record)
     receipt = run_admission(request_, services=services, clock=clock)
-    published = _receipt_path(request_, receipt)
-    receipts_fd = os.open(published.parent, os.O_RDONLY | os.O_DIRECTORY)
-    try:
-        live = Deadline.start(clock, 100.0)
-        _Publication(receipts_fd, published.parent, published.name, ".absent.tmp", live).checkpoint("return")
-    finally:
-        os.close(receipts_fd)
-    assert published.is_file()
+
+    (publication, deadline), = seen
+    assert publication == PublicationRequest(
+        owner_root=request_.repo_root,
+        target_root=request_.artifact_root / receipt.evaluation_identity,
+        directory_name=RECEIPTS_DIR_NAME,
+        lock_name=PUBLICATION_LOCK_NAME,
+        identity=receipt.run_identity,
+        entry_name=f"{receipt.run_identity}.json",
+        temporary_name=f".{receipt.run_identity}.json.tmp",
+        payload=canonical_json(receipt.to_dict()),
+    )
+    # The vocabulary every rendered failure detail is a template over.
+    assert (publication.noun, publication.step_prefix) == ("receipt", "publish_receipt")
+    assert publication.reserve_seconds == PUBLICATION_RESERVE_SECONDS
+    assert (deadline.seconds, deadline.started) == (float(ADMISSION_BUDGET_SECONDS), 0.0)
 
 
 @pytest.mark.parametrize(
@@ -1034,19 +1023,19 @@ def test_a_slow_post_link_directory_sync_returns_no_pass_and_leaves_none(
     barrier would let a run return a pass it earned only after the ceiling.
     """
 
-    import scripts.backend_eval.admission as admission_module
+    import scripts.backend_eval.publish as publish_module
 
-    real_sync = admission_module._sync_directory
+    real_sync = publish_module._sync_directory
     calls = {"n": 0}
 
-    def slow_sync(dir_fd: int, evaluation_root: Path) -> None:
+    def slow_sync(dir_fd: int, publication: PublicationRequest) -> None:
         calls["n"] += 1
         # Barrier 1 is the post-link sync; barrier 2 follows the temporary unlink.
         if calls["n"] == boundary:
             clock.advance(float(ADMISSION_BUDGET_SECONDS))
-        real_sync(dir_fd, evaluation_root)
+        real_sync(dir_fd, publication)
 
-    monkeypatch.setattr(admission_module, "_sync_directory", slow_sync)
+    monkeypatch.setattr(publish_module, "_sync_directory", slow_sync)
     with pytest.raises(AdmissionError, match="admission_deadline_exceeded") as error:
         run_admission(request_, services=services, clock=clock)
     assert error.value.failure.status == "incomplete"
@@ -1062,19 +1051,19 @@ def test_a_slow_post_link_temporary_unlink_returns_no_pass_and_leaves_none(
 ) -> None:
     """A namespace mutation after the link is a checkpoint boundary too, not just a sync."""
 
-    import scripts.backend_eval.admission as admission_module
+    import scripts.backend_eval.publish as publish_module
 
-    real_replace = admission_module._replace_temporary
+    real_replace = publish_module._replace_temporary
     seen: list[str] = []
 
-    def slow_replace(dir_fd: int, evaluation_root: Path, temporary: str) -> None:
-        seen.append(temporary)
-        real_replace(dir_fd, evaluation_root, temporary)
+    def slow_replace(dir_fd: int, publication: PublicationRequest) -> None:
+        seen.append(publication.temporary_name)
+        real_replace(dir_fd, publication)
         # Only the post-link unlink is slowed; the pre-write one must stay inside the budget.
         if len(seen) == 2:
             clock.advance(float(ADMISSION_BUDGET_SECONDS))
 
-    monkeypatch.setattr(admission_module, "_replace_temporary", slow_replace)
+    monkeypatch.setattr(publish_module, "_replace_temporary", slow_replace)
     with pytest.raises(AdmissionError, match="admission_deadline_exceeded") as error:
         run_admission(request_, services=services, clock=clock)
     assert "publish_receipt:temporary_unlinked" in error.value.failure.detail
@@ -1747,3 +1736,207 @@ def test_admission_module_never_creates_state_outside_the_declared_roots(
     assert {entry.name for entry in tmp_path.iterdir()} == before
     assert not (request_.runtime_base).exists()
     assert os.listdir(request_.artifact_root) != []
+
+
+# --- post-link publication failures, through the gate ------------------------------
+#
+# The primitive's own recovery is characterized in ``test_publish.py``.  What these prove is
+# that the gate inherits it: a post-link durability or unlink failure arrives as a typed
+# ``incomplete``, no ``pass`` is returned, and -- the part that was broken -- no receipt is
+# left at the canonical path for a consumer to read as evidence of a run that failed.
+
+
+def _failing_publication_step(
+    monkeypatch: pytest.MonkeyPatch, name: str, call: int, detail: str
+) -> None:
+    import scripts.backend_eval.publish as publish_module
+
+    real = getattr(publish_module, name)
+    seen = {"n": 0}
+
+    def wrapper(dir_fd: int, publication: PublicationRequest) -> None:
+        seen["n"] += 1
+        if seen["n"] == call:
+            raise PublicationError(PublicationFailure(code=PUBLICATION_FAILED, detail=detail))
+        real(dir_fd, publication)
+
+    monkeypatch.setattr(publish_module, name, wrapper)
+
+
+@pytest.mark.parametrize("call", [1, 2])
+def test_a_post_link_sync_failure_returns_no_pass_and_leaves_no_receipt(
+    request_: AdmissionRequest,
+    services: FakeServices,
+    clock: FakeClock,
+    monkeypatch: pytest.MonkeyPatch,
+    call: int,
+) -> None:
+    """A failed post-link barrier is an untrustworthy observation, not a published receipt."""
+
+    _failing_publication_step(monkeypatch, "_sync_directory", call, "cannot synchronize: boom")
+
+    with pytest.raises(AdmissionError, match="receipt_publication_failed") as error:
+        run_admission(request_, services=services, clock=clock)
+
+    assert error.value.failure.status == "incomplete"
+    assert error.value.failure.code == "receipt_publication_failed"
+    assert error.value.failure.detail == "cannot synchronize: boom"
+
+    identity = evaluation_identity(request_, services.identities[0], _evaluator())
+    receipts = request_.artifact_root / identity / RECEIPTS_DIR_NAME
+    assert not receipts.exists() or list(receipts.iterdir()) == []
+
+
+def test_a_post_link_temporary_unlink_failure_returns_no_pass_and_leaves_no_receipt(
+    request_: AdmissionRequest, services: FakeServices, clock: FakeClock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _failing_publication_step(monkeypatch, "_replace_temporary", 2, "cannot clear the receipt temporary: boom")
+
+    with pytest.raises(AdmissionError, match="receipt_publication_failed") as error:
+        run_admission(request_, services=services, clock=clock)
+
+    assert error.value.failure.status == "incomplete"
+    assert error.value.failure.detail == "cannot clear the receipt temporary: boom"
+
+    identity = evaluation_identity(request_, services.identities[0], _evaluator())
+    receipts = request_.artifact_root / identity / RECEIPTS_DIR_NAME
+    assert not receipts.exists() or list(receipts.iterdir()) == []
+
+
+def test_a_withdrawal_that_cannot_be_proven_arrives_as_a_typed_incomplete(
+    request_: AdmissionRequest, services: FakeServices, clock: FakeClock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The gate never turns an unproven withdrawal into silence: it is a typed incomplete."""
+
+    _failing_publication_step(monkeypatch, "_sync_directory", 1, "boom")
+    _failing_publication_step(monkeypatch, "_sync_directory", 2, "the barrier is gone")
+
+    with pytest.raises(AdmissionError, match="receipt_publication_failed") as error:
+        run_admission(request_, services=services, clock=clock)
+
+    assert error.value.failure.status == "incomplete"
+    assert "could not be proven durable: the barrier is gone" in error.value.failure.detail
+
+
+def test_a_refused_republication_leaves_no_temporary_for_a_cleanup_that_already_ran(
+    request_: AdmissionRequest, services: FakeServices, clock: FakeClock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Cleanup precedes publication, so a temporary abandoned at the link is never collected.
+
+    The refused run must therefore leave the receipts directory holding exactly the receipt
+    that was already immutable -- no dot-name residue that nothing in the gate would remove.
+    """
+
+    import scripts.backend_eval.admission as admission_module
+
+    first = run_admission(request_, services=services, clock=clock)
+    monkeypatch.setattr(admission_module, "new_run_identity", lambda _started: first.run_identity)
+
+    with pytest.raises(AdmissionError, match="already exists and is immutable"):
+        run_admission(request_, services=_services(request_, clock), clock=clock)
+
+    receipts = _receipt_path(request_, first).parent
+    assert sorted(entry.name for entry in receipts.iterdir()) == [f"{first.run_identity}.json"]
+    assert _receipt_path(request_, first).read_bytes() == canonical_json(first.to_dict())
+
+
+# --- the close boundary, through the gate ------------------------------------------
+
+
+def _fail_close_of(monkeypatch: pytest.MonkeyPatch, match: object) -> None:
+    """Let one descriptor's ``close`` report a deferred error after the kernel released it."""
+
+    real_open, real_close = os.open, os.close
+    targets: set[int] = set()
+
+    def open_(path: object, flags: int, mode: int = 0o777, *, dir_fd: int | None = None) -> int:
+        fd = real_open(path, flags, mode, dir_fd=dir_fd)  # type: ignore[arg-type]
+        if match(path, flags):  # type: ignore[operator]
+            targets.add(fd)
+        return fd
+
+    def close_(fd: int) -> None:
+        real_close(fd)
+        if fd in targets:
+            targets.discard(fd)
+            raise OSError(errno.EIO, "Input/output error")
+
+    monkeypatch.setattr(os, "open", open_)
+    monkeypatch.setattr(os, "close", close_)
+
+
+def _publication_of(
+    request: AdmissionRequest, services: FakeServices, clock: FakeClock
+) -> tuple[AdmissionReceipt, _Evidence, Deadline]:
+    """Evaluate the gate, then hand back everything publication needs, and nothing more.
+
+    The close injection has to be armed around *publication alone*: a run's evaluation opens
+    and closes descriptors of its own -- the corpus capture and the artifact digest both walk
+    trees -- and a match broad enough to name the publication's owner root would also name
+    theirs.
+    """
+
+    receipt = evaluate_admission(request, services=services, clock=clock)
+    evidence = _Evidence(
+        run_identity=receipt.run_identity,
+        evaluation_root=request.artifact_root / receipt.evaluation_identity,
+    )
+    return receipt, evidence, Deadline(clock=clock, seconds=ADMISSION_BUDGET_SECONDS, started=0.0)
+
+
+def test_a_refused_payload_close_is_a_typed_incomplete_and_publishes_no_receipt(
+    request_: AdmissionRequest, services: FakeServices, clock: FakeClock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A pre-link close refusal reaches the gate typed, not as a bare ``OSError``.
+
+    Before the lock's relabelling was narrowed this arrived as ``cannot lock``; had the
+    relabelling simply been removed without typing the close, it would have escaped
+    ``_publish_receipt`` as an untranslated ``OSError`` and never become an admission
+    disposition at all.
+    """
+
+    import scripts.backend_eval.publish as publish_module
+
+    receipt, evidence, deadline = _publication_of(request_, services, clock)
+    _fail_close_of(monkeypatch, lambda path, flags: flags == publish_module._CREATE_FLAGS)
+    with pytest.raises(AdmissionError, match="receipt_publication_failed") as error:
+        _publish_receipt(request_, evidence, receipt, deadline)
+    monkeypatch.undo()
+
+    assert error.value.failure.status == "incomplete"
+    assert error.value.failure.code == "receipt_publication_failed"
+    assert "cannot close the receipt below" in error.value.failure.detail
+    assert "cannot lock" not in error.value.failure.detail
+
+    # No receipt, and no dot-name residue for a cleanup that has already run.
+    receipts = evidence.evaluation_root / RECEIPTS_DIR_NAME if evidence.evaluation_root else None
+    assert receipts is not None
+    assert not receipts.exists() or list(receipts.iterdir()) == []
+
+
+@pytest.mark.parametrize(
+    "match",
+    [
+        lambda path, flags: path == RECEIPTS_DIR_NAME,
+        lambda path, flags: path == PUBLICATION_LOCK_NAME,
+        lambda path, flags: isinstance(path, Path),
+    ],
+    ids=["receipts directory", "publication lock", "owner root"],
+)
+def test_a_refused_close_after_durability_still_publishes_the_receipt(
+    request_: AdmissionRequest,
+    services: FakeServices,
+    clock: FakeClock,
+    monkeypatch: pytest.MonkeyPatch,
+    match: object,
+) -> None:
+    """The gate must not report an incomplete for a receipt every consumer can read."""
+
+    receipt, evidence, deadline = _publication_of(request_, services, clock)
+    _fail_close_of(monkeypatch, match)
+    published = _publish_receipt(request_, evidence, receipt, deadline)
+    monkeypatch.undo()
+
+    assert published == _receipt_path(request_, receipt)
+    assert published.read_bytes() == canonical_json(receipt.to_dict())
+    assert sorted(entry.name for entry in published.parent.iterdir()) == [f"{receipt.run_identity}.json"]

@@ -13,6 +13,8 @@ Phase 1's ``scripts.backend_eval.{process,runtime,models}`` -- never ``serena_li
 from __future__ import annotations
 
 import os
+import signal
+import subprocess
 from collections.abc import Callable, Mapping
 from contextlib import suppress
 from dataclasses import dataclass
@@ -34,14 +36,26 @@ from serena_light.lsp.adapter import (
 )
 from serena_light.lsp.client import SyncLspClient
 from serena_light.lsp.positions import PositionEncoding
-from serena_light.processes import LanguageServerSubprocessLauncher
+from serena_light.processes import (
+    LanguageServerSubprocessLauncher,
+    terminate_process_tree_with_kill_fallback,
+)
 
-__all__ = ["BackendProtocolSpec", "ProtocolSession", "protocol_session_from_error", "run_protocol_probe"]
+__all__ = [
+    "BackendProtocolSpec",
+    "ProtocolSession",
+    "protocol_session_from_error",
+    "redacted_evidence_text",
+    "run_protocol_probe",
+]
 
 # Below this many seconds remaining, a graceful client.shutdown() round trip cannot possibly
 # complete honestly; the handshake is skipped entirely rather than attempted with a
 # near-zero timeout that can only fail (Minor 4; see also the M10 note in run_protocol_probe).
 _GRACEFUL_SHUTDOWN_MINIMUM_SECONDS = 0.05
+_NATURAL_EXIT_GRACE_SECONDS = 2.0
+_EVIDENCE_TEXT_MAX_CHARS = 1024
+_TRUNCATION_MARKER = "...<truncated>..."
 
 _PROTOCOL_SESSION_EVIDENCE_ATTR = "protocol_session_evidence"
 
@@ -62,6 +76,8 @@ class BackendProtocolSpec:
     engine: Callable[[CandidateRuntime], EngineMetadata]
     position_encoding: PositionEncoding
     diagnostics_mode: str
+    validate_initialize_params: Callable[[Mapping[str, object]], None] | None = None
+    notification_handler: Callable[[str, Any], None] | None = None
 
     def __post_init__(self) -> None:
         if not self.name:
@@ -136,7 +152,23 @@ def _try_attach_protocol_session(error: BaseException, session_evidence: Protoco
         _attach_protocol_session(error, session_evidence)
     except BaseException as attach_error:
         with suppress(BaseException):
-            error.add_note(f"cleanup: could not attach protocol session evidence: {attach_error!r}")
+            error.add_note(
+                redacted_evidence_text(
+                    f"cleanup: could not attach protocol session evidence: {attach_error!r}"
+                )
+            )
+
+
+def redacted_evidence_text(value: object) -> str:
+    """Render one persisted evidence string through one redaction and size boundary."""
+
+    text = _redact(str(value))
+    if len(text) <= _EVIDENCE_TEXT_MAX_CHARS:
+        return text
+    available = _EVIDENCE_TEXT_MAX_CHARS - len(_TRUNCATION_MARKER)
+    prefix = available // 2
+    suffix = available - prefix
+    return f"{text[:prefix]}{_TRUNCATION_MARKER}{text[-suffix:]}"
 
 
 def _child_environment(minimal_env: Mapping[str, str]) -> dict[str, str | None]:
@@ -166,6 +198,84 @@ def _redacted_stderr_tail(stderr_capture: BoundedStderrCapture | None) -> str:
     return _redact(text)[-1024:]
 
 
+@dataclass(slots=True)
+class _LaunchTracker:
+    """Remember the exact child if the reused provider fails before returning a runtime."""
+
+    delegate: LanguageServerSubprocessLauncher
+    process: subprocess.Popen[bytes] | None = None
+
+    def launch(
+        self,
+        command: Any,
+        *,
+        cwd: str | Path,
+        env: Mapping[str, str | None] | None = None,
+    ) -> subprocess.Popen[bytes]:
+        if self.process is not None:
+            raise RuntimeError("one protocol probe may launch only one candidate process")
+        process = self.delegate.launch(command, cwd=cwd, env=env)
+        self.process = process
+        return process
+
+
+def _cleanup_partial_launch(
+    process: subprocess.Popen[bytes] | None,
+    deadline: Deadline,
+) -> tuple[str, ...]:
+    """Reap a child launched by a provider that failed before returning AdapterRuntime."""
+
+    if process is None:
+        return ()
+    errors: list[str] = []
+    try:
+        terminate_process_tree_with_kill_fallback(
+            process,
+            min(2.0, deadline.remaining()),
+            "partially-started evaluation language server",
+            kill_timeout=2.0,
+        )
+    except BaseException as cleanup_error:
+        errors.append(
+            redacted_evidence_text(
+                "partial provider.start cleanup raised: "
+                f"{type(cleanup_error).__name__}: {cleanup_error}"
+            )
+        )
+        try:
+            process_group = os.getpgid(process.pid)
+            if process_group == process.pid and process_group != os.getpgrp():
+                os.killpg(process_group, signal.SIGKILL)
+            else:
+                process.kill()
+        except (OSError, ProcessLookupError):
+            pass
+        with suppress(subprocess.TimeoutExpired):
+            process.wait(timeout=2.0)
+    finally:
+        for stream in (process.stdin, process.stdout, process.stderr):
+            if stream is not None:
+                with suppress(OSError):
+                    stream.close()
+    if process.poll() is None:
+        errors.append(redacted_evidence_text("partially-started evaluation language server survived cleanup"))
+    return tuple(errors)
+
+
+def _record_cleanup_failure(
+    primary: BaseException | None,
+    cleanup_errors: list[str],
+    label: str,
+    error: BaseException,
+) -> BaseException:
+    rendered = redacted_evidence_text(f"{label}: {type(error).__name__}: {error}")
+    cleanup_errors.append(rendered)
+    if primary is None:
+        return error
+    primary.add_note(redacted_evidence_text(f"cleanup: {label} also failed: {type(error).__name__}: {error}"))
+    return primary
+
+
 def _cleanup(
     client: SyncLspClient,
     provider: SubprocessAdapterRuntimeProvider,
@@ -192,6 +302,7 @@ def _cleanup(
 
     cleanup_errors: list[str] = []
     remaining = deadline.remaining()
+    shutdown_succeeded = False
     if remaining >= _GRACEFUL_SHUTDOWN_MINIMUM_SECONDS:
         # Mirror SubprocessAdapterRuntimeProvider.stop()'s own convention: mark this runtime
         # as intentionally stopping *before* the shutdown call, so the client's own resulting
@@ -201,21 +312,52 @@ def _cleanup(
             adapter_runtime.stopping.set()
         try:
             client.shutdown(timeout=min(2.0, remaining))
+            shutdown_succeeded = True
         except BaseException as shutdown_error:
-            cleanup_errors.append(f"client.shutdown() raised: {shutdown_error!r}")
-            if primary is None:
-                primary = shutdown_error
-            else:
-                primary.add_note(f"cleanup: client.shutdown() also raised: {shutdown_error!r}")
+            primary = _record_cleanup_failure(
+                primary,
+                cleanup_errors,
+                "client.shutdown() raised",
+                shutdown_error,
+            )
+    if shutdown_succeeded:
+        try:
+            _wait_for_natural_exit(adapter_runtime, deadline)
+        except BaseException as wait_error:
+            primary = _record_cleanup_failure(
+                primary,
+                cleanup_errors,
+                "process.wait() after client.shutdown() raised",
+                wait_error,
+            )
     try:
         provider.stop(adapter_runtime)
     except BaseException as stop_error:
-        cleanup_errors.append(f"SubprocessAdapterRuntimeProvider.stop() raised: {stop_error!r}")
-        if primary is None:
-            primary = stop_error
-        else:
-            primary.add_note(f"cleanup: SubprocessAdapterRuntimeProvider.stop() also raised: {stop_error!r}")
+        primary = _record_cleanup_failure(
+            primary,
+            cleanup_errors,
+            "SubprocessAdapterRuntimeProvider.stop() raised",
+            stop_error,
+        )
     return primary, tuple(cleanup_errors)
+
+
+def _wait_for_natural_exit(adapter_runtime: AdapterRuntime, deadline: Deadline) -> None:
+    """Give the exact candidate process one bounded chance to honor LSP ``exit``.
+
+    A timeout is the expected stubborn-server outcome and simply falls through to the
+    provider's existing process-tree stop. Any other wait failure is cleanup evidence, while
+    :func:`_cleanup` still invokes that same stop fallback.
+    """
+
+    process = adapter_runtime.process
+    if process is None or process.poll() is not None:
+        return
+    wait_seconds = min(_NATURAL_EXIT_GRACE_SECONDS, deadline.remaining())
+    if wait_seconds <= 0.0:
+        return
+    with suppress(subprocess.TimeoutExpired):
+        process.wait(timeout=wait_seconds)
 
 
 def run_protocol_probe[T](
@@ -258,33 +400,54 @@ def run_protocol_probe[T](
     stderr_tail = ""
     primary: BaseException | None = None
     provider: SubprocessAdapterRuntimeProvider | None = None
+    launch_tracker: _LaunchTracker | None = None
     adapter_runtime: AdapterRuntime | None = None
     client: SyncLspClient | None = None
     session_evidence: ProtocolSession[Any] | None = None
     try:
         deadline.check(f"{spec.name} protocol probe start")
         engine = spec.engine(runtime)
+        if engine.interpreter is None:
+            raise ValueError(
+                f"{spec.name} engine metadata must bind the selected interpreter"
+            )
         command = spec.build_command(runtime)
-        env = _child_environment(minimal_backend_environment(runtime, runtime.python))
+        initialize_params = dict(spec.initialize_params(workspace_root))
+        if spec.validate_initialize_params is not None:
+            spec.validate_initialize_params(initialize_params)
+        deadline.check(f"{spec.name} initialize params")
+        env = _child_environment(
+            minimal_backend_environment(runtime, engine.interpreter)
+        )
+        launch_tracker = _LaunchTracker(LanguageServerSubprocessLauncher.get_instance())
         provider = SubprocessAdapterRuntimeProvider(
             command=command,
             cwd=workspace_root,
-            launcher=LanguageServerSubprocessLauncher.get_instance(),
+            launcher=cast("LanguageServerSubprocessLauncher", launch_tracker),
             env=env,
             request_timeout=deadline.remaining(),
             request_handlers=spec.request_handlers,
+            terminate_timeout=min(2.0, deadline.remaining()),
         )
-        adapter_runtime = provider.start(
-            notification_handler=lambda _method, _params: None,
-            terminal_handler=terminal_errors.append,
-        )
+        try:
+            adapter_runtime = provider.start(
+                notification_handler=(
+                    spec.notification_handler
+                    if spec.notification_handler is not None
+                    else lambda _method, _params: None
+                ),
+                terminal_handler=terminal_errors.append,
+            )
+        except BaseException as start_error:
+            cleanup_error_strings = _cleanup_partial_launch(launch_tracker.process, deadline)
+            for cleanup_error in cleanup_error_strings:
+                start_error.add_note(redacted_evidence_text(f"cleanup: {cleanup_error}"))
+            raise
         # SubprocessAdapterRuntimeProvider.start always constructs a real SyncLspClient; its
         # return type widens to the AdapterClient protocol for adapter-neutral callers.
         client = cast(SyncLspClient, adapter_runtime.client)
         deadline.check(f"{spec.name} initialize")
-        initialize_result = client.request(
-            "initialize", dict(spec.initialize_params(workspace_root)), timeout=deadline.remaining()
-        )
+        initialize_result = client.request("initialize", initialize_params, timeout=deadline.remaining())
         if not isinstance(initialize_result, Mapping):
             raise TypeError(f"{spec.name} initialize result must be an object")
         raw_providers = RawLspProviders.from_initialize_result(initialize_result)
@@ -302,10 +465,23 @@ def run_protocol_probe[T](
     finally:
         if client is not None and provider is not None and adapter_runtime is not None:
             primary, cleanup_error_strings = _cleanup(client, provider, adapter_runtime, deadline, primary)
+            try:
+                deadline.check(f"{spec.name} protocol probe cleanup")
+            except BaseException as cleanup_deadline_error:
+                mutable_cleanup_errors = list(cleanup_error_strings)
+                primary = _record_cleanup_failure(
+                    primary,
+                    mutable_cleanup_errors,
+                    f"{spec.name} protocol probe cleanup",
+                    cleanup_deadline_error,
+                )
+                cleanup_error_strings = tuple(mutable_cleanup_errors)
             stderr_tail = _redacted_stderr_tail(adapter_runtime.stderr_capture)
-            terminal_error_strings = tuple(str(error) for error in terminal_errors)
+            terminal_error_strings = tuple(redacted_evidence_text(error) for error in terminal_errors)
             if adapter_runtime.process is not None:
                 exit_status = adapter_runtime.process.poll()
+        elif launch_tracker is not None and launch_tracker.process is not None:
+            exit_status = launch_tracker.process.poll()
         if engine is not None:
             session_evidence = ProtocolSession(
                 raw_providers=raw_providers,

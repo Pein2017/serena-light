@@ -15,7 +15,11 @@ from scripts.backend_eval.models import (
     LifecycleEvidence,
 )
 from scripts.backend_eval.process import Deadline
-from scripts.backend_eval.protocol import BackendProtocolSpec, run_protocol_probe
+from scripts.backend_eval.protocol import (
+    BackendProtocolSpec,
+    redacted_evidence_text,
+    run_protocol_probe,
+)
 from scripts.backend_eval.runtime import CandidateRuntime, load_prepared_candidate_runtime
 from serena_light.lsp.adapter import RawLspProviders, read_only_client_request_handlers
 from serena_light.lsp.client import CONTENT_MODIFIED, LspResponseError, SyncLspClient
@@ -51,6 +55,7 @@ class _ObservedCapability:
     normalized_valid: bool
     notes: str
     error_code: int | None = None
+    ready_elapsed: float | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -178,8 +183,10 @@ def run_pyright_capability_probe(
                 client.notify("textDocument/didClose", {"textDocument": {"uri": source_uri}})
             except BaseException as close_error:
                 primary.add_note(
-                    "Pyright document close also failed: "
-                    f"{type(close_error).__name__}: {close_error}"
+                    redacted_evidence_text(
+                        "Pyright document close also failed: "
+                        f"{type(close_error).__name__}: {close_error}"
+                    )
                 )
             raise
         try:
@@ -187,7 +194,7 @@ def run_pyright_capability_probe(
         except BaseException as close_error:
             return _PyrightSessionResult(
                 observations=observations,
-                document_close_error=(
+                document_close_error=redacted_evidence_text(
                     "Pyright document close failed: "
                     f"{type(close_error).__name__}: {close_error}"
                 ),
@@ -222,7 +229,10 @@ def run_pyright_capability_probe(
         for name in _CAPABILITY_NAMES
     )
     capability_issues = [
-        f"{capability.name}: {capability.notes or 'advertised request was not normalized-valid'}"
+        redacted_evidence_text(
+            f"{capability.name}: "
+            f"{capability.notes or 'advertised request was not normalized-valid'}"
+        )
         for capability in capabilities
         if capability.advertised and (capability.accepted is not True or capability.normalized_valid is not True)
     ]
@@ -231,6 +241,16 @@ def run_pyright_capability_probe(
         for name in sorted(_REQUIRED_ADVERTISEMENTS)
         if not advertised[name]
     )
+    required_readiness = tuple(
+        observation.ready_elapsed
+        for observation in observations.values()
+        if observation.name in _REQUIRED_ADVERTISEMENTS
+        and observation.ready_elapsed is not None
+    )
+    if not required_readiness:
+        capability_issues.append(
+            "cold readiness was not achieved: no required capability returned normalized-valid evidence"
+        )
     lifecycle_issues = [*protocol_session.terminal_errors, *protocol_session.cleanup_errors]
     if protocol_session.result.document_close_error is not None:
         lifecycle_issues.append(protocol_session.result.document_close_error)
@@ -246,8 +266,9 @@ def run_pyright_capability_probe(
     error_codes = tuple(
         observation.error_code for observation in observations.values() if observation.error_code is not None
     )
+    cold_readiness_elapsed = min(required_readiness, default=deadline.elapsed())
     lifecycle = LifecycleEvidence(
-        cold_readiness_seconds=max(0.0, deadline.elapsed() - started_elapsed),
+        cold_readiness_seconds=max(0.0, cold_readiness_elapsed - started_elapsed),
         diagnostics_mode="push",
         content_modified_count=error_codes.count(CONTENT_MODIFIED),
         request_cancelled_count=error_codes.count(_REQUEST_CANCELLED),
@@ -294,7 +315,9 @@ def _observe_request(
             name=name,
             accepted=False,
             normalized_valid=False,
-            notes=f"LspResponseError code={error.code} message={error.message}",
+            notes=redacted_evidence_text(
+                f"LspResponseError code={error.code} message={error.message}"
+            ),
             error_code=error.code,
         )
     try:
@@ -304,7 +327,7 @@ def _observe_request(
             name=name,
             accepted=True,
             normalized_valid=False,
-            notes=f"normalization failed: {error}",
+            notes=redacted_evidence_text(f"normalization failed: {error}"),
         )
     if not normalized:
         return _ObservedCapability(
@@ -313,7 +336,13 @@ def _observe_request(
             normalized_valid=False,
             notes="normalization returned no evidence",
         )
-    return _ObservedCapability(name=name, accepted=True, normalized_valid=True, notes="")
+    return _ObservedCapability(
+        name=name,
+        accepted=True,
+        normalized_valid=True,
+        notes="",
+        ready_elapsed=deadline.elapsed(),
+    )
 
 
 def _normalize_locations(raw_result: object) -> tuple[object, ...]:

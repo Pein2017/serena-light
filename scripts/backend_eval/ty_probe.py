@@ -17,7 +17,11 @@ from scripts.backend_eval.models import (
     ServiceConfigIdentity,
 )
 from scripts.backend_eval.process import Deadline
-from scripts.backend_eval.protocol import BackendProtocolSpec, run_protocol_probe
+from scripts.backend_eval.protocol import (
+    BackendProtocolSpec,
+    redacted_evidence_text,
+    run_protocol_probe,
+)
 from scripts.backend_eval.runtime import (
     CandidateRuntime,
     load_prepared_candidate_runtime,
@@ -60,6 +64,7 @@ class _ObservedCapability:
     normalized_valid: bool
     notes: str
     error_code: int | None = None
+    ready_elapsed: float | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -83,6 +88,7 @@ def ty_protocol_spec(
         or service_config.cache_path != str(runtime.cache)
     ):
         raise ValueError("service-owned ty configuration is not bound to this candidate runtime")
+    selected_interpreter = _selected_ms_interpreter(runtime)
 
     def initialize_params(workspace_root: Path) -> Mapping[str, object]:
         root = workspace_root.resolve(strict=True)
@@ -129,7 +135,7 @@ def ty_protocol_spec(
             name="ty",
             version=_TY_VERSION,
             executable=candidate_runtime.ty,
-            interpreter=candidate_runtime.python,
+            interpreter=selected_interpreter,
         ),
         position_encoding=PositionEncoding.UTF16,
         diagnostics_mode="pull",
@@ -160,6 +166,7 @@ def run_ty_capability_probe(
         raise ValueError("ty probe symbol_position must contain two non-negative integers")
 
     service_config = _ty_service_config(runtime)
+    selected_interpreter = _selected_ms_interpreter(runtime)
     source_text = read_stable_source_text(root, source, deadline=deadline)
     source_uri = source.as_uri()
     started_elapsed = deadline.elapsed()
@@ -175,7 +182,7 @@ def run_ty_capability_probe(
                     "ty": {
                         "configurationFile": service_config.config_path,
                         "configuration": {
-                            "environment": {"python": str(runtime.python)}
+                            "environment": {"python": str(selected_interpreter)}
                         },
                     }
                 }
@@ -250,8 +257,10 @@ def run_ty_capability_probe(
                 client.notify("textDocument/didClose", {"textDocument": {"uri": source_uri}})
             except BaseException as close_error:
                 primary.add_note(
-                    "ty document close also failed: "
-                    f"{type(close_error).__name__}: {close_error}"
+                    redacted_evidence_text(
+                        "ty document close also failed: "
+                        f"{type(close_error).__name__}: {close_error}"
+                    )
                 )
             raise
         try:
@@ -259,7 +268,7 @@ def run_ty_capability_probe(
         except BaseException as close_error:
             return _TySessionResult(
                 observations=observations,
-                document_close_error=(
+                document_close_error=redacted_evidence_text(
                     "ty document close failed: "
                     f"{type(close_error).__name__}: {close_error}"
                 ),
@@ -283,7 +292,10 @@ def run_ty_capability_probe(
     )
 
     capability_issues = [
-        f"{capability.name}: {capability.notes or 'advertised request was not normalized-valid'}"
+        redacted_evidence_text(
+            f"{capability.name}: "
+            f"{capability.notes or 'advertised request was not normalized-valid'}"
+        )
         for capability in capabilities
         if capability.advertised
         and (capability.accepted is not True or capability.normalized_valid is not True)
@@ -293,6 +305,16 @@ def run_ty_capability_probe(
         for name in sorted(_REQUIRED_ADVERTISEMENTS)
         if not advertised[name]
     )
+    required_readiness = tuple(
+        observation.ready_elapsed
+        for observation in observations.values()
+        if observation.name in _REQUIRED_ADVERTISEMENTS
+        and observation.ready_elapsed is not None
+    )
+    if not required_readiness:
+        capability_issues.append(
+            "cold readiness was not achieved: no required capability returned normalized-valid evidence"
+        )
     lifecycle_issues = [*protocol_session.terminal_errors, *protocol_session.cleanup_errors]
     if protocol_session.result.document_close_error is not None:
         lifecycle_issues.append(protocol_session.result.document_close_error)
@@ -310,8 +332,9 @@ def run_ty_capability_probe(
         for observation in observations.values()
         if observation.error_code is not None
     )
+    cold_readiness_elapsed = min(required_readiness, default=deadline.elapsed())
     lifecycle = LifecycleEvidence(
-        cold_readiness_seconds=max(0.0, deadline.elapsed() - started_elapsed),
+        cold_readiness_seconds=max(0.0, cold_readiness_elapsed - started_elapsed),
         diagnostics_mode="pull",
         content_modified_count=error_codes.count(CONTENT_MODIFIED),
         request_cancelled_count=error_codes.count(_REQUEST_CANCELLED),
@@ -383,7 +406,9 @@ def _observe_request(
             name=name,
             accepted=False,
             normalized_valid=False,
-            notes=f"LspResponseError code={error.code} message={error.message}",
+            notes=redacted_evidence_text(
+                f"LspResponseError code={error.code} message={error.message}"
+            ),
             error_code=error.code,
         )
     try:
@@ -393,7 +418,7 @@ def _observe_request(
             name=name,
             accepted=True,
             normalized_valid=False,
-            notes=f"normalization failed: {error}",
+            notes=redacted_evidence_text(f"normalization failed: {error}"),
         )
     if not normalized:
         return _ObservedCapability(
@@ -402,7 +427,13 @@ def _observe_request(
             normalized_valid=False,
             notes="normalization returned no evidence",
         )
-    return _ObservedCapability(name=name, accepted=True, normalized_valid=True, notes="")
+    return _ObservedCapability(
+        name=name,
+        accepted=True,
+        normalized_valid=True,
+        notes="",
+        ready_elapsed=deadline.elapsed(),
+    )
 
 
 def _normalize_locations(raw_result: object) -> tuple[object, ...]:
@@ -481,6 +512,15 @@ def _ty_service_config(runtime: CandidateRuntime) -> ServiceConfigIdentity:
     if len(matches) != 1:
         raise ValueError("candidate runtime must bind exactly one service-owned ty configuration")
     return matches[0]
+
+
+def _selected_ms_interpreter(runtime: CandidateRuntime) -> Path:
+    matches = tuple(
+        identity for identity in runtime.environments if identity.name == "ms"
+    )
+    if len(matches) != 1:
+        raise ValueError("candidate runtime must bind exactly one frozen ms interpreter")
+    return Path(matches[0].interpreter_path)
 
 
 def _prepared_candidate_runtime() -> CandidateRuntime:

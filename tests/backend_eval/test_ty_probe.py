@@ -91,8 +91,8 @@ def _runtime(tmp_path: Path) -> tuple[CandidateRuntime, ServiceConfigIdentity]:
         environments=(
             EnvironmentIdentity(
                 name="ms",
-                interpreter_path=str(root / "venv/bin/python"),
-                interpreter_realpath=str(root / "venv/bin/python"),
+                interpreter_path=str(root / "environments/ms/bin/python"),
+                interpreter_realpath=str(root / "environments/ms/bin/python"),
                 version="3.12.11",
             ),
         ),
@@ -223,6 +223,7 @@ def _run_fake(
 
 def test_ty_protocol_spec_binds_locked_command_config_and_interpreter(tmp_path: Path) -> None:
     runtime, config = _runtime(tmp_path)
+    selected_interpreter = Path(runtime.environments[0].interpreter_path)
 
     spec = ty_protocol_spec(runtime, config)
 
@@ -233,13 +234,13 @@ def test_ty_protocol_spec_binds_locked_command_config_and_interpreter(tmp_path: 
     assert spec.engine(runtime).name == "ty"
     assert spec.engine(runtime).version == "0.0.70"
     assert spec.engine(runtime).executable == runtime.ty
-    assert spec.engine(runtime).interpreter == runtime.python
+    assert spec.engine(runtime).interpreter == selected_interpreter
     params = spec.initialize_params(tmp_path)
     assert params["rootPath"] == str(tmp_path)
     assert params["rootUri"] == tmp_path.as_uri()
     assert params["initializationOptions"] == {}
-    environment = minimal_backend_environment(runtime, runtime.python)
-    assert environment["SERENA_LIGHT_SELECTED_PYTHON"] == str(runtime.python)
+    environment = minimal_backend_environment(runtime, selected_interpreter)
+    assert environment["SERENA_LIGHT_SELECTED_PYTHON"] == str(selected_interpreter)
     assert environment["XDG_CONFIG_HOME"] == str(runtime.config)
     assert not any(key.upper().endswith("_PROXY") for key in environment)
 
@@ -262,15 +263,17 @@ def test_ty_probe_uses_inline_interpreter_and_external_configuration(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     outcome, client, runtime, config = _run_fake(tmp_path, monkeypatch)
+    selected_interpreter = runtime.environments[0].interpreter_path
 
     assert outcome.gate_disposition == "pass"
+    assert outcome.lifecycle.cold_readiness_seconds == pytest.approx(0.1)
     assert client.notifications[0] == (
         "workspace/didChangeConfiguration",
         {
             "settings": {
                 "ty": {
                     "configurationFile": config.config_path,
-                    "configuration": {"environment": {"python": str(runtime.python)}},
+                    "configuration": {"environment": {"python": selected_interpreter}},
                 }
             }
         },
@@ -444,6 +447,30 @@ def test_ty_probe_preserves_typed_lsp_error_and_fresh_request_deadlines(
     assert all(timeout is not None and timeout > 0 for timeout in timeouts)
     assert timeouts == sorted(timeouts, reverse=True)
     assert client.notifications[-1][0] == "textDocument/didClose"
+
+
+def test_ty_redacts_and_bounds_server_error_notes_and_issues(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = tmp_path / "known.py"
+    secret = "malicious-ty-secret"
+    responses = _responses(target)
+    responses["textDocument/definition"] = LspResponseError(
+        -32001,
+        f"password={secret} " + "x" * 5000,
+    )
+
+    outcome, _client, _runtime_value, _config = _run_fake(
+        tmp_path,
+        monkeypatch,
+        responses=responses,
+    )
+
+    definition = next(item for item in outcome.capabilities if item.name == "definition")
+    assert secret not in definition.notes
+    assert "<redacted>" in definition.notes
+    assert len(definition.notes) <= 1024
+    assert all(secret not in issue and len(issue) <= 1024 for issue in outcome.issues)
 
 
 def test_primary_semantic_error_precedes_did_close_failure(

@@ -210,6 +210,7 @@ def test_pyright_capability_probe_exercises_and_normalizes_every_advertised_prov
     assert all(capability.accepted is True for capability in outcome.capabilities)
     assert all(capability.normalized_valid is True for capability in outcome.capabilities)
     assert outcome.gate_disposition == "pass"
+    assert outcome.lifecycle.cold_readiness_seconds == pytest.approx(0.1)
     assert [method for method, _params, _timeout in client.requests] == [
         "textDocument/definition",
         "textDocument/references",
@@ -254,6 +255,66 @@ def test_pyright_capability_probe_records_typed_lsp_error_and_still_closes_docum
     assert outcome.lifecycle.content_modified_count == 1
     assert outcome.gate_disposition == "fail"
     assert client.notifications[-1][0] == "textDocument/didClose"
+
+
+def test_pyright_reports_when_no_required_capability_achieves_cold_readiness(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = tmp_path / "known.py"
+    target.write_text("Known = 1\n", encoding="utf-8")
+    clock = _FakeClock()
+    responses = _responses(target)
+    responses.update(
+        {
+            "textDocument/definition": None,
+            "textDocument/references": [],
+            "textDocument/documentSymbol": [],
+            "workspace/symbol": [],
+        }
+    )
+    client = _FakeClient(clock, responses)
+    _install_fake_runner(monkeypatch, client, {})
+
+    outcome = run_pyright_capability_probe(
+        _facts(tmp_path / "python"),
+        tmp_path,
+        target,
+        (0, 0),
+        deadline=Deadline.start(clock, 10.0),
+    )
+
+    assert outcome.gate_disposition == "fail"
+    assert any("cold readiness was not achieved" in issue for issue in outcome.issues)
+
+
+def test_pyright_redacts_and_bounds_server_error_notes_and_issues(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = tmp_path / "known.py"
+    target.write_text("Known = 1\n", encoding="utf-8")
+    secret = "malicious-pyright-secret"
+    clock = _FakeClock()
+    responses = _responses(target)
+    responses["textDocument/definition"] = LspResponseError(
+        -32001,
+        f"password={secret} " + "x" * 5000,
+    )
+    client = _FakeClient(clock, responses)
+    _install_fake_runner(monkeypatch, client, {})
+
+    outcome = run_pyright_capability_probe(
+        _facts(tmp_path / "python"),
+        tmp_path,
+        target,
+        (0, 0),
+        deadline=Deadline.start(clock, 10.0),
+    )
+
+    definition = next(item for item in outcome.capabilities if item.name == "definition")
+    assert secret not in definition.notes
+    assert "<redacted>" in definition.notes
+    assert len(definition.notes) <= 1024
+    assert all(secret not in issue and len(issue) <= 1024 for issue in outcome.issues)
 
 
 @pytest.mark.parametrize(

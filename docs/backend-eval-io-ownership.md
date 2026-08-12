@@ -1,9 +1,12 @@
 # Backend-evaluation I/O ownership
 
-Every read and write the evaluation package executes has exactly one owner, and the set of
-them is finite and enumerated. `tests/backend_eval/test_io_ownership.py` is the authority:
+Every filesystem access and Phase 2 lifecycle side effect the evaluation package executes
+has exactly one owner, and the set is finite and enumerated.
+`tests/backend_eval/test_io_ownership.py` is the authority:
 it parses every module under `scripts/backend_eval/`, collects every call that
-opens, creates, enumerates, reads, or writes a filesystem object, and fails until each one
+opens, creates, enumerates, reads, or writes a filesystem object, delegates a stable source
+read, observes or signals a candidate process, or temporarily changes the evaluator
+environment, and fails until each one
 appears in its `OWNERSHIP` table with an owner class. A new access anywhere in the evaluator
 fails that test until it is declared; a removed one fails it until the row goes. This
 document explains what each owner class guarantees, and states the boundaries that remain.
@@ -23,6 +26,12 @@ production helper is enumerated both where it runs and where it is asked for. De
 *and* proven mechanically: a dedicated test walks every call to one and requires its first
 argument to be a descriptor-shaped expression, never a constructed pathname, so the
 `descriptor` class cannot be used to hide a pathname-shaped access.
+
+Phase 2 adds four non-filesystem classes to the same closed census: delegation to the stable
+source reader; candidate PID/create-time/process-group observation; exact process-group
+signals; and the poison probe's synchronously restored environment mutation. These rows keep
+the lifecycle evidence producer from hiding process or ambient-state effects behind a module
+that happens not to open files itself.
 
 ## Why a check followed by an open is not a guard
 
@@ -217,6 +226,45 @@ Phase 2 write-guard task owns the before/after mutation proof. The shared runner
 shutdown, process-tree reap, redacted stderr, terminal errors, cleanup errors, and post-stop
 exit status. No row here promotes a plumbing probe into evidence of zero workspace mutation.
 
+### `source-read-delegation`
+
+The call delegates source bytes to `manifests.read_stable_source_text`; it does not reopen the
+path itself. The delegated reader owns the `guarded` workspace-root open, the component-wise
+`confined` walk, the nonblocking descriptor read, the byte ceiling, and the retained-root and
+entry re-proofs. The caller owns selecting the declared workspace and relative target and
+consuming the decoded text. This class appears on every capability probe and on the lifecycle
+cold-readiness scenario, so a new direct or delegated source read cannot be hidden.
+
+### `owned-process-observation`
+
+The evaluator observes candidate identity and cleanup through PID, process create time, and
+process group. The lifecycle runner brackets each shared-runner launch with a direct-child
+census, accepts exactly one newly created direct child, requires that child to own its process
+group, and records `(pid, create_time, pgid)`. Missing and extra children fail closed. Cleanup
+checks both that exact PID/create-time identity and every live member of its recorded process
+group; inability to inspect either is a failed observation, never evidence that the group was
+reaped. Pre-existing `process.py` and `protocol.py` `getpgid` calls are in the same structural
+census rather than grandfathered outside it.
+
+### `owned-process-group-signal`
+
+An `os.killpg` that can affect a candidate process tree. The lifecycle crash scenario first
+reopens the captured PID through psutil, re-proves its exact create time, re-reads its PGID,
+requires both the stored and current group to equal the captured PID, and only then signals
+that exact group. A reused PID or changed PGID fails without a signal. The older bounded-runner
+and partial-launch cleanup signals are enumerated in this class as well; their existing
+process owners and reap paths remain authoritative for those calls.
+
+### `temporary-process-environment`
+
+The lifecycle poison proof temporarily replaces only its finite declared set of proxy and
+ambient-runtime keys, starts one candidate through the normal minimal-environment seam, and
+restores every prior value in `finally`. A module lock serializes this context across lifecycle
+batteries in the evaluator process. This is not a claim that arbitrary unrelated threads can
+never read process-global environment during the window; Task 8 must run candidate batteries
+sequentially, as the lifecycle runner itself does. It is a bounded proof that poison does not
+reach the candidate, not a general environment sandbox.
+
 ### `own-image`
 
 Reads or writes this process's own sealed `memfd`, by descriptor or through `/proc/self/fd`.
@@ -256,7 +304,7 @@ ignore semantics, including `.gitignore` and `.git/info/exclude`, remain authori
 | Module | What it owns |
 | --- | --- |
 | `__init__.py` | no filesystem access; both parent-package initializers are inert |
-| `admission.py` | artifact tree digest, receipt publication, publication lock, and evaluation directory; disk `__main__` only refuses |
+| `admission.py` | artifact tree digest and cleanup; disk `__main__` only refuses. Receipt publication is delegated to `publish.py` under admission's own names |
 | `backend_eval_bootstrap.py` | the declared standard-library transport trust root: startup validation, source-image construction/sealing, bounded image child, relay, timeout, and reap; no admission semantics |
 | `candidate_lock.py` | the frozen candidate-lock transaction below the artifact root |
 | `identity.py` | the evaluator's own executed source closure |
@@ -266,6 +314,8 @@ ignore semantics, including `.gitignore` and `.git/info/exclude`, remain authori
 | `production_helper.py` | verifying the expected bytes and starting that child |
 | `production_identity.py` | the three declared production lock inputs |
 | `protocol.py` | no direct filesystem access; one structurally collected `candidate-child` delegation through the frozen production process/transport primitives |
+| `protocol_lifecycle.py` | lifecycle source-read delegation, exact candidate PID/create-time/PGID observation, fail-closed process-group signal and cleanup census, and the synchronously restored ambient poison proof |
+| `publish.py` | the generic atomic immutable publication: the per-target publication lock, the publication directory and every artifact component below the declared owner root, the `O_EXCL` temporary, the payload write, the atomic link, and the withdrawal |
 | `runtime.py` | service-owned candidate runtime preparation and the separate read-only prepared-runtime manifest loader/verifier |
 | `pyrefly_probe.py` | no direct filesystem access; delegates workspace manifests and source bytes to `manifests.py`, consumes the caller-bound prepared runtime, and delegates candidate lifecycle to `protocol.py` |
 | `pyright_probe.py` | no direct filesystem access; delegates source bytes to `manifests.py`, prepared-runtime verification to `runtime.py`, and candidate lifecycle to `protocol.py` |
@@ -276,8 +326,8 @@ ignore semantics, including `.gitignore` and `.git/info/exclude`, remain authori
 
 `models.py`, `protocol.py`, `pyrefly_probe.py`, and `pyright_probe.py` execute no direct filesystem
 byte access of their own: the first serializes and validates, the second declares its candidate
-process/transport delegation as `candidate-child`, and the two candidate probes delegate their
-read-only filesystem contracts to audited evaluator seams.
+process/transport delegation and emergency observation/signal surface, and the two candidate
+probes declare their stable-source-read delegations to the audited descriptor-confined seam.
 `process.py`
 resolves `memfd_create` from the already-loaded process image rather than through
 `ctypes.util.find_library`, which would shell out to `ldconfig` and put an unbounded child
@@ -285,6 +335,27 @@ inside a phase whose contract is that every child it starts is bounded and killa
 `write_guard.py` delegates its one content read to `manifests.bounded_file_digests`, which is
 `production-child`, and owns only the `declared-path` `lstat` that decides whether a remainder
 record needs one.
+
+`publish.py` is the one filesystem owner that belongs to no single phase. It holds every access
+the immutable publication performs -- the `guarded` open of the declared owner root, the
+`confined` walk that creates and reopens every artifact component below it, the per-target
+`O_NOFOLLOW` publication lock, the `O_EXCL` temporary, the chunked payload write, the atomic
+`link`, the directory `fsync` barriers, the withdrawal `unlink`, and every descriptor release --
+and it takes the names,
+the payload, and the phase deadline from its caller. It refuses a target the declared owner root
+does not lexically contain as a typed failure before it opens anything, and every path that
+abandons a publication -- the refused link, the exhausted reserve, an interrupted write -- removes
+its own temporary and proves the removal durable, because the owning phase's cleanup runs *before*
+publication and would never collect it. Its closes are split by what they can still decide:
+`_close_payload` is a pre-link step whose refusal discards the temporary and is reported in the
+payload's own words, while `_release_descriptor` covers every close whose outcome is already
+settled. The publication lock names only its own open, `fchmod`, and `flock`; the body it guards
+is outside that handler, so a failure the publication itself raises is never republished as a
+locking failure. It carries no phase vocabulary and no
+receipt semantics: failures leave it as one of two typed codes, and the calling phase's thin
+adapter states what they mean. `admission.py` is that adapter for Phase 1, which is why the
+receipts directory, the `.admission-publication.lock` name, and the receipt file names appear
+there rather than here.
 
 ## Residual boundaries
 
@@ -302,7 +373,9 @@ claiming a guarantee the kernel does not offer.
    `test_a_non_regular_runtime_source_changes_the_identity_rather_than_hanging`.
 3. **The ceiling is cooperative.** A `link`, `unlink`, or `fsync` already in flight is not
    preemptible. The two invariants that hold are that no `pass` is returned after the ceiling
-   and no final receipt remains once an overrun is observed.
+   and no final receipt remains once an overrun *or a post-link failure* is observed. Both are
+   enforced in `publish.py` rather than in any one phase, so a second phase inherits them
+   instead of restating them.
 4. **Confinement is claimed only below a root the harness opened.** `guarded` accesses close
    final-component substitution and blocking, not ancestor substitution, because the paths
    they read -- a caller's declared lock, an interpreter's realpath, `/usr/bin/git`, a declared
@@ -351,3 +424,24 @@ claiming a guarantee the kernel does not offer.
     semantic pass is refused. A party that changes and restores every affected entry wholly
     between those observations may remain unobservable; the loader does not claim to prevent
     filesystem mutation or to preempt a syscall already in flight.
+11. **A withdrawal that cannot be proven is reported, not assumed.** Every post-link step --
+    both durability barriers and the temporary unlink -- runs inside one recovery that removes
+    this call's own two names before the failure propagates, so a failed barrier can no longer
+    leave a readable canonical entry behind while reporting failure. The original typed failure
+    is what the caller gets back whenever the removal is proven. When a name cannot be unlinked,
+    or the withdrawal's own `fsync` fails, that is reported instead, because nothing about the
+    directory's contents can be claimed at that point. The kernel still offers no way to make
+    the removal atomic with the failure that triggered it; what is closed is the silent case.
+12. **One close error is deliberately not reported.** Linux frees a descriptor whether or not
+    `close` returns an error: the error is a deferred writeback report the kernel already
+    recorded, so retrying is unsafe -- the number may already be reused -- and no state is left
+    to repair. `_release_descriptor` therefore swallows it, and every call site is one where the
+    outcome is already settled: the publication directory and the owner root are read-only
+    descriptors whose durability barrier was an explicit `fsync` that already returned, the
+    publication lock carries no payload, the walk releases a parent only once its child is open,
+    and the payload descriptor arrives there only on a path already failing and already
+    discarding the temporary. Propagating it would hand the caller a failure while the durable
+    record it denies is on disk, or would mask the failure already being reported. The close
+    that *can* still be acted on -- the payload's, before the link -- is not in this class: it
+    discards the temporary and fails typed. What is not claimed is that a deferred writeback
+    error is invisible; it is claimed that it cannot deny a record the barriers already proved.

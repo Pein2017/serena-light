@@ -166,6 +166,8 @@ def _install_fake_runner(
     exit_status: int | None = 0,
     manifests: tuple[object, object] = ("stable", "stable"),
     after_protocol_advance: float = 0.0,
+    push_diagnostics_observed: bool = True,
+    foreign_push_diagnostics_uri: bool = False,
 ) -> None:
     import scripts.backend_eval.pyrefly_probe as module
 
@@ -198,6 +200,19 @@ def _install_fake_runner(
         )
         typed_spec = cast(Any, spec)
         result = session(client, validated_providers)
+        if push_diagnostics_observed and typed_spec.notification_handler is not None:
+            opened = next(
+                params
+                for method, params in client.notifications
+                if method == "textDocument/didOpen"
+            )
+            source_uri = cast(Any, opened)["textDocument"]["uri"]
+            if foreign_push_diagnostics_uri:
+                source_uri = (workspace_root / "foreign.py").as_uri()
+            typed_spec.notification_handler(
+                "textDocument/publishDiagnostics",
+                {"uri": source_uri, "diagnostics": []},
+            )
         client.clock.advance(after_protocol_advance)
         return ProtocolSession(
             raw_providers=validated_providers,
@@ -226,6 +241,8 @@ def _run_fake(
     manifests: tuple[object, object] = ("stable", "stable"),
     reserve: float = 1.0,
     after_protocol_advance: float = 0.0,
+    push_diagnostics_observed: bool = True,
+    foreign_push_diagnostics_uri: bool = False,
 ) -> tuple[object, _FakeClient, CandidateRuntime, ServiceConfigIdentity, dict[str, object]]:
     target = tmp_path / "known.py"
     target.write_text("Known = 1\n", encoding="utf-8")
@@ -241,6 +258,8 @@ def _run_fake(
         diagnostic_provider=diagnostic_provider,
         manifests=manifests,
         after_protocol_advance=after_protocol_advance,
+        push_diagnostics_observed=push_diagnostics_observed,
+        foreign_push_diagnostics_uri=foreign_push_diagnostics_uri,
     )
     outcome = run_pyrefly_capability_probe(
         runtime,
@@ -287,6 +306,8 @@ def test_pyrefly_protocol_spec_binds_locked_command_external_config_and_ms_inter
     assert params["rootPath"] == str(tmp_path)
     assert params["rootUri"] == tmp_path.as_uri()
     assert params["initializationOptions"] == expected_options
+    assert spec.validate_initialize_params is not None
+    assert spec.validate_initialize_params(params) is None
     text_document = cast(Any, params)["capabilities"]["textDocument"]
     assert "linkSupport" not in text_document["definition"]
     assert "linkSupport" not in text_document["implementation"]
@@ -297,6 +318,75 @@ def test_pyrefly_protocol_spec_binds_locked_command_external_config_and_ms_inter
     assert environment["SERENA_LIGHT_SELECTED_PYTHON"] == str(ms_interpreter)
     assert environment["XDG_CONFIG_HOME"] == str(runtime.config)
     assert not any(key.upper().endswith("_PROXY") for key in environment)
+
+
+def test_pyrefly_initialize_params_validator_rejects_missing_foreign_and_malformed_values(
+    tmp_path: Path,
+) -> None:
+    """Removing any exact interpreter/config/mode check must admit at least one invalid
+    initialization object that could silently evaluate a different Python environment."""
+
+    runtime, config, ms_interpreter = _runtime(tmp_path)
+    validator = pyrefly_protocol_spec(runtime, config).validate_initialize_params
+    assert validator is not None
+    valid_options = {
+        "pythonPath": str(ms_interpreter),
+        "pyrefly": {
+            "configPath": config.config_path,
+            "diagnosticMode": "workspace",
+        },
+    }
+    invalid_params: tuple[Mapping[str, object], ...] = (
+        {},
+        {"initializationOptions": "malformed"},
+        {"initializationOptions": {"pyrefly": valid_options["pyrefly"]}},
+        {
+            "initializationOptions": {
+                "pythonPath": "/foreign/bin/python",
+                "pyrefly": valid_options["pyrefly"],
+            }
+        },
+        {
+            "initializationOptions": {
+                "pythonPath": str(ms_interpreter),
+                "pyrefly": "malformed",
+            }
+        },
+        {
+            "initializationOptions": {
+                "pythonPath": str(ms_interpreter),
+                "pyrefly": {"diagnosticMode": "workspace"},
+            }
+        },
+        {
+            "initializationOptions": {
+                "pythonPath": str(ms_interpreter),
+                "pyrefly": {
+                    "configPath": "/foreign/pyrefly.toml",
+                    "diagnosticMode": "workspace",
+                },
+            }
+        },
+        {
+            "initializationOptions": {
+                "pythonPath": str(ms_interpreter),
+                "pyrefly": {"configPath": config.config_path},
+            }
+        },
+        {
+            "initializationOptions": {
+                "pythonPath": str(ms_interpreter),
+                "pyrefly": {
+                    "configPath": config.config_path,
+                    "diagnosticMode": "openFilesOnly",
+                },
+            }
+        },
+    )
+
+    for params in invalid_params:
+        with pytest.raises(ValueError, match="Pyrefly initialize params"):
+            validator(params)
 
 
 @pytest.mark.parametrize(
@@ -348,6 +438,7 @@ def test_pyrefly_probe_uses_external_configuration_without_runtime_config_mutati
     outcome, client, _runtime_value, _config, captured = _run_fake(tmp_path, monkeypatch)
 
     assert cast(Any, outcome).gate_disposition == "pass"
+    assert cast(Any, outcome).lifecycle.cold_readiness_seconds == pytest.approx(0.1)
     assert [method for method, _params in client.notifications] == [
         "textDocument/didOpen",
         "textDocument/didClose",
@@ -358,6 +449,21 @@ def test_pyrefly_probe_uses_external_configuration_without_runtime_config_mutati
     )
     assert cast(Any, captured["spec"]).request_handlers is not None
     assert captured["manifest_roots"] == [tmp_path, tmp_path]
+
+
+def test_pyrefly_probe_does_not_claim_clean_push_mode_without_exact_uri_publication(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    outcome, _client, _runtime_value, _config, _captured = _run_fake(
+        tmp_path,
+        monkeypatch,
+        foreign_push_diagnostics_uri=True,
+    )
+
+    typed = cast(Any, outcome)
+    assert typed.lifecycle.diagnostics_mode == "push"
+    assert typed.gate_disposition == "fail"
+    assert any("push diagnostics remain unproven" in issue for issue in typed.issues)
 
 
 def test_pyrefly_probe_raises_typed_workspace_mutation_for_any_manifest_change(
@@ -660,6 +766,30 @@ def test_pyrefly_probe_preserves_typed_lsp_errors_and_fresh_request_deadlines(
     assert all(timeout is not None and timeout > 0 for timeout in timeouts)
     assert timeouts == sorted(timeouts, reverse=True)
     assert client.notifications[-1][0] == "textDocument/didClose"
+
+
+def test_pyrefly_redacts_and_bounds_server_error_notes_and_issues(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = tmp_path / "known.py"
+    secret = "malicious-pyrefly-secret"
+    responses = _responses(target)
+    responses["textDocument/definition"] = LspResponseError(
+        -32001,
+        f"password={secret} " + "x" * 5000,
+    )
+
+    outcome, _client, _runtime_value, _config, _captured = _run_fake(
+        tmp_path,
+        monkeypatch,
+        responses=responses,
+    )
+    typed = cast(Any, outcome)
+    definition = next(item for item in typed.capabilities if item.name == "definition")
+    assert secret not in definition.notes
+    assert "<redacted>" in definition.notes
+    assert len(definition.notes) <= 1024
+    assert all(secret not in issue and len(issue) <= 1024 for issue in typed.issues)
 
 
 def test_primary_semantic_error_precedes_did_close_failure(

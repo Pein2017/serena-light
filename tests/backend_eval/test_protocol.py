@@ -13,7 +13,9 @@ import json
 import os
 import subprocess
 import sys
+import time
 from collections.abc import Callable, Mapping
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -22,7 +24,12 @@ import pytest
 from scripts.backend_eval import protocol as protocol_module
 from scripts.backend_eval.models import DIAGNOSTICS_MODES, EnvironmentIdentity, ServiceConfigIdentity
 from scripts.backend_eval.process import Deadline, DeadlineExceeded, monotonic_clock
-from scripts.backend_eval.protocol import BackendProtocolSpec, protocol_session_from_error, run_protocol_probe
+from scripts.backend_eval.protocol import (
+    BackendProtocolSpec,
+    protocol_session_from_error,
+    redacted_evidence_text,
+    run_protocol_probe,
+)
 from scripts.backend_eval.runtime import BACKEND_ENVIRONMENT_KEYS, SERVICE_CONFIG_RELPATHS, CandidateRuntime
 from serena_light.lsp.adapter import (
     AdapterRuntime,
@@ -32,6 +39,7 @@ from serena_light.lsp.adapter import (
 )
 from serena_light.lsp.client import LspTransportClosed, SyncLspClient
 from serena_light.lsp.positions import PositionEncoding
+from serena_light.processes import LanguageServerSubprocessLauncher
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _INTERPRETER_VERSION = "3.12.11"
@@ -40,12 +48,16 @@ _FAKE_SERVER_TEMPLATE = r"""
 import json
 import os
 import sys
+import time
 
 CAPABILITIES = json.loads({capabilities_json!r})
 ECHO_ENVIRONMENT = {echo_environment!r}
 BAD_INITIALIZE_RESULT = {bad_initialize_result!r}
 CRASH_ON_METHOD = json.loads({crash_on_method_json!r})
 EXIT_STATUS_ON_SHUTDOWN = {exit_status_on_shutdown!r}
+EXIT_DELAY_SECONDS = {exit_delay_seconds!r}
+IGNORE_EXIT = {ignore_exit!r}
+CLOSE_STDOUT_ON_EXIT = {close_stdout_on_exit!r}
 STDERR_TEXT = json.loads({stderr_text_json!r})
 
 if STDERR_TEXT is not None:
@@ -92,6 +104,13 @@ while True:
             os._exit(EXIT_STATUS_ON_SHUTDOWN)
         _write(stdout, {{"jsonrpc": "2.0", "id": message["id"], "result": None}})
     elif method == "exit":
+        if CLOSE_STDOUT_ON_EXIT:
+            os.close(stdout.fileno())
+        if IGNORE_EXIT:
+            while True:
+                time.sleep(60)
+        if EXIT_DELAY_SECONDS:
+            time.sleep(EXIT_DELAY_SECONDS)
         break
     elif "id" in message:
         payload = {{"echoed": method}}
@@ -108,6 +127,9 @@ def _fake_server_script(
     bad_initialize_result: bool = False,
     crash_on_method: str | None = None,
     exit_status_on_shutdown: int | None = None,
+    exit_delay_seconds: float = 0.0,
+    ignore_exit: bool = False,
+    close_stdout_on_exit: bool = False,
     stderr_text: str | None = None,
 ) -> str:
     """A small fake stdio LSP server script -- never a real candidate backend."""
@@ -119,6 +141,9 @@ def _fake_server_script(
         bad_initialize_result=bad_initialize_result,
         crash_on_method_json=json.dumps(crash_on_method),
         exit_status_on_shutdown=exit_status_on_shutdown,
+        exit_delay_seconds=exit_delay_seconds,
+        ignore_exit=ignore_exit,
+        close_stdout_on_exit=close_stdout_on_exit,
         stderr_text_json=json.dumps(stderr_text),
     )
 
@@ -183,7 +208,12 @@ def _fake_spec(script: str | None = None) -> BackendProtocolSpec:
         build_command=lambda runtime: (str(runtime.python), "-c", resolved_script),
         initialize_params=lambda root: {"rootUri": root.as_uri(), "capabilities": {}},
         request_handlers=None,
-        engine=lambda runtime: EngineMetadata(name="fake", version="0.0.0", executable=runtime.python),
+        engine=lambda runtime: EngineMetadata(
+            name="fake",
+            version="0.0.0",
+            executable=runtime.python,
+            interpreter=runtime.python,
+        ),
         position_encoding=PositionEncoding.UTF16,
         diagnostics_mode="push",
     )
@@ -307,6 +337,70 @@ def test_run_protocol_probe_records_advertised_pull_diagnostic_provider(tmp_path
     assert session_result.diagnostic_provider is True
 
 
+def test_run_protocol_probe_forwards_the_optional_notification_observer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runtime = _fake_runtime(tmp_path)
+    observed: list[tuple[str, object]] = []
+    original_start = protocol_module.SubprocessAdapterRuntimeProvider.start
+
+    def start_with_notification(
+        self: SubprocessAdapterRuntimeProvider,
+        *,
+        notification_handler: Callable[[str, Any], None],
+        terminal_handler: Callable[[BaseException], None],
+    ) -> AdapterRuntime:
+        notification_handler(
+            "textDocument/publishDiagnostics",
+            {"uri": (tmp_path / "known.py").as_uri(), "diagnostics": []},
+        )
+        return original_start(
+            self,
+            notification_handler=notification_handler,
+            terminal_handler=terminal_handler,
+        )
+
+    monkeypatch.setattr(
+        protocol_module.SubprocessAdapterRuntimeProvider,
+        "start",
+        start_with_notification,
+    )
+    spec = BackendProtocolSpec(
+        name="fake",
+        build_command=lambda candidate_runtime: (
+            str(candidate_runtime.python),
+            "-c",
+            _fake_server_script(),
+        ),
+        initialize_params=lambda root: {"rootUri": root.as_uri(), "capabilities": {}},
+        request_handlers=None,
+        engine=lambda candidate_runtime: EngineMetadata(
+            name="fake",
+            version="0.0.0",
+            executable=candidate_runtime.python,
+            interpreter=candidate_runtime.python,
+        ),
+        position_encoding=PositionEncoding.UTF16,
+        diagnostics_mode="push",
+        notification_handler=lambda method, params: observed.append((method, params)),
+    )
+
+    run_protocol_probe(
+        spec,
+        runtime,
+        tmp_path,
+        deadline=Deadline.start(monotonic_clock, 30.0),
+        session=lambda _client, _providers: None,
+    )
+
+    assert observed == [
+        (
+            "textDocument/publishDiagnostics",
+            {"uri": (tmp_path / "known.py").as_uri(), "diagnostics": []},
+        )
+    ]
+
+
 def test_run_protocol_probe_negotiates_the_servers_selected_position_encoding(tmp_path: Path) -> None:
     runtime = _fake_runtime(tmp_path)
     spec = _fake_spec(_fake_server_script(capabilities={"positionEncoding": "utf-32"}))
@@ -331,6 +425,61 @@ def test_run_protocol_probe_rejects_a_non_mapping_initialize_result(tmp_path: Pa
 
     with pytest.raises(TypeError, match="initialize result must be an object"):
         run_protocol_probe(spec, runtime, tmp_path, deadline=deadline, session=session)
+
+
+def test_run_protocol_probe_validates_initialize_params_before_constructing_a_provider(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Removing or moving the validation after provider construction would let an invalid
+    candidate configuration reach the process-launch surface before it is refused."""
+
+    runtime = _fake_runtime(tmp_path)
+    provider_constructions: list[object] = []
+
+    def forbidden_provider(*args: object, **kwargs: object) -> object:
+        provider_constructions.append((args, kwargs))
+        raise AssertionError("provider must not be constructed for invalid initialize params")
+
+    monkeypatch.setattr(protocol_module, "SubprocessAdapterRuntimeProvider", forbidden_provider)
+
+    def reject_initialize_params(params: Mapping[str, object]) -> None:
+        assert params == {"rootUri": tmp_path.as_uri(), "capabilities": {}}
+        raise ValueError("initialize params refused")
+
+    spec = BackendProtocolSpec(
+        name="fake",
+        build_command=lambda candidate_runtime: (
+            str(candidate_runtime.python),
+            "-c",
+            _fake_server_script(),
+        ),
+        initialize_params=lambda root: {"rootUri": root.as_uri(), "capabilities": {}},
+        request_handlers=None,
+        engine=lambda candidate_runtime: EngineMetadata(
+            name="fake",
+            version="0.0.0",
+            executable=candidate_runtime.python,
+            interpreter=candidate_runtime.python,
+        ),
+        position_encoding=PositionEncoding.UTF16,
+        diagnostics_mode="push",
+        validate_initialize_params=reject_initialize_params,
+    )
+
+    def session(client: SyncLspClient, _providers: RawLspProviders) -> None:
+        del client
+        raise AssertionError("session must never run after initialize params are refused")
+
+    with pytest.raises(ValueError, match="initialize params refused"):
+        run_protocol_probe(
+            spec,
+            runtime,
+            tmp_path,
+            deadline=Deadline.start(monotonic_clock, 30.0),
+            session=session,
+        )
+
+    assert provider_constructions == []
 
 
 # --- Fix round 3: engine frozen before any process side effect -------------------
@@ -381,6 +530,59 @@ def test_run_protocol_probe_starts_no_child_process_when_the_engine_callable_rai
 
     assert start_calls == []
     assert protocol_session_from_error(excinfo.value) is None
+
+
+def test_run_protocol_probe_reaps_a_partial_launch_when_sync_client_start_raises(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """If the reused provider launches the child but fails before returning its runtime,
+    the evaluation wrapper must still reap that exact child transactionally."""
+
+    runtime = _fake_runtime(tmp_path)
+    launched: list[subprocess.Popen[bytes]] = []
+    original_launch = LanguageServerSubprocessLauncher.launch
+
+    def spy_launch(
+        self: LanguageServerSubprocessLauncher,
+        command: object,
+        *,
+        cwd: str | Path,
+        env: Mapping[str, str | None] | None = None,
+    ) -> subprocess.Popen[bytes]:
+        process = original_launch(self, command, cwd=cwd, env=env)  # type: ignore[arg-type]
+        launched.append(process)
+        return process
+
+    def failing_start(self: SyncLspClient) -> None:
+        del self
+        raise RuntimeError("client reader failed to start")
+
+    monkeypatch.setattr(LanguageServerSubprocessLauncher, "launch", spy_launch)
+    monkeypatch.setattr(SyncLspClient, "start", failing_start)
+
+    try:
+        with pytest.raises(RuntimeError, match="client reader failed to start") as excinfo:
+            run_protocol_probe(
+                _fake_spec(),
+                runtime,
+                tmp_path,
+                deadline=Deadline.start(monotonic_clock, 30.0),
+                session=lambda _client, _providers: None,
+            )
+        assert len(launched) == 1
+        assert launched[0].poll() is not None
+        evidence = protocol_session_from_error(excinfo.value)
+        assert evidence is not None
+        assert evidence.result is None
+    finally:
+        for process in launched:
+            if process.poll() is None:
+                process.terminate()
+                try:
+                    process.wait(timeout=2.0)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait(timeout=2.0)
 
 
 def test_run_protocol_probe_preserves_the_primary_exception_when_evidence_attachment_fails(
@@ -609,6 +811,260 @@ def test_run_protocol_probe_reports_a_nonzero_exit_status_when_shutdown_crashes(
 
     assert session_result.result == "session-complete"
     assert session_result.exit_status == 23
+
+
+def test_run_protocol_probe_allows_a_delayed_exit_notification_to_finish_naturally(
+    tmp_path: Path,
+) -> None:
+    """Removing the post-shutdown grace makes provider.stop terminate this real child
+    before its delayed handling of the LSP ``exit`` notification can return status zero."""
+
+    runtime = _fake_runtime(tmp_path)
+    spec = _fake_spec(
+        _fake_server_script(
+            exit_delay_seconds=1.0,
+            close_stdout_on_exit=True,
+        )
+    )
+
+    def session(client: SyncLspClient, _providers: RawLspProviders) -> str:
+        del client
+        return "session-complete"
+
+    session_result = run_protocol_probe(
+        spec,
+        runtime,
+        tmp_path,
+        deadline=Deadline.start(monotonic_clock, 30.0),
+        session=session,
+    )
+
+    assert session_result.result == "session-complete"
+    assert session_result.exit_status == 0
+
+
+def test_run_protocol_probe_force_stops_a_server_that_ignores_exit_within_the_deadline_bound(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A natural-exit grace must remain bounded and must not weaken the existing exact
+    process fallback: a server that ignores ``exit`` is still force-stopped and reaped."""
+
+    runtime = _fake_runtime(tmp_path)
+    spec = _fake_spec(
+        _fake_server_script(
+            ignore_exit=True,
+            close_stdout_on_exit=True,
+        )
+    )
+    processes: list[subprocess.Popen[bytes] | None] = []
+    original_start = protocol_module.SubprocessAdapterRuntimeProvider.start
+
+    def spy_start(
+        self: SubprocessAdapterRuntimeProvider,
+        *,
+        notification_handler: Callable[[str, Any], None],
+        terminal_handler: Callable[[BaseException], None],
+    ) -> AdapterRuntime:
+        adapter_runtime = original_start(
+            self,
+            notification_handler=notification_handler,
+            terminal_handler=terminal_handler,
+        )
+        processes.append(adapter_runtime.process)
+        return adapter_runtime
+
+    monkeypatch.setattr(protocol_module.SubprocessAdapterRuntimeProvider, "start", spy_start)
+
+    def session(client: SyncLspClient, _providers: RawLspProviders) -> None:
+        del client
+
+    started = time.monotonic()
+    session_result = run_protocol_probe(
+        spec,
+        runtime,
+        tmp_path,
+        deadline=Deadline.start(_FakeClock(), 0.4),
+        session=session,
+    )
+    elapsed = time.monotonic() - started
+
+    assert len(processes) == 1
+    process = processes[0]
+    assert process is not None
+    assert process.poll() is not None
+    assert session_result.exit_status is not None
+    assert elapsed >= 0.35
+    assert elapsed < 1.5
+
+
+def test_run_protocol_probe_makes_an_unexpected_natural_exit_wait_failure_primary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runtime = _fake_runtime(tmp_path)
+    spec = _fake_spec()
+
+    def failing_wait(adapter_runtime: AdapterRuntime, deadline: Deadline) -> None:
+        del adapter_runtime, deadline
+        raise OSError("natural exit wait failed")
+
+    monkeypatch.setattr(protocol_module, "_wait_for_natural_exit", failing_wait)
+
+    def session(client: SyncLspClient, _providers: RawLspProviders) -> str:
+        del client
+        return "session-complete"
+
+    with pytest.raises(OSError, match="natural exit wait failed") as excinfo:
+        run_protocol_probe(
+            spec,
+            runtime,
+            tmp_path,
+            deadline=Deadline.start(monotonic_clock, 30.0),
+            session=session,
+        )
+
+    evidence = protocol_session_from_error(excinfo.value)
+    assert evidence is not None
+    assert any("natural exit wait failed" in error for error in evidence.cleanup_errors)
+
+
+def test_run_protocol_probe_keeps_session_error_primary_when_natural_exit_wait_also_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runtime = _fake_runtime(tmp_path)
+    spec = _fake_spec()
+
+    def failing_wait(adapter_runtime: AdapterRuntime, deadline: Deadline) -> None:
+        del adapter_runtime, deadline
+        raise OSError("natural exit wait failed")
+
+    monkeypatch.setattr(protocol_module, "_wait_for_natural_exit", failing_wait)
+
+    def session(client: SyncLspClient, _providers: RawLspProviders) -> None:
+        del client
+        raise RuntimeError("session failed")
+
+    with pytest.raises(RuntimeError, match="session failed") as excinfo:
+        run_protocol_probe(
+            spec,
+            runtime,
+            tmp_path,
+            deadline=Deadline.start(monotonic_clock, 30.0),
+            session=session,
+        )
+
+    assert any("natural exit wait failed" in note for note in excinfo.value.__notes__)
+    evidence = protocol_session_from_error(excinfo.value)
+    assert evidence is not None
+    assert any("natural exit wait failed" in error for error in evidence.cleanup_errors)
+
+
+def test_run_protocol_probe_fails_typed_when_cleanup_consumes_the_remaining_deadline(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A successful session cannot remain successful when cleanup crosses the phase ceiling."""
+
+    runtime = _fake_runtime(tmp_path)
+    clock = _FakeClock()
+    deadline = Deadline.start(clock, 5.0)
+    original_stop = protocol_module.SubprocessAdapterRuntimeProvider.stop
+
+    def slow_stop(
+        self: SubprocessAdapterRuntimeProvider,
+        adapter_runtime: AdapterRuntime,
+    ) -> None:
+        original_stop(self, adapter_runtime)
+        clock.advance(6.0)
+
+    monkeypatch.setattr(protocol_module.SubprocessAdapterRuntimeProvider, "stop", slow_stop)
+
+    with pytest.raises(DeadlineExceeded) as excinfo:
+        run_protocol_probe(
+            _fake_spec(),
+            runtime,
+            tmp_path,
+            deadline=deadline,
+            session=lambda _client, _providers: "session-complete",
+        )
+
+    evidence = protocol_session_from_error(excinfo.value)
+    assert evidence is not None
+    assert evidence.result is None
+    assert evidence.exit_status == 0
+    assert any("protocol probe cleanup" in error for error in evidence.cleanup_errors)
+
+
+def test_redacted_evidence_text_redacts_secret_values_and_bounds_the_result() -> None:
+    secret = "malicious-direct-redaction-secret"
+
+    rendered = redacted_evidence_text(
+        f"password={secret} " + "x" * 5000
+    )
+
+    assert secret not in rendered
+    assert "<redacted>" in rendered
+    assert len(rendered) <= 1024
+
+
+def test_run_protocol_probe_redacts_and_bounds_terminal_error_evidence(tmp_path: Path) -> None:
+    secret = "malicious-terminal-secret"
+    server = _fake_server_script(
+        crash_on_method="textDocument/hover",
+        stderr_text="z" * 5000 + f"\npassword={secret}\n",
+    )
+
+    with pytest.raises(LspTransportClosed) as excinfo:
+        run_protocol_probe(
+            _fake_spec(server),
+            _fake_runtime(tmp_path),
+            tmp_path,
+            deadline=Deadline.start(monotonic_clock, 30.0),
+            session=lambda client, _providers: client.request("textDocument/hover", {}),
+        )
+
+    evidence = protocol_session_from_error(excinfo.value)
+    assert evidence is not None
+    assert evidence.terminal_errors
+    assert all(secret not in error for error in evidence.terminal_errors)
+    assert all(len(error) <= 1024 for error in evidence.terminal_errors)
+
+
+def test_run_protocol_probe_redacts_and_bounds_cleanup_evidence_and_notes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    secret = "malicious-cleanup-secret"
+    original_stop = protocol_module.SubprocessAdapterRuntimeProvider.stop
+
+    def secret_stop(
+        self: SubprocessAdapterRuntimeProvider,
+        adapter_runtime: AdapterRuntime,
+    ) -> None:
+        original_stop(self, adapter_runtime)
+        raise RuntimeError(f"password={secret} " + "x" * 5000)
+
+    monkeypatch.setattr(protocol_module.SubprocessAdapterRuntimeProvider, "stop", secret_stop)
+
+    def failed_session(_client: SyncLspClient, _providers: RawLspProviders) -> None:
+        raise ValueError("primary session failure")
+
+    with pytest.raises(ValueError, match="primary session failure") as excinfo:
+        run_protocol_probe(
+            _fake_spec(),
+            _fake_runtime(tmp_path),
+            tmp_path,
+            deadline=Deadline.start(monotonic_clock, 30.0),
+            session=failed_session,
+        )
+
+    evidence = protocol_session_from_error(excinfo.value)
+    assert evidence is not None
+    assert evidence.cleanup_errors
+    assert all(secret not in error for error in evidence.cleanup_errors)
+    assert all(len(error) <= 1024 for error in evidence.cleanup_errors)
+    assert any("<redacted>" in error for error in evidence.cleanup_errors)
+    notes = getattr(excinfo.value, "__notes__", ())
+    assert notes
+    assert all(secret not in note for note in notes)
+    assert all(len(note) <= 1024 for note in notes)
 
 
 def test_protocol_session_from_error_returns_none_for_an_unrelated_exception() -> None:
@@ -1039,6 +1495,95 @@ def test_run_protocol_probe_child_environment_is_exactly_the_minimal_allowlist(
     }
     if "PWD" in observed:
         assert Path(str(observed["PWD"])).resolve() == tmp_path.resolve()
+
+
+def test_run_protocol_probe_uses_the_engine_interpreter_for_the_child_environment(
+    tmp_path: Path,
+) -> None:
+    runtime = _fake_runtime(tmp_path)
+    selected_interpreter = tmp_path / "frozen-ms/bin/python"
+    runtime = replace(
+        runtime,
+        environments=(
+            *runtime.environments,
+            EnvironmentIdentity(
+                name="selected",
+                interpreter_path=str(selected_interpreter),
+                interpreter_realpath=str(selected_interpreter),
+                version=_INTERPRETER_VERSION,
+            ),
+        ),
+    )
+    spec = BackendProtocolSpec(
+        name="fake",
+        build_command=lambda candidate_runtime: (
+            str(candidate_runtime.python),
+            "-c",
+            _fake_server_script(capabilities={}, echo_environment=True),
+        ),
+        initialize_params=lambda root: {"rootUri": root.as_uri(), "capabilities": {}},
+        request_handlers=None,
+        engine=lambda candidate_runtime: EngineMetadata(
+            name="fake",
+            version="0.0.0",
+            executable=candidate_runtime.python,
+            interpreter=selected_interpreter,
+        ),
+        position_encoding=PositionEncoding.UTF16,
+        diagnostics_mode="push",
+    )
+
+    def session(client: SyncLspClient, _providers: RawLspProviders) -> Mapping[str, object]:
+        result = client.request("textDocument/hover", {})
+        assert isinstance(result, Mapping)
+        environment = result["environment"]
+        assert isinstance(environment, Mapping)
+        return environment
+
+    result = run_protocol_probe(
+        spec,
+        runtime,
+        tmp_path,
+        deadline=Deadline.start(monotonic_clock, 30.0),
+        session=session,
+    )
+
+    assert result.result["SERENA_LIGHT_SELECTED_PYTHON"] == str(selected_interpreter)
+
+
+def test_run_protocol_probe_starts_no_child_when_engine_has_no_interpreter(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runtime = _fake_runtime(tmp_path)
+    provider_constructions: list[object] = []
+
+    def forbidden_provider(*args: object, **kwargs: object) -> object:
+        provider_constructions.append((args, kwargs))
+        raise AssertionError("provider must not be constructed without a selected interpreter")
+
+    monkeypatch.setattr(protocol_module, "SubprocessAdapterRuntimeProvider", forbidden_provider)
+    spec = BackendProtocolSpec(
+        name="fake",
+        build_command=lambda candidate_runtime: (str(candidate_runtime.python), "--version"),
+        initialize_params=lambda root: {"rootUri": root.as_uri(), "capabilities": {}},
+        request_handlers=None,
+        engine=lambda candidate_runtime: EngineMetadata(
+            name="fake", version="0.0.0", executable=candidate_runtime.python
+        ),
+        position_encoding=PositionEncoding.UTF16,
+        diagnostics_mode="push",
+    )
+
+    with pytest.raises(ValueError, match="selected interpreter"):
+        run_protocol_probe(
+            spec,
+            runtime,
+            tmp_path,
+            deadline=Deadline.start(monotonic_clock, 30.0),
+            session=lambda _client, _providers: None,
+        )
+
+    assert provider_constructions == []
 
 
 def test_run_protocol_probe_never_mutates_the_real_process_environment(

@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import os
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from threading import Event
 from typing import Any, cast
 
 from scripts.backend_eval.identity import capture_evaluator_identity
@@ -23,7 +24,11 @@ from scripts.backend_eval.models import (
     ServiceConfigIdentity,
 )
 from scripts.backend_eval.process import Deadline
-from scripts.backend_eval.protocol import BackendProtocolSpec, run_protocol_probe
+from scripts.backend_eval.protocol import (
+    BackendProtocolSpec,
+    redacted_evidence_text,
+    run_protocol_probe,
+)
 from scripts.backend_eval.runtime import CandidateRuntime
 from scripts.backend_eval.source_binding import EVALUATION_OWNER_ROOT, HelperExpectation
 from serena_light.lsp.adapter import EngineMetadata, RawLspProviders, read_only_client_request_handlers
@@ -69,6 +74,7 @@ class _ObservedCapability:
     normalized_valid: bool
     notes: str
     error_code: int | None = None
+    ready_elapsed: float | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -80,6 +86,8 @@ class _PyreflySessionResult:
 def pyrefly_protocol_spec(
     runtime: CandidateRuntime,
     service_config: ServiceConfigIdentity,
+    *,
+    notification_handler: Callable[[str, Any], None] | None = None,
 ) -> BackendProtocolSpec:
     """Build Pyrefly's spec from one locked runtime and its exact external config."""
 
@@ -108,12 +116,18 @@ def pyrefly_protocol_spec(
             workspace_root,
             initialization_options,
         ),
+        validate_initialize_params=lambda params: _validate_initialize_params(
+            params,
+            interpreter=interpreter,
+            service_config=service_config,
+        ),
         request_handlers=read_only_client_request_handlers(
             lambda params: _workspace_configuration(params, initialization_options)
         ),
         engine=lambda candidate_runtime: _engine(candidate_runtime, interpreter),
         position_encoding=PositionEncoding.UTF16,
         diagnostics_mode="push",
+        notification_handler=notification_handler,
     )
 
 
@@ -155,8 +169,10 @@ def run_pyrefly_capability_probe(
             after_manifest = _capture_workspace_manifest(workspace_root, deadline.finalization())
         except BaseException as after_error:
             primary.add_note(
-                "Pyrefly after-manifest capture also failed: "
-                f"{type(after_error).__name__}: {after_error}"
+                redacted_evidence_text(
+                    "Pyrefly after-manifest capture also failed: "
+                    f"{type(after_error).__name__}: {after_error}"
+                )
             )
             raise primary from None
         if after_manifest != before_manifest:
@@ -168,8 +184,10 @@ def run_pyrefly_capability_probe(
     except BaseException as after_error:
         cast("Any", after_error).pyrefly_capability_outcome = outcome
         after_error.add_note(
-            "Pyrefly capability outcome completed before after-manifest proof failed: "
-            f"gate_disposition={outcome.gate_disposition}"
+            redacted_evidence_text(
+                "Pyrefly capability outcome completed before after-manifest proof failed: "
+                f"gate_disposition={outcome.gate_disposition}"
+            )
         )
         raise
     if after_manifest != before_manifest:
@@ -191,11 +209,29 @@ def _run_capability_probe(
     )
     if service_config is None:
         raise ValueError("CandidateRuntime has no service-owned Pyrefly configuration")
-    spec = pyrefly_protocol_spec(runtime, service_config)
     source = target if target.is_absolute() else workspace_root / target
     source_text = read_stable_source_text(workspace_root, source, deadline=deadline)
     source_uri = source.as_uri()
     started_elapsed = deadline.elapsed()
+    push_diagnostics_observed = Event()
+
+    def observe_notification(method: str, params: Any) -> None:
+        if method != "textDocument/publishDiagnostics" or not isinstance(params, Mapping):
+            return
+        typed_params = cast("Mapping[str, object]", params)
+        diagnostics = typed_params.get("diagnostics")
+        if (
+            typed_params.get("uri") == source_uri
+            and isinstance(diagnostics, Sequence)
+            and not isinstance(diagnostics, str | bytes)
+        ):
+            push_diagnostics_observed.set()
+
+    spec = pyrefly_protocol_spec(
+        runtime,
+        service_config,
+        notification_handler=observe_notification,
+    )
 
     def session(
         client: SyncLspClient,
@@ -284,8 +320,10 @@ def _run_capability_probe(
                 client.notify("textDocument/didClose", {"textDocument": {"uri": source_uri}})
             except BaseException as close_error:
                 primary.add_note(
-                    "Pyrefly document close also failed: "
-                    f"{type(close_error).__name__}: {close_error}"
+                    redacted_evidence_text(
+                        "Pyrefly document close also failed: "
+                        f"{type(close_error).__name__}: {close_error}"
+                    )
                 )
             raise
         try:
@@ -293,7 +331,7 @@ def _run_capability_probe(
         except BaseException as close_error:
             return _PyreflySessionResult(
                 observations=observations,
-                document_close_error=(
+                document_close_error=redacted_evidence_text(
                     "Pyrefly document close failed: "
                     f"{type(close_error).__name__}: {close_error}"
                 ),
@@ -323,7 +361,10 @@ def _run_capability_probe(
         for name in _CAPABILITY_NAMES
     )
     capability_issues = [
-        f"{capability.name}: {capability.notes or 'advertised request was not normalized-valid'}"
+        redacted_evidence_text(
+            f"{capability.name}: "
+            f"{capability.notes or 'advertised request was not normalized-valid'}"
+        )
         for capability in capabilities
         if capability.advertised
         and (capability.accepted is not True or capability.normalized_valid is not True)
@@ -333,6 +374,16 @@ def _run_capability_probe(
         for name in sorted(_REQUIRED_ADVERTISEMENTS)
         if not advertised[name]
     )
+    required_readiness = tuple(
+        observation.ready_elapsed
+        for observation in observations.values()
+        if observation.name in _REQUIRED_ADVERTISEMENTS
+        and observation.ready_elapsed is not None
+    )
+    if not required_readiness:
+        capability_issues.append(
+            "cold readiness was not achieved: no required capability returned normalized-valid evidence"
+        )
     lifecycle_issues = [*protocol_session.terminal_errors, *protocol_session.cleanup_errors]
     if protocol_session.result.document_close_error is not None:
         lifecycle_issues.append(protocol_session.result.document_close_error)
@@ -344,7 +395,17 @@ def _run_capability_probe(
         if diagnostics_mode == "pull"
         else None
     )
-    non_seam_issues = [*capability_issues, *lifecycle_issues]
+    push_diagnostics_issue = (
+        "Pyrefly did not publish diagnostics for the controlled document URI; "
+        "push diagnostics remain unproven"
+        if diagnostics_mode == "push" and not push_diagnostics_observed.is_set()
+        else None
+    )
+    non_seam_issues = [
+        *capability_issues,
+        *lifecycle_issues,
+        *(() if push_diagnostics_issue is None else (push_diagnostics_issue,)),
+    ]
     issues = tuple(sorted({*non_seam_issues, *(() if seam_issue is None else (seam_issue,))}))
     shutdown_clean = (
         protocol_session.exit_status == 0
@@ -357,8 +418,9 @@ def _run_capability_probe(
         for observation in observations.values()
         if observation.error_code is not None
     )
+    cold_readiness_elapsed = min(required_readiness, default=deadline.elapsed())
     lifecycle = LifecycleEvidence(
-        cold_readiness_seconds=max(0.0, deadline.elapsed() - started_elapsed),
+        cold_readiness_seconds=max(0.0, cold_readiness_elapsed - started_elapsed),
         diagnostics_mode=diagnostics_mode,
         content_modified_count=error_codes.count(CONTENT_MODIFIED),
         request_cancelled_count=error_codes.count(_REQUEST_CANCELLED),
@@ -460,6 +522,28 @@ def _initialize_params(
     }
 
 
+def _validate_initialize_params(
+    params: Mapping[str, object],
+    *,
+    interpreter: Path,
+    service_config: ServiceConfigIdentity,
+) -> None:
+    initialization_options = params.get("initializationOptions")
+    if not isinstance(initialization_options, Mapping):
+        raise ValueError("Pyrefly initialize params require initializationOptions to be an object")
+    typed_options = cast("Mapping[str, object]", initialization_options)
+    if typed_options.get("pythonPath") != str(interpreter):
+        raise ValueError("Pyrefly initialize params require pythonPath to equal the selected interpreter")
+    pyrefly = typed_options.get("pyrefly")
+    if not isinstance(pyrefly, Mapping):
+        raise ValueError("Pyrefly initialize params require pyrefly options to be an object")
+    typed_pyrefly = cast("Mapping[str, object]", pyrefly)
+    if typed_pyrefly.get("configPath") != service_config.config_path:
+        raise ValueError("Pyrefly initialize params require configPath to equal the service-owned config")
+    if typed_pyrefly.get("diagnosticMode") != "workspace":
+        raise ValueError("Pyrefly initialize params require diagnosticMode=workspace")
+
+
 def _workspace_configuration(
     params: object,
     initialization_options: Mapping[str, object],
@@ -515,7 +599,9 @@ def _observe_request(
             name=name,
             accepted=False,
             normalized_valid=False,
-            notes=f"LspResponseError code={error.code} message={error.message}",
+            notes=redacted_evidence_text(
+                f"LspResponseError code={error.code} message={error.message}"
+            ),
             error_code=error.code,
         )
     try:
@@ -525,7 +611,7 @@ def _observe_request(
             name=name,
             accepted=True,
             normalized_valid=False,
-            notes=f"normalization failed: {error}",
+            notes=redacted_evidence_text(f"normalization failed: {error}"),
         )
     if not normalized:
         return _ObservedCapability(
@@ -534,7 +620,13 @@ def _observe_request(
             normalized_valid=False,
             notes="normalization returned no evidence",
         )
-    return _ObservedCapability(name=name, accepted=True, normalized_valid=True, notes="")
+    return _ObservedCapability(
+        name=name,
+        accepted=True,
+        normalized_valid=True,
+        notes="",
+        ready_elapsed=deadline.elapsed(),
+    )
 
 
 def _normalize_locations(raw_result: object) -> tuple[object, ...]:

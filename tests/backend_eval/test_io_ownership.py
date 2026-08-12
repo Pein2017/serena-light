@@ -34,7 +34,16 @@ OWNERSHIP_DOC = EVALUATOR_ROOT / "docs" / "backend-eval-io-ownership.md"
 # production helper that reads a file the evaluation does not own.  A helper that only
 # decodes or normalizes strings is not filesystem access and is deliberately absent.
 
-_MODULE_QUALIFIED = ("os", "os.path", "shutil", "subprocess", "_bootstrap_os", "provider")
+_MODULE_QUALIFIED = (
+    "os",
+    "os.environ",
+    "os.path",
+    "psutil",
+    "shutil",
+    "subprocess",
+    "_bootstrap_os",
+    "provider",
+)
 _ACCESS_NAMES = {
     # --- namespace resolution and creation
     "os.open": "os.open",
@@ -136,6 +145,18 @@ _ACCESS_NAMES = {
     "run_production_helper": "delegated.production_child",
     # --- Phase 2's parent side of the candidate-process boundary.
     "provider.start": "delegated.candidate_process",
+    # --- Phase 2 source and candidate lifecycle observation boundaries.
+    "read_stable_source_text": "delegated.stable_source_read",
+    "children": "psutil.Process.children",
+    "create_time": "psutil.Process.create_time",
+    "status": "psutil.Process.status",
+    "psutil.process_iter": "psutil.process_iter",
+    "os.getpgid": "os.getpgid",
+    "os.killpg": "os.killpg",
+    # --- The lifecycle poison proof's bounded, synchronously restored ambient mutation.
+    "os.environ.get": "os.environ.get",
+    "os.environ.update": "os.environ.update",
+    "os.environ.pop": "os.environ.pop",
 }
 
 # --- the owner classes -----------------------------------------------------------------
@@ -177,6 +198,18 @@ CHILD = "production-child"
 
 CANDIDATE_CHILD = "candidate-child"
 """A declared candidate process launched and reaped through production's process owner."""
+
+SOURCE_READ = "source-read-delegation"
+"""A source read delegated to the descriptor-confined stable-source reader."""
+
+PROCESS_OBSERVATION = "owned-process-observation"
+"""An exact PID/create-time/process-group observation of an evaluator-owned child."""
+
+PROCESS_SIGNAL = "owned-process-group-signal"
+"""A process-group signal issued only by the owner of that bounded child lifecycle."""
+
+TEMP_ENVIRONMENT = "temporary-process-environment"
+"""A bounded, restored process-environment mutation used only for the poison proof."""
 
 OWN_IMAGE = "own-image"
 """Reads or writes this process's own sealed ``memfd``; no attacker surface."""
@@ -229,35 +262,17 @@ OWNERSHIP: frozenset[tuple[str, str, str, str]] = frozenset(
         ("admission.py", "_collect_artifact_entries", "os.open", CONFINED),
         ("admission.py", "_collect_artifact_entries", "os.scandir", DESCRIPTOR),
         ("admission.py", "_open_declared_root", "os.open", GUARDED),
-        ("admission.py", "_open_evaluation_directory", "os.close", DESCRIPTOR),
-        ("admission.py", "_open_evaluation_directory", "os.open", GUARDED),
-        ("admission.py", "_open_owned_child", "os.close", DESCRIPTOR),
-        ("admission.py", "_open_owned_child", "os.fchmod", DESCRIPTOR),
-        ("admission.py", "_open_owned_child", "os.mkdir", CONFINED),
-        ("admission.py", "_open_owned_child", "os.open", CONFINED),
         ("admission.py", "_open_owned_walk", "os.close", DESCRIPTOR),
         ("admission.py", "_open_owned_walk", "os.open", CONFINED),
-        ("admission.py", "_publication_lock", "os.close", DESCRIPTOR),
-        ("admission.py", "_publication_lock", "os.fchmod", DESCRIPTOR),
-        ("admission.py", "_publication_lock", "os.open", CONFINED),
-        ("admission.py", "_publish_receipt", "os.close", DESCRIPTOR),
-        ("admission.py", "_publish_receipt", "os.fchmod", DESCRIPTOR),
-        ("admission.py", "_publish_receipt", "os.fsync", DESCRIPTOR),
-        ("admission.py", "_publish_receipt", "os.link", CONFINED),
-        ("admission.py", "_publish_receipt", "os.open", CONFINED),
         ("admission.py", "_read_artifact_bytes", "os.close", DESCRIPTOR),
         ("admission.py", "_read_artifact_bytes", "os.fdopen", DESCRIPTOR),
         ("admission.py", "_read_artifact_bytes", "os.fstat", DESCRIPTOR),
         ("admission.py", "_read_artifact_bytes", "os.open", CONFINED),
         ("admission.py", "_read_artifact_bytes", "stream.read", DESCRIPTOR),
-        ("admission.py", "_replace_temporary", "os.unlink", CONFINED),
-        ("admission.py", "_sync_directory", "os.fsync", DESCRIPTOR),
-        ("admission.py", "_write_all", "os.write", DESCRIPTOR),
         ("admission.py", "artifact_tree_digest", "os.close", DESCRIPTOR),
         ("admission.py", "cleanup", "os.close", DESCRIPTOR),
         ("admission.py", "cleanup", "os.fsync", DESCRIPTOR),
         ("admission.py", "cleanup", "os.unlink", CONFINED),
-        ("admission.py", "withdraw", "os.unlink", CONFINED),
         # --- candidate_lock.py
         ("candidate_lock.py", "_artifact_directory", "os.close", DESCRIPTOR),
         ("candidate_lock.py", "_artifact_directory", "os.open", GUARDED),
@@ -343,11 +358,55 @@ OWNERSHIP: frozenset[tuple[str, str, str, str]] = frozenset(
         ("process.py", "bound_executable", "os.close", DESCRIPTOR),
         ("process.py", "bound_executable", "os.fstat", DESCRIPTOR),
         ("process.py", "bound_executable", "os.open", GUARDED),
+        ("process.py", "_kill_process_group", "os.getpgid", PROCESS_OBSERVATION),
+        ("process.py", "_kill_process_group", "os.killpg", PROCESS_SIGNAL),
         ("process.py", "sealed_image", "os.close", DESCRIPTOR),
         ("process.py", "sealed_image", "os.pread", OWN_IMAGE),
         ("process.py", "sealed_image", "os.write", OWN_IMAGE),
+        # --- publish.py
+        # Every close in this module goes through ``_close_payload`` (pre-link, actionable)
+        # or ``_release_descriptor`` (post-durability, deliberately not propagated).
+        ("publish.py", "_close_payload", "os.close", DESCRIPTOR),
+        ("publish.py", "_open_owned_child", "os.fchmod", DESCRIPTOR),
+        ("publish.py", "_open_owned_child", "os.mkdir", CONFINED),
+        ("publish.py", "_open_owned_child", "os.open", CONFINED),
+        ("publish.py", "_open_target_directory", "os.open", GUARDED),
+        ("publish.py", "_publication_lock", "os.fchmod", DESCRIPTOR),
+        ("publish.py", "_publication_lock", "os.open", CONFINED),
+        ("publish.py", "_release_descriptor", "os.close", DESCRIPTOR),
+        ("publish.py", "_remove_owned_names", "os.unlink", CONFINED),
+        ("publish.py", "_replace_temporary", "os.unlink", CONFINED),
+        ("publish.py", "_stage_payload", "os.fchmod", DESCRIPTOR),
+        ("publish.py", "_stage_payload", "os.fsync", DESCRIPTOR),
+        ("publish.py", "_stage_payload", "os.open", CONFINED),
+        ("publish.py", "_sync_directory", "os.fsync", DESCRIPTOR),
+        ("publish.py", "_write_all", "os.write", DESCRIPTOR),
+        ("publish.py", "publish_immutable_record", "os.link", CONFINED),
+        # --- pyrefly_probe.py
+        ("pyrefly_probe.py", "_run_capability_probe", "delegated.stable_source_read", SOURCE_READ),
+        # --- pyright_probe.py
+        ("pyright_probe.py", "run_pyright_capability_probe", "delegated.stable_source_read", SOURCE_READ),
         # --- protocol.py
+        ("protocol.py", "_cleanup_partial_launch", "os.getpgid", PROCESS_OBSERVATION),
+        ("protocol.py", "_cleanup_partial_launch", "os.killpg", PROCESS_SIGNAL),
         ("protocol.py", "run_protocol_probe", "delegated.candidate_process", CANDIDATE_CHILD),
+        # --- protocol_lifecycle.py
+        ("protocol_lifecycle.py", "_cold_diagnostics", "delegated.stable_source_read", SOURCE_READ),
+        ("protocol_lifecycle.py", "_direct_children", "psutil.Process.children", PROCESS_OBSERVATION),
+        ("protocol_lifecycle.py", "_direct_children", "psutil.Process.create_time", PROCESS_OBSERVATION),
+        ("protocol_lifecycle.py", "_discover_new_owned_child", "os.getpgid", PROCESS_OBSERVATION),
+        ("protocol_lifecycle.py", "_discover_new_owned_child", "psutil.Process.children", PROCESS_OBSERVATION),
+        ("protocol_lifecycle.py", "_discover_new_owned_child", "psutil.Process.create_time", PROCESS_OBSERVATION),
+        ("protocol_lifecycle.py", "_live_process_group_members", "os.getpgid", PROCESS_OBSERVATION),
+        ("protocol_lifecycle.py", "_live_process_group_members", "psutil.process_iter", PROCESS_OBSERVATION),
+        ("protocol_lifecycle.py", "_same_process_alive", "psutil.Process.create_time", PROCESS_OBSERVATION),
+        ("protocol_lifecycle.py", "_same_process_alive", "psutil.Process.status", PROCESS_OBSERVATION),
+        ("protocol_lifecycle.py", "_signal_captured_process", "os.getpgid", PROCESS_OBSERVATION),
+        ("protocol_lifecycle.py", "_signal_captured_process", "os.killpg", PROCESS_SIGNAL),
+        ("protocol_lifecycle.py", "_signal_captured_process", "psutil.Process.create_time", PROCESS_OBSERVATION),
+        ("protocol_lifecycle.py", "_temporary_environment", "os.environ.get", TEMP_ENVIRONMENT),
+        ("protocol_lifecycle.py", "_temporary_environment", "os.environ.pop", TEMP_ENVIRONMENT),
+        ("protocol_lifecycle.py", "_temporary_environment", "os.environ.update", TEMP_ENVIRONMENT),
         # --- production_child.py
         ("production_child.py", "_bounded_non_git_inventory", "production.bounded_non_git_trust_inventory", CHILD),
         ("production_child.py", "_git_inventory_from_bytes", "Path.resolve", CHILD),
@@ -498,6 +557,7 @@ OWNERSHIP: frozenset[tuple[str, str, str, str]] = frozenset(
         ("source_image.py", "evaluation_owner_root", "Path.resolve", DECLARED),
         ("source_image.py", "evaluator_source_files", "stream.read", OWN_IMAGE),
         # --- ty_probe.py
+        ("ty_probe.py", "run_ty_capability_probe", "delegated.stable_source_read", SOURCE_READ),
         ("ty_probe.py", "initialize_params", "Path.is_dir", DECLARED),
         ("ty_probe.py", "initialize_params", "Path.resolve", DECLARED),
         # --- write_guard.py
@@ -567,6 +627,30 @@ def test_candidate_process_delegation_is_structurally_collected_and_owned() -> N
     assert (*candidate_process, "candidate-child") in OWNERSHIP
 
 
+def test_lifecycle_process_and_environment_surfaces_have_exact_owners() -> None:
+    lifecycle = {
+        row for row in OWNERSHIP if row[0] == "protocol_lifecycle.py"
+    }
+    assert lifecycle == {
+        ("protocol_lifecycle.py", "_cold_diagnostics", "delegated.stable_source_read", SOURCE_READ),
+        ("protocol_lifecycle.py", "_direct_children", "psutil.Process.children", PROCESS_OBSERVATION),
+        ("protocol_lifecycle.py", "_direct_children", "psutil.Process.create_time", PROCESS_OBSERVATION),
+        ("protocol_lifecycle.py", "_discover_new_owned_child", "os.getpgid", PROCESS_OBSERVATION),
+        ("protocol_lifecycle.py", "_discover_new_owned_child", "psutil.Process.children", PROCESS_OBSERVATION),
+        ("protocol_lifecycle.py", "_discover_new_owned_child", "psutil.Process.create_time", PROCESS_OBSERVATION),
+        ("protocol_lifecycle.py", "_live_process_group_members", "os.getpgid", PROCESS_OBSERVATION),
+        ("protocol_lifecycle.py", "_live_process_group_members", "psutil.process_iter", PROCESS_OBSERVATION),
+        ("protocol_lifecycle.py", "_same_process_alive", "psutil.Process.create_time", PROCESS_OBSERVATION),
+        ("protocol_lifecycle.py", "_same_process_alive", "psutil.Process.status", PROCESS_OBSERVATION),
+        ("protocol_lifecycle.py", "_signal_captured_process", "os.getpgid", PROCESS_OBSERVATION),
+        ("protocol_lifecycle.py", "_signal_captured_process", "os.killpg", PROCESS_SIGNAL),
+        ("protocol_lifecycle.py", "_signal_captured_process", "psutil.Process.create_time", PROCESS_OBSERVATION),
+        ("protocol_lifecycle.py", "_temporary_environment", "os.environ.get", TEMP_ENVIRONMENT),
+        ("protocol_lifecycle.py", "_temporary_environment", "os.environ.pop", TEMP_ENVIRONMENT),
+        ("protocol_lifecycle.py", "_temporary_environment", "os.environ.update", TEMP_ENVIRONMENT),
+    }
+
+
 def test_every_declared_access_has_exactly_one_owner() -> None:
     owners: dict[tuple[str, str, str], set[str]] = {}
     for module, function, access, owner in OWNERSHIP:
@@ -579,6 +663,10 @@ def test_every_declared_access_has_exactly_one_owner() -> None:
         DESCRIPTOR,
         CHILD,
         CANDIDATE_CHILD,
+        SOURCE_READ,
+        PROCESS_OBSERVATION,
+        PROCESS_SIGNAL,
+        TEMP_ENVIRONMENT,
         OWN_IMAGE,
     }
 
@@ -656,7 +744,20 @@ def test_every_descriptor_primitive_receives_a_descriptor_and_never_a_pathname()
 
 
 @pytest.mark.parametrize(
-    "owner", [CONFINED, GUARDED, DECLARED, DESCRIPTOR, CHILD, CANDIDATE_CHILD, OWN_IMAGE]
+    "owner",
+    [
+        CONFINED,
+        GUARDED,
+        DECLARED,
+        DESCRIPTOR,
+        CHILD,
+        CANDIDATE_CHILD,
+        SOURCE_READ,
+        PROCESS_OBSERVATION,
+        PROCESS_SIGNAL,
+        TEMP_ENVIRONMENT,
+        OWN_IMAGE,
+    ],
 )
 def test_the_ownership_document_explains_each_owner_class(owner: str) -> None:
     assert OWNERSHIP_DOC.is_file()
@@ -667,7 +768,7 @@ def test_the_ownership_document_names_every_audited_module() -> None:
     text = OWNERSHIP_DOC.read_text(encoding="utf-8")
     modules = {module for module, _function, _access, _owner in OWNERSHIP}
     # These execute no filesystem access of their own; the document says so.
-    without_access = {"__init__.py", "models.py", "pyrefly_probe.py", "pyright_probe.py"}
+    without_access = {"__init__.py", "models.py"}
     audited_modules = modules | without_access
     assert audited_modules == {path.name for path in EVALUATOR_PACKAGE.glob("*.py")}
     for module in sorted(audited_modules):
