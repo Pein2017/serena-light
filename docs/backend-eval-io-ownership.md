@@ -277,7 +277,28 @@ The direct bootstrap's evaluator zip is owned here as well. The standard-library
 reads the complete evaluator package through a descriptor-confined walk, writes and seals one
 `memfd`, and starts the semantic evaluator with that descriptor as its zip import root.
 `source_image.py` verifies the seal set and hashes the archive from that inherited descriptor;
-its `ZipFile` reads operate on an in-memory `BytesIO`, not a filesystem pathname.
+its `ZipFile` reads operate on an in-memory `BytesIO`, not a filesystem pathname. The same
+owner covers the protocol image's frozen production Python entries and pure-Python dependency
+entries, plus `fstat`/`pread` of the two already-sealed native dependency descriptors. These
+reads bind the delayed-import universe before a candidate starts; they do not reopen disk
+source or a site-packages pathname.
+
+## Exact parent admission and disposable protocol witness
+
+`protocol_parent.py` has no discovery operation. It derives one receipt pathname from the
+caller's exact evaluation and run identities, opens `/` once as the `guarded` filesystem
+anchor, then opens every ancestor and the 0600 regular leaf relative to retained descriptors.
+Its remaining `open` calls are therefore `confined`; `fstat`, `fdopen`, `read`, and `close`
+operate only on descriptors. A missing exact receipt cannot fall through to another run.
+
+`protocol_witness.py` owns a single disposable fixture below an already-created, caller-owned
+per-run directory. `_open_owned_run_root` is the only `guarded` absolute open and proves the
+root is the expected 0700 directory. Creation, verification, and cleanup then use only
+`dir_fd`-relative `mkdir`, `chmod`, `open`, `stat`, `unlink`, and `rmdir` calls (`confined`) or
+descriptor-only I/O and durability calls. `_checked_open` closes only the descriptor it just
+opened if the shared phase deadline expires after the syscall. The two `Path.resolve`
+locations merely reject a definition outside the frozen transformers root; they authorize no
+subsequent write and remain `declared-path` observations.
 
 ## Executables the evaluation runs
 
@@ -315,13 +336,15 @@ ignore semantics, including `.gitignore` and `.git/info/exclude`, remain authori
 | `production_identity.py` | the three declared production lock inputs |
 | `protocol.py` | no direct filesystem access; one structurally collected `candidate-child` delegation through the frozen production process/transport primitives |
 | `protocol_lifecycle.py` | lifecycle source-read delegation, exact candidate PID/create-time/PGID observation, fail-closed process-group signal and cleanup census, and the synchronously restored ambient poison proof |
+| `protocol_parent.py` | exact Phase 1 parent receipt binding: one guarded filesystem-root anchor, no-follow descriptor walk, strict regular-file read, and no discovery fallback |
+| `protocol_witness.py` | one deadline-bounded disposable witness below the caller-owned run root: confined creation, verification, durability, cleanup, and read-only external-definition observations |
 | `publish.py` | the generic atomic immutable publication: the per-target publication lock, the publication directory and every artifact component below the declared owner root, the `O_EXCL` temporary, the payload write, the atomic link, and the withdrawal |
 | `runtime.py` | service-owned candidate runtime preparation and the separate read-only prepared-runtime manifest loader/verifier |
 | `pyrefly_probe.py` | no direct filesystem access; delegates workspace manifests and source bytes to `manifests.py`, consumes the caller-bound prepared runtime, and delegates candidate lifecycle to `protocol.py` |
 | `pyright_probe.py` | no direct filesystem access; delegates source bytes to `manifests.py`, prepared-runtime verification to `runtime.py`, and candidate lifecycle to `protocol.py` |
 | `ty_probe.py` | two `declared-path` workspace-root observations (`Path.resolve()` and `Path.is_dir()`) used only to refuse an invalid caller path; delegates source bytes to `manifests.py`, prepared-runtime verification to `runtime.py`, and candidate lifecycle to `protocol.py` |
 | `source_binding.py` | the executed production helper closure and the execution expectation |
-| `source_image.py` | the sealed evaluator-image descriptor, image-derived source closure, owner root, and loader-origin checks |
+| `source_image.py` | sealed evaluator and native-dependency descriptors, image-derived evaluator/production/dependency source closures, owner root, and loader-origin checks |
 | `write_guard.py` | one `lstat` bracket around a changed remainder record |
 
 `models.py`, `protocol.py`, `pyrefly_probe.py`, and `pyright_probe.py` execute no direct filesystem

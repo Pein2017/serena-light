@@ -26,7 +26,14 @@ import pytest
 
 EVALUATOR_ROOT = Path(__file__).resolve().parents[2]
 EVALUATOR_PACKAGE = EVALUATOR_ROOT / "scripts" / "backend_eval"
+EVALUATOR_BOOTSTRAP = EVALUATOR_ROOT / "scripts" / "backend_eval_bootstrap.py"
 OWNERSHIP_DOC = EVALUATOR_ROOT / "docs" / "backend-eval-io-ownership.md"
+
+
+def _evaluator_sources() -> tuple[Path, ...]:
+    """Every Python module executed by the evaluator, including its transport trust root."""
+
+    return (*sorted(EVALUATOR_PACKAGE.glob("*.py")), EVALUATOR_BOOTSTRAP)
 
 # --- what counts as a filesystem access ------------------------------------------------
 #
@@ -273,6 +280,35 @@ OWNERSHIP: frozenset[tuple[str, str, str, str]] = frozenset(
         ("admission.py", "cleanup", "os.close", DESCRIPTOR),
         ("admission.py", "cleanup", "os.fsync", DESCRIPTOR),
         ("admission.py", "cleanup", "os.unlink", CONFINED),
+        # --- backend_eval_bootstrap.py
+        ("backend_eval_bootstrap.py", "_bootstrap_command", "stream.write", DESCRIPTOR),
+        ("backend_eval_bootstrap.py", "_bound_psutil_sources", "Path.is_file", DECLARED),
+        ("backend_eval_bootstrap.py", "_bound_psutil_sources", "os.close", DESCRIPTOR),
+        ("backend_eval_bootstrap.py", "_bound_psutil_sources", "os.scandir", DESCRIPTOR),
+        ("backend_eval_bootstrap.py", "_build_evaluator_source_image", "os.close", DESCRIPTOR),
+        ("backend_eval_bootstrap.py", "_build_evaluator_source_image", "os.scandir", DESCRIPTOR),
+        ("backend_eval_bootstrap.py", "_closed_startup", "os.path.realpath", DECLARED),
+        ("backend_eval_bootstrap.py", "_kill_evaluator_group", "os.getpgid", PROCESS_OBSERVATION),
+        ("backend_eval_bootstrap.py", "_kill_evaluator_group", "os.killpg", PROCESS_SIGNAL),
+        ("backend_eval_bootstrap.py", "_module_file_location", "Path.is_file", DECLARED),
+        ("backend_eval_bootstrap.py", "_open_absolute_directory", "os.close", DESCRIPTOR),
+        ("backend_eval_bootstrap.py", "_open_absolute_directory", "os.open", CONFINED),
+        ("backend_eval_bootstrap.py", "_open_filesystem_root", "os.open", GUARDED),
+        ("backend_eval_bootstrap.py", "_open_relative_directory", "os.close", DESCRIPTOR),
+        ("backend_eval_bootstrap.py", "_open_relative_directory", "os.dup", DESCRIPTOR),
+        ("backend_eval_bootstrap.py", "_open_relative_directory", "os.open", CONFINED),
+        ("backend_eval_bootstrap.py", "_read_owned_source", "os.close", DESCRIPTOR),
+        ("backend_eval_bootstrap.py", "_read_relative_file", "os.close", DESCRIPTOR),
+        ("backend_eval_bootstrap.py", "_read_relative_file", "os.fstat", DESCRIPTOR),
+        ("backend_eval_bootstrap.py", "_read_relative_file", "os.open", CONFINED),
+        ("backend_eval_bootstrap.py", "_read_relative_file", "os.read", DESCRIPTOR),
+        ("backend_eval_bootstrap.py", "_run_sealed_evaluator", "os.close", OWN_IMAGE),
+        ("backend_eval_bootstrap.py", "_run_sealed_protocol", "os.close", OWN_IMAGE),
+        ("backend_eval_bootstrap.py", "_sealed_evaluator_image", "os.close", OWN_IMAGE),
+        ("backend_eval_bootstrap.py", "_sealed_evaluator_image", "os.pread", OWN_IMAGE),
+        ("backend_eval_bootstrap.py", "_sealed_evaluator_image", "os.write", OWN_IMAGE),
+        ("backend_eval_bootstrap.py", "_source_imports", "Path.walk", DECLARED),
+        ("backend_eval_bootstrap.py", "main", "stream.write", DESCRIPTOR),
         # --- candidate_lock.py
         ("candidate_lock.py", "_artifact_directory", "os.close", DESCRIPTOR),
         ("candidate_lock.py", "_artifact_directory", "os.open", GUARDED),
@@ -407,6 +443,42 @@ OWNERSHIP: frozenset[tuple[str, str, str, str]] = frozenset(
         ("protocol_lifecycle.py", "_temporary_environment", "os.environ.get", TEMP_ENVIRONMENT),
         ("protocol_lifecycle.py", "_temporary_environment", "os.environ.pop", TEMP_ENVIRONMENT),
         ("protocol_lifecycle.py", "_temporary_environment", "os.environ.update", TEMP_ENVIRONMENT),
+        # --- protocol_parent.py
+        ("protocol_parent.py", "_close_descriptor", "os.close", DESCRIPTOR),
+        ("protocol_parent.py", "_open_filesystem_root", "os.close", DESCRIPTOR),
+        ("protocol_parent.py", "_open_filesystem_root", "os.open", GUARDED),
+        ("protocol_parent.py", "_read_exact_regular_file", "os.close", DESCRIPTOR),
+        ("protocol_parent.py", "_read_exact_regular_file", "os.fdopen", DESCRIPTOR),
+        ("protocol_parent.py", "_read_exact_regular_file", "os.fstat", DESCRIPTOR),
+        ("protocol_parent.py", "_read_exact_regular_file", "os.open", CONFINED),
+        ("protocol_parent.py", "_read_exact_regular_file", "stream.read", DESCRIPTOR),
+        # --- protocol_witness.py
+        ("protocol_witness.py", "_checked_open", "os.close", DESCRIPTOR),
+        ("protocol_witness.py", "_external_relative_path", "Path.resolve", DECLARED),
+        ("protocol_witness.py", "_external_transformers_location", "Path.resolve", DECLARED),
+        ("protocol_witness.py", "_open_owned_run_root", "os.close", DESCRIPTOR),
+        ("protocol_witness.py", "_open_owned_run_root", "os.fstat", DESCRIPTOR),
+        ("protocol_witness.py", "_open_owned_run_root", "os.open", GUARDED),
+        ("protocol_witness.py", "cleanup", "os.close", DESCRIPTOR),
+        ("protocol_witness.py", "cleanup", "os.fsync", DESCRIPTOR),
+        ("protocol_witness.py", "cleanup", "os.rmdir", CONFINED),
+        ("protocol_witness.py", "cleanup", "os.stat", CONFINED),
+        ("protocol_witness.py", "cleanup", "os.unlink", CONFINED),
+        ("protocol_witness.py", "create", "os.chmod", CONFINED),
+        ("protocol_witness.py", "create", "os.close", DESCRIPTOR),
+        ("protocol_witness.py", "create", "os.fchmod", DESCRIPTOR),
+        ("protocol_witness.py", "create", "os.fstat", DESCRIPTOR),
+        ("protocol_witness.py", "create", "os.fsync", DESCRIPTOR),
+        ("protocol_witness.py", "create", "os.mkdir", CONFINED),
+        ("protocol_witness.py", "create", "os.open", CONFINED),
+        ("protocol_witness.py", "create", "os.rmdir", CONFINED),
+        ("protocol_witness.py", "create", "os.unlink", CONFINED),
+        ("protocol_witness.py", "create", "os.write", DESCRIPTOR),
+        ("protocol_witness.py", "verify", "os.close", DESCRIPTOR),
+        ("protocol_witness.py", "verify", "os.fstat", DESCRIPTOR),
+        ("protocol_witness.py", "verify", "os.open", CONFINED),
+        ("protocol_witness.py", "verify", "os.read", DESCRIPTOR),
+        ("protocol_witness.py", "verify", "os.stat", CONFINED),
         # --- production_child.py
         ("production_child.py", "_bounded_non_git_inventory", "production.bounded_non_git_trust_inventory", CHILD),
         ("production_child.py", "_git_inventory_from_bytes", "Path.resolve", CHILD),
@@ -551,11 +623,15 @@ OWNERSHIP: frozenset[tuple[str, str, str, str]] = frozenset(
         ("source_binding.py", "bind_production_source", "Path.resolve", DECLARED),
         ("source_binding.py", "bind_production_source", "os.path.realpath", DECLARED),
         # --- source_image.py
+        ("source_image.py", "_sealed_descriptor_bytes", "os.fstat", OWN_IMAGE),
+        ("source_image.py", "_sealed_descriptor_bytes", "os.pread", OWN_IMAGE),
         ("source_image.py", "_source_image_bytes", "os.fstat", OWN_IMAGE),
         ("source_image.py", "_source_image_bytes", "os.pread", OWN_IMAGE),
         ("source_image.py", "_verified_context", "os.fstat", OWN_IMAGE),
+        ("source_image.py", "dependency_source_files", "stream.read", OWN_IMAGE),
         ("source_image.py", "evaluation_owner_root", "Path.resolve", DECLARED),
         ("source_image.py", "evaluator_source_files", "stream.read", OWN_IMAGE),
+        ("source_image.py", "production_source_files", "stream.read", OWN_IMAGE),
         # --- ty_probe.py
         ("ty_probe.py", "run_ty_capability_probe", "delegated.stable_source_read", SOURCE_READ),
         ("ty_probe.py", "initialize_params", "Path.is_dir", DECLARED),
@@ -597,17 +673,34 @@ def _called_name(func: ast.expr) -> str | None:
             base = "os"
         return f"{base}.{func.attr}" if base in _MODULE_QUALIFIED else func.attr
     if isinstance(func, ast.Name):
+        if _ACCESS_NAMES.get(func.id, "").startswith("Path."):
+            return None
         return func.id
     return None
 
 
 def _observed_accesses() -> set[tuple[str, str, str]]:
     observed: set[tuple[str, str, str]] = set()
-    for module in sorted(EVALUATOR_PACKAGE.glob("*.py")):
+    for module in _evaluator_sources():
         visitor = _AccessVisitor()
         visitor.visit(ast.parse(module.read_text(encoding="utf-8")))
         observed.update((module.name, function, access) for function, access in visitor.found)
     return observed
+
+
+def test_the_collector_does_not_treat_dataclass_replace_as_a_path_replace() -> None:
+    """Only a receiver-qualified ``.replace()`` can be a pathlib namespace mutation."""
+
+    visitor = _AccessVisitor()
+    visitor.visit(
+        ast.parse(
+            "from dataclasses import replace\n"
+            "def updated(value):\n"
+            "    return replace(value, field=1)\n"
+        )
+    )
+
+    assert visitor.found == set()
 
 
 def test_the_evaluator_owns_exactly_the_declared_filesystem_accesses() -> None:
@@ -726,7 +819,7 @@ def test_every_descriptor_primitive_receives_a_descriptor_and_never_a_pathname()
     """
 
     offenders: list[str] = []
-    for module in sorted(EVALUATOR_PACKAGE.glob("*.py")):
+    for module in _evaluator_sources():
         tree = ast.parse(module.read_text(encoding="utf-8"))
         for node in ast.walk(tree):
             if not isinstance(node, ast.Call):
@@ -770,6 +863,6 @@ def test_the_ownership_document_names_every_audited_module() -> None:
     # These execute no filesystem access of their own; the document says so.
     without_access = {"__init__.py", "models.py"}
     audited_modules = modules | without_access
-    assert audited_modules == {path.name for path in EVALUATOR_PACKAGE.glob("*.py")}
+    assert audited_modules == {path.name for path in _evaluator_sources()}
     for module in sorted(audited_modules):
         assert module in text

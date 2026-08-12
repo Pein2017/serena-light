@@ -221,6 +221,20 @@ _PHASE2_PRODUCTION_IMPORTS: dict[str, Counter[ProductionImport]] = {
             ("serena_light.lsp.client", "SyncLspClient", None): 1,
         }
     ),
+    "protocol_witness.py": Counter(
+        {
+            ("serena_light.lsp.adapter", "RawLspProviders", None): 1,
+            ("serena_light.lsp.client", "SyncLspClient", None): 1,
+            ("serena_light.lsp.normalize", "Location", None): 1,
+            ("serena_light.lsp.normalize", "NormalizationError", None): 1,
+            ("serena_light.lsp.normalize", "normalize_location", None): 1,
+            ("serena_light.lsp.positions", "FileSnapshot", None): 1,
+            ("serena_light.lsp.positions", "LspPosition", None): 1,
+            ("serena_light.lsp.positions", "PositionEncoding", None): 1,
+            ("serena_light.lsp.positions", "PositionError", None): 1,
+            ("serena_light.lsp.positions", "PublicPositionRenderer", None): 1,
+        }
+    ),
     "pyright_probe.py": Counter(
         {
             ("serena_light.lsp.adapter", "RawLspProviders", None): 1,

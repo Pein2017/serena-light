@@ -258,7 +258,7 @@ def _proxy_environment_absent(observed: Mapping[str, str]) -> bool:
 def healthy_pyright_observation() -> _HealthyObservation:
     runtime = _prepared_candidate_runtime()
     facts = _locked_facts()
-    spec = pyright_protocol_spec(facts)
+    spec = pyright_protocol_spec(runtime, facts, production_root=_REPO_ROOT)
     deadline = Deadline.start(monotonic_clock, _REAL_TEST_DEADLINE_SECONDS)
     source_text = read_stable_source_text(_MS_SWIFT, _TARGET, deadline=deadline)
     source_uri = _TARGET.as_uri()
@@ -553,10 +553,12 @@ def test_request_cancelled_response_is_counted_once_without_retry(
     monkeypatch.setattr(pyright_probe_module, "run_protocol_probe", fake_runner)
     try:
         outcome = run_pyright_capability_probe(
+            runtime,
             _locked_facts(),
             tmp_path,
             target,
             (0, 0),
+            production_root=_REPO_ROOT,
             deadline=Deadline.start(monotonic_clock, 10.0),
         )
     finally:
@@ -571,7 +573,8 @@ def test_request_cancelled_response_is_counted_once_without_retry(
 
 def test_bounded_request_timeout_raises_typed_timeout_and_cleans_up() -> None:
     runtime = _prepared_candidate_runtime()
-    spec = pyright_protocol_spec(_locked_facts())
+    facts = _locked_facts()
+    spec = pyright_protocol_spec(runtime, facts, production_root=_REPO_ROOT)
     deadline = Deadline.start(monotonic_clock, _REAL_TEST_DEADLINE_SECONDS)
 
     with pytest.MonkeyPatch.context() as monkeypatch:
@@ -599,7 +602,8 @@ def test_bounded_request_timeout_raises_typed_timeout_and_cleans_up() -> None:
 
 def test_crash_is_detected_and_process_tree_is_fully_reaped() -> None:
     runtime = _prepared_candidate_runtime()
-    spec = pyright_protocol_spec(_locked_facts())
+    facts = _locked_facts()
+    spec = pyright_protocol_spec(runtime, facts, production_root=_REPO_ROOT)
     deadline = Deadline.start(monotonic_clock, _REAL_TEST_DEADLINE_SECONDS)
 
     with pytest.MonkeyPatch.context() as monkeypatch:
@@ -632,7 +636,7 @@ def test_crash_is_detected_and_process_tree_is_fully_reaped() -> None:
 def test_stderr_and_environment_are_redacted_in_the_recorded_evidence() -> None:
     runtime = _prepared_candidate_runtime()
     facts = _locked_facts()
-    direct_spec = pyright_protocol_spec(facts)
+    direct_spec = pyright_protocol_spec(runtime, facts, production_root=_REPO_ROOT)
     bearer_secret = "fake-pyright-bearer-secret-abc123"
     password_secret = "fake-pyright-password-secret-xyz789"
     wrapper = (

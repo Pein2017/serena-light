@@ -13,7 +13,11 @@ from scripts.backend_eval.manifests import RootManifestRequest, capture_root_man
 from scripts.backend_eval.models import CandidateProtocolOutcome, RootManifest
 from scripts.backend_eval.process import Deadline, monotonic_clock
 from scripts.backend_eval.protocol import ProtocolSession
-from scripts.backend_eval.pyright_probe import pyright_protocol_spec, run_pyright_capability_probe
+from scripts.backend_eval.pyright_probe import (
+    _prepared_candidate_runtime,
+    pyright_protocol_spec,
+    run_pyright_capability_probe,
+)
 from scripts.backend_eval.runtime import CandidateRuntime
 from serena_light.lsp.adapter import EngineMetadata, RawLspProviders
 from serena_light.lsp.client import LspResponseError
@@ -160,14 +164,34 @@ def _install_fake_runner(
     monkeypatch.setattr(module, "run_protocol_probe", fake_run_protocol_probe)
 
 
+def _run_fake_pyright_capability_probe(
+    facts: PyrightFacts,
+    workspace_root: Path,
+    target: Path,
+    symbol_position: tuple[int, int],
+    *,
+    deadline: Deadline,
+) -> CandidateProtocolOutcome:
+    return run_pyright_capability_probe(
+        cast(CandidateRuntime, object()),
+        facts,
+        workspace_root,
+        target,
+        symbol_position,
+        production_root=workspace_root,
+        deadline=deadline,
+    )
+
+
 def test_pyright_protocol_spec_delegates_all_locked_facts(tmp_path: Path) -> None:
     interpreter = tmp_path / "python"
     interpreter.write_bytes(b"")
     facts = _facts(interpreter)
+    runtime = cast(CandidateRuntime, object())
 
-    spec = pyright_protocol_spec(facts)
+    spec = pyright_protocol_spec(runtime, facts, production_root=tmp_path)
 
-    assert spec.build_command(cast(CandidateRuntime, object())) is facts.command
+    assert spec.build_command(runtime) is facts.command
     assert spec.initialize_params(tmp_path) == facts.initialize_params(tmp_path)
     assert spec.request_handlers is not None
     assert spec.request_handlers["workspace/configuration"](
@@ -175,9 +199,38 @@ def test_pyright_protocol_spec_delegates_all_locked_facts(tmp_path: Path) -> Non
     ) == facts.workspace_configuration(
         {"items": [{"section": "python"}, {"section": "python.analysis"}]}
     )
-    assert spec.engine(cast(CandidateRuntime, object())) == facts.adapter_language_facts(tmp_path).engine
+    assert spec.engine(runtime) == facts.adapter_language_facts(tmp_path).engine
+    with pytest.raises(ValueError, match="exact caller-bound runtime"):
+        spec.build_command(cast(CandidateRuntime, object()))
     assert spec.position_encoding is PositionEncoding.UTF16
     assert spec.diagnostics_mode == "push"
+
+
+def test_pyright_probe_uses_the_exact_caller_runtime_and_explicit_production_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = tmp_path / "known.py"
+    target.write_text("Known = 1\n", encoding="utf-8")
+    runtime = cast(CandidateRuntime, object())
+    facts = _facts(tmp_path / "python")
+    client = _FakeClient(_FakeClock(), _responses(target))
+    captured: dict[str, object] = {}
+    _install_fake_runner(monkeypatch, client, captured)
+
+    run_pyright_capability_probe(
+        runtime,
+        facts,
+        tmp_path,
+        target,
+        (0, 0),
+        production_root=tmp_path,
+        deadline=Deadline.start(client.clock, 10.0),
+    )
+
+    assert captured["runtime"] is runtime
+    assert cast(Any, captured["spec"]).engine(runtime) == facts.adapter_language_facts(
+        tmp_path
+    ).engine
 
 
 def test_pyright_capability_probe_exercises_and_normalizes_every_advertised_provider(
@@ -190,7 +243,7 @@ def test_pyright_capability_probe_exercises_and_normalizes_every_advertised_prov
     captured: dict[str, object] = {}
     _install_fake_runner(monkeypatch, client, captured)
 
-    outcome = run_pyright_capability_probe(
+    outcome = _run_fake_pyright_capability_probe(
         _facts(tmp_path / "python"),
         tmp_path,
         target,
@@ -240,7 +293,7 @@ def test_pyright_capability_probe_records_typed_lsp_error_and_still_closes_docum
     client = _FakeClient(clock, responses)
     _install_fake_runner(monkeypatch, client, {})
 
-    outcome = run_pyright_capability_probe(
+    outcome = _run_fake_pyright_capability_probe(
         _facts(tmp_path / "python"),
         tmp_path,
         target,
@@ -275,7 +328,7 @@ def test_pyright_reports_when_no_required_capability_achieves_cold_readiness(
     client = _FakeClient(clock, responses)
     _install_fake_runner(monkeypatch, client, {})
 
-    outcome = run_pyright_capability_probe(
+    outcome = _run_fake_pyright_capability_probe(
         _facts(tmp_path / "python"),
         tmp_path,
         target,
@@ -302,7 +355,7 @@ def test_pyright_redacts_and_bounds_server_error_notes_and_issues(
     client = _FakeClient(clock, responses)
     _install_fake_runner(monkeypatch, client, {})
 
-    outcome = run_pyright_capability_probe(
+    outcome = _run_fake_pyright_capability_probe(
         _facts(tmp_path / "python"),
         tmp_path,
         target,
@@ -346,7 +399,7 @@ def test_advertised_empty_results_are_accepted_but_fail_normalized_validity(
     client = _FakeClient(_FakeClock(), responses)
     _install_fake_runner(monkeypatch, client, {})
 
-    outcome = run_pyright_capability_probe(
+    outcome = _run_fake_pyright_capability_probe(
         _facts(tmp_path / "python"),
         tmp_path,
         target,
@@ -382,7 +435,7 @@ def test_pyright_gate_requires_current_baseline_advertisements(
     client = _FakeClient(_FakeClock(), _responses(target))
     _install_fake_runner(monkeypatch, client, {}, providers=providers)
 
-    outcome = run_pyright_capability_probe(
+    outcome = _run_fake_pyright_capability_probe(
         _facts(tmp_path / "python"),
         tmp_path,
         target,
@@ -411,7 +464,7 @@ def test_unadvertised_implementation_remains_explicitly_unsupported_without_fail
     client = _FakeClient(_FakeClock(), responses)
     _install_fake_runner(monkeypatch, client, {}, providers=providers)
 
-    outcome = run_pyright_capability_probe(
+    outcome = _run_fake_pyright_capability_probe(
         _facts(tmp_path / "python"),
         tmp_path,
         target,
@@ -485,7 +538,7 @@ def test_workspace_symbols_require_the_full_production_symbol_shape(
     client = _FakeClient(_FakeClock(), responses)
     _install_fake_runner(monkeypatch, client, {})
 
-    outcome = run_pyright_capability_probe(
+    outcome = _run_fake_pyright_capability_probe(
         _facts(tmp_path / "python"),
         tmp_path,
         target,
@@ -510,7 +563,7 @@ def test_semantic_timeout_remains_primary_when_did_close_also_fails(
     _install_fake_runner(monkeypatch, client, {})
 
     with pytest.raises(TimeoutError, match="semantic-timeout") as raised:
-        run_pyright_capability_probe(
+        _run_fake_pyright_capability_probe(
             _facts(tmp_path / "python"),
             tmp_path,
             target,
@@ -531,7 +584,7 @@ def test_normalization_failure_remains_visible_when_did_close_also_fails(
     client = _FakeClient(_FakeClock(), responses, close_error=RuntimeError("didClose-failure"))
     _install_fake_runner(monkeypatch, client, {})
 
-    outcome = run_pyright_capability_probe(
+    outcome = _run_fake_pyright_capability_probe(
         _facts(tmp_path / "python"),
         tmp_path,
         target,
@@ -552,7 +605,7 @@ def test_did_close_failure_alone_fails_the_run(
     client = _FakeClient(_FakeClock(), _responses(target), close_error=RuntimeError("didClose-failure"))
     _install_fake_runner(monkeypatch, client, {})
 
-    outcome = run_pyright_capability_probe(
+    outcome = _run_fake_pyright_capability_probe(
         _facts(tmp_path / "python"),
         tmp_path,
         target,
@@ -575,10 +628,12 @@ def real_pyright_slice(
 ) -> tuple[CandidateProtocolOutcome, RootManifest, RootManifest]:
     before = capture_root_manifest(ms_swift_request, expectation=real_expectation())
     outcome = run_pyright_capability_probe(
+        _prepared_candidate_runtime(),
         PyrightFacts.locked(root=Path("/data/CoordExp/serena-light"), interpreter=MS_INTERPRETER),
         MS_SWIFT,
         KNOWN_FILE,
         KNOWN_POSITION,
+        production_root=Path("/data/CoordExp/serena-light"),
         deadline=Deadline.start(monotonic_clock, 90.0),
     )
     after = capture_root_manifest(ms_swift_request, expectation=real_expectation())

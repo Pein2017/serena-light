@@ -95,6 +95,13 @@ def _validate_absolute_path(value: object, label: str) -> str:
     return text
 
 
+def _validate_canonical_absolute_path(value: object, label: str) -> str:
+    text = _validate_absolute_path(value, label)
+    if text.startswith("//") or any(part in {"", ".", ".."} for part in text.split("/")[1:]):
+        raise ValueError(f"{label} must be a canonical absolute path")
+    return text
+
+
 def _validate_relative_path(value: object, label: str) -> str:
     text = _validate_non_empty_str(value, label)
     if text.startswith("/"):
@@ -644,6 +651,259 @@ def _runtime_binding_from_dict(value: object) -> RuntimeBinding:
         manifest_path=_expect_str(mapping["manifest_path"], "RuntimeBinding.manifest_path"),
         manifest_sha256=_expect_str(mapping["manifest_sha256"], "RuntimeBinding.manifest_sha256"),
     )
+
+
+# --- AdmissionBinding --------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class AdmissionRootWitness:
+    """One exact Phase 1 corpus-root authority retained by every later phase."""
+
+    root: str
+    kind: str
+    source_revision: str | None
+    manifest_digest: str
+
+    def __post_init__(self) -> None:
+        _validate_canonical_absolute_path(self.root, "AdmissionRootWitness.root")
+        if self.kind not in _ROOT_MANIFEST_KINDS:
+            raise ValueError(
+                f"AdmissionRootWitness.kind must be one of {sorted(_ROOT_MANIFEST_KINDS)}"
+            )
+        if self.kind == "git":
+            if (
+                not isinstance(self.source_revision, str)
+                or _GIT_REVISION_RE.fullmatch(self.source_revision) is None
+            ):
+                raise ValueError(
+                    "AdmissionRootWitness.source_revision must be a Git revision for a Git root"
+                )
+        elif self.source_revision is not None:
+            raise ValueError(
+                "AdmissionRootWitness.source_revision must be None for a non-Git root"
+            )
+        _validate_sha256(self.manifest_digest, "AdmissionRootWitness.manifest_digest")
+
+
+_ADMISSION_ROOT_WITNESS_FIELDS = frozenset(
+    {"root", "kind", "source_revision", "manifest_digest"}
+)
+
+
+def _admission_root_witness_to_dict(witness: AdmissionRootWitness) -> dict[str, object]:
+    return {
+        "root": witness.root,
+        "kind": witness.kind,
+        "source_revision": witness.source_revision,
+        "manifest_digest": witness.manifest_digest,
+    }
+
+
+def _admission_root_witness_from_dict(value: object) -> AdmissionRootWitness:
+    mapping = _expect_mapping(value, "AdmissionRootWitness")
+    _closed_fields(mapping, _ADMISSION_ROOT_WITNESS_FIELDS, "AdmissionRootWitness")
+    source_revision = mapping["source_revision"]
+    return AdmissionRootWitness(
+        root=_expect_str(mapping["root"], "AdmissionRootWitness.root"),
+        kind=_expect_str(mapping["kind"], "AdmissionRootWitness.kind"),
+        source_revision=(
+            None
+            if source_revision is None
+            else _expect_str(source_revision, "AdmissionRootWitness.source_revision")
+        ),
+        manifest_digest=_expect_str(
+            mapping["manifest_digest"], "AdmissionRootWitness.manifest_digest"
+        ),
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class AdmissionBinding:
+    """The exact immutable Phase 1 receipt one later phase is chained from.
+
+    The parent receipt remains the authority for its full Phase 1 evidence.  This compact
+    leaf publishes only the identity chain a later receipt must retain: the exact receipt
+    name and bytes, the Phase 1 artifact/candidate/runtime witnesses, and the production
+    source/lock/build witnesses against which the later phase begins.
+    """
+
+    admission_evaluation_identity: str
+    admission_run_identity: str
+    receipt_path: str
+    receipt_sha256: str
+    artifact_tree_digest: str
+    candidate_lock_digest: str
+    runtime_root: str
+    runtime_manifest_sha256: str
+    production_root: str
+    production_source_revision: str
+    production_dependency_lock_digest: str
+    production_build_identity: str
+    parent_root_manifests: tuple[AdmissionRootWitness, ...]
+
+    def __post_init__(self) -> None:
+        _validate_sha256(
+            self.admission_evaluation_identity,
+            "AdmissionBinding.admission_evaluation_identity",
+        )
+        _validate_sha256(self.admission_run_identity, "AdmissionBinding.admission_run_identity")
+        receipt_path = _validate_canonical_absolute_path(
+            self.receipt_path, "AdmissionBinding.receipt_path"
+        )
+        receipt_parts = receipt_path.split("/")
+        if (
+            len(receipt_parts) < 4
+            or receipt_parts[-3] != self.admission_evaluation_identity
+            or receipt_parts[-2] != "receipts"
+            or receipt_parts[-1] != f"{self.admission_run_identity}.json"
+        ):
+            raise ValueError(
+                "AdmissionBinding.receipt_path must name the exact "
+                "<evaluation_identity>/receipts/<run_identity>.json receipt"
+            )
+        _validate_sha256(self.receipt_sha256, "AdmissionBinding.receipt_sha256")
+        _validate_sha256(self.artifact_tree_digest, "AdmissionBinding.artifact_tree_digest")
+        _validate_sha256(self.candidate_lock_digest, "AdmissionBinding.candidate_lock_digest")
+        runtime_root = _validate_canonical_absolute_path(
+            self.runtime_root, "AdmissionBinding.runtime_root"
+        )
+        if runtime_root.rsplit("/", 1)[-1] != self.candidate_lock_digest:
+            raise ValueError(
+                "AdmissionBinding.runtime_root must be addressed by candidate_lock_digest"
+            )
+        _validate_sha256(
+            self.runtime_manifest_sha256, "AdmissionBinding.runtime_manifest_sha256"
+        )
+        _validate_canonical_absolute_path(
+            self.production_root, "AdmissionBinding.production_root"
+        )
+        if _GIT_REVISION_RE.fullmatch(self.production_source_revision) is None:
+            raise ValueError(
+                "AdmissionBinding.production_source_revision must be a Git commit revision"
+            )
+        _validate_sha256(
+            self.production_dependency_lock_digest,
+            "AdmissionBinding.production_dependency_lock_digest",
+        )
+        _validate_sha256(
+            self.production_build_identity, "AdmissionBinding.production_build_identity"
+        )
+        parent_roots = _validate_tuple(
+            self.parent_root_manifests, "AdmissionBinding.parent_root_manifests"
+        )
+        if not parent_roots or any(
+            not isinstance(witness, AdmissionRootWitness) for witness in parent_roots
+        ):
+            raise ValueError(
+                "AdmissionBinding.parent_root_manifests must contain typed root witnesses"
+            )
+        _validate_sorted_unique(
+            [witness.root for witness in parent_roots],
+            "AdmissionBinding.parent_root_manifests",
+        )
+        production_witnesses = tuple(
+            witness for witness in parent_roots if witness.root == self.production_root
+        )
+        if (
+            len(production_witnesses) != 1
+            or production_witnesses[0].kind != "git"
+            or production_witnesses[0].source_revision
+            != self.production_source_revision
+        ):
+            raise ValueError(
+                "AdmissionBinding.parent_root_manifests must contain the exact Git "
+                "production root and source revision"
+            )
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "admission_evaluation_identity": self.admission_evaluation_identity,
+            "admission_run_identity": self.admission_run_identity,
+            "receipt_path": self.receipt_path,
+            "receipt_sha256": self.receipt_sha256,
+            "artifact_tree_digest": self.artifact_tree_digest,
+            "candidate_lock_digest": self.candidate_lock_digest,
+            "runtime_root": self.runtime_root,
+            "runtime_manifest_sha256": self.runtime_manifest_sha256,
+            "production_root": self.production_root,
+            "production_source_revision": self.production_source_revision,
+            "production_dependency_lock_digest": self.production_dependency_lock_digest,
+            "production_build_identity": self.production_build_identity,
+            "parent_root_manifests": [
+                _admission_root_witness_to_dict(witness)
+                for witness in self.parent_root_manifests
+            ],
+        }
+
+    @staticmethod
+    def from_dict(value: Mapping[str, object]) -> AdmissionBinding:
+        _closed_fields(value, _ADMISSION_BINDING_FIELDS, "AdmissionBinding")
+        return AdmissionBinding(
+            admission_evaluation_identity=_expect_str(
+                value["admission_evaluation_identity"],
+                "AdmissionBinding.admission_evaluation_identity",
+            ),
+            admission_run_identity=_expect_str(
+                value["admission_run_identity"], "AdmissionBinding.admission_run_identity"
+            ),
+            receipt_path=_expect_str(value["receipt_path"], "AdmissionBinding.receipt_path"),
+            receipt_sha256=_expect_str(
+                value["receipt_sha256"], "AdmissionBinding.receipt_sha256"
+            ),
+            artifact_tree_digest=_expect_str(
+                value["artifact_tree_digest"], "AdmissionBinding.artifact_tree_digest"
+            ),
+            candidate_lock_digest=_expect_str(
+                value["candidate_lock_digest"], "AdmissionBinding.candidate_lock_digest"
+            ),
+            runtime_root=_expect_str(value["runtime_root"], "AdmissionBinding.runtime_root"),
+            runtime_manifest_sha256=_expect_str(
+                value["runtime_manifest_sha256"],
+                "AdmissionBinding.runtime_manifest_sha256",
+            ),
+            production_root=_expect_str(
+                value["production_root"], "AdmissionBinding.production_root"
+            ),
+            production_source_revision=_expect_str(
+                value["production_source_revision"],
+                "AdmissionBinding.production_source_revision",
+            ),
+            production_dependency_lock_digest=_expect_str(
+                value["production_dependency_lock_digest"],
+                "AdmissionBinding.production_dependency_lock_digest",
+            ),
+            production_build_identity=_expect_str(
+                value["production_build_identity"],
+                "AdmissionBinding.production_build_identity",
+            ),
+            parent_root_manifests=tuple(
+                _admission_root_witness_from_dict(item)
+                for item in _expect_list(
+                    value["parent_root_manifests"],
+                    "AdmissionBinding.parent_root_manifests",
+                )
+            ),
+        )
+
+
+_ADMISSION_BINDING_FIELDS = frozenset(
+    {
+        "admission_evaluation_identity",
+        "admission_run_identity",
+        "receipt_path",
+        "receipt_sha256",
+        "artifact_tree_digest",
+        "candidate_lock_digest",
+        "runtime_root",
+        "runtime_manifest_sha256",
+        "production_root",
+        "production_source_revision",
+        "production_dependency_lock_digest",
+        "production_build_identity",
+        "parent_root_manifests",
+    }
+)
 
 
 # --- EnvironmentIdentity / ServiceConfigIdentity -------------------------------
@@ -1577,7 +1837,10 @@ _ADMISSION_RECEIPT_FIELDS = frozenset(
 # itself mirrors AdmissionReceipt's public to_dict/from_dict/closed-field/canonical-order
 # discipline exactly, because it is this phase's published, top-level receipt.
 
-PROTOCOL_PHASE_RECEIPT_SCHEMA_VERSION = 2
+# Schema 3 adds the exact immutable Phase 1 parent receipt binding.  No Phase 2 receipt
+# predating this schema was admitted or published, so there is no historical evidence to
+# migrate; older in-memory shapes are refused rather than guessed.
+PROTOCOL_PHASE_RECEIPT_SCHEMA_VERSION = 3
 
 # Decision P2-3: task_utility is a fixed disposition literal, never fabricated Phase 2 data.
 CAPABILITY_TASK_UTILITY_DEFERRED = "deferred_to_feature_phase"
@@ -1591,9 +1854,17 @@ DIAGNOSTICS_MODES = frozenset({"push", "pull"})
 # evaluation at the protocol stop gate; a surviving competitor permits Phase 3 planning.
 PROTOCOL_PHASE_NEXT_ACTION_PASS = "begin_product_seam_planning_for_surviving_candidates"
 PROTOCOL_PHASE_NEXT_ACTION_STOP = "retain_pyright_and_stop_after_protocol_phase"
+PROTOCOL_PHASE_NEXT_ACTION_INCONCLUSIVE = "inconclusive_retain_pyright"
+
+# The private behavior witness is an evaluation artifact, not a public tool schema.  Probe
+# outcomes may exist briefly with an all-None witness leaf; every published survivor binds
+# one exact schema-v1 witness payload by SHA-256 before a receipt can pass.
+PROTOCOL_WITNESS_SCHEMA_VERSION = 1
 
 _CANDIDATE_PROTOCOL_NAMES = frozenset({"pyright", "ty", "pyrefly"})
-_GATE_DISPOSITIONS = frozenset({"pass", "fail", "seam_incompatible_pull_only"})
+_GATE_DISPOSITIONS = frozenset(
+    {"pass", "fail", "seam_incompatible_pull_only", "configuration_inconclusive"}
+)
 # The frozen Phase 2 callbacks exercise these five providers. ``declaration`` remains a raw
 # initialize fact in this phase and therefore is not fabricated as accepted request evidence.
 _PROBED_CAPABILITY_NAMES = frozenset(
@@ -1838,6 +2109,9 @@ class CandidateProtocolOutcome:
     lifecycle: LifecycleEvidence
     gate_disposition: str
     issues: tuple[str, ...]
+    witness_schema_version: int | None = None
+    witness_sha256: str | None = None
+    witness_passed: bool | None = None
 
     def __post_init__(self) -> None:
         from serena_light.lsp.adapter import RawLspProviders  # see module-level TYPE_CHECKING note
@@ -1858,10 +2132,76 @@ class CandidateProtocolOutcome:
         _validate_sorted_unique(
             _validate_tuple(self.issues, "CandidateProtocolOutcome.issues"), "CandidateProtocolOutcome.issues"
         )
+        witness_present = (
+            self.witness_schema_version is not None,
+            self.witness_sha256 is not None,
+            self.witness_passed is not None,
+        )
+        if any(witness_present) and not all(witness_present):
+            raise ValueError(
+                "CandidateProtocolOutcome witness fields must be all present or all absent"
+            )
+        if all(witness_present):
+            if self.witness_schema_version != PROTOCOL_WITNESS_SCHEMA_VERSION:
+                raise ValueError(
+                    "CandidateProtocolOutcome.witness_schema_version must be "
+                    f"{PROTOCOL_WITNESS_SCHEMA_VERSION}, got {self.witness_schema_version!r}"
+                )
+            _validate_sha256(self.witness_sha256, "CandidateProtocolOutcome.witness_sha256")
+            _expect_bool(self.witness_passed, "CandidateProtocolOutcome.witness_passed")
+        if self.gate_disposition == "configuration_inconclusive" and self.witness_passed is True:
+            raise ValueError(
+                "CandidateProtocolOutcome configuration_inconclusive requires witness_passed=false"
+            )
+
+
+def bind_candidate_protocol_witness(
+    outcome: CandidateProtocolOutcome,
+    *,
+    schema_version: int,
+    witness_sha256: str,
+    passed: bool,
+) -> CandidateProtocolOutcome:
+    """Return an immutable outcome copy bound to one exact private witness.
+
+    Probe code deliberately constructs an unbound intermediate outcome.  The Task 8
+    orchestrator calls this once after writing the candidate's canonical witness bytes;
+    rebinding already-published evidence is refused rather than silently replacing it.
+    """
+
+    if (
+        outcome.witness_schema_version is not None
+        or outcome.witness_sha256 is not None
+        or outcome.witness_passed is not None
+    ):
+        raise ValueError("CandidateProtocolOutcome witness is already bound")
+    return CandidateProtocolOutcome(
+        candidate=outcome.candidate,
+        engine_version=outcome.engine_version,
+        raw_providers=outcome.raw_providers,
+        capabilities=outcome.capabilities,
+        lifecycle=outcome.lifecycle,
+        gate_disposition=outcome.gate_disposition,
+        issues=outcome.issues,
+        witness_schema_version=schema_version,
+        witness_sha256=witness_sha256,
+        witness_passed=passed,
+    )
 
 
 _CANDIDATE_PROTOCOL_OUTCOME_FIELDS = frozenset(
-    {"candidate", "engine_version", "raw_providers", "capabilities", "lifecycle", "gate_disposition", "issues"}
+    {
+        "candidate",
+        "engine_version",
+        "raw_providers",
+        "capabilities",
+        "lifecycle",
+        "gate_disposition",
+        "issues",
+        "witness_schema_version",
+        "witness_sha256",
+        "witness_passed",
+    }
 )
 
 
@@ -1874,12 +2214,18 @@ def _candidate_protocol_outcome_to_dict(outcome: CandidateProtocolOutcome) -> di
         "lifecycle": _lifecycle_evidence_to_dict(outcome.lifecycle),
         "gate_disposition": outcome.gate_disposition,
         "issues": list(outcome.issues),
+        "witness_schema_version": outcome.witness_schema_version,
+        "witness_sha256": outcome.witness_sha256,
+        "witness_passed": outcome.witness_passed,
     }
 
 
 def _candidate_protocol_outcome_from_dict(value: object) -> CandidateProtocolOutcome:
     mapping = _expect_mapping(value, "CandidateProtocolOutcome")
     _closed_fields(mapping, _CANDIDATE_PROTOCOL_OUTCOME_FIELDS, "CandidateProtocolOutcome")
+    witness_schema_version = mapping["witness_schema_version"]
+    witness_sha256 = mapping["witness_sha256"]
+    witness_passed = mapping["witness_passed"]
     return CandidateProtocolOutcome(
         candidate=_expect_str(mapping["candidate"], "CandidateProtocolOutcome.candidate"),
         engine_version=_expect_str(mapping["engine_version"], "CandidateProtocolOutcome.engine_version"),
@@ -1893,6 +2239,24 @@ def _candidate_protocol_outcome_from_dict(value: object) -> CandidateProtocolOut
         issues=tuple(
             _expect_str(item, "CandidateProtocolOutcome.issues item")
             for item in _expect_list(mapping["issues"], "CandidateProtocolOutcome.issues")
+        ),
+        witness_schema_version=(
+            None
+            if witness_schema_version is None
+            else _expect_int(
+                witness_schema_version,
+                "CandidateProtocolOutcome.witness_schema_version",
+            )
+        ),
+        witness_sha256=(
+            None
+            if witness_sha256 is None
+            else _expect_str(witness_sha256, "CandidateProtocolOutcome.witness_sha256")
+        ),
+        witness_passed=(
+            None
+            if witness_passed is None
+            else _expect_bool(witness_passed, "CandidateProtocolOutcome.witness_passed")
         ),
     )
 
@@ -1954,12 +2318,51 @@ def _require_candidate_protocol_evidence(outcome: CandidateProtocolOutcome) -> N
                 raise ValueError(
                     f"{label} capability {capability.name} has an incoherent unadvertised result"
                 )
+    if outcome.gate_disposition == "fail":
+        negative_capability = any(
+            capability.accepted is False or capability.normalized_valid is False
+            for capability in outcome.capabilities
+        )
+        negative_lifecycle = any(
+            getattr(outcome.lifecycle, field) is False for field in _PASS_LIFECYCLE_FIELDS
+        )
+        if not (
+            outcome.witness_passed is False
+            or negative_capability
+            or negative_lifecycle
+        ):
+            raise ValueError(
+                f"{label} gate_disposition='fail' requires at least one negative "
+                "capability, lifecycle, or witness fact"
+            )
+    if (
+        outcome.gate_disposition == "seam_incompatible_pull_only"
+        and outcome.lifecycle.diagnostics_mode != "pull"
+    ):
+        raise ValueError(
+            f"{label} seam_incompatible_pull_only requires explicit pull diagnostics evidence"
+        )
+
+
+def _require_bound_candidate_witness(outcome: CandidateProtocolOutcome) -> None:
+    label = f"ProtocolPhaseReceipt outcome {outcome.candidate}"
+    if (
+        outcome.witness_schema_version != PROTOCOL_WITNESS_SCHEMA_VERSION
+        or outcome.witness_sha256 is None
+        or outcome.witness_passed is None
+    ):
+        raise ValueError(f"{label} lacks an exact bound witness")
 
 
 def _require_passing_candidate_evidence(outcome: CandidateProtocolOutcome) -> None:
     """Reject a survivor unless all capability and lifecycle evidence is affirmative."""
 
     label = f"ProtocolPhaseReceipt outcome {outcome.candidate}"
+    _require_bound_candidate_witness(outcome)
+    if outcome.witness_passed is not True:
+        raise ValueError(
+            f"{label} has gate_disposition='pass' but witness_passed is not an exact bound true witness"
+        )
     for capability in outcome.capabilities:
         if capability.advertised and (
             capability.accepted is not True or capability.normalized_valid is not True
@@ -2000,6 +2403,7 @@ class ProtocolPhaseReceipt:
     started_at: str
     ended_at: str
     budgets: tuple[PhaseBudget, ...]
+    admission_binding: AdmissionBinding | None
     evaluator: EvaluatorIdentity | None
     production_identity_before: ProductionIdentity
     production_identity_after: ProductionIdentity
@@ -2050,8 +2454,74 @@ class ProtocolPhaseReceipt:
         _validate_sorted_unique(issues, "ProtocolPhaseReceipt.issues")
         _validate_sha256(self.artifact_tree_digest, "ProtocolPhaseReceipt.artifact_tree_digest")
         _validate_non_empty_str(self.next_action, "ProtocolPhaseReceipt.next_action")
+        if (
+            self.admission_binding is not None
+            and self.evaluation_identity
+            == self.admission_binding.admission_evaluation_identity
+        ):
+            raise ValueError(
+                "ProtocolPhaseReceipt child evaluation_identity must differ from its "
+                "parent admission evaluation identity"
+            )
+        configuration_inconclusive = tuple(
+            outcome
+            for outcome in outcomes
+            if outcome.gate_disposition == "configuration_inconclusive"
+        )
+        if configuration_inconclusive:
+            self._require_configuration_inconclusive(outcomes, issues)
+        elif self.next_action == PROTOCOL_PHASE_NEXT_ACTION_INCONCLUSIVE:
+            raise ValueError(
+                "ProtocolPhaseReceipt next_action='inconclusive_retain_pyright' requires at least "
+                "one configuration_inconclusive candidate outcome"
+            )
         if self.status == "pass":
             self._require_canonical_pass(budgets, root_manifests_before, root_manifests_after, write_deltas, outcomes)
+
+    def _require_configuration_inconclusive(
+        self,
+        outcomes: tuple[CandidateProtocolOutcome, ...],
+        issues: tuple[str, ...],
+    ) -> None:
+        """Retain uncertain configuration evidence without laundering it into a backend fail."""
+
+        if self.status not in {"hold", "incomplete"}:
+            raise ValueError(
+                "ProtocolPhaseReceipt with configuration_inconclusive evidence must have "
+                "status 'hold' or 'incomplete', never canonical pass"
+            )
+        if self.next_action != PROTOCOL_PHASE_NEXT_ACTION_INCONCLUSIVE:
+            raise ValueError(
+                "ProtocolPhaseReceipt with configuration_inconclusive evidence must use "
+                "next_action='inconclusive_retain_pyright'"
+            )
+        if not issues:
+            raise ValueError(
+                "ProtocolPhaseReceipt with configuration_inconclusive evidence must carry issues"
+            )
+        if frozenset(outcome.candidate for outcome in outcomes) != _CANDIDATE_PROTOCOL_NAMES:
+            raise ValueError(
+                "ProtocolPhaseReceipt with configuration_inconclusive evidence must retain "
+                f"exactly {sorted(_CANDIDATE_PROTOCOL_NAMES)} candidate outcomes"
+            )
+        pyright = next(outcome for outcome in outcomes if outcome.candidate == "pyright")
+        if pyright.gate_disposition != "pass":
+            raise ValueError(
+                "ProtocolPhaseReceipt cannot retain Pyright inconclusively unless Pyright passed"
+            )
+        for outcome in outcomes:
+            _require_bound_candidate_witness(outcome)
+            _require_candidate_protocol_evidence(outcome)
+            if outcome.gate_disposition == "pass":
+                _require_passing_candidate_evidence(outcome)
+            if (
+                outcome.gate_disposition == "configuration_inconclusive"
+                and outcome.witness_passed is not False
+            ):
+                raise ValueError(
+                    f"ProtocolPhaseReceipt outcome {outcome.candidate} "
+                    "configuration_inconclusive requires an exact failed bound witness"
+                )
 
     def _require_canonical_pass(
         self,
@@ -2078,21 +2548,65 @@ class ProtocolPhaseReceipt:
                 f"single-entry ('protocol', {frozen_protocol_budget.seconds}) tuple: got "
                 f"{[(budget.name, budget.seconds) for budget in budgets]}"
             )
+        if self.admission_binding is None:
+            raise ValueError(
+                "ProtocolPhaseReceipt status is pass but no exact Phase 1 admission_binding is recorded"
+            )
         if self.evaluator is None:
             raise ValueError("ProtocolPhaseReceipt status is pass but no evaluator identity is bound")
+        if not self.evaluator.source_clean:
+            raise ValueError(
+                "ProtocolPhaseReceipt status is pass but evaluator.source_clean is not true"
+            )
+        if not self.evaluator.production_clean:
+            raise ValueError(
+                "ProtocolPhaseReceipt status is pass but evaluator.production_clean is not true"
+            )
         if self.runtime_binding is None:
             raise ValueError("ProtocolPhaseReceipt status is pass but no runtime_binding is recorded")
         if self.runtime_binding.lock_digest != self.candidate_lock.digest:
             raise ValueError("ProtocolPhaseReceipt status is pass but runtime_binding names another candidate lock")
+        if self.admission_binding.candidate_lock_digest != self.candidate_lock.digest:
+            raise ValueError(
+                "ProtocolPhaseReceipt status is pass but candidate_lock differs from admission_binding"
+            )
+        if (
+            self.admission_binding.runtime_root != self.runtime_binding.root
+            or self.admission_binding.runtime_manifest_sha256
+            != self.runtime_binding.manifest_sha256
+        ):
+            raise ValueError(
+                "ProtocolPhaseReceipt status is pass but runtime_binding differs from admission_binding"
+            )
         if self.production_identity_before != self.production_identity_after:
             raise ValueError(
                 "ProtocolPhaseReceipt status is pass but production identity changed between before and after"
+            )
+        if (
+            self.production_identity_before.dependency_lock_digest
+            != self.admission_binding.production_dependency_lock_digest
+        ):
+            raise ValueError(
+                "ProtocolPhaseReceipt status is pass but production dependency lock differs from admission_binding"
+            )
+        if (
+            self.production_identity_before.build_identity
+            != self.admission_binding.production_build_identity
+        ):
+            raise ValueError(
+                "ProtocolPhaseReceipt status is pass but production build identity differs from admission_binding"
             )
         candidate_names = frozenset(outcome.candidate for outcome in outcomes)
         if candidate_names != _CANDIDATE_PROTOCOL_NAMES:
             raise ValueError(
                 "ProtocolPhaseReceipt status is pass but outcomes do not cover exactly "
                 f"{sorted(_CANDIDATE_PROTOCOL_NAMES)}"
+            )
+        if any(
+            outcome.gate_disposition == "configuration_inconclusive" for outcome in outcomes
+        ):
+            raise ValueError(
+                "ProtocolPhaseReceipt status is pass but an outcome is configuration_inconclusive"
             )
         pyright = next(outcome for outcome in outcomes if outcome.candidate == "pyright")
         if pyright.gate_disposition != "pass":
@@ -2115,6 +2629,7 @@ class ProtocolPhaseReceipt:
         if not survivors:
             raise ValueError("ProtocolPhaseReceipt status is pass but it carries no surviving candidate")
         for outcome in outcomes:
+            _require_bound_candidate_witness(outcome)
             _require_candidate_protocol_evidence(outcome)
         for survivor in survivors:
             _require_passing_candidate_evidence(survivor)
@@ -2131,6 +2646,10 @@ class ProtocolPhaseReceipt:
         before_by_root = {manifest.root: manifest for manifest in root_manifests_before}
         after_by_root = {manifest.root: manifest for manifest in root_manifests_after}
         delta_roots = {delta.root for delta in write_deltas}
+        parent_by_root = {
+            witness.root: witness
+            for witness in self.admission_binding.parent_root_manifests
+        }
         if not before_by_root:
             raise ValueError("ProtocolPhaseReceipt status is pass but it carries no root manifest")
         if set(before_by_root) != delta_roots or set(after_by_root) != delta_roots:
@@ -2171,6 +2690,27 @@ class ProtocolPhaseReceipt:
                 raise ValueError(
                     f"ProtocolPhaseReceipt status is pass but write_deltas[{delta.root}] has control_changes"
                 )
+        if set(before_by_root) != set(parent_by_root) or set(after_by_root) != set(
+            parent_by_root
+        ):
+            raise ValueError(
+                "ProtocolPhaseReceipt status is pass but root manifests do not cover "
+                "the exact parent corpus roots"
+            )
+        for root, parent in parent_by_root.items():
+            for label, manifest in (
+                ("before", before_by_root[root]),
+                ("after", after_by_root[root]),
+            ):
+                if (
+                    manifest.kind != parent.kind
+                    or manifest.source_revision != parent.source_revision
+                    or manifest.manifest_digest != parent.manifest_digest
+                ):
+                    raise ValueError(
+                        f"ProtocolPhaseReceipt {label} root {root} differs from its "
+                        "exact parent manifest witness"
+                    )
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -2182,6 +2722,9 @@ class ProtocolPhaseReceipt:
             "started_at": self.started_at,
             "ended_at": self.ended_at,
             "budgets": [_phase_budget_to_dict(budget) for budget in self.budgets],
+            "admission_binding": (
+                None if self.admission_binding is None else self.admission_binding.to_dict()
+            ),
             "evaluator": None if self.evaluator is None else _evaluator_identity_to_dict(self.evaluator),
             "production_identity_before": _production_identity_to_dict(self.production_identity_before),
             "production_identity_after": _production_identity_to_dict(self.production_identity_after),
@@ -2207,6 +2750,7 @@ class ProtocolPhaseReceipt:
                 f"got {schema_version!r}"
             )
         _closed_fields(value, _PROTOCOL_PHASE_RECEIPT_FIELDS, "ProtocolPhaseReceipt")
+        admission_binding = value["admission_binding"]
         evaluator = value["evaluator"]
         binding = value["runtime_binding"]
         return ProtocolPhaseReceipt(
@@ -2222,6 +2766,13 @@ class ProtocolPhaseReceipt:
             budgets=tuple(
                 _phase_budget_from_dict(item)
                 for item in _expect_list(value["budgets"], "ProtocolPhaseReceipt.budgets")
+            ),
+            admission_binding=(
+                None
+                if admission_binding is None
+                else AdmissionBinding.from_dict(
+                    _expect_mapping(admission_binding, "ProtocolPhaseReceipt.admission_binding")
+                )
             ),
             evaluator=None if evaluator is None else _evaluator_identity_from_dict(evaluator),
             production_identity_before=_production_identity_from_dict(value["production_identity_before"]),
@@ -2265,6 +2816,7 @@ _PROTOCOL_PHASE_RECEIPT_FIELDS = frozenset(
         "started_at",
         "ended_at",
         "budgets",
+        "admission_binding",
         "evaluator",
         "production_identity_before",
         "production_identity_after",

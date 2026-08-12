@@ -279,7 +279,7 @@ def test_real_locked_pyright_battery_produces_complete_cleanup_evidence() -> Non
     facts = PyrightFacts.locked(root=_REPO_ROOT, interpreter=MS_INTERPRETER)
     request = LifecycleBatteryRequest(
         candidate="pyright",
-        spec=pyright_protocol_spec(facts),
+        spec=pyright_protocol_spec(runtime, facts, production_root=_REPO_ROOT),
         runtime=runtime,
         workspace_root=_MS_SWIFT,
         target=_TARGET,

@@ -100,10 +100,14 @@ def pyrefly_protocol_spec(
     interpreter = _selected_ms_interpreter(runtime)
     initialization_options = _initialization_options(service_config, interpreter)
 
-    return BackendProtocolSpec(
-        name="pyrefly",
-        build_command=lambda candidate_runtime: (
-            str(candidate_runtime.pyrefly),
+    def require_bound_runtime(candidate_runtime: CandidateRuntime) -> None:
+        if candidate_runtime is not runtime:
+            raise ValueError("Pyrefly protocol spec requires its exact caller-bound runtime")
+
+    def build_command(candidate_runtime: CandidateRuntime) -> tuple[str, ...]:
+        require_bound_runtime(candidate_runtime)
+        return (
+            str(runtime.pyrefly),
             "lsp",
             "--indexing-mode",
             "lazy-blocking",
@@ -111,7 +115,15 @@ def pyrefly_protocol_spec(
             "1",
             "--workspace-indexing-limit",
             "2000",
-        ),
+        )
+
+    def engine(candidate_runtime: CandidateRuntime) -> EngineMetadata:
+        require_bound_runtime(candidate_runtime)
+        return _engine(runtime, interpreter)
+
+    return BackendProtocolSpec(
+        name="pyrefly",
+        build_command=build_command,
         initialize_params=lambda workspace_root: _initialize_params(
             workspace_root,
             initialization_options,
@@ -124,7 +136,7 @@ def pyrefly_protocol_spec(
         request_handlers=read_only_client_request_handlers(
             lambda params: _workspace_configuration(params, initialization_options)
         ),
-        engine=lambda candidate_runtime: _engine(candidate_runtime, interpreter),
+        engine=engine,
         position_encoding=PositionEncoding.UTF16,
         diagnostics_mode="push",
         notification_handler=notification_handler,
@@ -166,7 +178,7 @@ def run_pyrefly_capability_probe(
         )
     except BaseException as primary:
         try:
-            after_manifest = _capture_workspace_manifest(workspace_root, deadline.finalization())
+            after_manifest = _capture_workspace_manifest(workspace_root, deadline)
         except BaseException as after_error:
             primary.add_note(
                 redacted_evidence_text(
@@ -180,7 +192,7 @@ def run_pyrefly_capability_probe(
         raise
 
     try:
-        after_manifest = _capture_workspace_manifest(workspace_root, deadline.finalization())
+        after_manifest = _capture_workspace_manifest(workspace_root, deadline)
     except BaseException as after_error:
         cast("Any", after_error).pyrefly_capability_outcome = outcome
         after_error.add_note(

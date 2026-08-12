@@ -235,6 +235,10 @@ def test_ty_protocol_spec_binds_locked_command_config_and_interpreter(tmp_path: 
     assert spec.engine(runtime).version == "0.0.70"
     assert spec.engine(runtime).executable == runtime.ty
     assert spec.engine(runtime).interpreter == selected_interpreter
+    with pytest.raises(ValueError, match="exact caller-bound runtime"):
+        spec.build_command(cast(CandidateRuntime, object()))
+    with pytest.raises(ValueError, match="exact caller-bound runtime"):
+        spec.engine(cast(CandidateRuntime, object()))
     params = spec.initialize_params(tmp_path)
     assert params["rootPath"] == str(tmp_path)
     assert params["rootUri"] == tmp_path.as_uri()

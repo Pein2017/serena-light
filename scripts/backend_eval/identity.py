@@ -54,9 +54,13 @@ from scripts.backend_eval.source_binding import (
 )
 from scripts.backend_eval.source_image import (
     SourceImageError,
+    dependency_source_files,
     evaluator_source_files,
+    production_source_files,
+    require_bound_runtime_modules,
     require_image_module,
     source_image_active,
+    source_image_deadline_seconds,
 )
 
 __all__ = [
@@ -147,7 +151,11 @@ def capture_evaluator_identity(*, deadline: Deadline | None = None) -> Evaluator
     _require_no_shadowed_module(dict(source_files))
     production_files = _production_closure()
     commit, clean = _source_commit(deadline, source_files)
-    production_clean = commit is not None and _is_clean(PRODUCTION_SOURCE_ROOT, deadline)
+    production_clean = (
+        commit is not None
+        and _is_clean(PRODUCTION_SOURCE_ROOT, deadline)
+        and _production_matches_current_checkout(production_files)
+    )
     executable = Path(sys.executable)
     if not executable.is_absolute():
         raise IdentityError(f"the CLI host interpreter is not an absolute path: {executable}")
@@ -174,7 +182,14 @@ def _source_closure() -> tuple[tuple[str, str], ...]:
     except SourceImageError as error:
         raise IdentityError(str(error)) from error
     if imaged is not None:
-        return tuple((name, sha256_bytes(payload)) for name, payload in imaged)
+        closure = {name: sha256_bytes(payload) for name, payload in imaged}
+        try:
+            dependencies = dependency_source_files()
+        except SourceImageError as error:
+            raise IdentityError(str(error)) from error
+        if dependencies is not None:
+            closure.update((name, sha256_bytes(payload)) for name, payload in dependencies)
+        return tuple(sorted(closure.items()))
 
     try:
         names = sorted(entry.name for entry in os.scandir(EVALUATOR_PACKAGE) if entry.name.endswith(".py"))
@@ -192,8 +207,22 @@ def _production_closure() -> tuple[tuple[str, str], ...]:
     """Digest every executed production helper, refusing one loaded from another checkout."""
 
     try:
-        return bind_production_source()
+        imaged = production_source_files()
+        if imaged is None:
+            return bind_production_source()
+        closure = dict(bind_production_source(modules={}))
+        for name, payload in imaged:
+            digest = sha256_bytes(payload)
+            previous = closure.setdefault(name, digest)
+            if previous != digest:
+                raise IdentityError(
+                    f"production source {name} differs between the sealed protocol image "
+                    "and the child-helper execution expectation"
+                )
+        return tuple(sorted(closure.items()))
     except SourceBindingError as error:
+        raise IdentityError(str(error)) from error
+    except SourceImageError as error:
         raise IdentityError(str(error)) from error
 
 
@@ -227,6 +256,11 @@ def _require_no_shadowed_module(recorded: Mapping[str, str]) -> None:
             recorded_name = path.name
         if not owned or recorded_name not in recorded:
             raise IdentityError(f"imported evaluator module {name} is not part of the recorded closure: {path}")
+    if source_image_active():
+        try:
+            require_bound_runtime_modules()
+        except SourceImageError as error:
+            raise IdentityError(str(error)) from error
 
 
 def _source_commit(
@@ -251,22 +285,45 @@ def _source_commit(
 def _image_matches_current_checkout(source_files: tuple[tuple[str, str], ...]) -> bool:
     """A restored pathname cannot make transient image bytes look clean at the Git commit."""
 
-    recorded = dict(source_files)
+    recorded = {
+        name: digest for name, digest in source_files if not name.startswith("dependencies/")
+    }
     try:
         names = sorted(entry.name for entry in os.scandir(EVALUATOR_PACKAGE) if entry.name.endswith(".py"))
     except OSError as error:
         raise IdentityError(f"cannot compare the sealed evaluator with {EVALUATOR_PACKAGE}: {error}") from error
-    expected = [*names, "scripts/__init__.py"]
-    if sorted(expected) != sorted(recorded):
+    expected = {*names, "scripts/__init__.py"}
+    protocol_image = source_image_deadline_seconds() == 5400.0
+    if (
+        not set(recorded) <= expected
+        or "scripts/__init__.py" not in recorded
+        or (not protocol_image and set(recorded) != expected)
+    ):
         return False
     evaluator_matches = all(
-        sha256_bytes(_read_regular_file(EVALUATOR_PACKAGE / name)) == recorded[name]
-        for name in names
+        name == "scripts/__init__.py"
+        or sha256_bytes(_read_regular_file(EVALUATOR_PACKAGE / name)) == digest
+        for name, digest in recorded.items()
     )
     scripts_init = EVALUATION_OWNER_ROOT / "scripts" / "__init__.py"
     return evaluator_matches and sha256_bytes(_read_regular_file(scripts_init)) == recorded[
         "scripts/__init__.py"
     ]
+
+
+def _production_matches_current_checkout(
+    production_files: tuple[tuple[str, str], ...]
+) -> bool:
+    """A transient protocol production image remains visible after its path is restored."""
+
+    for relative, digest in production_files:
+        path = EVALUATION_OWNER_ROOT / relative
+        try:
+            if sha256_bytes(_read_regular_file(path)) != digest:
+                return False
+        except IdentityError:
+            return False
+    return True
 
 
 def _is_clean(subtree: Path, deadline: Deadline | None) -> bool:

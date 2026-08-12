@@ -64,27 +64,47 @@ class _PyrightSessionResult:
     document_close_error: str | None = None
 
 
-def pyright_protocol_spec(facts: PyrightFacts) -> BackendProtocolSpec:
-    """Build the shared protocol spec only from already-locked production facts."""
+def pyright_protocol_spec(
+    runtime: CandidateRuntime,
+    facts: PyrightFacts,
+    *,
+    production_root: Path,
+) -> BackendProtocolSpec:
+    """Build the shared protocol spec from caller-bound production facts and root."""
 
-    language_facts = facts.adapter_language_facts(Path.cwd())
+    language_facts = facts.adapter_language_facts(production_root)
+
+    def require_bound_runtime(candidate_runtime: CandidateRuntime) -> None:
+        if candidate_runtime is not runtime:
+            raise ValueError("Pyright protocol spec requires its exact caller-bound runtime")
+
+    def build_command(candidate_runtime: CandidateRuntime) -> tuple[str, ...]:
+        require_bound_runtime(candidate_runtime)
+        return facts.command
+
+    def engine(candidate_runtime: CandidateRuntime) -> Any:
+        require_bound_runtime(candidate_runtime)
+        return language_facts.engine
+
     return BackendProtocolSpec(
         name="pyright",
-        build_command=lambda _runtime: facts.command,
+        build_command=build_command,
         initialize_params=facts.initialize_params,
         request_handlers=read_only_client_request_handlers(facts.workspace_configuration),
-        engine=lambda _runtime: language_facts.engine,
+        engine=engine,
         position_encoding=language_facts.default_position_encoding,
         diagnostics_mode="push",
     )
 
 
 def run_pyright_capability_probe(
+    runtime: CandidateRuntime,
     facts: PyrightFacts,
     workspace_root: Path,
     target: Path,
     symbol_position: tuple[int, int],
     *,
+    production_root: Path,
     deadline: Deadline,
 ) -> CandidateProtocolOutcome:
     """Exercise Pyright's five Phase 2 semantic providers through the shared runner."""
@@ -202,8 +222,8 @@ def run_pyright_capability_probe(
         return _PyrightSessionResult(observations=observations)
 
     protocol_session = run_protocol_probe(
-        pyright_protocol_spec(facts),
-        _prepared_candidate_runtime(),
+        pyright_protocol_spec(runtime, facts, production_root=production_root),
+        runtime,
         root,
         deadline=deadline,
         session=session,

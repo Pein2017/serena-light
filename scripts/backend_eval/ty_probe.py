@@ -90,6 +90,23 @@ def ty_protocol_spec(
         raise ValueError("service-owned ty configuration is not bound to this candidate runtime")
     selected_interpreter = _selected_ms_interpreter(runtime)
 
+    def require_bound_runtime(candidate_runtime: CandidateRuntime) -> None:
+        if candidate_runtime is not runtime:
+            raise ValueError("ty protocol spec requires its exact caller-bound runtime")
+
+    def build_command(candidate_runtime: CandidateRuntime) -> tuple[str, ...]:
+        require_bound_runtime(candidate_runtime)
+        return (str(runtime.ty), "server")
+
+    def engine(candidate_runtime: CandidateRuntime) -> EngineMetadata:
+        require_bound_runtime(candidate_runtime)
+        return EngineMetadata(
+            name="ty",
+            version=_TY_VERSION,
+            executable=runtime.ty,
+            interpreter=selected_interpreter,
+        )
+
     def initialize_params(workspace_root: Path) -> Mapping[str, object]:
         root = workspace_root.resolve(strict=True)
         if not root.is_dir():
@@ -125,18 +142,13 @@ def ty_protocol_spec(
 
     return BackendProtocolSpec(
         name="ty",
-        build_command=lambda candidate_runtime: (str(candidate_runtime.ty), "server"),
+        build_command=build_command,
         initialize_params=initialize_params,
         # The locked server is not assumed to issue workspace/configuration. A real request
         # therefore remains visible as an unsupported server request rather than being hidden
         # behind a speculative Pyright-shaped handler.
         request_handlers=None,
-        engine=lambda candidate_runtime: EngineMetadata(
-            name="ty",
-            version=_TY_VERSION,
-            executable=candidate_runtime.ty,
-            interpreter=selected_interpreter,
-        ),
+        engine=engine,
         position_encoding=PositionEncoding.UTF16,
         diagnostics_mode="pull",
     )

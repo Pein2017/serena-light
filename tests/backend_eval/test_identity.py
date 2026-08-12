@@ -136,6 +136,21 @@ def test_evaluator_source_digest_changes_with_any_source_byte() -> None:
     assert mutated != first.source_files
 
 
+def test_protocol_source_image_cleanliness_compares_its_reachable_subset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import scripts.backend_eval.identity as identity_module
+
+    scripts_init = identity_module.EVALUATION_OWNER_ROOT / "scripts" / "__init__.py"
+    recorded = (
+        ("models.py", sha256_bytes((EVALUATOR_PACKAGE / "models.py").read_bytes())),
+        ("scripts/__init__.py", sha256_bytes(scripts_init.read_bytes())),
+    )
+    monkeypatch.setattr(identity_module, "source_image_deadline_seconds", lambda: 5400.0)
+
+    assert identity_module._image_matches_current_checkout(recorded)
+
+
 # --- bootstrap environment ------------------------------------------------------------
 
 

@@ -295,6 +295,10 @@ def test_pyrefly_protocol_spec_binds_locked_command_external_config_and_ms_inter
     assert spec.engine(runtime).version == "1.2.0"
     assert spec.engine(runtime).executable == runtime.pyrefly
     assert spec.engine(runtime).interpreter == ms_interpreter
+    with pytest.raises(ValueError, match="exact caller-bound runtime"):
+        spec.build_command(cast(CandidateRuntime, object()))
+    with pytest.raises(ValueError, match="exact caller-bound runtime"):
+        spec.engine(cast(CandidateRuntime, object()))
     params = spec.initialize_params(tmp_path)
     expected_options = {
         "pythonPath": str(ms_interpreter),
@@ -500,26 +504,27 @@ def test_pyrefly_probe_requires_manifest_reserve_before_capture_or_launch(
         )
 
 
-def test_pyrefly_after_manifest_uses_released_reserve_at_collection_boundary(
+def test_pyrefly_after_manifest_keeps_the_same_collection_deadline_and_reserve(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     outcome, _client, _runtime_value, _config, captured = _run_fake(
         tmp_path,
         monkeypatch,
         reserve=2.0,
-        after_protocol_advance=7.5,
+        after_protocol_advance=7.0,
     )
 
     assert cast(Any, outcome).gate_disposition == "pass"
     before_deadline, after_deadline = cast(list[Deadline], captured["manifest_deadlines"])
     assert captured["deadline"] is before_deadline
+    assert after_deadline is before_deadline
     assert before_deadline.reserve == 2.0
-    assert after_deadline.reserve == 0.0
+    assert after_deadline.reserve == 2.0
     assert after_deadline.started == before_deadline.started
     assert after_deadline.seconds == before_deadline.seconds
 
 
-def test_pyrefly_detects_mutation_in_released_reserve(
+def test_pyrefly_detects_mutation_within_the_collection_deadline(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     with pytest.raises(PyreflyWorkspaceMutation) as raised:
@@ -528,14 +533,14 @@ def test_pyrefly_detects_mutation_in_released_reserve(
             monkeypatch,
             manifests=("before", "after"),
             reserve=2.0,
-            after_protocol_advance=7.5,
+            after_protocol_advance=7.0,
         )
 
     assert raised.value.before_manifest == "before"
     assert raised.value.after_manifest == "after"
 
 
-def test_pyrefly_finalization_exhaustion_fails_closed_with_computed_outcome(
+def test_pyrefly_collection_exhaustion_fails_closed_with_computed_outcome(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     with pytest.raises(DeadlineExceeded) as raised:

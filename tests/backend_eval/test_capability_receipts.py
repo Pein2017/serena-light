@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from typing import Any, cast
 
 import pytest
@@ -10,9 +11,13 @@ import pytest
 from scripts.backend_eval.models import (
     CAPABILITY_TASK_UTILITY_DEFERRED,
     EVALUATION_CONTRACT_VERSION,
+    PROTOCOL_PHASE_NEXT_ACTION_INCONCLUSIVE,
     PROTOCOL_PHASE_NEXT_ACTION_PASS,
     PROTOCOL_PHASE_NEXT_ACTION_STOP,
     PROTOCOL_PHASE_RECEIPT_SCHEMA_VERSION,
+    PROTOCOL_WITNESS_SCHEMA_VERSION,
+    AdmissionBinding,
+    AdmissionRootWitness,
     CandidateLock,
     CandidatePackage,
     CandidateProtocolOutcome,
@@ -28,6 +33,7 @@ from scripts.backend_eval.models import (
     RootManifest,
     RuntimeBinding,
     WriteDelta,
+    bind_candidate_protocol_witness,
     canonical_json,
     default_phase_budgets,
 )
@@ -106,6 +112,9 @@ def _candidate_protocol_outcome(candidate: str = "pyright", **overrides: object)
         "lifecycle": _lifecycle_evidence(),
         "gate_disposition": "pass",
         "issues": (),
+        "witness_schema_version": PROTOCOL_WITNESS_SCHEMA_VERSION,
+        "witness_sha256": _SHA_B,
+        "witness_passed": True,
     }
     fields.update(overrides)
     return CandidateProtocolOutcome(**fields)
@@ -116,9 +125,16 @@ def _failed_candidate_protocol_outcome(
     *,
     gate_disposition: str = "fail",
 ) -> CandidateProtocolOutcome:
+    lifecycle = (
+        _lifecycle_evidence(diagnostics_mode="pull")
+        if gate_disposition == "seam_incompatible_pull_only"
+        else _lifecycle_evidence()
+    )
     return _candidate_protocol_outcome(
         candidate,
         gate_disposition=gate_disposition,
+        lifecycle=lifecycle,
+        witness_passed=gate_disposition != "fail",
         issues=(f"{candidate} did not survive the protocol gate",),
     )
 
@@ -218,6 +234,36 @@ def _runtime_binding() -> RuntimeBinding:
     )
 
 
+def _admission_binding(**overrides: object) -> AdmissionBinding:
+    fields: dict[str, object] = {
+        # Parent and child evaluation identities are deliberately different.  Task 8 derives
+        # a new child identity from this parent binding plus the current evaluator/artifact
+        # authority; it must never collapse both phases into the Phase 1 identity.
+        "admission_evaluation_identity": _SHA_B,
+        "admission_run_identity": _SHA_C,
+        "receipt_path": f"/data/evidence/{_SHA_B}/receipts/{_SHA_C}.json",
+        "receipt_sha256": _SHA_D,
+        "artifact_tree_digest": _SHA_E,
+        "candidate_lock_digest": _SHA_A,
+        "runtime_root": f"/data/CoordExp/.codex/runtime/serena-light/backend-eval/{_SHA_A}",
+        "runtime_manifest_sha256": _SHA_D,
+        "production_root": "/data/CoordExp/serena-light",
+        "production_source_revision": _GIT_REV,
+        "production_dependency_lock_digest": _SHA_D,
+        "production_build_identity": _SHA_E,
+        "parent_root_manifests": (
+            AdmissionRootWitness(
+                root="/data/CoordExp/serena-light",
+                kind="git",
+                source_revision=_GIT_REV,
+                manifest_digest=_root_manifest().manifest_digest,
+            ),
+        ),
+    }
+    fields.update(overrides)
+    return AdmissionBinding(**fields)
+
+
 def _path_record(path: str = "src/a.py", **overrides: object) -> PathRecord:
     fields: dict[str, object] = {
         "path": path,
@@ -276,6 +322,7 @@ def _protocol_phase_receipt(*, status: str = "pass", **overrides: object) -> Pro
         "started_at": "2026-08-12T00:00:00Z",
         "ended_at": "2026-08-12T00:10:00Z",
         "budgets": (PhaseBudget("protocol", 90 * 60),),
+        "admission_binding": _admission_binding(),
         "evaluator": _evaluator_identity(),
         "production_identity_before": before,
         "production_identity_after": before,
@@ -392,6 +439,109 @@ def test_candidate_protocol_outcome_rejects_non_raw_providers() -> None:
         _candidate_protocol_outcome(raw_providers=object())
 
 
+def test_candidate_protocol_outcome_rejects_unknown_witness_schema() -> None:
+    with pytest.raises(ValueError, match="witness_schema_version"):
+        _candidate_protocol_outcome(witness_schema_version=999)
+
+
+def test_candidate_protocol_outcome_rejects_malformed_witness_digest() -> None:
+    with pytest.raises(ValueError, match="witness_sha256"):
+        _candidate_protocol_outcome(witness_sha256="not-a-digest")
+
+
+def test_candidate_protocol_outcome_requires_boolean_witness_disposition() -> None:
+    with pytest.raises(ValueError, match="all present or all absent"):
+        _candidate_protocol_outcome(witness_passed=None)
+
+
+def test_candidate_protocol_outcome_allows_unbound_intermediate_witness() -> None:
+    outcome = _candidate_protocol_outcome(
+        witness_schema_version=None,
+        witness_sha256=None,
+        witness_passed=None,
+    )
+
+    assert outcome.witness_schema_version is None
+    assert outcome.witness_sha256 is None
+    assert outcome.witness_passed is None
+
+
+def test_candidate_protocol_outcome_rejects_partial_witness_binding() -> None:
+    match = "all present or all absent"
+    with pytest.raises(ValueError, match=match):
+        _candidate_protocol_outcome(witness_schema_version=None)
+    with pytest.raises(ValueError, match=match):
+        _candidate_protocol_outcome(witness_sha256=None)
+    with pytest.raises(ValueError, match=match):
+        _candidate_protocol_outcome(witness_passed=None)
+
+
+def test_bind_candidate_protocol_witness_returns_new_exactly_bound_outcome() -> None:
+    provisional = _candidate_protocol_outcome(
+        witness_schema_version=None,
+        witness_sha256=None,
+        witness_passed=None,
+    )
+
+    bound = bind_candidate_protocol_witness(
+        provisional,
+        schema_version=PROTOCOL_WITNESS_SCHEMA_VERSION,
+        witness_sha256=_SHA_C,
+        passed=False,
+    )
+
+    assert provisional.witness_schema_version is None
+    assert bound.witness_schema_version == PROTOCOL_WITNESS_SCHEMA_VERSION
+    assert bound.witness_sha256 == _SHA_C
+    assert bound.witness_passed is False
+
+
+def test_bind_candidate_protocol_witness_rejects_rebinding() -> None:
+    with pytest.raises(ValueError, match="already bound"):
+        bind_candidate_protocol_witness(
+            _candidate_protocol_outcome(),
+            schema_version=PROTOCOL_WITNESS_SCHEMA_VERSION,
+            witness_sha256=_SHA_C,
+            passed=True,
+        )
+
+
+def test_candidate_protocol_outcome_configuration_inconclusive_is_not_backend_failure() -> None:
+    outcome = _candidate_protocol_outcome(
+        "ty",
+        gate_disposition="configuration_inconclusive",
+        witness_passed=False,
+        issues=("selected interpreter could not be attributed",),
+    )
+
+    assert outcome.gate_disposition == "configuration_inconclusive"
+    assert not outcome.witness_passed
+
+
+def test_candidate_protocol_outcome_configuration_inconclusive_intermediate_may_be_unbound() -> None:
+    outcome = _candidate_protocol_outcome(
+        "ty",
+        gate_disposition="configuration_inconclusive",
+        issues=("selected interpreter could not be attributed",),
+        witness_schema_version=None,
+        witness_sha256=None,
+        witness_passed=None,
+    )
+
+    assert outcome.gate_disposition == "configuration_inconclusive"
+    assert outcome.witness_passed is None
+
+
+def test_candidate_protocol_outcome_configuration_inconclusive_rejects_passing_witness() -> None:
+    with pytest.raises(ValueError, match="configuration_inconclusive"):
+        _candidate_protocol_outcome(
+            "ty",
+            gate_disposition="configuration_inconclusive",
+            issues=("selected interpreter could not be attributed",),
+            witness_passed=True,
+        )
+
+
 # --- ProtocolPhaseReceipt -------------------------------------------------------
 
 
@@ -417,13 +567,313 @@ def test_protocol_phase_receipt_pass_requires_the_frozen_next_action_literal() -
         _protocol_phase_receipt(status="pass", next_action="do_something_else")
 
 
-def test_protocol_phase_receipt_schema_advances_to_v2() -> None:
-    assert PROTOCOL_PHASE_RECEIPT_SCHEMA_VERSION == 2
+def test_protocol_phase_receipt_schema_advances_to_v3_for_parent_binding() -> None:
+    assert PROTOCOL_PHASE_RECEIPT_SCHEMA_VERSION == 3
+
+
+def test_protocol_phase_receipt_pass_requires_exact_parent_admission_binding() -> None:
+    with pytest.raises(ValueError, match="admission_binding"):
+        _protocol_phase_receipt(status="pass", admission_binding=None)
+
+
+def test_protocol_phase_receipt_pass_rejects_a_survivor_without_passing_witness() -> None:
+    pyright = _candidate_protocol_outcome("pyright", witness_passed=False)
+    with pytest.raises(ValueError, match="witness_passed"):
+        _protocol_phase_receipt(outcomes=_canonical_protocol_outcomes(pyright=pyright))
+
+
+def test_protocol_phase_receipt_pass_rejects_failed_candidate_without_bound_witness() -> None:
+    pyrefly = _failed_candidate_protocol_outcome("pyrefly")
+    pyrefly = replace(
+        pyrefly,
+        witness_schema_version=None,
+        witness_sha256=None,
+        witness_passed=None,
+    )
+
+    with pytest.raises(ValueError, match="pyrefly.*bound witness"):
+        _protocol_phase_receipt(outcomes=_canonical_protocol_outcomes(pyrefly=pyrefly))
+
+
+def test_protocol_phase_receipt_from_dict_rejects_failed_candidate_without_bound_witness() -> None:
+    payload = _protocol_phase_receipt().to_dict()
+    outcomes = cast("list[dict[str, Any]]", payload["outcomes"])
+    pyrefly = next(item for item in outcomes if item["candidate"] == "pyrefly")
+    pyrefly["witness_schema_version"] = None
+    pyrefly["witness_sha256"] = None
+    pyrefly["witness_passed"] = None
+
+    with pytest.raises(ValueError, match="pyrefly.*bound witness"):
+        ProtocolPhaseReceipt.from_dict(payload)
+
+
+def test_protocol_phase_receipt_pass_rejects_all_positive_failed_candidate() -> None:
+    all_positive = _candidate_protocol_outcome(
+        "pyrefly",
+        gate_disposition="fail",
+        issues=("unsubstantiated failure",),
+    )
+
+    with pytest.raises(ValueError, match="pyrefly.*negative"):
+        _protocol_phase_receipt(
+            outcomes=_canonical_protocol_outcomes(pyrefly=all_positive)
+        )
+
+
+def test_protocol_phase_receipt_from_dict_rejects_all_positive_failed_candidate() -> None:
+    payload = _protocol_phase_receipt().to_dict()
+    outcomes = cast("list[dict[str, Any]]", payload["outcomes"])
+    pyrefly = next(item for item in outcomes if item["candidate"] == "pyrefly")
+    pyrefly["witness_passed"] = True
+
+    with pytest.raises(ValueError, match="pyrefly.*negative"):
+        ProtocolPhaseReceipt.from_dict(payload)
+
+
+def test_protocol_phase_receipt_pass_rejects_configuration_inconclusive_candidate() -> None:
+    ty = _candidate_protocol_outcome(
+        "ty",
+        gate_disposition="configuration_inconclusive",
+        witness_passed=False,
+        issues=("configuration attribution is inconclusive",),
+    )
+    with pytest.raises(ValueError, match="configuration_inconclusive"):
+        _protocol_phase_receipt(outcomes=_canonical_protocol_outcomes(ty=ty))
+
+
+@pytest.mark.parametrize("status", ["hold", "incomplete"])
+def test_protocol_phase_receipt_configuration_inconclusive_requires_conservative_action(
+    status: str,
+) -> None:
+    ty = _candidate_protocol_outcome(
+        "ty",
+        gate_disposition="configuration_inconclusive",
+        witness_passed=False,
+        issues=("configuration attribution is inconclusive",),
+    )
+    receipt = _protocol_phase_receipt(
+        status=status,
+        outcomes=_canonical_protocol_outcomes(ty=ty),
+        issues=("candidate configuration evidence is inconclusive",),
+        next_action=PROTOCOL_PHASE_NEXT_ACTION_INCONCLUSIVE,
+    )
+
+    assert receipt.status == status
+    assert receipt.next_action == PROTOCOL_PHASE_NEXT_ACTION_INCONCLUSIVE
+    assert {outcome.candidate for outcome in receipt.outcomes} == {"pyright", "ty", "pyrefly"}
+
+
+def test_protocol_phase_receipt_configuration_inconclusive_rejects_definitive_stop() -> None:
+    ty = _candidate_protocol_outcome(
+        "ty",
+        gate_disposition="configuration_inconclusive",
+        witness_passed=False,
+        issues=("configuration attribution is inconclusive",),
+    )
+    with pytest.raises(ValueError, match="inconclusive_retain_pyright"):
+        _protocol_phase_receipt(
+            status="hold",
+            outcomes=_canonical_protocol_outcomes(ty=ty),
+            issues=("candidate configuration evidence is inconclusive",),
+            next_action=PROTOCOL_PHASE_NEXT_ACTION_STOP,
+        )
+
+
+def test_protocol_phase_receipt_configuration_inconclusive_still_requires_pyright_witness() -> None:
+    pyright = _candidate_protocol_outcome(
+        "pyright",
+        witness_schema_version=None,
+        witness_sha256=None,
+        witness_passed=None,
+    )
+    ty = _candidate_protocol_outcome(
+        "ty",
+        gate_disposition="configuration_inconclusive",
+        issues=("configuration attribution is inconclusive",),
+        witness_schema_version=None,
+        witness_sha256=None,
+        witness_passed=None,
+    )
+
+    with pytest.raises(ValueError, match="pyright.*bound witness"):
+        _protocol_phase_receipt(
+            status="hold",
+            outcomes=_canonical_protocol_outcomes(pyright=pyright, ty=ty),
+            issues=("candidate configuration evidence is inconclusive",),
+            next_action=PROTOCOL_PHASE_NEXT_ACTION_INCONCLUSIVE,
+        )
+
+
+def test_protocol_phase_receipt_configuration_inconclusive_requires_failed_bound_witness() -> None:
+    ty = _candidate_protocol_outcome(
+        "ty",
+        gate_disposition="configuration_inconclusive",
+        issues=("configuration attribution is inconclusive",),
+        witness_schema_version=None,
+        witness_sha256=None,
+        witness_passed=None,
+    )
+
+    with pytest.raises(ValueError, match="ty.*bound witness"):
+        _protocol_phase_receipt(
+            status="hold",
+            outcomes=_canonical_protocol_outcomes(ty=ty),
+            issues=("candidate configuration evidence is inconclusive",),
+            next_action=PROTOCOL_PHASE_NEXT_ACTION_INCONCLUSIVE,
+        )
+
+
+def test_protocol_phase_receipt_inconclusive_action_requires_configuration_evidence() -> None:
+    with pytest.raises(ValueError, match="configuration_inconclusive"):
+        _protocol_phase_receipt(
+            status="hold",
+            issues=("inconclusive",),
+            next_action=PROTOCOL_PHASE_NEXT_ACTION_INCONCLUSIVE,
+        )
+
+
+def test_protocol_phase_receipt_child_identity_is_distinct_from_parent_identity() -> None:
+    receipt = _protocol_phase_receipt()
+
+    assert receipt.admission_binding is not None
+    assert receipt.evaluation_identity != receipt.admission_binding.admission_evaluation_identity
+
+
+def test_protocol_phase_receipt_rejects_child_identity_equal_to_parent_identity() -> None:
+    parent = _admission_binding()
+
+    with pytest.raises(ValueError, match="child evaluation_identity"):
+        _protocol_phase_receipt(
+            evaluation_identity=parent.admission_evaluation_identity,
+            admission_binding=parent,
+        )
+
+
+def test_protocol_phase_receipt_from_dict_rejects_child_identity_equal_to_parent() -> None:
+    payload = _protocol_phase_receipt().to_dict()
+    admission = cast("dict[str, object]", payload["admission_binding"])
+    payload["evaluation_identity"] = admission["admission_evaluation_identity"]
+
+    with pytest.raises(ValueError, match="child evaluation_identity"):
+        ProtocolPhaseReceipt.from_dict(payload)
+
+
+def test_protocol_phase_receipt_pass_binds_candidate_lock_to_parent_admission() -> None:
+    other_root = f"/data/CoordExp/.codex/runtime/serena-light/backend-eval/{_SHA_B}"
+    with pytest.raises(ValueError, match="candidate_lock.*admission_binding"):
+        _protocol_phase_receipt(
+            admission_binding=_admission_binding(
+                candidate_lock_digest=_SHA_B,
+                runtime_root=other_root,
+            )
+        )
+
+
+def test_protocol_phase_receipt_pass_binds_runtime_to_parent_admission() -> None:
+    with pytest.raises(ValueError, match="runtime_binding.*admission_binding"):
+        _protocol_phase_receipt(
+            admission_binding=_admission_binding(runtime_manifest_sha256=_SHA_B)
+        )
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("production_dependency_lock_digest", _SHA_A, "dependency lock"),
+        ("production_build_identity", _SHA_A, "build identity"),
+    ],
+)
+def test_protocol_phase_receipt_pass_binds_production_to_parent_admission(
+    field: str,
+    value: str,
+    message: str,
+) -> None:
+    with pytest.raises(ValueError, match=message):
+        _protocol_phase_receipt(admission_binding=_admission_binding(**{field: value}))
+
+
+def test_protocol_phase_receipt_pass_requires_exact_parent_corpus_roots() -> None:
+    unrelated = _root_manifest(root="/data/unrelated")
+    unrelated_delta = WriteDelta(
+        root=unrelated.root,
+        kind=unrelated.kind,
+        before_manifest_digest=unrelated.manifest_digest,
+        after_manifest_digest=unrelated.manifest_digest,
+        declared=(),
+        unexpected=(),
+        control_changes=(),
+    )
+
+    with pytest.raises(ValueError, match="parent corpus roots"):
+        _protocol_phase_receipt(
+            root_manifests_before=(unrelated,),
+            root_manifests_after=(unrelated,),
+            write_deltas=(unrelated_delta,),
+        )
+
+
+def test_protocol_phase_receipt_pass_requires_exact_parent_manifest_witness() -> None:
+    changed = _root_manifest(inventory_digest=_SHA_B)
+    changed_delta = _write_delta(
+        before_manifest_digest=changed.manifest_digest,
+        after_manifest_digest=changed.manifest_digest,
+    )
+
+    with pytest.raises(ValueError, match="parent manifest witness"):
+        _protocol_phase_receipt(
+            root_manifests_before=(changed,),
+            root_manifests_after=(changed,),
+            write_deltas=(changed_delta,),
+        )
+
+
+def test_protocol_phase_receipt_from_dict_rejects_unrelated_only_corpus() -> None:
+    payload = _protocol_phase_receipt().to_dict()
+    unrelated = _root_manifest(root="/data/unrelated")
+    unrelated_delta = WriteDelta(
+        root=unrelated.root,
+        kind=unrelated.kind,
+        before_manifest_digest=unrelated.manifest_digest,
+        after_manifest_digest=unrelated.manifest_digest,
+        declared=(),
+        unexpected=(),
+        control_changes=(),
+    )
+    replacement = _protocol_phase_receipt(
+        status="incomplete",
+        root_manifests_before=(unrelated,),
+        root_manifests_after=(unrelated,),
+        write_deltas=(unrelated_delta,),
+    ).to_dict()
+    payload["root_manifests_before"] = replacement["root_manifests_before"]
+    payload["root_manifests_after"] = replacement["root_manifests_after"]
+    payload["write_deltas"] = replacement["write_deltas"]
+
+    with pytest.raises(ValueError, match="parent corpus roots"):
+        ProtocolPhaseReceipt.from_dict(payload)
 
 
 def test_protocol_phase_receipt_pass_requires_evaluator() -> None:
     with pytest.raises(ValueError, match="evaluator"):
         _protocol_phase_receipt(status="pass", evaluator=None)
+
+
+@pytest.mark.parametrize("field", ["source_clean", "production_clean"])
+def test_protocol_phase_receipt_pass_requires_clean_evaluator(field: str) -> None:
+    evaluator = _evaluator_identity()
+
+    with pytest.raises(ValueError, match=field):
+        _protocol_phase_receipt(evaluator=replace(evaluator, **{field: False}))
+
+
+@pytest.mark.parametrize("field", ["source_clean", "production_clean"])
+def test_protocol_phase_receipt_from_dict_rejects_dirty_evaluator(field: str) -> None:
+    payload = _protocol_phase_receipt().to_dict()
+    evaluator = cast("dict[str, object]", payload["evaluator"])
+    evaluator[field] = False
+
+    with pytest.raises(ValueError, match=field):
+        ProtocolPhaseReceipt.from_dict(payload)
 
 
 def test_protocol_phase_receipt_pass_requires_runtime_binding() -> None:
@@ -534,6 +984,32 @@ def test_protocol_phase_receipt_seam_incompatible_candidate_is_retained_but_not_
     receipt = _protocol_phase_receipt(outcomes=_canonical_protocol_outcomes(ty=pull_only_ty))
     assert receipt.next_action == PROTOCOL_PHASE_NEXT_ACTION_STOP
     assert receipt.outcomes[-1].gate_disposition == "seam_incompatible_pull_only"
+
+
+def test_protocol_phase_receipt_seam_incompatible_requires_pull_diagnostics_evidence() -> None:
+    unsupported_claim = _candidate_protocol_outcome(
+        "ty",
+        gate_disposition="seam_incompatible_pull_only",
+        issues=("claimed pull-only incompatibility",),
+        lifecycle=_lifecycle_evidence(diagnostics_mode="push"),
+    )
+
+    with pytest.raises(ValueError, match="ty.*pull"):
+        _protocol_phase_receipt(
+            outcomes=_canonical_protocol_outcomes(ty=unsupported_claim)
+        )
+
+
+def test_protocol_phase_receipt_from_dict_rejects_seam_claim_with_push_diagnostics() -> None:
+    payload = _protocol_phase_receipt().to_dict()
+    outcomes = cast("list[dict[str, Any]]", payload["outcomes"])
+    ty = next(item for item in outcomes if item["candidate"] == "ty")
+    ty["gate_disposition"] = "seam_incompatible_pull_only"
+    ty["issues"] = ["claimed pull-only incompatibility"]
+    ty["witness_passed"] = True
+
+    with pytest.raises(ValueError, match="ty.*pull"):
+        ProtocolPhaseReceipt.from_dict(payload)
 
 
 @pytest.mark.parametrize("gate_disposition", ["fail", "seam_incompatible_pull_only"])
@@ -657,6 +1133,7 @@ def test_protocol_phase_receipt_preserves_explicit_ty_negative_implementation_ev
         raw_providers=raw_providers,
         capabilities=capabilities,
         gate_disposition="fail",
+        witness_passed=False,
         issues=("ty failed a separate protocol gate",),
     )
     receipt = _protocol_phase_receipt(outcomes=_canonical_protocol_outcomes(ty=ty))
@@ -915,6 +1392,72 @@ def test_protocol_phase_receipt_rejects_unknown_schema() -> None:
 def test_protocol_phase_receipt_to_dict_from_dict_round_trips() -> None:
     receipt = _protocol_phase_receipt()
     assert ProtocolPhaseReceipt.from_dict(receipt.to_dict()) == receipt
+
+
+def test_protocol_phase_receipt_from_dict_round_trips_unbound_intermediate_witness() -> None:
+    provisional = _candidate_protocol_outcome(
+        witness_schema_version=None,
+        witness_sha256=None,
+        witness_passed=None,
+    )
+    receipt = _protocol_phase_receipt(
+        status="incomplete",
+        evaluator=None,
+        runtime_binding=None,
+        outcomes=(provisional,),
+    )
+
+    assert ProtocolPhaseReceipt.from_dict(receipt.to_dict()) == receipt
+
+
+def test_protocol_phase_receipt_from_dict_rejects_partial_witness_binding() -> None:
+    payload = _protocol_phase_receipt().to_dict()
+    outcomes = cast("list[dict[str, Any]]", payload["outcomes"])
+    outcomes[0]["witness_sha256"] = None
+
+    with pytest.raises(ValueError, match="all present or all absent"):
+        ProtocolPhaseReceipt.from_dict(payload)
+
+
+def test_protocol_phase_receipt_from_dict_rejects_missing_witness_field() -> None:
+    payload = _protocol_phase_receipt().to_dict()
+    outcomes = cast("list[dict[str, Any]]", payload["outcomes"])
+    del outcomes[0]["witness_sha256"]
+
+    with pytest.raises(ValueError, match="missing required fields"):
+        ProtocolPhaseReceipt.from_dict(payload)
+
+
+def test_protocol_phase_receipt_from_dict_rejects_failed_survivor_witness() -> None:
+    payload = _protocol_phase_receipt().to_dict()
+    outcomes = cast("list[dict[str, Any]]", payload["outcomes"])
+    pyright = next(item for item in outcomes if item["candidate"] == "pyright")
+    pyright["witness_passed"] = False
+
+    with pytest.raises(ValueError, match="witness_passed"):
+        ProtocolPhaseReceipt.from_dict(payload)
+
+
+def test_protocol_phase_receipt_from_dict_rejects_inconclusive_candidate_as_pass() -> None:
+    ty = _candidate_protocol_outcome(
+        "ty",
+        gate_disposition="configuration_inconclusive",
+        issues=("configuration attribution is inconclusive",),
+        witness_passed=False,
+    )
+    receipt = _protocol_phase_receipt(
+        status="hold",
+        outcomes=_canonical_protocol_outcomes(ty=ty),
+        issues=("candidate configuration evidence is inconclusive",),
+        next_action=PROTOCOL_PHASE_NEXT_ACTION_INCONCLUSIVE,
+    )
+    payload = receipt.to_dict()
+    payload["status"] = "pass"
+    payload["issues"] = []
+    payload["next_action"] = PROTOCOL_PHASE_NEXT_ACTION_STOP
+
+    with pytest.raises(ValueError, match="configuration_inconclusive"):
+        ProtocolPhaseReceipt.from_dict(payload)
 
 
 def test_protocol_phase_receipt_canonical_bytes_round_trip_without_drift() -> None:
