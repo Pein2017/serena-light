@@ -32,7 +32,7 @@ user Git configuration.
 ```bash
 cd /data/CoordExp/.worktrees/serena-light-backend-eval-final-fix
 backend_eval_freeze_at="2026-08-12T12:29:00Z"
-/data/CoordExp/.worktrees/serena-light-backend-eval-final-fix/.venv/bin/python -I -S -B scripts/backend_eval_bootstrap.py \
+/data/CoordExp/.worktrees/serena-light-backend-eval/.venv/bin/python -I -S -B scripts/backend_eval_bootstrap.py \
   --repo-root /data/CoordExp/serena-light \
   --artifact-root /data/CoordExp/serena-light/.admission-artifacts/backend-eval \
   --runtime-base /data/CoordExp/.codex/runtime/serena-light/backend-eval \
@@ -45,6 +45,15 @@ The command ran once from the clean committed `2a06e167` checkout. It exited `0`
 empty and stdout was the compact terminal result. The receipt window is
 `started_at=2026-08-12T12:29:00Z` through `ended_at=2026-08-12T12:29:17Z`, 17 seconds of the
 1800-second admission ceiling.
+
+**Receipt-bound CLI-host deviation.** The command used the sibling evaluation worktree's
+configured interpreter path
+`/data/CoordExp/.worktrees/serena-light-backend-eval/.venv/bin/python`, not a `.venv` below
+the `final-fix` checkout. The receipt binds that exact path, its realpath
+`/root/miniconda3/envs/ms/bin/python3.12`, version `3.12.11`, and SHA-256
+`068d88ca469ae96121a1a220eb9e0ac3e1a6400b193e3b9cc7c14f54f9ed28e4` inside the evaluator
+identity. The working directory and bootstrap script remained the clean `final-fix` checkout,
+and the semantic evaluator executed from the sealed image recorded below.
 
 | Field | Value |
 | --- | --- |
