@@ -23,7 +23,15 @@ import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from types import MappingProxyType
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
+
+if TYPE_CHECKING:
+    # Deferred to a function-local import at every runtime use site: the admission CLI's
+    # closure test (test_source_binding.py) asserts its non-stdlib module set is exactly
+    # {"scripts", "serena_light"}, and a module-level import here would pull `psutil` (via
+    # serena_light.lsp.adapter -> serena_light.processes) into that closure even though
+    # admission.py never constructs a Phase 2 protocol record.
+    from serena_light.lsp.adapter import RawLspProviders
 
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _GIT_REVISION_RE = re.compile(r"^[0-9a-f]{40}$|^[0-9a-f]{64}$")
@@ -1544,6 +1552,564 @@ _ADMISSION_RECEIPT_FIELDS = frozenset(
         "root_manifests_before",
         "root_manifests_after",
         "write_deltas",
+        "issues",
+        "artifact_tree_digest",
+        "next_action",
+    }
+)
+
+
+# --- Protocol-phase evidence (Phase 2 Task 1) ------------------------------------
+#
+# CapabilityEvidence, LifecycleEvidence, and CandidateProtocolOutcome are leaf records
+# nested inside ProtocolPhaseReceipt, following PathRecord/WriteDelta's precedent: only
+# private module-level (de)serializers, no public to_dict/from_dict. ProtocolPhaseReceipt
+# itself mirrors AdmissionReceipt's public to_dict/from_dict/closed-field/canonical-order
+# discipline exactly, because it is this phase's published, top-level receipt.
+
+PROTOCOL_PHASE_RECEIPT_SCHEMA_VERSION = 1
+
+# Decision P2-3: task_utility is a fixed disposition literal, never fabricated Phase 2 data.
+CAPABILITY_TASK_UTILITY_DEFERRED = "deferred_to_feature_phase"
+
+_CANDIDATE_PROTOCOL_NAMES = frozenset({"pyright", "ty", "pyrefly"})
+_GATE_DISPOSITIONS = frozenset({"pass", "fail", "seam_incompatible_pull_only"})
+_DIAGNOSTICS_MODES = frozenset({"push", "pull"})
+
+
+def _validate_diagnostics_mode(value: object, label: str) -> str:
+    text = _validate_non_empty_str(value, label)
+    if text not in _DIAGNOSTICS_MODES:
+        raise ValueError(f"{label} must be one of {sorted(_DIAGNOSTICS_MODES)}")
+    return text
+
+
+def _validate_bool(value: object, label: str) -> bool:
+    if not isinstance(value, bool):
+        raise ValueError(f"{label} must be a boolean")
+    return value
+
+
+def _validate_optional_bool(value: object, label: str) -> bool | None:
+    if value is None:
+        return None
+    return _validate_bool(value, label)
+
+
+def _validate_non_negative_number(value: object, label: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        raise ValueError(f"{label} must be a number")
+    if value < 0:
+        raise ValueError(f"{label} must be >= 0")
+    return float(value)
+
+
+def _optional_bool(value: object, label: str) -> bool | None:
+    if value is None:
+        return None
+    return _expect_bool(value, label)
+
+
+def _expect_number(value: object, label: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        raise ValueError(f"{label} must be a number")
+    return float(value)
+
+
+@dataclass(frozen=True, slots=True)
+class CapabilityEvidence:
+    """One capability's advertisement/accept/normalize/utility evidence.
+
+    ``task_utility`` is fixed to :data:`CAPABILITY_TASK_UTILITY_DEFERRED` on every Phase 2
+    record (Decision P2-3): real-task utility is Phase 4's decision-owning evidence, and
+    Phase 2 never fabricates it.
+    """
+
+    name: str
+    advertised: bool
+    accepted: bool | None
+    normalized_valid: bool | None
+    task_utility: str
+    notes: str
+
+    def __post_init__(self) -> None:
+        _validate_non_empty_str(self.name, "CapabilityEvidence.name")
+        _validate_bool(self.advertised, "CapabilityEvidence.advertised")
+        _validate_optional_bool(self.accepted, "CapabilityEvidence.accepted")
+        _validate_optional_bool(self.normalized_valid, "CapabilityEvidence.normalized_valid")
+        if self.task_utility != CAPABILITY_TASK_UTILITY_DEFERRED:
+            raise ValueError(
+                f"CapabilityEvidence.task_utility must be {CAPABILITY_TASK_UTILITY_DEFERRED!r}, "
+                f"got {self.task_utility!r}"
+            )
+        if not isinstance(self.notes, str):
+            raise ValueError("CapabilityEvidence.notes must be a string")
+
+
+_CAPABILITY_EVIDENCE_FIELDS = frozenset(
+    {"name", "advertised", "accepted", "normalized_valid", "task_utility", "notes"}
+)
+
+
+def _capability_evidence_to_dict(evidence: CapabilityEvidence) -> dict[str, object]:
+    return {
+        "name": evidence.name,
+        "advertised": evidence.advertised,
+        "accepted": evidence.accepted,
+        "normalized_valid": evidence.normalized_valid,
+        "task_utility": evidence.task_utility,
+        "notes": evidence.notes,
+    }
+
+
+def _capability_evidence_from_dict(value: object) -> CapabilityEvidence:
+    mapping = _expect_mapping(value, "CapabilityEvidence")
+    _closed_fields(mapping, _CAPABILITY_EVIDENCE_FIELDS, "CapabilityEvidence")
+    return CapabilityEvidence(
+        name=_expect_str(mapping["name"], "CapabilityEvidence.name"),
+        advertised=_expect_bool(mapping["advertised"], "CapabilityEvidence.advertised"),
+        accepted=_optional_bool(mapping["accepted"], "CapabilityEvidence.accepted"),
+        normalized_valid=_optional_bool(mapping["normalized_valid"], "CapabilityEvidence.normalized_valid"),
+        task_utility=_expect_str(mapping["task_utility"], "CapabilityEvidence.task_utility"),
+        notes=_expect_str(mapping["notes"], "CapabilityEvidence.notes"),
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class LifecycleEvidence:
+    cold_readiness_seconds: float
+    diagnostics_mode: str
+    content_modified_count: int
+    request_cancelled_count: int
+    retry_seam_disabled: bool
+    bounded_timeout_observed: bool
+    crash_handled: bool
+    shutdown_clean: bool
+    cleanup_clean: bool
+    proxy_rejected: bool
+    minimal_environment_verified: bool
+    redaction_verified: bool
+
+    def __post_init__(self) -> None:
+        _validate_non_negative_number(self.cold_readiness_seconds, "LifecycleEvidence.cold_readiness_seconds")
+        _validate_diagnostics_mode(self.diagnostics_mode, "LifecycleEvidence.diagnostics_mode")
+        _validate_int(self.content_modified_count, "LifecycleEvidence.content_modified_count", minimum=0)
+        _validate_int(self.request_cancelled_count, "LifecycleEvidence.request_cancelled_count", minimum=0)
+        for name in (
+            "retry_seam_disabled",
+            "bounded_timeout_observed",
+            "crash_handled",
+            "shutdown_clean",
+            "cleanup_clean",
+            "proxy_rejected",
+            "minimal_environment_verified",
+            "redaction_verified",
+        ):
+            _validate_bool(getattr(self, name), f"LifecycleEvidence.{name}")
+
+
+_LIFECYCLE_EVIDENCE_FIELDS = frozenset(
+    {
+        "cold_readiness_seconds",
+        "diagnostics_mode",
+        "content_modified_count",
+        "request_cancelled_count",
+        "retry_seam_disabled",
+        "bounded_timeout_observed",
+        "crash_handled",
+        "shutdown_clean",
+        "cleanup_clean",
+        "proxy_rejected",
+        "minimal_environment_verified",
+        "redaction_verified",
+    }
+)
+
+
+def _lifecycle_evidence_to_dict(evidence: LifecycleEvidence) -> dict[str, object]:
+    return {
+        "cold_readiness_seconds": evidence.cold_readiness_seconds,
+        "diagnostics_mode": evidence.diagnostics_mode,
+        "content_modified_count": evidence.content_modified_count,
+        "request_cancelled_count": evidence.request_cancelled_count,
+        "retry_seam_disabled": evidence.retry_seam_disabled,
+        "bounded_timeout_observed": evidence.bounded_timeout_observed,
+        "crash_handled": evidence.crash_handled,
+        "shutdown_clean": evidence.shutdown_clean,
+        "cleanup_clean": evidence.cleanup_clean,
+        "proxy_rejected": evidence.proxy_rejected,
+        "minimal_environment_verified": evidence.minimal_environment_verified,
+        "redaction_verified": evidence.redaction_verified,
+    }
+
+
+def _lifecycle_evidence_from_dict(value: object) -> LifecycleEvidence:
+    mapping = _expect_mapping(value, "LifecycleEvidence")
+    _closed_fields(mapping, _LIFECYCLE_EVIDENCE_FIELDS, "LifecycleEvidence")
+    return LifecycleEvidence(
+        cold_readiness_seconds=_expect_number(
+            mapping["cold_readiness_seconds"], "LifecycleEvidence.cold_readiness_seconds"
+        ),
+        diagnostics_mode=_expect_str(mapping["diagnostics_mode"], "LifecycleEvidence.diagnostics_mode"),
+        content_modified_count=_expect_int(
+            mapping["content_modified_count"], "LifecycleEvidence.content_modified_count"
+        ),
+        request_cancelled_count=_expect_int(
+            mapping["request_cancelled_count"], "LifecycleEvidence.request_cancelled_count"
+        ),
+        retry_seam_disabled=_expect_bool(mapping["retry_seam_disabled"], "LifecycleEvidence.retry_seam_disabled"),
+        bounded_timeout_observed=_expect_bool(
+            mapping["bounded_timeout_observed"], "LifecycleEvidence.bounded_timeout_observed"
+        ),
+        crash_handled=_expect_bool(mapping["crash_handled"], "LifecycleEvidence.crash_handled"),
+        shutdown_clean=_expect_bool(mapping["shutdown_clean"], "LifecycleEvidence.shutdown_clean"),
+        cleanup_clean=_expect_bool(mapping["cleanup_clean"], "LifecycleEvidence.cleanup_clean"),
+        proxy_rejected=_expect_bool(mapping["proxy_rejected"], "LifecycleEvidence.proxy_rejected"),
+        minimal_environment_verified=_expect_bool(
+            mapping["minimal_environment_verified"], "LifecycleEvidence.minimal_environment_verified"
+        ),
+        redaction_verified=_expect_bool(mapping["redaction_verified"], "LifecycleEvidence.redaction_verified"),
+    )
+
+
+_RAW_LSP_PROVIDERS_FIELDS = frozenset(
+    {"definition", "declaration", "implementation", "references", "document_symbols", "workspace_symbols"}
+)
+
+
+def _raw_lsp_providers_to_dict(providers: RawLspProviders) -> dict[str, object]:
+    return {
+        "definition": providers.definition,
+        "declaration": providers.declaration,
+        "implementation": providers.implementation,
+        "references": providers.references,
+        "document_symbols": providers.document_symbols,
+        "workspace_symbols": providers.workspace_symbols,
+    }
+
+
+def _raw_lsp_providers_from_dict(value: object) -> RawLspProviders:
+    from serena_light.lsp.adapter import RawLspProviders  # see module-level TYPE_CHECKING note
+
+    mapping = _expect_mapping(value, "RawLspProviders")
+    _closed_fields(mapping, _RAW_LSP_PROVIDERS_FIELDS, "RawLspProviders")
+    return RawLspProviders(
+        definition=_expect_bool(mapping["definition"], "RawLspProviders.definition"),
+        declaration=_expect_bool(mapping["declaration"], "RawLspProviders.declaration"),
+        implementation=_expect_bool(mapping["implementation"], "RawLspProviders.implementation"),
+        references=_expect_bool(mapping["references"], "RawLspProviders.references"),
+        document_symbols=_expect_bool(mapping["document_symbols"], "RawLspProviders.document_symbols"),
+        workspace_symbols=_expect_bool(mapping["workspace_symbols"], "RawLspProviders.workspace_symbols"),
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class CandidateProtocolOutcome:
+    candidate: str
+    engine_version: str
+    raw_providers: RawLspProviders
+    capabilities: tuple[CapabilityEvidence, ...]
+    lifecycle: LifecycleEvidence
+    gate_disposition: str
+    issues: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        from serena_light.lsp.adapter import RawLspProviders  # see module-level TYPE_CHECKING note
+
+        if self.candidate not in _CANDIDATE_PROTOCOL_NAMES:
+            raise ValueError(f"CandidateProtocolOutcome.candidate must be one of {sorted(_CANDIDATE_PROTOCOL_NAMES)}")
+        _validate_non_empty_str(self.engine_version, "CandidateProtocolOutcome.engine_version")
+        if not isinstance(self.raw_providers, RawLspProviders):
+            raise ValueError("CandidateProtocolOutcome.raw_providers must be a RawLspProviders record")
+        capabilities = _validate_tuple(self.capabilities, "CandidateProtocolOutcome.capabilities")
+        _validate_sorted_unique(
+            [capability.name for capability in capabilities], "CandidateProtocolOutcome.capabilities"
+        )
+        if not isinstance(self.lifecycle, LifecycleEvidence):
+            raise ValueError("CandidateProtocolOutcome.lifecycle must be a LifecycleEvidence record")
+        if self.gate_disposition not in _GATE_DISPOSITIONS:
+            raise ValueError(f"CandidateProtocolOutcome.gate_disposition must be one of {sorted(_GATE_DISPOSITIONS)}")
+        _validate_sorted_unique(
+            _validate_tuple(self.issues, "CandidateProtocolOutcome.issues"), "CandidateProtocolOutcome.issues"
+        )
+
+
+_CANDIDATE_PROTOCOL_OUTCOME_FIELDS = frozenset(
+    {"candidate", "engine_version", "raw_providers", "capabilities", "lifecycle", "gate_disposition", "issues"}
+)
+
+
+def _candidate_protocol_outcome_to_dict(outcome: CandidateProtocolOutcome) -> dict[str, object]:
+    return {
+        "candidate": outcome.candidate,
+        "engine_version": outcome.engine_version,
+        "raw_providers": _raw_lsp_providers_to_dict(outcome.raw_providers),
+        "capabilities": [_capability_evidence_to_dict(capability) for capability in outcome.capabilities],
+        "lifecycle": _lifecycle_evidence_to_dict(outcome.lifecycle),
+        "gate_disposition": outcome.gate_disposition,
+        "issues": list(outcome.issues),
+    }
+
+
+def _candidate_protocol_outcome_from_dict(value: object) -> CandidateProtocolOutcome:
+    mapping = _expect_mapping(value, "CandidateProtocolOutcome")
+    _closed_fields(mapping, _CANDIDATE_PROTOCOL_OUTCOME_FIELDS, "CandidateProtocolOutcome")
+    return CandidateProtocolOutcome(
+        candidate=_expect_str(mapping["candidate"], "CandidateProtocolOutcome.candidate"),
+        engine_version=_expect_str(mapping["engine_version"], "CandidateProtocolOutcome.engine_version"),
+        raw_providers=_raw_lsp_providers_from_dict(mapping["raw_providers"]),
+        capabilities=tuple(
+            _capability_evidence_from_dict(item)
+            for item in _expect_list(mapping["capabilities"], "CandidateProtocolOutcome.capabilities")
+        ),
+        lifecycle=_lifecycle_evidence_from_dict(mapping["lifecycle"]),
+        gate_disposition=_expect_str(mapping["gate_disposition"], "CandidateProtocolOutcome.gate_disposition"),
+        issues=tuple(
+            _expect_str(item, "CandidateProtocolOutcome.issues item")
+            for item in _expect_list(mapping["issues"], "CandidateProtocolOutcome.issues")
+        ),
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class ProtocolPhaseReceipt:
+    """The Phase 2 protocol-plane receipt, mirroring :class:`AdmissionReceipt` exactly.
+
+    Unlike :class:`AdmissionReceipt`, this receipt carries one :class:`CandidateProtocolOutcome`
+    per candidate instead of the fixed environment/service-config evidence, and a ``pass``
+    receipt requires only the frozen ``protocol`` budget rather than the complete Phase 1
+    budget set, because this receipt binds one phase, not the whole evaluation.
+    """
+
+    schema_version: int
+    evaluation_contract_version: str
+    evaluation_identity: str
+    run_identity: str
+    status: str
+    started_at: str
+    ended_at: str
+    budgets: tuple[PhaseBudget, ...]
+    evaluator: EvaluatorIdentity | None
+    production_identity_before: ProductionIdentity
+    production_identity_after: ProductionIdentity
+    candidate_lock: CandidateLock
+    runtime_binding: RuntimeBinding | None
+    root_manifests_before: tuple[RootManifest, ...]
+    root_manifests_after: tuple[RootManifest, ...]
+    write_deltas: tuple[WriteDelta, ...]
+    outcomes: tuple[CandidateProtocolOutcome, ...]
+    issues: tuple[str, ...]
+    artifact_tree_digest: str
+    next_action: str
+
+    def __post_init__(self) -> None:
+        if self.schema_version != PROTOCOL_PHASE_RECEIPT_SCHEMA_VERSION:
+            raise ValueError(
+                f"ProtocolPhaseReceipt schema_version must be {PROTOCOL_PHASE_RECEIPT_SCHEMA_VERSION}, "
+                f"got {self.schema_version!r}"
+            )
+        if self.evaluation_contract_version != EVALUATION_CONTRACT_VERSION:
+            raise ValueError(
+                f"ProtocolPhaseReceipt evaluation_contract_version must be {EVALUATION_CONTRACT_VERSION!r}, "
+                f"got {self.evaluation_contract_version!r}"
+            )
+        _validate_sha256(self.evaluation_identity, "ProtocolPhaseReceipt.evaluation_identity")
+        _validate_sha256(self.run_identity, "ProtocolPhaseReceipt.run_identity")
+        if self.status not in _ADMISSION_STATUSES:
+            raise ValueError(f"ProtocolPhaseReceipt.status must be one of {sorted(_ADMISSION_STATUSES)}")
+        _validate_non_empty_str(self.started_at, "ProtocolPhaseReceipt.started_at")
+        _validate_non_empty_str(self.ended_at, "ProtocolPhaseReceipt.ended_at")
+        budgets = _validate_tuple(self.budgets, "ProtocolPhaseReceipt.budgets")
+        _validate_sorted_unique([budget.name for budget in budgets], "ProtocolPhaseReceipt.budgets")
+        root_manifests_before = _validate_tuple(
+            self.root_manifests_before, "ProtocolPhaseReceipt.root_manifests_before"
+        )
+        _validate_sorted_unique(
+            [manifest.root for manifest in root_manifests_before], "ProtocolPhaseReceipt.root_manifests_before"
+        )
+        root_manifests_after = _validate_tuple(self.root_manifests_after, "ProtocolPhaseReceipt.root_manifests_after")
+        _validate_sorted_unique(
+            [manifest.root for manifest in root_manifests_after], "ProtocolPhaseReceipt.root_manifests_after"
+        )
+        write_deltas = _validate_tuple(self.write_deltas, "ProtocolPhaseReceipt.write_deltas")
+        _validate_sorted_unique([delta.root for delta in write_deltas], "ProtocolPhaseReceipt.write_deltas")
+        outcomes = _validate_tuple(self.outcomes, "ProtocolPhaseReceipt.outcomes")
+        _validate_sorted_unique([outcome.candidate for outcome in outcomes], "ProtocolPhaseReceipt.outcomes")
+        issues = _validate_tuple(self.issues, "ProtocolPhaseReceipt.issues")
+        _validate_sorted_unique(issues, "ProtocolPhaseReceipt.issues")
+        _validate_sha256(self.artifact_tree_digest, "ProtocolPhaseReceipt.artifact_tree_digest")
+        _validate_non_empty_str(self.next_action, "ProtocolPhaseReceipt.next_action")
+        if self.status == "pass":
+            self._require_canonical_pass(budgets, root_manifests_before, root_manifests_after, write_deltas, outcomes)
+
+    def _require_canonical_pass(
+        self,
+        budgets: tuple[PhaseBudget, ...],
+        root_manifests_before: tuple[RootManifest, ...],
+        root_manifests_after: tuple[RootManifest, ...],
+        write_deltas: tuple[WriteDelta, ...],
+        outcomes: tuple[CandidateProtocolOutcome, ...],
+    ) -> None:
+        """A ``pass`` receipt must carry a trustworthy, zero-mutation protocol run."""
+
+        if self.issues:
+            raise ValueError("ProtocolPhaseReceipt status is pass but it carries issues")
+        started = _validate_utc_timestamp(self.started_at, "ProtocolPhaseReceipt.started_at")
+        ended = _validate_utc_timestamp(self.ended_at, "ProtocolPhaseReceipt.ended_at")
+        if ended < started:
+            raise ValueError("ProtocolPhaseReceipt.ended_at must not precede started_at")
+        protocol_budget = next((budget for budget in budgets if budget.name == "protocol"), None)
+        frozen_protocol_seconds = DEFAULT_PHASE_BUDGETS["protocol"].seconds
+        if protocol_budget is None or protocol_budget.seconds != frozen_protocol_seconds:
+            raise ValueError(
+                "ProtocolPhaseReceipt status is pass but its 'protocol' budget is not the frozen "
+                f"{frozen_protocol_seconds} seconds"
+            )
+        if self.evaluator is None:
+            raise ValueError("ProtocolPhaseReceipt status is pass but no evaluator identity is bound")
+        if self.runtime_binding is None:
+            raise ValueError("ProtocolPhaseReceipt status is pass but no runtime_binding is recorded")
+        if self.runtime_binding.lock_digest != self.candidate_lock.digest:
+            raise ValueError("ProtocolPhaseReceipt status is pass but runtime_binding names another candidate lock")
+        if self.production_identity_before != self.production_identity_after:
+            raise ValueError(
+                "ProtocolPhaseReceipt status is pass but production identity changed between before and after"
+            )
+        if not outcomes:
+            raise ValueError("ProtocolPhaseReceipt status is pass but it carries no candidate outcome")
+        before_by_root = {manifest.root: manifest for manifest in root_manifests_before}
+        after_by_root = {manifest.root: manifest for manifest in root_manifests_after}
+        delta_roots = {delta.root for delta in write_deltas}
+        if not before_by_root:
+            raise ValueError("ProtocolPhaseReceipt status is pass but it carries no root manifest")
+        if set(before_by_root) != delta_roots or set(after_by_root) != delta_roots:
+            raise ValueError(
+                "ProtocolPhaseReceipt status is pass but root manifest roots do not match write_deltas roots"
+            )
+        for delta in write_deltas:
+            before_manifest = before_by_root[delta.root]
+            after_manifest = after_by_root[delta.root]
+            if delta.before_manifest_digest != before_manifest.manifest_digest:
+                raise ValueError(
+                    f"ProtocolPhaseReceipt status is pass but write_deltas[{delta.root}]."
+                    "before_manifest_digest does not match its root_manifests_before entry"
+                )
+            if delta.after_manifest_digest != after_manifest.manifest_digest:
+                raise ValueError(
+                    f"ProtocolPhaseReceipt status is pass but write_deltas[{delta.root}]."
+                    "after_manifest_digest does not match its root_manifests_after entry"
+                )
+            if delta.unexpected:
+                raise ValueError(
+                    f"ProtocolPhaseReceipt status is pass but write_deltas[{delta.root}] has unexpected paths"
+                )
+            if delta.control_changes:
+                raise ValueError(
+                    f"ProtocolPhaseReceipt status is pass but write_deltas[{delta.root}] has control_changes"
+                )
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "schema_version": self.schema_version,
+            "evaluation_contract_version": self.evaluation_contract_version,
+            "evaluation_identity": self.evaluation_identity,
+            "run_identity": self.run_identity,
+            "status": self.status,
+            "started_at": self.started_at,
+            "ended_at": self.ended_at,
+            "budgets": [_phase_budget_to_dict(budget) for budget in self.budgets],
+            "evaluator": None if self.evaluator is None else _evaluator_identity_to_dict(self.evaluator),
+            "production_identity_before": _production_identity_to_dict(self.production_identity_before),
+            "production_identity_after": _production_identity_to_dict(self.production_identity_after),
+            "candidate_lock": _candidate_lock_to_dict(self.candidate_lock),
+            "runtime_binding": (
+                None if self.runtime_binding is None else _runtime_binding_to_dict(self.runtime_binding)
+            ),
+            "root_manifests_before": [_root_manifest_to_dict(manifest) for manifest in self.root_manifests_before],
+            "root_manifests_after": [_root_manifest_to_dict(manifest) for manifest in self.root_manifests_after],
+            "write_deltas": [_write_delta_to_dict(delta) for delta in self.write_deltas],
+            "outcomes": [_candidate_protocol_outcome_to_dict(outcome) for outcome in self.outcomes],
+            "issues": list(self.issues),
+            "artifact_tree_digest": self.artifact_tree_digest,
+            "next_action": self.next_action,
+        }
+
+    @staticmethod
+    def from_dict(value: Mapping[str, object]) -> ProtocolPhaseReceipt:
+        schema_version = value.get("schema_version")
+        if schema_version != PROTOCOL_PHASE_RECEIPT_SCHEMA_VERSION:
+            raise ValueError(
+                f"ProtocolPhaseReceipt schema_version must be {PROTOCOL_PHASE_RECEIPT_SCHEMA_VERSION}, "
+                f"got {schema_version!r}"
+            )
+        _closed_fields(value, _PROTOCOL_PHASE_RECEIPT_FIELDS, "ProtocolPhaseReceipt")
+        evaluator = value["evaluator"]
+        binding = value["runtime_binding"]
+        return ProtocolPhaseReceipt(
+            schema_version=_expect_int(value["schema_version"], "ProtocolPhaseReceipt.schema_version"),
+            evaluation_contract_version=_expect_str(
+                value["evaluation_contract_version"], "ProtocolPhaseReceipt.evaluation_contract_version"
+            ),
+            evaluation_identity=_expect_str(value["evaluation_identity"], "ProtocolPhaseReceipt.evaluation_identity"),
+            run_identity=_expect_str(value["run_identity"], "ProtocolPhaseReceipt.run_identity"),
+            status=_expect_str(value["status"], "ProtocolPhaseReceipt.status"),
+            started_at=_expect_str(value["started_at"], "ProtocolPhaseReceipt.started_at"),
+            ended_at=_expect_str(value["ended_at"], "ProtocolPhaseReceipt.ended_at"),
+            budgets=tuple(
+                _phase_budget_from_dict(item)
+                for item in _expect_list(value["budgets"], "ProtocolPhaseReceipt.budgets")
+            ),
+            evaluator=None if evaluator is None else _evaluator_identity_from_dict(evaluator),
+            production_identity_before=_production_identity_from_dict(value["production_identity_before"]),
+            production_identity_after=_production_identity_from_dict(value["production_identity_after"]),
+            candidate_lock=_candidate_lock_from_dict(value["candidate_lock"]),
+            runtime_binding=None if binding is None else _runtime_binding_from_dict(binding),
+            root_manifests_before=tuple(
+                _root_manifest_from_dict(item)
+                for item in _expect_list(value["root_manifests_before"], "ProtocolPhaseReceipt.root_manifests_before")
+            ),
+            root_manifests_after=tuple(
+                _root_manifest_from_dict(item)
+                for item in _expect_list(value["root_manifests_after"], "ProtocolPhaseReceipt.root_manifests_after")
+            ),
+            write_deltas=tuple(
+                _write_delta_from_dict(item)
+                for item in _expect_list(value["write_deltas"], "ProtocolPhaseReceipt.write_deltas")
+            ),
+            outcomes=tuple(
+                _candidate_protocol_outcome_from_dict(item)
+                for item in _expect_list(value["outcomes"], "ProtocolPhaseReceipt.outcomes")
+            ),
+            issues=tuple(
+                _expect_str(item, "ProtocolPhaseReceipt.issues item")
+                for item in _expect_list(value["issues"], "ProtocolPhaseReceipt.issues")
+            ),
+            artifact_tree_digest=_expect_str(
+                value["artifact_tree_digest"], "ProtocolPhaseReceipt.artifact_tree_digest"
+            ),
+            next_action=_expect_str(value["next_action"], "ProtocolPhaseReceipt.next_action"),
+        )
+
+
+_PROTOCOL_PHASE_RECEIPT_FIELDS = frozenset(
+    {
+        "schema_version",
+        "evaluation_contract_version",
+        "evaluation_identity",
+        "run_identity",
+        "status",
+        "started_at",
+        "ended_at",
+        "budgets",
+        "evaluator",
+        "production_identity_before",
+        "production_identity_after",
+        "candidate_lock",
+        "runtime_binding",
+        "root_manifests_before",
+        "root_manifests_after",
+        "write_deltas",
+        "outcomes",
         "issues",
         "artifact_tree_digest",
         "next_action",
