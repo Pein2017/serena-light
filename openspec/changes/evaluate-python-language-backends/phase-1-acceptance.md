@@ -1,12 +1,141 @@
 # Phase 1 acceptance: admission gate
 
-**Admission gate disposition: no admitted run. The last PASS -- run `59a38137…d73f` at HEAD
-`82651d0`, recorded at commit `49d557f` -- was REJECTED by the final review and is retained
-below as superseded evidence, never as an admitted PASS.** Two independent exact-target
-reviewers (Sol-xhigh and Opus-max) returned HOLD on it, for two defect families that no
-re-review of that receipt could clear. Both are repaired at this HEAD, and no admission run has
-been performed against the repaired evaluator: the next admitting run is the lead's one-shot
-step after review, and Task 1.8 stays unchecked until then.
+**Admission gate disposition: one current admitting receipt exists, but Task 1.8 remains on
+HOLD and unchecked.** The clean final evaluator target is
+`2a06e1671c8f66cbe1bd4ece9d79e428e57b8896`. Scoped review passed the sealed evaluator
+transport at `79c35d5` and the explicit Git trust correction at `2a06e167`; those reviews
+approve the code surfaces they examined, not the receipt. Task 1.8 may be checked only after
+independent Sol-xhigh static/correctness and Opus-max runtime/evidence reviews approve the
+exact receipt below.
+
+## Current admitting run: `ce005e27…961fa` / `442851b1…a39a2`
+
+### The failed canonical attempt that preceded it
+
+The first canonical execution against `79c35d5`, frozen at
+`2026-08-12T12:00:24Z`, returned typed `incomplete` in approximately one second with
+`corpus_capture_failed`: Git rejected
+`/data/CoordExp/.worktrees/research-probes` as dubious ownership. It published **no receipt**
+and leaked no process. This execution is failure evidence, not a receipt and not a PASS.
+
+The sealed child intentionally has no `HOME`; older runs had obtained `safe.directory` from
+`/root/.gitconfig`, which also contains user identity and credential-helper state and is not
+an admissible input. The correction at `2a06e167` gives every evaluator and corpus Git child
+no `HOME`, disables system configuration, and supplies a sealed protected global config plus
+a matching `-c` argument that trust only the exact declared Git root. No parent, wildcard,
+credential helper, user identity, include, or ambient global excludes file is accepted.
+Repository-local ignore semantics remain active. The correction neither reads nor passes the
+user Git configuration.
+
+### Exact command and terminal result
+
+```bash
+cd /data/CoordExp/.worktrees/serena-light-backend-eval-final-fix
+backend_eval_freeze_at="2026-08-12T12:29:00Z"
+/data/CoordExp/.worktrees/serena-light-backend-eval-final-fix/.venv/bin/python -I -S -B scripts/backend_eval_bootstrap.py \
+  --repo-root /data/CoordExp/serena-light \
+  --artifact-root /data/CoordExp/serena-light/.admission-artifacts/backend-eval \
+  --runtime-base /data/CoordExp/.codex/runtime/serena-light/backend-eval \
+  --uv /root/miniconda3/envs/ms/bin/uv \
+  --python /root/miniconda3/envs/ms/bin/python \
+  --exclude-newer "$backend_eval_freeze_at"
+```
+
+The command ran once from the clean committed `2a06e167` checkout. It exited `0`; stderr was
+empty and stdout was the compact terminal result. The receipt window is
+`started_at=2026-08-12T12:29:00Z` through `ended_at=2026-08-12T12:29:17Z`, 17 seconds of the
+1800-second admission ceiling.
+
+| Field | Value |
+| --- | --- |
+| `evaluation_identity` | `ce005e27b796ef323e3b4fb09c27eff2d1acb8c8b56928ead3628e287eb961fa` |
+| `run_identity` | `442851b127d85f568500ccfc1bf3d7ca0214ec78eb1049b3382feb8babda39a2` |
+| receipt | `/data/CoordExp/serena-light/.admission-artifacts/backend-eval/ce005e27b796ef323e3b4fb09c27eff2d1acb8c8b56928ead3628e287eb961fa/receipts/442851b127d85f568500ccfc1bf3d7ca0214ec78eb1049b3382feb8babda39a2.json` |
+| receipt file | inode `125836138`, mode `0600`, 39,753,917 bytes, SHA-256 `68085049014a900559a9d7c84b328f044be0230f78e09ec312b2b42700f63912` |
+| `status` / `next_action` | `pass` / `begin_protocol_probe_planning` |
+| `artifact_tree_digest` | `e6e10ca2ff9540a83457d361b081bb08eccc07a2662be9d249f4a2417600f7e6` |
+
+The published bytes round-trip to canonical serialization exactly and pass the current strict
+schema parser. The evaluation identity, receipt SHA-256, artifact-tree digest, runtime
+manifest digest, evaluator and production closure digests, all root-manifest digests, and
+both production identity sides were independently recomputed and matched.
+
+### Evaluator, candidate, and runtime identity
+
+| Field | Value |
+| --- | --- |
+| sealed semantic evaluator closure | clean commit `2a06e1671c8f66cbe1bd4ece9d79e428e57b8896`; 15 source files; digest `8b740633bfc83fee60a22c58ef73b893b5c2f1b3f3e4d7bb8f9375d61c98dcc8` |
+| executed production-helper closure | clean; 6 files; digest `d7ed23955949067b932e9b18e5818ca6bece52797cbd2b2241fb84981331966b` |
+| candidate lock | `6cd570324d1a35aa0f4c30b60fd3005fe0953e8efe230915fb19ad24184b9062`, unchanged; `pyrefly==1.2.0`, `ty==0.0.70` |
+| runtime manifest | `e578bf4d6f1d98df96140d6c03b793a26af60658e49ea03b6810581898a6b4ec`, unchanged |
+| runtime permission repair | none |
+
+All frozen budgets equal the contract exactly: admission 1800 s, protocol 5400 s,
+product-seam 10800 s, feature 7200 s, Agent 28800 s, and total 57600 s.
+
+### Production identity and pre-existing main advance
+
+Production main had independently advanced **before** this run, at 2026-08-12 10:27 UTC, to
+`fd6335c5182a56bb266adc6f0ec07bf862bf3117`. The receipt therefore correctly binds that
+commit. The evaluator did not cause this pre-existing main update, and equality to the
+historical `77e0ff6e…` build identity is not the current invariant.
+
+The current invariant is `production_identity_before == production_identity_after ==` the
+independent live capture. `compute_build_identity` is
+`6498a4eb68c62e23561aa6b04e167fe54dd55b9d90b80c12bbb6560f078b9c39` on all three sides.
+The dependency-lock digest remains
+`eff6ebdf252faff7f77cb3a2f3894d17b9a0dfc89b46bd193fafdaa9e9ab4941`, and its input bytes
+remain unchanged:
+
+| Lock input | SHA-256 |
+| --- | --- |
+| `pyproject.toml` | `97c8e100f9dd8b0f77a1cbf69a02bea1b1c4ff3d04d168cbf4f4854e914e17d4` |
+| `uv.lock` | `5998451d896430ca4df3cf28f92e6a0bc413bcb840673c5f4db8be64f9a9edca` |
+| `package-lock.json` | `c4f17c7f2e5faf7f69a1d11642792cb8bae5b6502c7288cde3577a8ec3fe0cba` |
+
+### Corpus and zero-write result
+
+| Root | Kind | Source revision | In scope | Excluded |
+| --- | --- | --- | ---: | ---: |
+| `/data/CoordExp/.worktrees/research-probes` | git | `f4b061b73e89e19c19062fac0c9c68030ef00082` | 62,714 | 27 |
+| `/data/CoordExp/serena-light` | git | `fd6335c5182a56bb266adc6f0ec07bf862bf3117` | 815 | 3 |
+| `/data/ms-swift` | git | `f2797138dba0e224cfff735cd89a528a08d8732a` | 2,329 | 1 |
+| `llm-framework-study` declared non-Git paths | non_git | — | 3 | 0 |
+| `ms` transformers | non_git | — | 2,214 | 0 |
+
+The totals are 68,075 in-scope paths and 31 declared exclusions. Every before manifest
+equals its after manifest. All five deltas contain zero declared mutations, zero unexpected
+paths, and zero manifest-control changes.
+
+### Preservation, process ownership, and current code gates
+
+All nine prior receipt files -- eight schema-v2 receipts plus the legacy receipt -- remain
+byte-for-byte preserved. This run adds the ninth schema-v2 receipt, for ten receipt files in
+total. No evaluator or candidate process leaked. The existing production Serena Pyright
+daemon is unrelated to this evaluation and was not stopped, restarted, or otherwise touched.
+
+Current-code evidence at `2a06e167` is intentionally scoped rather than presented as a new
+whole-repository test count:
+
+- focused Git trust, dubious-ownership worktree, bounded-runner, identity, and ownership
+  tests: 59 passed in 9.06 s;
+- full `tests/backend_eval`: 597 passed in 87.73 s;
+- repository-wide Ruff and Ty: clean;
+- strict validation of `evaluate-python-language-backends`: exit 0;
+- `git diff --check`: clean;
+- production `src/serena_light`, `pyproject.toml`, `uv.lock`, and `package-lock.json`:
+  unchanged by the evaluator repair.
+
+The scoped evaluator-transport and Git-trust reviews returned PASS at their exact code
+targets. The final Sol-xhigh and Opus-max reviews of the exact `ce005e27…` /
+`442851b1…` receipt remain the only Task 1.8 acceptance work.
+
+## Historical evidence retained below
+
+The remaining sections are an append-only record of earlier rejected, superseded, and
+historical runs and their then-current test counts. Their old dispositions and references to
+an "admitting run" describe their own time and are superseded by the current disposition
+above; they are not erased or retroactively rewritten.
 
 ## The eighth defect family: what rejected run `59a38137…d73f`
 

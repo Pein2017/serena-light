@@ -8,8 +8,24 @@
 - [x] 1.6 Implement bounded non-Git manifests for `ms` transformers and the exact `llm-framework-study` task paths without scanning the full environment.
 - [x] 1.7 Implement before/after write detection that hashes the trust-inventory closure and declared fixture paths, metadata-scans the *complete* declared in-scope remainder of every Git root for path membership, type, symlink target, size, `mtime_ns`, and inode, and hashes only changed or created remainder paths; publish the declared exclusions; test declared disposable edits separately from unexpected backend mutation.
 - [ ] 1.8 Run the admission command under its 30-minute ceiling, record exact versions, hashes, roots, interpreters, configuration, production identity invariants, and phase budget, and stop for lead disposition if any candidate or required corpus cannot be frozen reproducibly.
-> **Task 1.8 is on HOLD and stays unchecked, after a second Sol-xhigh re-review.** That
-> re-review overruled a passing Opus review with executable evidence and found three further
+> **Current Task 1.8 status: HOLD and unchecked pending two exact-receipt reviews.** The clean
+> final evaluator target is `2a06e1671c8f66cbe1bd4ece9d79e428e57b8896`. Scoped review
+> passed the sealed evaluator transport at `79c35d5` and the explicit Git trust correction at
+> `2a06e167`. The first canonical attempt at `79c35d5`, frozen at
+> `2026-08-12T12:00:24Z`, returned typed `incomplete` in approximately one second because Git
+> rejected the `research-probes` worktree as dubious ownership; it published no receipt and
+> leaked no process. The exact-root sealed Git trust repair produced the current admitting run
+> at freeze `2026-08-12T12:29:00Z`: evaluation
+> `ce005e27b796ef323e3b4fb09c27eff2d1acb8c8b56928ead3628e287eb961fa`, run
+> `442851b127d85f568500ccfc1bf3d7ca0214ec78eb1049b3382feb8babda39a2`, `status=pass`, 17 s
+> of the 1800 s ceiling, 68,075 in-scope paths across five roots, 31 exclusions, zero
+> unexpected paths / declared mutations / changed controls, equal before/after/live production
+> identity, and no evaluator or candidate process leak. Task 1.8 may be checked only after a
+> final Sol-xhigh static/correctness review and Opus-max runtime/evidence review both approve
+> that exact receipt. A checked box may never stand for an unreviewed run.
+>
+> **Historical defect background retained below.** A second Sol-xhigh re-review overruled a
+> passing Opus review with executable evidence and found three further
 > defects, for which tasks 1.13 and 1.15 were reopened: a delayed post-link directory `fsync`
 > let a run return `pass` at 1811 s with the final receipt present, cleanup received no
 > deadline and could spend the budget, and a retained runtime still carried five
@@ -205,8 +221,9 @@
 > paths in five roots, 7 s of the 1800 s ceiling with publication inside it, equal
 > post-cleanup production identity, no leaked process, the five pre-contract runtime files
 > repaired from `0660` to `0600` with byte, size, inode, and manifest digest unchanged, and
-> all 62 earlier artifact files unchanged. Task 1.8 may be checked only after two independent
-> re-reviews approve *that* receipt: a checked box may never stand for an unreviewed run.
+> all 62 earlier artifact files unchanged. That historical target was later superseded by the
+> current `ce005e27…961fa` / `442851b1…a39a2` receipt named above; the two required final
+> reviews apply to the current receipt, not to `0960ec13…7025` / `991c9866…cff33`.
 >
 > Task 1.7 is checked: its write-detection instrument is unchanged by this repair and the
 > final review raised no finding against it.
