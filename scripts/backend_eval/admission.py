@@ -321,7 +321,7 @@ def _receipt_temporary_name(run_identity: str) -> str:
 class AdmissionServices(Protocol):
     """The external work admission orchestrates; every member is a Task 1-5 interface."""
 
-    def capture_production_identity(self, repo_root: Path) -> ProductionIdentity: ...
+    def capture_production_identity(self, repo_root: Path, deadline: Deadline) -> ProductionIdentity: ...
 
     def capture_evaluator_identity(self, deadline: Deadline) -> EvaluatorIdentity: ...
 
@@ -357,8 +357,8 @@ class ProductionAdmissionServices:
 
     runtime_permission_repairs: list[str] = field(default_factory=list)
 
-    def capture_production_identity(self, repo_root: Path) -> ProductionIdentity:
-        return capture_production_identity(repo_root)
+    def capture_production_identity(self, repo_root: Path, deadline: Deadline) -> ProductionIdentity:
+        return capture_production_identity(repo_root, deadline=deadline)
 
     def capture_evaluator_identity(self, deadline: Deadline) -> EvaluatorIdentity:
         return capture_evaluator_identity(deadline=deadline)
@@ -617,7 +617,7 @@ def run_admission(
         evidence.issues.append(_issue(request, failure.code, failure.detail))
     status = "pass" if failure is None else failure.status
     status = _cleanup(request, active, evidence, status, finalize)
-    _capture_final_production_identity(request, active, evidence, failure)
+    _capture_final_production_identity(request, active, evidence, failure, finalize)
     status = _bracket_cleanup(request, evidence, status)
     receipt = _build_receipt(
         request, active, evidence, status=status, started_at=started_at, failure=failure, deadline=finalize
@@ -652,7 +652,7 @@ def _collect(
         "capture_production_identity_before",
         "incomplete",
         "production_identity_capture_failed",
-        lambda: services.capture_production_identity(request.repo_root),
+        lambda: services.capture_production_identity(request.repo_root, deadline),
     )
     evidence.identity = evaluation_identity(
         request, evidence.production_identity_before, evidence.evaluator
@@ -700,7 +700,7 @@ def _collect(
         lambda: services.capture_corpus(deadline),
     )
     evidence.manifests_after, evidence.write_deltas = _write_deltas(
-        evidence.manifests_before, evidence.manifests_after
+        evidence.manifests_before, evidence.manifests_after, deadline
     )
     _require_no_unexpected_writes(evidence.write_deltas)
 
@@ -709,7 +709,7 @@ def _collect(
         "capture_production_identity_after",
         "incomplete",
         "production_identity_capture_failed",
-        lambda: services.capture_production_identity(request.repo_root),
+        lambda: services.capture_production_identity(request.repo_root, deadline),
     )
     with _translated("hold", "production_identity_changed"):
         assert_production_identity_unchanged(evidence.production_identity_before, evidence.production_identity_after)
@@ -776,7 +776,7 @@ def _runtime_request(request: AdmissionRequest, evaluation_root: Path) -> Runtim
 
 
 def _write_deltas(
-    before: tuple[RootManifest, ...], after: tuple[RootManifest, ...]
+    before: tuple[RootManifest, ...], after: tuple[RootManifest, ...], deadline: Deadline
 ) -> tuple[tuple[RootManifest, ...], tuple[WriteDelta, ...]]:
     """Enrich, then pair, the two canonical manifest collections root by root.
 
@@ -796,7 +796,9 @@ def _write_deltas(
     deltas: list[WriteDelta] = []
     for root in sorted(before_by_root):
         with _translated("incomplete", "unstable_corpus_root"):
-            manifest = enrich_after_manifest(before_by_root[root], after_by_root[root])
+            manifest = enrich_after_manifest(
+                before_by_root[root], after_by_root[root], deadline=deadline
+            )
             enriched.append(manifest)
             deltas.append(compare_root_manifests(before_by_root[root], manifest))
     return tuple(enriched), tuple(deltas)
@@ -851,6 +853,7 @@ def _capture_final_production_identity(
     services: AdmissionServices,
     evidence: _Evidence,
     failure: AdmissionFailure | None,
+    deadline: Deadline,
 ) -> None:
     """Capture the production identity the receipt publishes, after cleanup has run.
 
@@ -862,7 +865,9 @@ def _capture_final_production_identity(
     if evidence.production_identity_before is None:
         return
     try:
-        evidence.production_identity_final = services.capture_production_identity(request.repo_root)
+        evidence.production_identity_final = services.capture_production_identity(
+            request.repo_root, deadline
+        )
     except (OSError, RuntimeError, ValueError) as exc:
         context = "" if failure is None else f" (after {failure.code})"
         raise _fail(

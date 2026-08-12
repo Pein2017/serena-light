@@ -79,10 +79,79 @@ repair -- each now fixed and covered by adversarial tests:
    descriptor: the runtime manifest, the owned-runtime mode-repair walk, the admission
    artifact-tree read, the evaluator source closure, and the bound production helper closure.
 
-### The residual boundary, stated rather than papered over
+6. **Three whole families of read and write were outside the previous audit.** The
+   `O_NONBLOCK` repair above searched `os.open` constants, which cannot see an access that
+   carries no flags. A Sol-xhigh HOLD review and an independent read-only audit found the
+   same three families:
 
-The ceiling is enforced *cooperatively*, at the boundaries between syscalls, in the calling
-thread. A `link`, `unlink`, or `fsync` already in flight is not preemptible, and a watchdog
+   * **Harness-owned writes in `runtime.py`.** The installed lock snapshot, the three service
+     configurations, and the manifest temporary were written with a path-based
+     `O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW`, and their directories created with
+     `Path.mkdir(parents=True)`. `O_NOFOLLOW` guards only the last component, so a symlinked
+     `config/ty` carried the write outside the runtime root; a FIFO at `config/ty/ty.toml`
+     blocked the open until a reader appeared and then received the harness payload; and
+     `O_TRUNC` destroyed an existing target before anything proved what it was. The
+     service-configuration verification was a check followed by `Path.read_bytes()`, which a
+     post-check symlink to a file holding the expected bytes passes.
+   * **The production identity inputs.** `production_identity.py` read `pyproject.toml`,
+     `uv.lock`, and `package-lock.json` the same check-then-read way, and the production
+     helpers it calls -- `dependency_lock_digest`, `compute_build_identity`, `runtime_paths` --
+     do the same inside `src/serena_light`, which the evaluation may not edit.
+   * **The corpus digest.** `inventory.observe_file_digest` opens `O_RDONLY | O_NOFOLLOW` with
+     no `O_NONBLOCK`, so a node substituted after its type was inspected blocks the capture.
+
+   All three are closed without one byte of change to `src/serena_light`. Every harness-owned
+   write and verification read below the runtime root walks out from the already-open root
+   descriptor one component at a time, creating and reopening each intermediate directory from
+   its parent's descriptor, opening leaves `O_NONBLOCK`, proving them regular by `fstat` on
+   that same descriptor, and truncating only after that proof -- so a FIFO with a live reader
+   is refused with not one byte delivered, reproduced as a regression. The three lock inputs
+   are read through one guarded descriptor each. The four production helpers run as their
+   exact unmodified bytes in a bounded, source-bound, minimal-environment child whose process
+   group the phase deadline kills, with canonical digest-bound request and response and every
+   executed helper byte re-read and compared by the parent; equivalence with the in-process
+   helpers is pinned by test on honest inputs. And the surface is now enumerated structurally
+   rather than by grep: `tests/backend_eval/test_io_ownership.py` parses every evaluator
+   module, collects every filesystem access including `Path.read_bytes`, `Path.write_text`,
+   `Path.mkdir`, and each production helper call, and fails until every one appears in a finite
+   table with exactly one owner. `docs/backend-eval-io-ownership.md` is its prose companion.
+
+   **What this does not claim.** Running production's bytes in a killable child *bounds* the
+   helpers' own check-then-reopen race; it does not remove it. A helper blocked on a
+   substituted node costs the phase its remaining budget and a typed failure, not an unbounded
+   hang. Separately, `runtime_source_files` still silently skips a non-regular source file:
+   that changes the build identity and is refused by the identity guard rather than hidden, and
+   it is pinned by test.
+
+   **Two source-binding seams inside this repair were closed before it was committed**, after
+   a lead pre-review of the new bounded-child path. The parent's re-read of the helper bytes a
+   child reported opened the whole relative path under one `O_NOFOLLOW`, so a symlinked `src`
+   or `src/serena_light` could have supplied another tree's bytes for the parent to "confirm";
+   it now walks every component from an open descriptor on the evaluator owner root, with an
+   intermediate-substitution regression. And the child *program* was handed to the interpreter
+   as a mutable pathname, leaving a window between the read that digested those bytes and the
+   `execve` that ran them; it is now read through that same confined walk, pinned by digest on
+   first use, and executed from a sealed `memfd` addressed as `/proc/self/fd/<image>` with only
+   that descriptor inherited, with a test proving the digest equals the one the evaluator
+   identity records for `production_child.py` and a substitution test proving a mid-run swap is
+   refused rather than executed. Closing the second seam surfaced an unbounded child the
+   bounded-runner accounting test then caught -- `ctypes.util.find_library("c")` shells out to
+   `ldconfig` -- so `memfd_create` is resolved from the already-loaded process image instead.
+
+### The residual boundaries, stated rather than papered over
+
+**Confinement is claimed only where a root descriptor owns it.** A `guarded` read -- the
+caller's declared candidate lock, an interpreter's realpath, the evaluator's own source
+closure, the three production lock inputs below the resolved repository root -- closes
+final-component substitution and blocking on a special node. It does not re-prove the
+components *above* its root, because no root the harness opened owns them. That distinction is
+in the ownership table, per access.
+
+**A bounded race is still a race.** The production helpers keep their own check-then-reopen
+window. The child bounds the consequence, not the window.
+
+**The ceiling is cooperative.** It is enforced at the boundaries between syscalls, in the
+calling thread. A `link`, `unlink`, or `fsync` already in flight is not preemptible, and a watchdog
 thread that interrupted one would trade a bounded, observable overrun for an unbounded
 correctness hazard in the middle of a durability barrier. The consequence: for as long as one
 in-flight post-link `fsync` takes to complete, the final receipt name can exist in the

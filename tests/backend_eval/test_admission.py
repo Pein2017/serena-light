@@ -274,8 +274,9 @@ class FakeServices:
         self._enter("bootstrap")
         return _bootstrap()
 
-    def capture_production_identity(self, repo_root: Path) -> ProductionIdentity:
+    def capture_production_identity(self, repo_root: Path, deadline: Deadline) -> ProductionIdentity:
         assert repo_root.is_absolute()
+        assert isinstance(deadline, Deadline)
         step = ("identity_before", "identity_after", "identity_final")[min(self.identity_calls, 2)]
         self.identity_calls += 1
         self._enter(step)
@@ -351,8 +352,8 @@ class _DriftingServices:
     def capture_bootstrap_environment(self) -> BootstrapEnvironmentIdentity:
         return self.inner.capture_bootstrap_environment()
 
-    def capture_production_identity(self, repo_root: Path) -> ProductionIdentity:
-        return self.inner.capture_production_identity(repo_root)
+    def capture_production_identity(self, repo_root: Path, deadline: Deadline) -> ProductionIdentity:
+        return self.inner.capture_production_identity(repo_root, deadline)
 
     def compile_candidate_lock(self, request: CandidateLockRequest, deadline: Deadline) -> CandidateLock:
         return self.inner.compile_candidate_lock(request, deadline)

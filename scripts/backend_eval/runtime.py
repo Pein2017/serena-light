@@ -57,9 +57,7 @@ re-checked before publication and on every exit path.
 
 from __future__ import annotations
 
-import ctypes
-import ctypes.util
-import fcntl
+import errno
 import json
 import os
 import stat
@@ -89,7 +87,10 @@ from scripts.backend_eval.process import (
     CommandRunner,
     CommandTimeout,
     Deadline,
+    SealedImageError,
     acquire_exclusive_lock,
+    descriptor_path,
+    sealed_image,
     subprocess_runner,
 )
 from scripts.backend_eval.production_identity import (
@@ -168,13 +169,11 @@ _NOFOLLOW_DIRECTORY_FLAGS = _DIRECTORY_FLAGS | os.O_NOFOLLOW
 # regular-file check below then refuses it promptly rather than reading empty bytes or, for
 # the owned-descendant walk, hanging the mode repair on a special node opened for fchmod.
 _READ_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
-_WRITE_FLAGS = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW
-# memfd_create and file seals: the conda interpreter's os/fcntl modules omit these constants.
-_MFD_CLOEXEC = 0x0001
-_MFD_ALLOW_SEALING = 0x0002
-_F_ADD_SEALS = 1033
-_F_GET_SEALS = 1034
-_ALL_SEALS = 0x1 | 0x2 | 0x4 | 0x8
+# A harness-owned write never carries O_TRUNC: an existing node keeps every byte until the
+# descriptor it was opened through proves it is a regular file we own.  O_NONBLOCK makes a
+# FIFO with no reader fail with ENXIO instead of blocking the calling thread forever.
+_WRITE_FLAGS = os.O_WRONLY | os.O_NOFOLLOW | os.O_NONBLOCK
+_CREATE_FLAGS = _WRITE_FLAGS | os.O_CREAT | os.O_EXCL
 
 
 class RuntimePreparationError(RuntimeError):
@@ -324,21 +323,25 @@ class _Layout:
     tmp: Path
     bin_dir: Path
     requirements: Path
+    # The already-proven open runtime root.  Every harness-owned read and write below the
+    # root walks out from *this* descriptor, one component at a time, rather than reopening
+    # a pathname a later rename or symlink could have redirected.
+    root_fd: int | None = None
 
     @staticmethod
     def from_root(root: Path) -> _Layout:
         """A purely logical layout, used for identity and for the public backend environment."""
 
-        return _Layout._at(root, root)
+        return _Layout._at(root, root, None)
 
     @staticmethod
     def opened(logical_root: Path, root_fd: int) -> _Layout:
         """A layout whose every operational path resolves through one open descriptor."""
 
-        return _Layout._at(logical_root, descriptor_path(root_fd))
+        return _Layout._at(logical_root, descriptor_path(root_fd), root_fd)
 
     @staticmethod
-    def _at(logical_root: Path, base: Path) -> _Layout:
+    def _at(logical_root: Path, base: Path, root_fd: int | None) -> _Layout:
         venv = base / "venv"
         return _Layout(
             logical_root=logical_root,
@@ -350,16 +353,20 @@ class _Layout:
             tmp=base / "tmp",
             bin_dir=venv / "bin",
             requirements=base / REQUIREMENTS_SNAPSHOT_NAME,
+            root_fd=root_fd,
         )
 
     def logical(self) -> _Layout:
         return _Layout.from_root(self.logical_root)
 
+    def bound_root_fd(self) -> int:
+        """The open runtime root, or a refusal: a logical layout owns no descriptor."""
 
-def descriptor_path(fd: int) -> Path:
-    """The stable pathname of an open descriptor, resolvable by this process and its children."""
-
-    return Path(f"/proc/{os.getpid()}/fd/{fd}")
+        if self.root_fd is None:
+            raise RuntimePreparationError(
+                f"the runtime layout for {self.logical_root} is not bound to an open runtime root"
+            )
+        return self.root_fd
 
 
 def prepare_candidate_runtime(
@@ -379,15 +386,15 @@ def prepare_candidate_runtime(
     exit path.
     """
 
-    before = capture_production_identity(request.repo_root)
+    before = capture_production_identity(request.repo_root, deadline=deadline)
     try:
         runtime = _prepare(lock, request, runner, before, deadline)
     except BaseException as exc:
         # Drift raised inside the preparation is already the authoritative error.
         if not isinstance(exc, ProductionIdentityError):
-            _assert_production_identity_unchanged(before, request.repo_root, cause=exc)
+            _assert_production_identity_unchanged(before, request.repo_root, cause=exc, deadline=deadline)
         raise
-    _assert_production_identity_unchanged(before, request.repo_root, cause=None)
+    _assert_production_identity_unchanged(before, request.repo_root, cause=None, deadline=deadline)
     return runtime
 
 
@@ -467,7 +474,7 @@ def _build_runtime(
     install_env = _install_environment(layout)
     tools = _capture_tools(request, layout, runner, deadline)
     # Durable evidence of the verified bytes; the sync itself reads a sealed image of them.
-    _write_file(layout.requirements, source)
+    _write_confined_file(root_fd, REQUIREMENTS_SNAPSHOT_NAME, layout.logical_root, source)
     _require_snapshot(layout, lock.digest)
     venv_command = _venv_command(request)
     _run(runner, venv_command, layout, install_env, deadline)
@@ -492,7 +499,7 @@ def _build_runtime(
     # Publication happens only for a run whose root was never swapped and that provably left
     # production untouched.
     _require_open_root(base_fd, root_fd, layout.logical_root, "before publication")
-    _assert_production_identity_unchanged(before, request.repo_root, cause=None)
+    _assert_production_identity_unchanged(before, request.repo_root, cause=None, deadline=deadline)
     _publish_manifest(layout, root_fd, payload)
     _require_open_root(base_fd, root_fd, layout.logical_root, "after publication")
     # A freshly built runtime must already satisfy the contract reuse repairs: the ambient
@@ -582,7 +589,12 @@ def _capture_executables(
         version_output = _capture_version(path, candidate.name, candidate.version, layout, runner, deadline)
         executables[candidate.name] = {
             "path": str(logical.venv / candidate.executable_relpath),
-            "sha256": _file_digest(path, f"candidate executable {candidate.name}"),
+            "sha256": _confined_file_digest(
+                layout.bound_root_fd(),
+                f"venv/{candidate.executable_relpath}",
+                layout.logical_root,
+                f"candidate executable {candidate.name}",
+            ),
             "version_output": version_output,
         }
     return executables
@@ -650,12 +662,13 @@ def _write_service_configs(layout: _Layout) -> tuple[ServiceConfigIdentity, ...]
 
     identities: list[ServiceConfigIdentity] = []
     logical = layout.logical()
+    root_fd = layout.bound_root_fd()
     for backend in sorted(SERVICE_CONFIG_RELPATHS):
         relpath = SERVICE_CONFIG_RELPATHS[backend]
-        path = layout.config / relpath
-        _require_owned_directory(path.parent)
         payload = _service_config_bytes(backend)
-        _write_file(path, payload)
+        # ``config/<backend>/<file>``: every component, including the per-backend directory
+        # this creates, is opened from its parent's descriptor below the open runtime root.
+        _write_confined_file(root_fd, f"config/{relpath}", layout.logical_root, payload)
         identities.append(
             ServiceConfigIdentity(
                 backend=backend,
@@ -893,7 +906,7 @@ def _restore_fields(
 def _publish_manifest(layout: _Layout, root_fd: int, payload: bytes) -> None:
     """Publish the manifest atomically and durably, last of all, relative to the descriptor."""
 
-    _write_file(layout.root / _MANIFEST_TEMPORARY_NAME, payload)
+    _write_confined_file(root_fd, _MANIFEST_TEMPORARY_NAME, layout.logical_root, payload)
     try:
         os.replace(
             _MANIFEST_TEMPORARY_NAME, MANIFEST_FILE_NAME, src_dir_fd=root_fd, dst_dir_fd=root_fd
@@ -908,12 +921,12 @@ def _publish_manifest(layout: _Layout, root_fd: int, payload: bytes) -> None:
 def _read_manifest(layout: _Layout) -> tuple[Mapping[str, Any], bytes] | None:
     """Return the published manifest and its exact bytes, or ``None`` when never published."""
 
-    path = layout.root / MANIFEST_FILE_NAME
-    if not path.exists():
+    path = layout.logical_root / MANIFEST_FILE_NAME
+    payload = _read_confined_optional(
+        layout.bound_root_fd(), MANIFEST_FILE_NAME, layout.logical_root, "published runtime manifest"
+    )
+    if payload is None:
         return None
-    if path.is_symlink() or not path.is_file():
-        raise RuntimePreparationError(f"published runtime manifest must be a regular file: {path}")
-    payload = _read_regular_file(path, "published runtime manifest")
     try:
         decoded = json.loads(payload.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
@@ -933,7 +946,13 @@ def runtime_manifest_digest(root: Path) -> str:
     binding is verified against the file rather than against a value carried in memory.
     """
 
-    return sha256_bytes(_read_regular_file(root / MANIFEST_FILE_NAME, "published runtime manifest"))
+    root_fd = _open_existing_confined_directory(root)
+    try:
+        return sha256_bytes(
+            _read_confined_file(root_fd, MANIFEST_FILE_NAME, root, "published runtime manifest")
+        )
+    finally:
+        os.close(root_fd)
 
 
 def _verify_published_runtime(
@@ -980,7 +999,7 @@ def _verify_published_runtime(
         raise RuntimePreparationError(f"published runtime manifest does not describe the installed lock of {root}")
     _require_only_declared_entries(root_fd, root, published=True)
     for name in RUNTIME_DIRECTORY_NAMES:
-        _require_owned_directory(layout.root / name, create=False)
+        _require_owned_directory(layout.root / name)
     # Still under the per-digest lock, and before anything reads the published bytes: repair
     # the mode of any harness-written file left behind by a runtime built before the contract
     # was enforced, then re-assert the whole contract.  Modes only -- no byte moves.
@@ -1029,7 +1048,13 @@ def _verify_published_executables(
         if entry["path"] != str(logical_path):
             raise RuntimePreparationError(f"published runtime executable {candidate.name} moved: {logical_path}")
         _require_regular_executable_inside(path, layout.root, f"candidate executable {candidate.name}")
-        if _file_digest(path, f"candidate executable {candidate.name}") != entry["sha256"]:
+        observed_digest = _confined_file_digest(
+            layout.bound_root_fd(),
+            f"venv/{candidate.executable_relpath}",
+            layout.logical_root,
+            f"candidate executable {candidate.name}",
+        )
+        if observed_digest != entry["sha256"]:
             raise RuntimePreparationError(f"published runtime executable {candidate.name} changed: {path}")
         version_output: str = entry["version_output"]
         _require_reported_version(version_output, candidate.version, f"candidate executable {candidate.name}")
@@ -1101,8 +1126,13 @@ def _verify_published_service_configs(
             raise RuntimePreparationError(
                 f"published runtime service configuration for {identity.backend} is not the declared one: {path}"
             )
-        _require_existing_regular_file(path, f"service configuration {identity.backend}")
-        if path.read_bytes() != expected:
+        observed = _read_confined_file(
+            layout.bound_root_fd(),
+            f"config/{relpath}",
+            layout.logical_root,
+            f"service configuration {identity.backend}",
+        )
+        if observed != expected:
             raise RuntimePreparationError(
                 f"published runtime service configuration for {identity.backend} changed: {path}"
             )
@@ -1126,6 +1156,34 @@ def _open_confined_directory(path: Path) -> int:
     try:
         for part in path.parts[1:]:
             child = _open_confined_child(fd, part, path)
+            os.close(fd)
+            fd = child
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
+
+
+def _open_existing_confined_directory(path: Path) -> int:
+    """Open an existing absolute directory one component at a time, creating nothing.
+
+    The independent manifest-digest recomputation has no descriptor handed to it, so it
+    anchors its own walk at the filesystem root and refuses a symlinked component rather
+    than trusting one ``O_NOFOLLOW`` on the last one.
+    """
+
+    try:
+        fd = os.open("/", _DIRECTORY_FLAGS)
+    except OSError as exc:
+        raise RuntimePreparationError(f"cannot open the filesystem root: {exc}") from exc
+    try:
+        for part in path.parts[1:]:
+            try:
+                child = os.open(part, _NOFOLLOW_DIRECTORY_FLAGS, dir_fd=fd)
+            except OSError as exc:
+                raise RuntimePreparationError(
+                    f"cannot open {path} without following a link: {exc}"
+                ) from exc
             os.close(fd)
             fd = child
     except BaseException:
@@ -1220,12 +1278,15 @@ def _scandir_names(dir_fd: int, root: Path) -> list[str]:
         raise RuntimePreparationError(f"cannot list the runtime directory {root}: {exc}") from exc
 
 
-def _require_owned_directory(path: Path, *, create: bool = True) -> None:
-    if create:
-        try:
-            path.mkdir(mode=_DIRECTORY_MODE, parents=True, exist_ok=True)
-        except OSError as exc:
-            raise RuntimePreparationError(f"cannot create the evaluation-owned directory {path}: {exc}") from exc
+def _require_owned_directory(path: Path) -> None:
+    """Refuse a runtime directory that is a symlink or a special node.
+
+    Creation never goes through a pathname: :func:`_open_confined_directory_chain` makes and
+    owns every component from its parent's descriptor, so no ``mkdir(parents=True)`` can be
+    satisfied by a symlinked intermediate component.  This is the cheap lexical pre-check;
+    :func:`_require_owned_modes` re-proves the same directories through descriptors.
+    """
+
     try:
         mode = path.lstat().st_mode
     except OSError as exc:
@@ -1234,8 +1295,6 @@ def _require_owned_directory(path: Path, *, create: bool = True) -> None:
         raise RuntimePreparationError(
             f"{path} must be an evaluation-owned directory, not a symlink or special file"
         )
-    if create:
-        _own_directory_mode(path)
 
 
 def _require_venv_interpreter(layout: _Layout, request: RuntimeRequest) -> None:
@@ -1285,34 +1344,11 @@ def _sealed_requirements(payload: bytes) -> Iterator[Path]:
     installs cannot be changed by anyone -- including transiently -- for the whole sync.
     """
 
-    fd = _memfd_create(REQUIREMENTS_SNAPSHOT_NAME)
     try:
-        written = 0
-        while written < len(payload):
-            written += os.write(fd, payload[written:])
-        if fcntl.fcntl(fd, _F_ADD_SEALS, _ALL_SEALS) != 0 or fcntl.fcntl(fd, _F_GET_SEALS) != _ALL_SEALS:
-            raise RuntimePreparationError("cannot seal the candidate requirements image")
-        path = descriptor_path(fd)
-        _require_sealed_image(path, payload)
-        yield path
-    except OSError as exc:
-        raise RuntimePreparationError(f"cannot build the sealed candidate requirements image: {exc}") from exc
-    finally:
-        os.close(fd)
-
-
-def _memfd_create(name: str) -> int:
-    libc = ctypes.CDLL(ctypes.util.find_library("c") or "libc.so.6", use_errno=True)
-    if not hasattr(libc, "memfd_create"):
-        raise RuntimePreparationError("this platform cannot provide a sealed candidate requirements image")
-    libc.memfd_create.argtypes = [ctypes.c_char_p, ctypes.c_uint]
-    libc.memfd_create.restype = ctypes.c_int
-    fd = libc.memfd_create(name.encode("utf-8"), _MFD_CLOEXEC | _MFD_ALLOW_SEALING)
-    if fd < 0:
-        raise RuntimePreparationError(
-            f"cannot create the sealed candidate requirements image: {os.strerror(ctypes.get_errno())}"
-        )
-    return fd
+        with sealed_image(REQUIREMENTS_SNAPSHOT_NAME, payload) as fd:
+            yield descriptor_path(fd)
+    except SealedImageError as exc:
+        raise RuntimePreparationError(str(exc)) from exc
 
 
 def _require_sealed_image(path: Path, payload: bytes) -> None:
@@ -1326,9 +1362,14 @@ def _require_snapshot(layout: _Layout, digest: str) -> None:
     """Re-bind the installed snapshot to the candidate lock digest."""
 
     _require_digest(
-        _read_regular_file(layout.requirements, "installed candidate requirements lock"),
+        _read_confined_file(
+            layout.bound_root_fd(),
+            REQUIREMENTS_SNAPSHOT_NAME,
+            layout.logical_root,
+            "installed candidate requirements lock",
+        ),
         digest,
-        layout.requirements,
+        layout.logical_root / REQUIREMENTS_SNAPSHOT_NAME,
     )
 
 
@@ -1362,21 +1403,6 @@ def _file_digest(path: Path, label: str) -> str:
     return sha256_bytes(_read_regular_file(path, label))
 
 
-def _own_directory_mode(path: Path) -> None:
-    """Force ``0700`` on one service-owned directory, whatever the ambient umask was."""
-
-    try:
-        fd = os.open(path, _NOFOLLOW_DIRECTORY_FLAGS)
-    except OSError as exc:
-        raise RuntimePreparationError(f"cannot open the evaluation-owned directory {path}: {exc}") from exc
-    try:
-        os.fchmod(fd, _DIRECTORY_MODE)
-    except OSError as exc:
-        raise RuntimePreparationError(f"cannot own the evaluation-owned directory {path}: {exc}") from exc
-    finally:
-        os.close(fd)
-
-
 # --- the harness-owned permission contract --------------------------------------------
 #
 # The 0600/0700 contract is scoped, deliberately, to what *this harness* writes: its own
@@ -1403,6 +1429,10 @@ def owned_runtime_directory_relpaths() -> tuple[str, ...]:
     return ("", *RUNTIME_DIRECTORY_NAMES, *(f"config/{backend}" for backend in sorted(SERVICE_CONFIG_RELPATHS)))
 
 
+class _MissingOwnedPath(RuntimePreparationError):
+    """One harness-owned relative path does not exist below the open runtime root."""
+
+
 def _open_owned_descendant(root_fd: int, relpath: str, root: Path, *, directory: bool) -> int:
     """Open one harness-owned path under the runtime root without following any link.
 
@@ -1414,26 +1444,167 @@ def _open_owned_descendant(root_fd: int, relpath: str, root: Path, *, directory:
     only name something the runtime root physically contains.
     """
 
+    flags = _NOFOLLOW_DIRECTORY_FLAGS if directory else _READ_FLAGS
+    return _open_confined_relpath(root_fd, relpath, root, leaf_flags=flags)
+
+
+def _open_confined_relpath(root_fd: int, relpath: str, root: Path, *, leaf_flags: int) -> int:
+    """Walk one existing relative path out from the open runtime root, component by component."""
+
+    parts = tuple(part for part in relpath.split("/") if part)
+    if not parts:
+        return os.dup(root_fd)
     current = os.dup(root_fd)
     try:
-        parts = tuple(part for part in relpath.split("/") if part)
         for index, part in enumerate(parts):
             last = index == len(parts) - 1
-            flags = _READ_FLAGS if last and not directory else _NOFOLLOW_DIRECTORY_FLAGS
-            try:
-                child = os.open(part, flags, dir_fd=current)
-            except FileNotFoundError as exc:
-                raise RuntimePreparationError(f"published runtime {root} is missing {relpath}") from exc
-            except OSError as exc:
-                raise RuntimePreparationError(
-                    f"cannot open {root / relpath} without following a link: {exc}"
-                ) from exc
+            child = _open_confined_existing_child(
+                current, part, root, relpath, leaf_flags if last else _NOFOLLOW_DIRECTORY_FLAGS
+            )
             os.close(current)
             current = child
     except BaseException:
         os.close(current)
         raise
     return current
+
+
+def _open_confined_existing_child(parent_fd: int, name: str, root: Path, relpath: str, flags: int) -> int:
+    try:
+        return os.open(name, flags, dir_fd=parent_fd)
+    except FileNotFoundError as exc:
+        raise _MissingOwnedPath(f"published runtime {root} is missing {relpath}") from exc
+    except OSError as exc:
+        if exc.errno == errno.ENXIO:
+            raise RuntimePreparationError(
+                f"harness-owned runtime path must be a regular file: {root / relpath}"
+            ) from exc
+        raise RuntimePreparationError(
+            f"cannot open {root / relpath} without following a link: {exc}"
+        ) from exc
+
+
+def _open_confined_directory_chain(root_fd: int, relpath: str, root: Path) -> int:
+    """Create, own, and open every component of one directory relpath below the open root.
+
+    ``mkdir(parents=True)`` on the logical pathname would silently accept a symlinked
+    intermediate component and then let the write land wherever it points; each component is
+    created and reopened ``O_NOFOLLOW`` from its parent's descriptor instead.
+    """
+
+    current = os.dup(root_fd)
+    try:
+        for part in (item for item in relpath.split("/") if item):
+            child = _open_confined_child(current, part, root / relpath)
+            os.close(current)
+            current = child
+    except BaseException:
+        os.close(current)
+        raise
+    return current
+
+
+def _write_confined_file(root_fd: int, relpath: str, root: Path, payload: bytes) -> None:
+    """Write one harness-owned ``0600`` regular file through a fully confined descriptor walk.
+
+    No component is ever resolved by pathname: every directory on the way is created and
+    reopened ``O_NOFOLLOW`` from its parent, and the leaf is opened non-blocking and *without*
+    ``O_TRUNC``.  A FIFO with no reader therefore fails with ``ENXIO`` rather than blocking,
+    a symlink fails with ``ELOOP``, and an existing file keeps every byte until ``fstat`` on
+    that same descriptor proves it regular and ``fchmod`` proves we own it.
+    """
+
+    parts = tuple(part for part in relpath.split("/") if part)
+    if not parts:
+        raise RuntimePreparationError(f"the runtime root itself is not a harness-owned file: {root}")
+    parent_fd = _open_confined_directory_chain(root_fd, "/".join(parts[:-1]), root)
+    try:
+        fd = _open_owned_write_leaf(parent_fd, parts[-1], root, relpath)
+        try:
+            _write_owned_descriptor(fd, payload, root / relpath)
+        finally:
+            os.close(fd)
+    finally:
+        os.close(parent_fd)
+
+
+def _open_owned_write_leaf(parent_fd: int, name: str, root: Path, relpath: str) -> int:
+    """Open the write leaf from its parent's descriptor, creating it only if it is absent."""
+
+    try:
+        return os.open(name, _WRITE_FLAGS, _FILE_MODE, dir_fd=parent_fd)
+    except FileNotFoundError:
+        pass
+    except OSError as exc:
+        if exc.errno == errno.ENXIO:
+            # O_WRONLY|O_NONBLOCK on a FIFO with no reader: the node exists and is not regular.
+            raise RuntimePreparationError(
+                f"harness-owned runtime path must be a regular file: {root / relpath}"
+            ) from exc
+        raise RuntimePreparationError(
+            f"cannot open {root / relpath} without following a link: {exc}"
+        ) from exc
+    try:
+        return os.open(name, _CREATE_FLAGS, _FILE_MODE, dir_fd=parent_fd)
+    except OSError as exc:
+        raise RuntimePreparationError(
+            f"cannot create {root / relpath} without following a link: {exc}"
+        ) from exc
+
+
+def _write_owned_descriptor(fd: int, payload: bytes, path: Path) -> None:
+    """Prove the open descriptor is a regular file we own, then truncate and write it."""
+
+    before = os.fstat(fd)
+    if not stat.S_ISREG(before.st_mode):
+        raise RuntimePreparationError(f"harness-owned runtime path must be a regular file: {path}")
+    try:
+        os.fchmod(fd, _FILE_MODE)
+        os.ftruncate(fd, 0)
+        with os.fdopen(fd, "wb", closefd=False) as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+    except OSError as exc:
+        raise RuntimePreparationError(f"cannot write {path}: {exc}") from exc
+    after = os.fstat(fd)
+    if (after.st_dev, after.st_ino) != (before.st_dev, before.st_ino) or stat.S_IMODE(
+        after.st_mode
+    ) != _FILE_MODE:
+        raise RuntimePreparationError(f"harness-owned runtime file changed while it was written: {path}")
+
+
+def _read_confined_file(root_fd: int, relpath: str, root: Path, label: str) -> bytes:
+    """Read one harness-owned regular file through the same confined walk the writes use."""
+
+    fd = _open_owned_descendant(root_fd, relpath, root, directory=False)
+    try:
+        return _read_owned_descriptor(fd, label, root / relpath)
+    finally:
+        os.close(fd)
+
+
+def _read_confined_optional(root_fd: int, relpath: str, root: Path, label: str) -> bytes | None:
+    """The same read, with a missing path reported as ``None`` rather than as a failure."""
+
+    try:
+        return _read_confined_file(root_fd, relpath, root, label)
+    except _MissingOwnedPath:
+        return None
+
+
+def _read_owned_descriptor(fd: int, label: str, path: Path) -> bytes:
+    if not stat.S_ISREG(os.fstat(fd).st_mode):
+        raise RuntimePreparationError(f"{label} must be a regular file: {path}")
+    try:
+        with os.fdopen(fd, "rb", closefd=False) as handle:
+            return handle.read()
+    except OSError as exc:
+        raise RuntimePreparationError(f"cannot read {label} {path}: {exc}") from exc
+
+
+def _confined_file_digest(root_fd: int, relpath: str, root: Path, label: str) -> str:
+    return sha256_bytes(_read_confined_file(root_fd, relpath, root, label))
 
 
 def _normalize_owned_modes(root_fd: int, root: Path) -> tuple[str, ...]:
@@ -1501,27 +1672,6 @@ def _require_owned_modes(root_fd: int, root: Path) -> None:
             raise RuntimePreparationError(
                 f"service-owned directory {root / relpath} is {observed:04o}, not {_DIRECTORY_MODE:04o}"
             )
-
-
-def _write_file(path: Path, payload: bytes) -> None:
-    """Write one service-owned regular file at mode ``0600``, never through a symlink."""
-
-    if path.is_symlink():
-        raise RuntimePreparationError(f"cannot write through a symlink: {path}")
-    try:
-        fd = os.open(path, _WRITE_FLAGS, _FILE_MODE)
-    except OSError as exc:
-        raise RuntimePreparationError(f"cannot write {path}: {exc}") from exc
-    try:
-        os.fchmod(fd, _FILE_MODE)
-        with os.fdopen(fd, "wb", closefd=False) as handle:
-            handle.write(payload)
-            handle.flush()
-            os.fsync(handle.fileno())
-    except OSError as exc:
-        raise RuntimePreparationError(f"cannot write {path}: {exc}") from exc
-    finally:
-        os.close(fd)
 
 
 def _fsync(fd: int, label: Path) -> None:
@@ -1659,12 +1809,14 @@ def _require_runtime_base(runtime_base: Path, repo_root: Path) -> None:
 
 
 def _assert_production_identity_unchanged(
-    before: ProductionIdentity, repo_root: Path, *, cause: BaseException | None
+    before: ProductionIdentity, repo_root: Path, *, cause: BaseException | None, deadline: Deadline | None
 ) -> None:
     """Re-check production identity; drift outranks and chains the failure that caused it."""
 
     try:
-        assert_production_identity_unchanged(before, capture_production_identity(repo_root))
+        assert_production_identity_unchanged(
+            before, capture_production_identity(repo_root, deadline=deadline)
+        )
     except ProductionIdentityError as identity_error:
         if cause is None:
             raise

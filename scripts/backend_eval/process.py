@@ -4,7 +4,9 @@ Every external command the evaluation runs -- ``uv``, ``git``, an interpreter ve
 probe -- goes through :func:`subprocess_runner` or :func:`run_bounded_bytes`, which start
 the child in its own session and, on expiry, ``SIGKILL`` the whole process group before
 returning.  A hung ``uv`` or ``git`` therefore cannot outlive the phase that started it,
-and cannot keep a pipe open long enough to block cleanup.
+and cannot keep a pipe open long enough to block cleanup.  A child with no request to read
+receives ``/dev/null`` on standard input rather than inheriting this process's, so it can
+never block waiting for input the phase will never send.
 
 :class:`Deadline` is the single monotonic ceiling.  ``reserve`` splits one budget into a
 collecting window and a finalization window: the collecting phase stops early enough that
@@ -22,12 +24,14 @@ ceiling arrives raises :class:`DeadlineExceeded` like any other expired step.
 
 from __future__ import annotations
 
+import ctypes
 import fcntl
 import os
 import signal
 import subprocess
 import time
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
@@ -42,9 +46,12 @@ __all__ = [
     "CommandTimeout",
     "Deadline",
     "DeadlineExceeded",
+    "SealedImageError",
     "acquire_exclusive_lock",
+    "descriptor_path",
     "monotonic_clock",
     "run_bounded_bytes",
+    "sealed_image",
     "subprocess_runner",
 ]
 
@@ -61,6 +68,18 @@ LOCK_POLL_SECONDS = 0.05
 
 # A caller with no phase ceiling still never waits forever on another process.
 UNBOUNDED_LOCK_WAIT_SECONDS = 120.0
+
+
+# memfd_create and file seals: the conda interpreter's os/fcntl modules omit these constants.
+_MFD_CLOEXEC = 0x0001
+_MFD_ALLOW_SEALING = 0x0002
+_F_ADD_SEALS = 1033
+_F_GET_SEALS = 1034
+_ALL_SEALS = 0x1 | 0x2 | 0x4 | 0x8
+
+
+class SealedImageError(RuntimeError):
+    """An immutable in-memory image of exactly these bytes cannot be provided."""
 
 
 class DeadlineExceeded(RuntimeError):
@@ -141,6 +160,60 @@ def acquire_exclusive_lock(
         sleep(min(poll_seconds, remaining))
 
 
+def descriptor_path(fd: int) -> Path:
+    """The stable pathname of an open descriptor, resolvable by this process and its children."""
+
+    return Path(f"/proc/{os.getpid()}/fd/{fd}")
+
+
+@contextmanager
+def sealed_image(name: str, payload: bytes) -> Iterator[int]:
+    """Yield a descriptor on an immutable in-memory image of exactly ``payload``.
+
+    The image is a ``memfd`` sealed ``F_SEAL_WRITE | F_SEAL_SHRINK | F_SEAL_GROW |
+    F_SEAL_SEAL`` and read back before it is handed out, so the bytes a child installs or
+    executes cannot be changed by anyone -- including transiently -- for the whole call.  It
+    is the answer to a mutable pathname: a name can be swapped between the read that bound it
+    and the open that used it, an already-sealed descriptor cannot.
+    """
+
+    fd = _memfd_create(name)
+    try:
+        written = 0
+        while written < len(payload):
+            written += os.write(fd, payload[written:])
+        if fcntl.fcntl(fd, _F_ADD_SEALS, _ALL_SEALS) != 0 or fcntl.fcntl(fd, _F_GET_SEALS) != _ALL_SEALS:
+            raise SealedImageError(f"cannot seal the {name} image")
+        if os.pread(fd, len(payload) + 1, 0) != payload:
+            raise SealedImageError(f"the sealed {name} image does not hold the bytes it was built from")
+        yield fd
+    except OSError as exc:
+        raise SealedImageError(f"cannot build the sealed {name} image: {exc}") from exc
+    finally:
+        os.close(fd)
+
+
+def _memfd_create(name: str) -> int:
+    """Create one sealable anonymous image without starting a process to find libc.
+
+    ``ctypes.util.find_library("c")`` shells out to ``ldconfig``, which would be an unbounded
+    child inside a phase whose whole contract is that every child it starts is bounded and
+    killable.  The already-loaded process image exports ``memfd_create`` directly, so it is
+    resolved from there and no child is started at all.
+    """
+
+    handle = ctypes.CDLL(None, use_errno=True)
+    if not hasattr(handle, "memfd_create"):
+        raise SealedImageError(f"this platform cannot provide a sealed {name} image")
+    create = handle.memfd_create
+    create.argtypes = [ctypes.c_char_p, ctypes.c_uint]
+    create.restype = ctypes.c_int
+    fd = create(name.encode("utf-8"), _MFD_CLOEXEC | _MFD_ALLOW_SEALING)
+    if fd < 0:
+        raise SealedImageError(f"cannot create the sealed {name} image: {os.strerror(ctypes.get_errno())}")
+    return fd
+
+
 @dataclass(frozen=True, slots=True)
 class CommandResult:
     returncode: int
@@ -175,16 +248,36 @@ def subprocess_runner(
 
 
 def run_bounded_bytes(
-    command: Sequence[str], *, cwd: Path, env: Mapping[str, str], timeout: float | None = None
+    command: Sequence[str],
+    *,
+    cwd: Path,
+    env: Mapping[str, str],
+    timeout: float | None = None,
+    stdin: bytes | None = None,
+    pass_fds: Sequence[int] = (),
 ) -> CommandBytesResult:
-    """Run one explicit absolute argv, bounded, and keep its output as raw bytes."""
+    """Run one explicit absolute argv, bounded, and keep its output as raw bytes.
 
-    returncode, stdout, stderr = _run(command, cwd=cwd, env=env, timeout=timeout)
+    ``stdin`` is written to the child and its end closed by ``communicate``, so a child that
+    reads its whole request never waits on a writer this process forgot to release.
+    ``pass_fds`` keeps exactly those descriptors -- and no others -- open at the same numbers
+    in the child, which is how a sealed image is executed instead of a mutable pathname.
+    """
+
+    returncode, stdout, stderr = _run(
+        command, cwd=cwd, env=env, timeout=timeout, stdin=stdin, pass_fds=pass_fds
+    )
     return CommandBytesResult(returncode=returncode, stdout=stdout, stderr=stderr)
 
 
 def _run(
-    command: Sequence[str], *, cwd: Path, env: Mapping[str, str], timeout: float | None
+    command: Sequence[str],
+    *,
+    cwd: Path,
+    env: Mapping[str, str],
+    timeout: float | None,
+    stdin: bytes | None = None,
+    pass_fds: Sequence[int] = (),
 ) -> tuple[int, bytes, bytes]:
     if timeout is not None and timeout <= 0:
         raise CommandTimeout(f"no remaining time to start {command[0]}")
@@ -193,13 +286,15 @@ def _run(
         list(command),
         cwd=cwd,
         env=dict(env),
+        stdin=subprocess.DEVNULL if stdin is None else subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
+        pass_fds=tuple(pass_fds),
         # Its own session, so the whole group can be killed without touching this process.
         start_new_session=True,
     )
     try:
-        stdout, stderr = process.communicate(timeout=timeout)
+        stdout, stderr = process.communicate(input=stdin, timeout=timeout)
     except subprocess.TimeoutExpired:
         _kill_process_group(process)
         raise CommandTimeout(

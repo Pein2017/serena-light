@@ -40,12 +40,13 @@ from __future__ import annotations
 import os
 import shutil
 import stat
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
 from scripts.backend_eval.models import PathRecord, RootManifest, canonical_json, sha256_bytes
 from scripts.backend_eval.process import CommandTimeout, Deadline, run_bounded_bytes
+from scripts.backend_eval.production_helper import ProductionHelperError, run_production_helper
 from serena_light.workspace.identity import open_guarded_directory
 
 # Evaluation-only reuse of production's *pure* inventory helpers.  These are executed
@@ -63,7 +64,6 @@ from serena_light.workspace.inventory import (
     _decode_git_path,
     _inventory_from_candidates,
     bounded_non_git_trust_inventory,
-    observe_file_digest,
 )
 
 SERENA_LIGHT_ROOT = Path("/data/CoordExp/serena-light")
@@ -75,6 +75,14 @@ LLM_FRAMEWORK_STUDY_SITE_PACKAGES = Path("/root/miniconda3/envs/llm-framework-st
 # The only trees a Git corpus scan prunes.  Each is service- or repository-owned, is not
 # part of the evaluated corpus, and every pruned path is published in the manifest.
 EXCLUDED_DIRECTORY_NAMES: tuple[str, ...] = (".admission-artifacts", ".git", ".venv", "node_modules")
+
+# Content digests come from ``observe_file_digest`` executed in a bounded child, in chunks.
+# The chunk is a deliberate trade: production's guarded read inspects a candidate's type and
+# then reopens it by name with no ``O_NONBLOCK``, so a node substituted in that window blocks
+# the reader, and only a killable process group can bound it.  Chunking keeps the per-chunk
+# stability window short -- the ``lstat`` bracket around each chunk is what proves a hashed
+# path held still -- while keeping the number of children per capture small.
+DIGEST_CHUNK_SIZE = 512
 
 _MAX_SCAN_DEPTH = 128
 _DIRECTORY_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
@@ -229,7 +237,7 @@ def _capture_git_manifest(
     _reject_inventory_rejections(inventory)
     hashed_names = set(inventory.paths) | set(request.fully_hashed_paths) | set(request.required_config_paths)
     disposition_for = _git_disposition_reader(before)
-    records = tuple(_hashed_record(root, relative, disposition_for(relative)) for relative in sorted(hashed_names))
+    records = _hashed_records(root, sorted(hashed_names), disposition_for, deadline)
     remainder, excluded = _scan_remainder(root, hashed_names, disposition_for, stop)
     _require_disjoint_records(records, remainder)
     after, _ = _git_freeze_state(root, deadline)
@@ -250,13 +258,12 @@ def _capture_git_manifest(
 def _capture_non_git_manifest(
     root: Path, request: RootManifestRequest, stop: Check, deadline: Deadline | None
 ) -> RootManifest:
-    del deadline
     if root == MS_TRANSFORMERS_ROOT:
-        return _capture_transformers_manifest(root, request, stop)
+        return _capture_transformers_manifest(root, request, stop, deadline)
     if not request.fully_hashed_paths and not request.required_config_paths:
         raise ManifestError("non-Git roots require an exact fully hashed task path list")
     hashed_paths = tuple(sorted(set(request.fully_hashed_paths) | set(request.required_config_paths)))
-    records = tuple(_hashed_record(root, relative, "declared") for relative in hashed_paths)
+    records = _hashed_records(root, hashed_paths, lambda _relative: "declared", deadline)
     metadata = _metadata_records(root, request.metadata_roots, lambda _relative: "declared", stop)
     _require_disjoint_records(records, metadata)
     inventory_digest = sha256_bytes(canonical_json({"kind": "non_git", "paths": list(hashed_paths)}))
@@ -272,14 +279,16 @@ def _capture_non_git_manifest(
     )
 
 
-def _capture_transformers_manifest(root: Path, request: RootManifestRequest, stop: Check) -> RootManifest:
+def _capture_transformers_manifest(
+    root: Path, request: RootManifestRequest, stop: Check, deadline: Deadline | None
+) -> RootManifest:
     try:
         inventory = bounded_non_git_trust_inventory(root)
     except (OSError, ValueError) as error:
         raise ManifestError(f"cannot capture bounded transformers inventory: {error}") from error
     _reject_inventory_rejections(inventory)
     hashed_paths = set(inventory.paths) | set(request.fully_hashed_paths) | set(request.required_config_paths)
-    records = tuple(_hashed_record(root, relative, "declared") for relative in sorted(hashed_paths))
+    records = _hashed_records(root, sorted(hashed_paths), lambda _relative: "declared", deadline)
     metadata = _metadata_records(root, request.metadata_roots, lambda _relative: "declared", stop)
     _require_disjoint_records(records, metadata)
     return RootManifest.build(
@@ -505,27 +514,85 @@ def _walk_metadata_root(
 # --- content-hashed records --------------------------------------------------------
 
 
-def _hashed_record(root: Path, relative: str, disposition: str) -> PathRecord:
-    absolute = root / relative
-    before = _lstat(absolute, relative)
-    if stat.S_ISLNK(before.st_mode):
+def bounded_file_digests(
+    root: Path, relatives: Sequence[str], *, deadline: Deadline | None
+) -> dict[str, str | None]:
+    """Digest every named path with production's ``observe_file_digest``, in bounded children.
+
+    The helper's own semantics are preserved exactly -- it is production's bytes that run --
+    and ``None`` still means "no byte identity exists to attribute".  What the child adds is
+    a ceiling: a substituted FIFO that blocks production's guarded open costs this phase its
+    remaining time and a typed failure, with the whole process group killed, instead of
+    hanging the evaluator inside one uninterruptible syscall.
+    """
+
+    digests: dict[str, str | None] = {}
+    for start in range(0, len(relatives), DIGEST_CHUNK_SIZE):
+        chunk = tuple(relatives[start : start + DIGEST_CHUNK_SIZE])
+        if deadline is not None:
+            deadline.check("capture_corpus")
+        digests.update(_digest_chunk(root, chunk, deadline))
+    return digests
+
+
+def _digest_chunk(root: Path, chunk: Sequence[str], deadline: Deadline | None) -> dict[str, str | None]:
+    paths = [str(root / relative) for relative in chunk]
+    try:
+        result = run_production_helper("observe_file_digests", {"paths": paths}, deadline=deadline)
+    except ProductionHelperError as error:
+        raise ManifestError(f"cannot digest the hashed closure below {root}: {error}") from error
+    recorded = result.get("digests")
+    if not isinstance(recorded, list) or len(recorded) != len(chunk):
+        raise ManifestError(f"the digest helper did not answer every hashed path below {root}")
+    digests: dict[str, str | None] = {}
+    for relative, expected, entry in zip(chunk, paths, recorded, strict=True):
+        if not isinstance(entry, list) or len(entry) != 2 or entry[0] != expected:
+            raise ManifestError(f"the digest helper answered a different path than {relative}")
+        digest = entry[1]
+        if digest is not None and not isinstance(digest, str):
+            raise ManifestError(f"the digest helper answered a malformed digest for {relative}")
+        digests[relative] = digest
+    return digests
+
+
+def _hashed_records(
+    root: Path,
+    relatives: Sequence[str],
+    disposition_for: Callable[[str], str],
+    deadline: Deadline | None,
+) -> tuple[PathRecord, ...]:
+    """Bracket one bounded digest pass with an ``lstat`` before and after every path."""
+
+    before = {relative: _require_hashable(root, relative) for relative in relatives}
+    digests = bounded_file_digests(root, relatives, deadline=deadline)
+    records: list[PathRecord] = []
+    for relative in relatives:
+        digest = digests.get(relative)
+        after = _lstat(root / relative, relative)
+        if digest is None or _stat_identity(before[relative]) != _stat_identity(after):
+            raise ManifestError(f"fully hashed path is unstable: {relative}")
+        records.append(
+            PathRecord(
+                path=relative,
+                kind="file",
+                disposition=disposition_for(relative),
+                size=after.st_size,
+                mtime_ns=after.st_mtime_ns,
+                inode=after.st_ino,
+                symlink_target=None,
+                content_sha256=digest,
+            )
+        )
+    return tuple(records)
+
+
+def _require_hashable(root: Path, relative: str) -> os.stat_result:
+    observed = _lstat(root / relative, relative)
+    if stat.S_ISLNK(observed.st_mode):
         raise ManifestError(f"fully hashed path is a symlink: {relative}")
-    if not stat.S_ISREG(before.st_mode):
+    if not stat.S_ISREG(observed.st_mode):
         raise ManifestError(f"fully hashed path is not a regular file: {relative}")
-    digest = observe_file_digest(absolute)
-    after = _lstat(absolute, relative)
-    if digest is None or _stat_identity(before) != _stat_identity(after):
-        raise ManifestError(f"fully hashed path is unstable: {relative}")
-    return PathRecord(
-        path=relative,
-        kind="file",
-        disposition=disposition,
-        size=after.st_size,
-        mtime_ns=after.st_mtime_ns,
-        inode=after.st_ino,
-        symlink_target=None,
-        content_sha256=digest,
-    )
+    return observed
 
 
 # --- Git facts ----------------------------------------------------------------------

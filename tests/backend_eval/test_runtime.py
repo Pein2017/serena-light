@@ -10,7 +10,7 @@ import shutil
 import stat
 import threading
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, fields, replace
 from pathlib import Path
 from typing import Any
@@ -44,6 +44,7 @@ from scripts.backend_eval.runtime import (
     CandidateRuntime,
     RuntimePreparationError,
     RuntimeRequest,
+    _write_confined_file,
     minimal_backend_environment,
     owned_runtime_directory_relpaths,
     owned_runtime_file_relpaths,
@@ -113,6 +114,9 @@ class _FakeRunner:
     swap: tuple[str, Path, Path] | None = None
     probe_sync_input: bool = False
     gate: tuple[threading.Event, threading.Event] | None = None
+    # One arbitrary mutation applied just before the runner answers the first command whose
+    # tokens contain the marker: the adversarial hook the write-path regressions plant with.
+    plant: tuple[str, Callable[[], None]] | None = None
     calls: list[tuple[tuple[str, ...], Path, Mapping[str, str]]] = field(default_factory=list)
     resolved_commands: list[tuple[str, ...]] = field(default_factory=list)
     resolved_cwds: list[Path] = field(default_factory=list)
@@ -180,6 +184,10 @@ class _FakeRunner:
         assert release.wait(10)
 
     def _apply_mutations(self, tokens: tuple[str, ...]) -> None:
+        if self.plant is not None and self.plant[0] in tokens:
+            _marker, action = self.plant
+            self.plant = None
+            action()
         if self.mutate is not None:
             self.mutate.write_bytes(self.mutate.read_bytes() + b"\n# evaluation drift\n")
             self.mutate = None
@@ -1685,3 +1693,346 @@ def test_reuse_refuses_a_harness_owned_path_replaced_by_a_fifo(
 
     assert elapsed < 2.0
     assert len(os.listdir("/proc/self/fd")) == before_fds
+
+
+# --- harness-owned writes: component-wise descriptor confinement -----------------------
+#
+# Every regression below plants its decoy *during* the build, through the runner, because a
+# preparation with no published manifest purges the runtime root before it writes anything.
+# The marker each one plants on is the runner call that immediately precedes the write it
+# attacks: the base-interpreter probe runs just before the requirements snapshot is written,
+# and the last declared environment interpreter runs just before the service configurations
+# and the manifest temporary are written.
+
+
+def _base_interpreter_marker() -> str:
+    """The token of the first ``-c`` probe, which runs before the snapshot is written."""
+
+    return "-I"
+
+
+def _last_interpreter_marker(request: RuntimeRequest) -> str:
+    """The token of the last interpreter probe, which runs before the configs are written."""
+
+    return str(request.environment_interpreters[-1][1])
+
+
+def _outside_decoy(tmp_path: Path, name: str) -> Path:
+    decoy = tmp_path / name
+    decoy.write_bytes(b"decoy bytes that must survive\n")
+    os.chmod(decoy, 0o644)
+    return decoy
+
+
+def test_the_snapshot_write_refuses_a_fifo_without_blocking(
+    lock: CandidateLock, request_: RuntimeRequest
+) -> None:
+    """``O_WRONLY`` on a FIFO with no reader blocks forever without ``O_NONBLOCK``.
+
+    The harness-owned write opens the leaf non-blocking and proves it regular through that
+    same descriptor before it may truncate or write a byte.
+    """
+
+    root = request_.runtime_base / lock.digest
+
+    def plant() -> None:
+        os.mkfifo(root / REQUIREMENTS_SNAPSHOT_NAME)
+
+    before_fds = len(os.listdir("/proc/self/fd"))
+    started = time.monotonic()
+    with pytest.raises(RuntimePreparationError, match="must be a regular file"):
+        prepare_candidate_runtime(lock, request_, runner=_FakeRunner(plant=(_base_interpreter_marker(), plant)))
+    elapsed = time.monotonic() - started
+
+    assert elapsed < 5.0
+    assert len(os.listdir("/proc/self/fd")) == before_fds
+
+
+def test_the_snapshot_write_refuses_a_symlinked_leaf_and_never_truncates_the_decoy(
+    lock: CandidateLock, request_: RuntimeRequest, tmp_path: Path
+) -> None:
+    root = request_.runtime_base / lock.digest
+    decoy = _outside_decoy(tmp_path, "snapshot-decoy.lock")
+
+    def plant() -> None:
+        (root / REQUIREMENTS_SNAPSHOT_NAME).symlink_to(decoy)
+
+    with pytest.raises(RuntimePreparationError, match="without following a link"):
+        prepare_candidate_runtime(lock, request_, runner=_FakeRunner(plant=(_base_interpreter_marker(), plant)))
+
+    assert decoy.read_bytes() == b"decoy bytes that must survive\n"
+    assert stat.S_IMODE(decoy.stat().st_mode) == 0o644
+
+
+def test_the_service_config_write_refuses_a_fifo_without_blocking(
+    lock: CandidateLock, request_: RuntimeRequest
+) -> None:
+    root = request_.runtime_base / lock.digest
+
+    def plant() -> None:
+        directory = root / "config" / "ty"
+        directory.mkdir(mode=0o700)
+        os.mkfifo(directory / "ty.toml")
+
+    before_fds = len(os.listdir("/proc/self/fd"))
+    started = time.monotonic()
+    with pytest.raises(RuntimePreparationError, match="must be a regular file"):
+        prepare_candidate_runtime(
+            lock, request_, runner=_FakeRunner(plant=(_last_interpreter_marker(request_), plant))
+        )
+    elapsed = time.monotonic() - started
+
+    assert elapsed < 5.0
+    assert len(os.listdir("/proc/self/fd")) == before_fds
+
+
+def test_the_service_config_write_refuses_a_symlinked_leaf_and_never_truncates_the_decoy(
+    lock: CandidateLock, request_: RuntimeRequest, tmp_path: Path
+) -> None:
+    root = request_.runtime_base / lock.digest
+    decoy = _outside_decoy(tmp_path, "ty-leaf-decoy.toml")
+
+    def plant() -> None:
+        directory = root / "config" / "ty"
+        directory.mkdir(mode=0o700)
+        (directory / "ty.toml").symlink_to(decoy)
+
+    with pytest.raises(RuntimePreparationError, match="without following a link"):
+        prepare_candidate_runtime(
+            lock, request_, runner=_FakeRunner(plant=(_last_interpreter_marker(request_), plant))
+        )
+
+    assert decoy.read_bytes() == b"decoy bytes that must survive\n"
+    assert stat.S_IMODE(decoy.stat().st_mode) == 0o644
+
+
+def test_the_service_config_write_refuses_a_symlinked_intermediate_component(
+    lock: CandidateLock, request_: RuntimeRequest, tmp_path: Path
+) -> None:
+    """``config/ty`` is an intermediate component, so a single ``O_NOFOLLOW`` never guards it.
+
+    A ``mkdir(parents=True)`` on the logical path followed by one whole-relative-path open
+    would create nothing (the link already resolves) and then write the configuration into
+    the attacker's directory.  Every component is created and opened from its parent's
+    descriptor instead, so the escape is refused and the outside tree is untouched.
+    """
+
+    root = request_.runtime_base / lock.digest
+    outside = tmp_path / "outside-config-dir"
+    outside.mkdir()
+    os.chmod(outside, 0o755)
+    decoy = _outside_decoy(outside, "ty.toml")
+
+    def plant() -> None:
+        (root / "config" / "ty").symlink_to(outside)
+
+    with pytest.raises(RuntimePreparationError, match="not a symlink or special file"):
+        prepare_candidate_runtime(
+            lock, request_, runner=_FakeRunner(plant=(_last_interpreter_marker(request_), plant))
+        )
+
+    assert sorted(path.name for path in outside.iterdir()) == ["ty.toml"]
+    assert decoy.read_bytes() == b"decoy bytes that must survive\n"
+    assert stat.S_IMODE(decoy.stat().st_mode) == 0o644
+    assert stat.S_IMODE(outside.stat().st_mode) == 0o755
+
+
+def test_the_service_config_write_refuses_a_special_intermediate_component(
+    lock: CandidateLock, request_: RuntimeRequest
+) -> None:
+    """A FIFO where an intermediate directory belongs must fail fast, not hang the mkdir."""
+
+    root = request_.runtime_base / lock.digest
+
+    def plant() -> None:
+        os.mkfifo(root / "config" / "ty")
+
+    before_fds = len(os.listdir("/proc/self/fd"))
+    started = time.monotonic()
+    with pytest.raises(RuntimePreparationError, match="not a symlink or special file"):
+        prepare_candidate_runtime(
+            lock, request_, runner=_FakeRunner(plant=(_last_interpreter_marker(request_), plant))
+        )
+    elapsed = time.monotonic() - started
+
+    assert elapsed < 5.0
+    assert len(os.listdir("/proc/self/fd")) == before_fds
+
+
+def test_a_harness_owned_write_never_writes_into_a_readable_fifo(
+    tmp_path: Path
+) -> None:
+    """The concrete hazard ``O_TRUNC`` and a blocking open together created.
+
+    ``O_WRONLY | O_CREAT | O_TRUNC`` on a FIFO blocks until a reader appears and then writes
+    the harness payload straight into that reader's pipe.  The confined write opens
+    non-blocking and proves the descriptor regular through ``fstat`` before it truncates or
+    writes anything, so a FIFO with a live reader is refused with not one byte delivered.
+    """
+
+    root = tmp_path / "root"
+    root.mkdir(mode=0o700)
+    os.mkfifo(root / "owned.txt")
+    reader = os.open(root / "owned.txt", os.O_RDONLY | os.O_NONBLOCK)
+    root_fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        with pytest.raises(RuntimePreparationError, match="must be a regular file"):
+            _write_confined_file(root_fd, "owned.txt", root, b"harness payload\n")
+        # No writer ever opened the pipe, so the reader sees end of file, not the payload.
+        assert os.read(reader, 4096) == b""
+    finally:
+        os.close(root_fd)
+        os.close(reader)
+
+
+def test_a_harness_owned_write_keeps_the_prior_bytes_of_a_refused_target(
+    tmp_path: Path
+) -> None:
+    """A target that cannot be owned is never truncated first."""
+
+    root = tmp_path / "root"
+    root.mkdir(mode=0o700)
+    target = root / "owned.txt"
+    target.write_bytes(b"prior contents\n")
+    root_fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        _write_confined_file(root_fd, "owned.txt", root, b"new contents\n")
+        assert target.read_bytes() == b"new contents\n"
+        assert stat.S_IMODE(target.stat().st_mode) == 0o600
+        # A directory at the leaf is refused by the open itself, before any truncation.
+        (root / "as-directory").mkdir()
+        with pytest.raises(RuntimePreparationError, match="without following a link"):
+            _write_confined_file(root_fd, "as-directory", root, b"payload\n")
+    finally:
+        os.close(root_fd)
+
+
+def test_a_harness_owned_write_refuses_an_intermediate_symlink_directly(
+    tmp_path: Path
+) -> None:
+    """The component walk refuses a symlinked intermediate and creates nothing outside."""
+
+    root = tmp_path / "root"
+    root.mkdir(mode=0o700)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    os.chmod(outside, 0o755)
+    (root / "config").symlink_to(outside)
+    root_fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        with pytest.raises(RuntimePreparationError, match="not a symlink or special file"):
+            _write_confined_file(root_fd, "config/ty/ty.toml", root, b"payload\n")
+    finally:
+        os.close(root_fd)
+
+    assert sorted(path.name for path in outside.iterdir()) == []
+
+
+def test_a_harness_owned_write_follows_the_descriptor_through_a_root_swap(
+    tmp_path: Path
+) -> None:
+    """A root renamed away mid-write still receives the bytes; the decoy never does."""
+
+    root = tmp_path / "root"
+    root.mkdir(mode=0o700)
+    decoy = tmp_path / "decoy-root"
+    decoy.mkdir(mode=0o700)
+    root_fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        root.rename(tmp_path / "moved-root")
+        (tmp_path / "root").symlink_to(decoy)
+        _write_confined_file(root_fd, "config/ty/ty.toml", root, b"payload\n")
+    finally:
+        os.close(root_fd)
+
+    assert (tmp_path / "moved-root" / "config" / "ty" / "ty.toml").read_bytes() == b"payload\n"
+    assert sorted(path.name for path in decoy.iterdir()) == []
+
+
+def test_the_published_service_configuration_read_is_descriptor_confined(
+    lock: CandidateLock, request_: RuntimeRequest, tmp_path: Path
+) -> None:
+    """Verification reads the bytes through the same confined walk the writes use.
+
+    A published configuration replaced by a symlink to an outside file with exactly the
+    expected bytes must be refused: a check-then-``read_bytes`` accepts it, because the
+    check and the read are two different resolutions of the same mutable path.
+    """
+
+    runtime = prepare_candidate_runtime(lock, request_, runner=_FakeRunner())
+    target = runtime.config / SERVICE_CONFIG_RELPATHS["ty"]
+    expected = target.read_bytes()
+    outside = tmp_path / "identical-config.toml"
+    outside.write_bytes(expected)
+    os.chmod(outside, 0o600)
+    target.unlink()
+    target.symlink_to(outside)
+
+    with pytest.raises(RuntimePreparationError, match="without following a link"):
+        prepare_candidate_runtime(lock, request_, runner=_FakeRunner())
+
+
+def test_the_installed_snapshot_read_is_descriptor_confined(
+    lock: CandidateLock, request_: RuntimeRequest, tmp_path: Path
+) -> None:
+    """The same for the installed lock snapshot: a matching outside file is still refused."""
+
+    runtime = prepare_candidate_runtime(lock, request_, runner=_FakeRunner())
+    target = runtime.root / REQUIREMENTS_SNAPSHOT_NAME
+    outside = tmp_path / "identical-snapshot.lock"
+    outside.write_bytes(target.read_bytes())
+    os.chmod(outside, 0o600)
+    target.unlink()
+    target.symlink_to(outside)
+
+    with pytest.raises(RuntimePreparationError, match="without following a link"):
+        prepare_candidate_runtime(lock, request_, runner=_FakeRunner())
+
+
+def test_the_published_manifest_read_is_descriptor_confined(
+    lock: CandidateLock, request_: RuntimeRequest, tmp_path: Path
+) -> None:
+    runtime = prepare_candidate_runtime(lock, request_, runner=_FakeRunner())
+    target = runtime.root / MANIFEST_FILE_NAME
+    outside = tmp_path / "identical-manifest.json"
+    outside.write_bytes(target.read_bytes())
+    os.chmod(outside, 0o600)
+    target.unlink()
+    target.symlink_to(outside)
+
+    with pytest.raises(RuntimePreparationError, match="without following a link"):
+        prepare_candidate_runtime(lock, request_, runner=_FakeRunner())
+
+    with pytest.raises(RuntimePreparationError, match="without following a link"):
+        runtime_manifest_digest(runtime.root)
+
+
+def test_the_candidate_executable_digest_read_is_descriptor_confined(
+    lock: CandidateLock, request_: RuntimeRequest, tmp_path: Path
+) -> None:
+    """A symlinked ``venv/bin`` must not redirect the recorded candidate byte digests."""
+
+    runtime = prepare_candidate_runtime(lock, request_, runner=_FakeRunner())
+    outside = tmp_path / "outside-bin"
+    outside.mkdir()
+    for name in ("pyrefly", "ty", "python"):
+        (outside / name).write_bytes(b"#!/bin/sh\nexit 0\n")
+        os.chmod(outside / name, 0o700)
+    shutil.rmtree(runtime.root / "venv" / "bin")
+    (runtime.root / "venv" / "bin").symlink_to(outside)
+
+    with pytest.raises(RuntimePreparationError):
+        prepare_candidate_runtime(lock, request_, runner=_FakeRunner())
+
+
+def test_the_runtime_manifest_digest_refuses_a_symlinked_root(
+    lock: CandidateLock, request_: RuntimeRequest, tmp_path: Path
+) -> None:
+    """``runtime_manifest_digest`` opens every component of its own root without following."""
+
+    runtime = prepare_candidate_runtime(lock, request_, runner=_FakeRunner())
+    alias = tmp_path / "runtime-alias"
+    alias.symlink_to(runtime.root)
+
+    with pytest.raises(RuntimePreparationError, match="without following a link"):
+        runtime_manifest_digest(alias)

@@ -3,18 +3,35 @@
 from __future__ import annotations
 
 import os
+import time
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
 from scripts.backend_eval.manifests import RootManifestRequest, capture_root_manifest
 from scripts.backend_eval.models import RootManifest, WriteDelta
+from scripts.backend_eval.process import Deadline, DeadlineExceeded, monotonic_clock
 from scripts.backend_eval.write_guard import (
     WriteGuardError,
     assert_no_unexpected_writes,
     compare_root_manifests,
     enrich_after_manifest,
 )
+from serena_light.workspace.inventory import observe_file_digest
+
+
+class _FakeClock:
+    """A monotonic clock the test advances explicitly."""
+
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def __call__(self) -> float:
+        return self.now
+
+    def advance(self, seconds: float) -> None:
+        self.now += seconds
 
 
 @pytest.fixture
@@ -244,3 +261,60 @@ def test_assertion_error_is_bounded_and_includes_counts_and_digests() -> None:
     assert delta.after_manifest_digest in message
     assert "path-049" in message
     assert "path-050" not in message
+
+
+# --- the bounded production-helper enrichment read ---------------------------------------
+
+
+def test_enrichment_hashes_changed_remainder_files_in_a_bounded_child(fixture_root: Path) -> None:
+    """The default enrichment digest is production's, executed under the phase's ceiling."""
+
+    before = capture_root_manifest(_request(fixture_root))
+    (fixture_root / "scratch" / "cache.bin").write_bytes(b"cache!")
+    after = capture_root_manifest(_request(fixture_root))
+
+    enriched = enrich_after_manifest(before, after, deadline=Deadline.start(monotonic_clock, 60.0))
+
+    changed = next(record for record in enriched.metadata_paths if record.path == "scratch/cache.bin")
+    assert changed.content_sha256 == observe_file_digest(fixture_root / "scratch" / "cache.bin")
+
+
+def test_enrichment_refuses_a_remainder_file_it_cannot_attribute(fixture_root: Path) -> None:
+    """A FIFO where a changed remainder file was is an incomplete observation, not clean."""
+
+    before = capture_root_manifest(_request(fixture_root))
+    target = fixture_root / "scratch" / "cache.bin"
+    target.unlink()
+    os.mkfifo(target)
+    after = capture_root_manifest(_request(fixture_root))
+    # The metadata scan sees a special node, so force the enrichment to attempt the digest.
+    forced = RootManifest.build(
+        root=after.root,
+        kind=after.kind,
+        source_revision=after.source_revision,
+        inventory_digest=after.inventory_digest,
+        inventory_paths=after.inventory_paths,
+        excluded_paths=after.excluded_paths,
+        hashed_paths=after.hashed_paths,
+        metadata_paths=tuple(
+            record if record.path != "scratch/cache.bin" else replace(record, kind="file")
+            for record in after.metadata_paths
+        ),
+    )
+
+    started = time.monotonic()
+    with pytest.raises(WriteGuardError, match="could not be hashed"):
+        enrich_after_manifest(before, forced, deadline=Deadline.start(monotonic_clock, 30.0))
+    assert time.monotonic() - started < 10.0
+
+
+def test_enrichment_with_no_remaining_time_fails_closed(fixture_root: Path) -> None:
+    before = capture_root_manifest(_request(fixture_root))
+    (fixture_root / "scratch" / "cache.bin").write_bytes(b"cache!")
+    after = capture_root_manifest(_request(fixture_root))
+    clock = _FakeClock()
+    deadline = Deadline.start(clock, 10.0)
+    clock.advance(10.0)
+
+    with pytest.raises((WriteGuardError, DeadlineExceeded)):
+        enrich_after_manifest(before, after, deadline=deadline)

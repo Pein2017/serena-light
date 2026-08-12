@@ -36,7 +36,15 @@ The evaluation SHALL keep candidate selection, candidate dependencies, temporary
 
 #### Scenario: Service-owned state is written
 - **WHEN** the evaluation writes a file, lock, configuration, or receipt it owns, or creates a directory it owns
-- **THEN** that regular file is `0600` and that directory is `0700` regardless of the ambient umask, and the contract covers every harness-written file and every service-owned ancestor directory
+- **THEN** every component of that path, including each intermediate directory it creates, is opened or created from its parent's descriptor without following a link, the leaf is opened non-blocking and proven a regular file through that same descriptor before any byte moves, no existing file is truncated before its type and ownership are proven, and the resulting regular file is `0600` and directory `0700` regardless of the ambient umask, for every harness-written file and every service-owned ancestor directory
+
+#### Scenario: A harness-owned write target is substituted before the write
+- **WHEN** a path the harness is about to write is a symlink, a FIFO, another special node, or lies below a symlinked intermediate component, or the runtime root is renamed and replaced during preparation
+- **THEN** the write is refused with a typed error, no byte is written or truncated anywhere outside the open root, no payload reaches a substituted reader, and any write that does proceed lands in the inode the harness opened rather than in whatever the pathname now names
+
+#### Scenario: Published harness-owned state is verified
+- **WHEN** the evaluation re-reads a file it owns to verify a published runtime, snapshot, configuration, or manifest digest
+- **THEN** it reads through the same component-wise descriptor walk its writes use, so a substituted file holding exactly the expected bytes is refused rather than accepted as the file that was verified
 
 #### Scenario: A third-party tool writes inside a service-owned tree
 - **WHEN** a resolver, installer, or candidate creates its own cache or environment files inside a service-owned directory
@@ -56,6 +64,10 @@ Candidate language servers SHALL use service-owned HOME, configuration, cache, e
 #### Scenario: A candidate runs on a read-only input
 - **WHEN** a protocol, common-surface, feature, cold-start, or warm-query probe completes
 - **THEN** a before-and-after lexical manifest fully hashes the trust-inventory closure and declared fixture paths, metadata-scans the complete declared in-scope remainder of every Git root -- files, symlink targets, directories including empty ones, and any other node -- for path membership, file type, symlink target, size, `mtime_ns`, and inode, and hashes any remainder path whose metadata changed or that did not exist before
+
+#### Scenario: The evaluator's own read and write surface is audited
+- **WHEN** evaluation code performs any filesystem access -- by descriptor, by pathname, or by delegating to a production helper
+- **THEN** that access appears in a finite declared ownership table with exactly one owner, the table is derived structurally from the evaluator source rather than by inspection so an undeclared or removed access fails, and the residual boundaries the table cannot close are stated explicitly rather than described as closed
 
 #### Scenario: A scan boundary is required to keep the sweep bounded
 - **WHEN** a Git corpus root contains a service- or repository-owned tree that is not part of the evaluated corpus
@@ -239,8 +251,20 @@ The frozen evaluation contract SHALL cap active wall time at 30 minutes for mani
 - **THEN** the deadline is enforced cooperatively at the next boundary rather than preempting the call, so the linked receipt name may exist transiently while that one call completes; it is withdrawn as soon as the expiry is observed and it is never admitted evidence, because a consumer requires successful command completion and canonical digest verification, neither of which an overrun run supplies
 
 #### Scenario: A guarded read finds a FIFO or other blocking special node
-- **WHEN** a guarded read expecting a regular file -- the corpus remainder, the runtime manifest, the owned-runtime mode repair, the evaluator source closure, the bound production helper closure, or the admission artifact-tree digest -- opens a path that is now a FIFO or other node whose open blocks without a peer
+- **WHEN** a guarded read expecting a regular file -- the corpus remainder, the runtime manifest, the owned-runtime mode repair, the evaluator source closure, the bound production helper closure, the declared production lock inputs, or the admission artifact-tree digest -- opens a path that is now a FIFO or other node whose open blocks without a peer
 - **THEN** the open returns immediately rather than blocking the calling thread, and the typed domain error the regular-file check already raises is returned promptly, so the FIFO can neither stall the phase past its ceiling nor be read as empty bytes
+
+#### Scenario: A production helper the evaluation may not edit blocks on a substituted node
+- **WHEN** a phase needs a value only a production helper can compute, that helper checks a path's type and then reopens it by name, and the node is substituted in that window
+- **THEN** the helper runs as its exact unmodified production bytes inside a child that receives the phase's remaining time, runs in its own session, and has its whole process group killed on expiry, so the phase fails typed inside its ceiling instead of hanging, and no evaluation-owned copy of the helper's semantics is used in its place
+
+#### Scenario: A production helper is executed in a child
+- **WHEN** the evaluation starts that child
+- **THEN** the child program is read through a component-wise no-follow walk from the evaluator checkout's own open descriptor, pinned by digest for the whole run, and executed from a sealed immutable in-memory image addressed by descriptor rather than by a pathname the interpreter would resolve again, with only that descriptor inherited, in isolated mode with an explicit source root and a minimal environment carrying no ambient `PATH`, `PYTHONPATH`, or user site directory, and the published evaluator identity names those same program bytes
+
+#### Scenario: The executed child program or helper closure is substituted
+- **WHEN** the child program, or any production module the child reports having loaded, changes on disk during a run or is reached through a symlinked ancestor component
+- **THEN** the phase refuses rather than executing or believing it, because the program digest is pinned on first use and every reported helper byte is re-read component by component from the evaluator checkout's open descriptor and compared, rather than being accepted on an after-the-fact cleanliness observation
 
 #### Scenario: Evaluation-owned cleanup runs
 - **WHEN** a phase runs its own cleanup before publishing

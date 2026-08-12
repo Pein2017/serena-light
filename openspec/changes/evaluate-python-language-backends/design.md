@@ -156,6 +156,16 @@ Three ways of leaving the ceiling remained after that, and all three are closed.
 
 **A fourth way was found later: a guarded read is a syscall too.** Every regular-file read the evaluator performs opens the path `O_RDONLY | O_NOFOLLOW`, `fstat`s the descriptor, and refuses anything that is not a regular file -- the corpus remainder, the runtime manifest, the owned-runtime mode repair, the evaluator source closure, the bound production helper closure, and the admission artifact-tree digest all go through one such guarded read each. `open()` on a FIFO in read-only mode blocks until a writer appears, regardless of `O_NOFOLLOW`, and that block is a single uninterruptible syscall in the calling thread -- the same enforcement boundary already stated above, but with no cooperative checkpoint inside the syscall to observe. A FIFO or other blocking special node left where a regular file is expected -- by a same-name race, or by a node the traversal's own `lstat` gate does not reach -- therefore hung the read rather than failing closed; it could not produce a false `pass`, since the `fstat` refusal still runs after any open that returns, but it could make a run exceed the whole-phase ceiling with no receipt, which is exactly the failure mode this decision exists to close. Every one of those guarded reads now adds `O_NONBLOCK`, which has no effect on a regular file's read behaviour and changes nothing about `O_NOFOLLOW`, descriptor-relative confinement, or the `fstat` refusal; it only makes the open on a FIFO or other blocking special node return immediately, so the refusal that already existed can run promptly instead of never running at all.
 
+**A fifth way: a production helper's read is a syscall the evaluator did not write.** The
+`O_NONBLOCK` repair above covers every guarded read *the evaluator owns*. It does not reach the
+production helpers the evaluator executes, which check a path's type and then reopen it by name
+with no `O_NONBLOCK` of their own, and which the evaluation may not edit. Those helpers now run
+in a bounded child started through the same runner as every other subprocess: it receives the
+phase's remaining time, runs in its own session, and has its whole process group `SIGKILL`ed on
+expiry. A helper blocked inside an uninterruptible `open` therefore costs the phase its
+remaining budget and a typed failure, which the ceiling can observe, instead of an unbounded
+hang it cannot. Decision 8d states the full shape.
+
 **What the ceiling is, precisely.** It is enforced *cooperatively*, at the boundaries between syscalls, in the calling thread. A `link`, `unlink`, or `fsync` already in flight is not preemptible, and introducing a watchdog thread to interrupt one would trade a bounded, observable overrun for an unbounded correctness hazard in the middle of a durability barrier. The consequence is stated rather than papered over: for as long as one in-flight post-link `fsync` takes to complete, the final receipt name can exist in the directory after the ceiling has passed. It is withdrawn at the next boundary, and it is not admitted evidence -- every consumer of this gate requires the command to have exited successfully *and* the receipt to verify canonically against its own digest and artifact-tree digest, and an overrun run supplies neither. The invariants that are actually guaranteed are the two that matter: no `pass` is ever returned after the ceiling, and no final receipt remains once an overrun has been observed.
 
 ### Decision 8c: Scope the file-permission contract to what the harness owns
@@ -165,6 +175,63 @@ Service-owned state is `0600` for regular files and `0700` for directories, inde
 It deliberately stops at third-party tree interiors. `uv` and `virtualenv` create their own cache and environment files inside those directories, including a world-writable `.lock`. Recursively rewriting them would mean chmod-ing a tool's private cache against its own assumptions, and would buy no confidentiality: they already sit behind `0700` service-owned ancestors, and the receipt's artifact-tree digest excludes the resolver cache entirely, so their modes are outside the evidence the receipt binds. That boundary is pinned by test on both sides rather than left to inspection.
 
 A runtime published before this contract was enforced keeps its old `0660` files, and content addressing means it is reused rather than rebuilt. Reuse already holds the per-digest runtime lock, which is the only safe place to correct them, so reuse repairs them there: `fchmod` on a descriptor whose *every* component was opened `O_NOFOLLOW` from the already-proven open runtime root, and which `fstat` shows to be a regular file through that same descriptor. Naming the whole relative path in a single `open` is not enough and was rejected for a concrete reason: `O_NOFOLLOW` constrains only the last component, so a symlinked `config/ty` would carry the `fchmod` to a file outside the root entirely. Both the repair and the verification therefore walk the path one component at a time. No byte moves, so neither the installed snapshot digest nor the published manifest digest can change; a symlink anywhere along the path, a non-regular harness file, or a widened service-owned directory is refused rather than repaired, so no chmod can escape the root. The contract is then re-verified in full, and a runtime that still violates it is never returned -- which is what makes the repair receipt-bound rather than advisory.
+
+### Decision 8d: Own every read and write by descriptor, and enumerate the surface
+
+Four rounds of review found the same defect in four different places, so the last round
+stopped fixing instances and enumerated the surface instead.
+
+**The defect shape.** Resolving one mutable pathname twice is not a guard. `path.is_file()`
+followed by `path.read_bytes()` is two independent resolutions: a symlink dropped between
+them is followed by the second, and a FIFO dropped between them blocks the second inside one
+uninterruptible `open`. `O_NOFOLLOW` does not close it either, because it constrains only the
+*last* component -- `open("config/ty/ty.toml", O_NOFOLLOW)` still traverses a symlinked
+`config/ty`. For writes the older form was worse: `O_WRONLY | O_CREAT | O_TRUNC` truncated an
+existing target before proving what it was, and on a FIFO it blocked until a reader appeared
+and then wrote the harness payload into that reader's pipe.
+
+**Harness-owned state: component-wise descriptor confinement.** Every read and write the
+harness performs below a root it opened now walks out from that already-proven descriptor one
+component at a time, `O_NOFOLLOW` on every component, creating and re-opening each
+intermediate directory from its parent's descriptor rather than through `mkdir(parents=True)`.
+Leaves are opened `O_NONBLOCK` and proven regular by `fstat` on the same descriptor before any
+byte moves. Write leaves carry no `O_TRUNC`: the file is opened `O_WRONLY | O_NOFOLLOW |
+O_NONBLOCK`, created `O_CREAT | O_EXCL` only if that reports `ENOENT`, proven regular,
+`fchmod`ed to `0600`, and *then* truncated. A FIFO with a live reader is refused with not one
+byte delivered. Nothing is reopened by pathname between validation and use, so a rename, a
+symlinked ancestor, or a swapped root cannot capture a later write.
+
+**Production helpers: exact semantics, bounded blast radius.** `dependency_lock_digest`,
+`compute_build_identity`, `runtime_paths`, and `observe_file_digest` live in `src/serena_light`
+and contain the same check-then-reopen shape. Two repairs were rejected. Editing production to
+close an evaluation-only exposure changes the semantics the receipt claims to bind, on the
+user's compatibility surface, for the benefit of a harness. Copying the helpers into
+evaluation-owned code forks exactly the semantics the corpus capture exists to measure, and the
+copy decays silently. The third option is taken: run the *exact production bytes* in a child
+the phase deadline can kill. The child is executed by absolute path under `-I` with an explicit
+`src` root and a minimal environment, so no `PYTHONPATH`, user site directory, or ambient
+`scripts` namespace package can shadow it; it reports the byte digest of every `serena_light`
+module it loaded and the parent re-reads and compares each one, so a child that ran another
+checkout's helpers is refused rather than believed; and its request and response are canonical
+JSON bound by the SHA-256 of the request bytes it consumed. Digest batches are chunked, and the
+capture `lstat`s each path before and after its chunk, so the stability window a hashed record
+is bound to stays short.
+
+This does not remove the race -- it bounds it, and the honest statement is that a production
+helper blocked on a substituted node costs the phase its remaining budget and a typed failure
+with the whole process group killed, not that the block cannot happen. One production behaviour
+is likewise left visible rather than papered over: `runtime_source_files` filters by
+`Path.is_file()`, so a non-regular file below `src/serena_light` is skipped rather than read,
+which changes the build identity and is refused by the identity guard.
+
+**The enumeration.** `tests/backend_eval/test_io_ownership.py` parses every evaluator module
+and requires the complete set of filesystem accesses -- descriptor primitives, every
+pathname-shaped `pathlib` and builtin access, and every production helper call -- to equal a
+declared table with one owner class per row. Grepping for `os.open` flags never found them all,
+because `Path.read_bytes`, `Path.write_text`, `Path.mkdir`, and a helper call are each an
+unguarded open with no flag to grep for. A new read or write fails that test until its owner is
+declared; a removed one fails it until the row goes. `docs/backend-eval-io-ownership.md` is its
+prose companion and states the residual boundaries.
 
 ### Decision 9: Keep raw evidence ignored and summaries reviewable
 
@@ -183,6 +250,7 @@ This change completes after the decision receipt is independently reviewed. A wi
 - **Candidate releases can move quickly** -> freeze versions and hashes once; later releases require a new evaluation identity rather than mutating the current evidence.
 - **Real dirty worktrees can change during setup** -> freeze bounded trust/fixture content manifests plus complete remainder metadata and use snapshots; fail if the source changes while one capture is running, and hold on any change observed between the two captures. A live external worktree that another lane is writing will therefore hold rather than pass; that is the instrument working, not a defect to compensate.
 - **A metadata-only remainder cannot see a same-size, same-timestamp rewrite** -> keep the trust-inventory closure and declared configuration paths fully content hashed on every capture, and record the bound explicitly rather than implying complete byte coverage of ignored trees.
+- **A production helper the evaluation may not edit can still block on a substituted node** -> run its exact bytes in a deadline-bound child whose process group is killed on expiry, bind the executed helper bytes into the receipt, and state that this bounds the race rather than removing it.
 - **Protocol logging may capture source or secrets** -> store bounded structured metadata by default, redact environment and bearer values, and keep raw transcripts local and ignored.
 - **Temporary MCP configuration could affect normal clients** -> use isolated config roots and names, never modify canonical Serena or installed Serena Light entries, and verify registrations before and after every Agent arm.
 - **The harness could become a dormant multi-backend product** -> keep it out of the wheel and production build identity, document its one-decision lifecycle, and remove service-owned candidate runtimes after archive unless an approved integration change needs the winning lock.

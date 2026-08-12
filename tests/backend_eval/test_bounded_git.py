@@ -19,6 +19,7 @@ from pathlib import Path
 import pytest
 
 import scripts.backend_eval.manifests as manifests
+import scripts.backend_eval.production_helper as production_helper
 from scripts.backend_eval.manifests import (
     RootManifestRequest,
     _git_environment,
@@ -161,15 +162,19 @@ def test_git_manifest_capture_succeeds_with_the_unbounded_helper_forbidden(
 # --- subprocess accounting ------------------------------------------------------------
 
 
-def test_every_git_child_of_a_capture_comes_through_the_bounded_runner(
+def test_every_child_of_a_capture_comes_through_the_bounded_runner(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Every process a capture starts -- Git *and* the digest helper -- is bounded and killable."""
+
     root = _repository(tmp_path)
     deadline = Deadline.start(monotonic_clock, 1800, reserve=300)
 
     bounded: list[tuple[tuple[str, ...], float | None]] = []
     spawned: list[Sequence[str]] = []
+    sessions: list[object] = []
     real_bounded = manifests.run_bounded_bytes
+    real_helper_bounded = production_helper.run_bounded_bytes
     real_popen = subprocess.Popen
 
     def recording_bounded(
@@ -178,24 +183,43 @@ def test_every_git_child_of_a_capture_comes_through_the_bounded_runner(
         bounded.append((tuple(command), timeout))
         return real_bounded(command, cwd=cwd, env=env, timeout=timeout)
 
+    def recording_helper_bounded(
+        command: Sequence[str],
+        *,
+        cwd: Path,
+        env: Mapping[str, str],
+        timeout: float | None = None,
+        stdin: bytes | None = None,
+        pass_fds: Sequence[int] = (),
+    ) -> CommandBytesResult:
+        bounded.append((tuple(command), timeout))
+        return real_helper_bounded(
+            command, cwd=cwd, env=env, timeout=timeout, stdin=stdin, pass_fds=pass_fds
+        )
+
     def recording_popen(args: Sequence[str], *rest: object, **kwargs: object) -> subprocess.Popen[bytes]:
         spawned.append(args)
+        sessions.append(kwargs.get("start_new_session"))
         return real_popen(args, *rest, **kwargs)  # type: ignore[arg-type]
 
     def forbidden_run(*args: object, **kwargs: object) -> None:
         raise AssertionError("an evaluation capture used unbounded subprocess.run")
 
     monkeypatch.setattr(manifests, "run_bounded_bytes", recording_bounded)
+    monkeypatch.setattr(production_helper, "run_bounded_bytes", recording_helper_bounded)
     monkeypatch.setattr(subprocess, "Popen", recording_popen)
     monkeypatch.setattr(subprocess, "run", forbidden_run)
 
     capture_root_manifest(_request(root), deadline=deadline)
 
-    # One child per bounded call and no others: nothing spawned a Git process another way.
+    # One child per bounded call and no others: nothing spawned a process another way, and
+    # every one of them got its own session so its whole group can be killed on expiry.
     assert len(spawned) == len(bounded) > 0
     assert [tuple(command) for command in spawned] == [command for command, _timeout in bounded]
+    assert sessions == [True] * len(spawned)
+    git_commands = [command for command, _timeout in bounded if command[0] == manifests._GIT_EXECUTABLE]
     # One `--show-toplevel` guard, then four bounded Git children per freeze state, twice.
-    assert [command[1:] for command, _timeout in bounded] == [
+    assert [command[1:] for command in git_commands] == [
         ("rev-parse", "--show-toplevel"),
         *2
         * [
@@ -205,8 +229,14 @@ def test_every_git_child_of_a_capture_comes_through_the_bounded_runner(
             COMBINED_LS_FILES,
         ],
     ]
-    for command, timeout in bounded:
-        assert command[0] == manifests._GIT_EXECUTABLE
+    # Exactly one bounded digest child, executing the production helper under -I.
+    helpers = [command for command, _timeout in bounded if command[0] != manifests._GIT_EXECUTABLE]
+    assert len(helpers) == 1
+    assert helpers[0][1:3] == ("-I", "-B")
+    # The program is a sealed in-memory image addressed by descriptor, never a pathname.
+    assert re.fullmatch(r"/proc/self/fd/\d+", helpers[0][3])
+    # Every child, of either family, carries the phase's own remaining time.
+    for _command, timeout in bounded:
         assert timeout is not None and 0 < timeout <= 1500
 
 

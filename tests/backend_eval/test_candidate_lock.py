@@ -31,7 +31,7 @@ from scripts.backend_eval.candidate_lock import (
     subprocess_runner,
 )
 from scripts.backend_eval.models import CandidateLock, ProductionIdentity, canonical_json, sha256_bytes
-from scripts.backend_eval.process import CommandTimeout
+from scripts.backend_eval.process import CommandTimeout, Deadline
 from scripts.backend_eval.production_identity import PRODUCTION_IDENTITY_FILES, ProductionIdentityChanged
 
 _RUNNER_EVENT = "<runner>"
@@ -615,8 +615,8 @@ def _drifting_capture(
     real = candidate_lock_module.capture_production_identity
     seen: list[int] = []
 
-    def drifting(root: Path) -> ProductionIdentity:
-        identity = real(root)
+    def drifting(root: Path, *, deadline: Deadline | None = None) -> ProductionIdentity:
+        identity = real(root, deadline=deadline)
         seen.append(1)
         if len(seen) > after_call:
             return replace(identity, uv_lock_sha256="f" * 64)

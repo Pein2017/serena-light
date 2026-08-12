@@ -24,8 +24,9 @@ from __future__ import annotations
 from collections.abc import Callable, Sequence
 from pathlib import Path
 
+from scripts.backend_eval.manifests import ManifestError, bounded_file_digests
 from scripts.backend_eval.models import PathRecord, RootManifest, WriteDelta
-from serena_light.workspace.inventory import observe_file_digest
+from scripts.backend_eval.process import Deadline
 
 __all__ = [
     "WriteGuardError",
@@ -40,6 +41,27 @@ _CONTROL_FIELDS = ("excluded_paths", "inventory_count", "inventory_digest", "inv
 DigestReader = Callable[[Path], str | None]
 
 
+def _bounded_digest_reader(root: Path, deadline: Deadline | None) -> DigestReader:
+    """Production's ``observe_file_digest``, executed in a bounded, killable child.
+
+    Enrichment reads only the remainder paths whose metadata actually moved, so this is
+    normally called zero times in a clean run; when it is called, the same ceiling that
+    bounds the corpus captures bounds it, one child per changed path.
+    """
+
+    def digest_for(absolute: Path) -> str | None:
+        try:
+            relative = absolute.relative_to(root).as_posix()
+        except ValueError as error:  # pragma: no cover - structural guard
+            raise WriteGuardError(f"{absolute} is not below the manifest root {root}") from error
+        try:
+            return bounded_file_digests(root, (relative,), deadline=deadline)[relative]
+        except ManifestError as error:
+            raise WriteGuardError(f"cannot hash the changed remainder file {relative}: {error}") from error
+
+    return digest_for
+
+
 class WriteGuardError(RuntimeError):
     """A manifest comparison cannot establish a bounded zero-write result."""
 
@@ -48,7 +70,8 @@ def enrich_after_manifest(
     before: RootManifest,
     after: RootManifest,
     *,
-    digest_for: DigestReader = observe_file_digest,
+    deadline: Deadline | None = None,
+    digest_for: DigestReader | None = None,
 ) -> RootManifest:
     """Return the after manifest with content hashes for changed or created remainder files.
 
@@ -59,6 +82,7 @@ def enrich_after_manifest(
     _require_same_root_identity(before, after)
     before_records = {record.path: record for record in after_and_before_records(before)}
     root = Path(after.root)
+    read_digest = _bounded_digest_reader(root, deadline) if digest_for is None else digest_for
     enriched: list[PathRecord] = []
     changed = False
     for record in after.metadata_paths:
@@ -66,7 +90,7 @@ def enrich_after_manifest(
         if record.kind != "file" or record.content_sha256 is not None or previous == record:
             enriched.append(record)
             continue
-        enriched.append(_hashed_remainder_record(root, record, digest_for))
+        enriched.append(_hashed_remainder_record(root, record, read_digest))
         changed = True
     if not changed:
         return after

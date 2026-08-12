@@ -56,6 +56,61 @@
 > changes nothing about ordinary-file behavior, and all five earlier runs remain preserved
 > byte-for-byte.
 >
+> **A sixth family was found by a Sol-xhigh HOLD review after that, and tasks 1.13 and 1.15
+> are reopened for it.** The `O_NONBLOCK` repair covered every guarded read the evaluator
+> owns, but the audit that produced it was flag-shaped: it searched `os.open` constants, so it
+> could not see the accesses that carry no flags. Three families survived. (1) `runtime.py`
+> wrote every harness-owned file -- the installed lock snapshot, the three service
+> configurations, the manifest temporary -- with a path-based `O_WRONLY | O_CREAT | O_TRUNC |
+> O_NOFOLLOW` and created their directories with `Path.mkdir(parents=True)`. `O_NOFOLLOW`
+> guards only the last component, so a symlinked `config/ty` carried the write outside the
+> root; a FIFO at `config/ty/ty.toml` blocked the open until a reader appeared and then
+> received the harness payload; and `O_TRUNC` destroyed an existing target before anything
+> proved what it was. Its service-configuration verification was a check followed by
+> `Path.read_bytes()`, which a post-check symlink to a file with the expected bytes passes.
+> (2) `production_identity.py` read the three declared lock inputs the same check-then-read
+> way, and the production helpers it calls -- `dependency_lock_digest`,
+> `compute_build_identity`, `runtime_paths` -- do the same inside `src/serena_light`, which the
+> evaluation may not edit. (3) `inventory.observe_file_digest` opens `O_RDONLY | O_NOFOLLOW`
+> with no `O_NONBLOCK`, so a node substituted after its type was inspected blocks the corpus
+> capture.
+>
+> All three are closed without touching `src/serena_light`. Every harness-owned write and
+> verification read below the runtime root now walks out from the already-open root descriptor
+> one component at a time, creating and reopening each intermediate directory from its
+> parent's descriptor, opening leaves `O_NONBLOCK`, proving them regular by `fstat` on that
+> same descriptor, and truncating only after that proof; a FIFO with a live reader is refused
+> with not one byte delivered. The three lock inputs are read through one guarded descriptor
+> each. The four production helpers run as their exact unmodified bytes in a bounded,
+> source-bound, minimal-environment child whose process group the phase deadline kills, with
+> canonical digest-bound request and response and every executed helper byte re-read and
+> compared by the parent. And the whole surface is now enumerated structurally rather than by
+> grep: `tests/backend_eval/test_io_ownership.py` parses every evaluator module, collects every
+> filesystem access including `Path.read_bytes`, `Path.write_text`, `Path.mkdir`, and each
+> production helper call, and fails until every one appears in a finite table with exactly one
+> owner; `docs/backend-eval-io-ownership.md` explains the owner classes and states the residual
+> boundaries. The honest limit is stated in both: running production's bytes in a killable
+> child *bounds* the helpers' own check-then-reopen race, it does not remove it, and
+> `runtime_source_files` still silently skips a non-regular source file, which changes the
+> build identity and is refused by the identity guard rather than hidden.
+>
+> **Two source-binding seams inside that repair were closed before it was committed, after a
+> lead pre-review.** (a) The parent's re-read of the helper bytes a child reported opened the
+> whole relative path under one `O_NOFOLLOW`, which guards only its last component, so a
+> symlinked `src` or `src/serena_light` could have supplied another tree's bytes for the
+> parent to "confirm". It now walks every component from an open descriptor on the evaluator
+> owner root. (b) The child *program* was handed to the interpreter as a mutable pathname,
+> leaving a window between the read that digested those bytes and the `execve` that ran them,
+> closed only after the fact by `source_clean`. The program is now read through that same
+> confined walk, pinned by digest on first use and re-checked on every later call, and executed
+> from a `memfd` sealed `F_SEAL_WRITE | F_SEAL_SHRINK | F_SEAL_GROW | F_SEAL_SEAL` addressed as
+> `/proc/self/fd/<image>` with only that descriptor inherited; a test proves the digest equals
+> the one the evaluator identity records for `production_child.py`, and a substitution test
+> proves a mid-run swap is refused rather than executed. Closing (b) also removed an unbounded
+> child the bounded-runner accounting test then caught: `ctypes.util.find_library("c")` shells
+> out to `ldconfig`, so `memfd_create` is resolved from the already-loaded process image
+> instead, and the sealed-image primitive now has one owner in `process.py`.
+>
 > **Task 1.8 background from the first re-review.** The final Sol-xhigh review of the earlier
 > admitting run (evaluator HEAD `7d40d41`, evaluation identity `380aaeb4…9147d`) found three
 > defects that made its PASS untrustworthy as a *gate*, and tasks 1.11, 1.13, and 1.14 were
@@ -80,9 +135,9 @@
 - [x] 1.10 Implement the spec's two-stage remainder algorithm: compare metadata first, hash only changed or created regular remainder files through guarded no-follow reads, rebuild the after manifest and digest with those hashes before constructing the delta, and treat a race during enrichment as incomplete rather than clean.
 - [x] 1.11 Bind every receipt to a typed evaluator identity (executed source closure digest, source commit and cleanliness, CLI host interpreter path/realpath/SHA-256/version), the allowlisted bootstrap environment recorded as key names and value digests only, and the candidate runtime's logical root and canonical `runtime-manifest.json` SHA-256 recomputed before PASS; include the evaluator identity and artifact root in the reproducible evaluation identity. Bind the executed *production* helper closure the same way -- origin root, per-file byte digest, recomputed closure digest, cleanliness at the recorded commit -- resolve `serena_light` from the evaluator's own checkout before any helper import, fail closed by realpath on a shadowed or out-of-owner helper, and prove with an adversarial test that changed or repointed helper bytes change the identity or refuse the run without any change to `scripts/backend_eval`.
 - [x] 1.12 Give each execution an immutable `run_identity` and publish `receipts/<run-identity>.json` exclusively under a per-identity no-follow lock so a repeated or concurrent run can neither delete nor replace another run's receipt; serialize candidate-lock transactions the same way so a live transaction is never mistaken for an interrupted one.
-- [x] 1.13 Make the 1800-second admission ceiling cover resolution, runtime preparation, both captures, cleanup, the final production identity, the artifact digest, and publication; propagate the remaining time to every subprocess and kill its process group on expiry; reserve enough finalization time to publish a trustworthy timeout receipt and fail closed without a receipt when that evidence cannot be completed. Acquire every resolution, runtime, and publication lock non-blockingly against the same monotonic deadline with no background thread, and make publication itself deadline-aware end to end -- chunked deadline-checked writes, a publication reserve before the atomic link, and withdrawal of this run's own link if the ceiling arrives during it -- so no PASS is published or returned after the frozen ceiling and no failure leaves a receipt at the final path. Re-observe the ceiling after *every* post-link mutation and durability barrier, including immediately before returning while withdrawal is still possible, and pass the same deadline into cleanup so a cleanup that spends the budget fails the run closed instead of yielding a later PASS. State the cooperative-enforcement boundary honestly rather than claiming preemption.
+- [x] 1.13 Make the 1800-second admission ceiling cover resolution, runtime preparation, both captures, cleanup, the final production identity, the artifact digest, and publication; propagate the remaining time to every subprocess and kill its process group on expiry; reserve enough finalization time to publish a trustworthy timeout receipt and fail closed without a receipt when that evidence cannot be completed. Acquire every resolution, runtime, and publication lock non-blockingly against the same monotonic deadline with no background thread, and make publication itself deadline-aware end to end -- chunked deadline-checked writes, a publication reserve before the atomic link, and withdrawal of this run's own link if the ceiling arrives during it -- so no PASS is published or returned after the frozen ceiling and no failure leaves a receipt at the final path. Re-observe the ceiling after *every* post-link mutation and durability barrier, including immediately before returning while withdrawal is still possible, and pass the same deadline into cleanup so a cleanup that spends the budget fails the run closed instead of yielding a later PASS. Bound the production helpers the evaluation executes but may not edit -- the dependency-lock digest, the build identity, the runtime paths, and the trust-inventory file digest -- by running their exact unmodified bytes in a source-bound, minimal-environment child that receives the phase's remaining time and has its whole process group killed on expiry, and propagate that deadline into every production-identity capture and every corpus-capture child. State the cooperative-enforcement boundary, and the fact that this bounds rather than removes the helpers' own check-then-reopen race, honestly rather than claiming preemption.
 - [x] 1.14 Make typed PASS structurally strict (exact budgets, ordered timestamps, exact environment and service-config names, one delta per root bound to both manifest digests, no unexpected path, no declared mutation, no changed manifest control, every identity present), recompute `RootManifest.manifest_digest` at construction and parsing, carry an explicit raw-lock digest witness on `CandidateLock`, and cover each case with adversarial parsing tests. Require every phase budget to equal its frozen `DEFAULT_PHASE_BUDGETS` seconds, not merely the frozen names with a positive admission budget, and cover the mutation of each budget's seconds in construction and in parsing.
-- [x] 1.15 Close the remaining evidence-integrity defects: a descriptor-relative `O_NOFOLLOW` artifact-tree traversal with no reopen after validation, redaction by path component rather than string prefix, and service-owned files and directories at `0600`/`0700` independent of the ambient umask. Scope that mode contract explicitly to harness-written files, locks, configurations, and receipts plus every service-owned ancestor directory; leave third-party resolver and environment internals at their tool-defined modes behind `0700` ancestors and excluded from the artifact digest, with the boundary pinned by test; and repair a runtime published before the contract under its own per-digest lock without changing bytes or the manifest digest, opening every path component from its parent's descriptor so no repair can follow a link out of the root.
+- [x] 1.15 Close the remaining evidence-integrity defects: a descriptor-relative `O_NOFOLLOW` artifact-tree traversal with no reopen after validation, redaction by path component rather than string prefix, and service-owned files and directories at `0600`/`0700` independent of the ambient umask. Scope that mode contract explicitly to harness-written files, locks, configurations, and receipts plus every service-owned ancestor directory; leave third-party resolver and environment internals at their tool-defined modes behind `0700` ancestors and excluded from the artifact digest, with the boundary pinned by test; and repair a runtime published before the contract under its own per-digest lock without changing bytes or the manifest digest, opening every path component from its parent's descriptor so no repair can follow a link out of the root. Extend that component-wise descriptor discipline from the mode repair to *every* harness-owned write and verification read below the runtime root -- creating each intermediate directory from its parent's descriptor rather than through `mkdir(parents=True)`, opening leaves non-blocking, proving them regular through the same descriptor, and never truncating an existing file before its type and ownership are proven -- and enumerate the evaluator's complete filesystem-access surface structurally in a finite ownership table with one owner per access, so an undeclared read or write fails a test rather than surviving a grep.
 - [x] 1.16 Remove the last unbounded subprocess from the corpus capture: derive the Git trust inventory from the already bounded combined `git ls-files --cached --others --exclude-standard -z` bytes and reuse production's subprocess-free candidate normalization and inspection, without modifying `src/serena_light`; prove field-by-field equivalence with `git_trust_inventory`, prove capture succeeds with that helper forbidden, and account for every Git child of a capture through the bounded runner.
 
 ## 2. Build and gate raw protocol probes
