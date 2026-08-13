@@ -128,6 +128,18 @@ task utility deferred to Phase 4; an empty advertised implementation result alon
 Phase 2. Locked ty's otherwise-valid pull diagnostics are classified
 `seam_incompatible_pull_only`, remain non-promotable, and never count as a surviving competitor.
 
+**Final Phase 2 disposition.** The fresh canonical receipt under evaluation
+`1f761365be67ab7afa89daa44e41d62cdc4b0de7f6a0a3f942697f017ab04665`, run
+`5a3b6e2721632197c81a3bd857b1da55d14198124af885c69d17bdee3576e7f4`, and receipt
+SHA-256 `3957dc7b059c4d29236a3a1aec1f729c756c1744aed56ed30d28e561b4400596`
+is the accepted gate evidence. Pyright passes, ty is correctly excluded as
+`seam_incompatible_pull_only`, and Pyrefly fails required diagnostics and workspace-symbol
+evidence. With no promotable competitor, the closed next action is
+`retain_pyright_and_stop_after_protocol_phase`; Phases 3 through 5 are
+`NOT_REQUIRED / SKIPPED_BY_STOP_GATE`, and their unimplemented task checkboxes remain
+unchecked. The exact command, parent/corpus bindings, outcomes, hashes, reviews, and claim
+boundary are recorded in `phase-2-acceptance.md`.
+
 ### Decision 5: Preserve Serena Light freshness and failure semantics
 
 Backends receive the same open/change/close and watched-file notifications from the shared adapter. Every content-bearing call keeps the existing preflight, at-most-one complete replay, byte-witness postflight, and typed second-race failure. The existing `LspClient.set_content_modified_retry_methods` seam remains disabled for all arms, so every request has one backend attempt; the harness may not add hidden retry loops. Protocol receipts separately count `ContentModified` and `RequestCancelled` outcomes.

@@ -250,16 +250,26 @@
 
 ## 2. Build and gate raw protocol probes
 
-- [ ] 2.1 Add the evaluation-only backend protocol interface and shared runner under `scripts/backend_eval/`, reusing production LSP transport and process-launcher behavior without importing evaluation modules from `src/serena_light`.
-- [ ] 2.2 Implement the Pyright baseline probe from current production facts and prove initialize providers, configuration requests, position encoding, and shutdown against the frozen manifest.
-- [ ] 2.3 Implement the ty probe with locked executable, explicit service-owned configuration and interpreter, and structured initialize/provider evidence.
-- [ ] 2.4 Implement the Pyrefly probe with locked executable, explicit external `configPath`/initialization options, workspace diagnostics configuration, and no automatic configuration creation, migration, workspace edit, or hidden retry loop.
-- [ ] 2.5 Add typed capability-receipt schemas and receipts that separate initialize advertisement, accepted request, valid normalized result, and real-task utility, including an explicit negative implementation record when the locked ty version does not advertise `textDocument/implementation`.
-- [ ] 2.6 Add real subprocess tests for cold readiness, push/pull diagnostics mode, `ContentModified`, `RequestCancelled`, the identically disabled production retry seam, and bounded timeout; use an explicit pytest timeout above the repository's 30-second default for declared real-corpus cases.
-- [ ] 2.7 Add real subprocess tests for crash, graceful shutdown, parent/process-tree cleanup, proxy poisoning, minimal environment, and secret/environment redaction.
-- [ ] 2.8 Run each protocol probe under bounded write detection and prove zero workspace mutation for Pyright, ty, and Pyrefly.
-- [ ] 2.9 Run the complete protocol phase under its 90-minute ceiling from one exact Phase 1 parent; bind the lexical workspace/target/zero-based position and frozen root witness, revalidate the same read-only parent runtime during finalization, publish typed per-candidate gate outcomes for PASS/FAIL and `seam_incompatible_pull_only` dispositions with artifact-tree digests, and remove failed candidates from later phases.
-> **Phase 2 evidence HOLD.** The previously published protocol receipt under evaluation
+- [x] 2.1 Add the evaluation-only backend protocol interface and shared runner under `scripts/backend_eval/`, reusing production LSP transport and process-launcher behavior without importing evaluation modules from `src/serena_light`.
+- [x] 2.2 Implement the Pyright baseline probe from current production facts and prove initialize providers, configuration requests, position encoding, and shutdown against the frozen manifest.
+- [x] 2.3 Implement the ty probe with locked executable, explicit service-owned configuration and interpreter, and structured initialize/provider evidence.
+- [x] 2.4 Implement the Pyrefly probe with locked executable, explicit external `configPath`/initialization options, workspace diagnostics configuration, and no automatic configuration creation, migration, workspace edit, or hidden retry loop.
+- [x] 2.5 Add typed capability-receipt schemas and receipts that separate initialize advertisement, accepted request, valid normalized result, and real-task utility, including an explicit negative implementation record when the locked ty version does not advertise `textDocument/implementation`.
+- [x] 2.6 Add real subprocess tests for cold readiness, push/pull diagnostics mode, `ContentModified`, `RequestCancelled`, the identically disabled production retry seam, and bounded timeout; use an explicit pytest timeout above the repository's 30-second default for declared real-corpus cases.
+- [x] 2.7 Add real subprocess tests for crash, graceful shutdown, parent/process-tree cleanup, proxy poisoning, minimal environment, and secret/environment redaction.
+- [x] 2.8 Run each protocol probe under bounded write detection and prove zero workspace mutation for Pyright, ty, and Pyrefly.
+- [x] 2.9 Run the complete protocol phase under its 90-minute ceiling from one exact Phase 1 parent; bind the lexical workspace/target/zero-based position and frozen root witness, revalidate the same read-only parent runtime during finalization, publish typed per-candidate gate outcomes for PASS/FAIL and `seam_incompatible_pull_only` dispositions with artifact-tree digests, and remove failed candidates from later phases.
+> **Phase 2 accepted; retain Pyright and stop.** The final canonical receipt is evaluation
+> `1f761365be67ab7afa89daa44e41d62cdc4b0de7f6a0a3f942697f017ab04665`, run
+> `5a3b6e2721632197c81a3bd857b1da55d14198124af885c69d17bdee3576e7f4`, receipt
+> SHA-256 `3957dc7b059c4d29236a3a1aec1f729c756c1744aed56ed30d28e561b4400596`.
+> It binds Phase 1 parent `d27d2bac...f67aa` / `cccfd94d...f76a`, passes strict schema and
+> artifact checks, proves zero write delta over all five frozen roots, and classifies Pyright
+> `pass`, ty `seam_incompatible_pull_only`, and Pyrefly `fail`. Sol-xhigh and Sol-max both
+> returned final exact-receipt PASS with no P0-P2 or false-PASS. Full evidence and the claim
+> boundary are in `phase-2-acceptance.md`.
+>
+> **Historical evidence remains immutable.** The previously published protocol receipt under evaluation
 > `f081b5e69385020072840528e865d79426cebb1d0f08a58070afc0ddefae875b` is immutable but
 > superseded/infrastructure-invalid: its ty configuration witness was based on an unconsumed
 > client notification, empty or stale diagnostics could satisfy controlled-document evidence,
@@ -272,10 +282,14 @@
 > classification-invalid and superseded: it made proven-configuration diagnostics failure
 > inconclusive, treated optional Phase 4 implementation evidence as a Phase 2 hard gate, and did
 > not classify otherwise-valid ty pull diagnostics as `seam_incompatible_pull_only`. A new Phase
-> 1 parent and fresh canonical Phase 2 receipt are required; neither historical receipt closes
-> task 2.9.
+> 1 parent and fresh canonical Phase 2 receipt were therefore required; neither historical
+> receipt is used to close task 2.9.
 
 ## 3. Compare the current Serena Light product surface
+
+> **Disposition: `NOT_REQUIRED / SKIPPED_BY_STOP_GATE`.** Phase 2 left no promotable
+> competitor: ty is pull-only under the current product seam and Pyrefly failed hard protocol
+> evidence. Tasks 3.1-3.13 remain unchecked because this phase was neither implemented nor run.
 
 - [ ] 3.1 Implement an evaluation-only fixed-corpus attributor and adapter-factory injection that feeds identical trust inventory to each survivor while keeping native/configured-program feasibility as a separate promotion gate.
 - [ ] 3.2 Implement an evaluation-only diagnostics identity/assembly seam that accepts candidate engine evidence without changing `DiagnosticEngineFacts`, production diagnostics code, stable specs, or installed runtime; record this wrapper deviation in every candidate receipt.
@@ -293,6 +307,10 @@
 
 ## 4. Probe future closed semantic operations
 
+> **Disposition: `NOT_REQUIRED / SKIPPED_BY_STOP_GATE`.** No competitor passed the Phase 2
+> entry gate, so feature probes cannot change the backend decision. Tasks 4.1-4.8 remain
+> unchecked because this phase was neither implemented nor run.
+
 - [ ] 4.1 Add evaluation-only normalized result models for implementation, type definition, hover, prepared call hierarchy, incoming/outgoing calls, prepared type hierarchy, supertypes, and subtypes using validated snapshot ranges and bounded compact text.
 - [ ] 4.2 Implement candidate dispatch for implementation, type-definition, and hover, returning explicit unsupported/failed evidence rather than references, text search, or AST synthesis.
 - [ ] 4.3 Implement internal prepare-plus-incoming/outgoing call-hierarchy dispatch without exposing opaque LSP items to the caller.
@@ -304,6 +322,10 @@
 
 ## 5. Run the conditional backend-blinded Codex Agent comparison
 
+> **Disposition: `NOT_REQUIRED / SKIPPED_BY_STOP_GATE`.** The protocol stop gate already
+> selects retention of Pyright, so an Agent comparison would be decision-irrelevant model
+> spend. Tasks 5.1-5.6 remain unchecked because this phase was neither implemented nor run.
+
 - [ ] 5.1 If and only if the Phase 4 entry receipt requires it, freeze typed task-corpus and model-route schemas for four to six concrete prompts, deterministic workspace/path/symbol/range-set verifiers, shell/MCP routing instructions, model and effort, semantic-call and response-character budgets, 25-minute per-arm ceiling, arm rotation, one infrastructure retry, and scoring rubric before the first arm.
 - [ ] 5.2 Implement a direct evaluation-only stdio MCP with one identical name and schema across arms, the existing public tools plus only Phase-4-justified normalized operations, explicit read-only transport classification for every closed operation, and orchestrator-owned backend selection absent from Agent-visible instructions and results.
 - [ ] 5.3 Implement isolated temporary Codex configuration and instrumentation that records semantic calls, serialized MCP characters, shell fallback, cold/warm status, time to first frozen decision-owning evidence, time to final answer, final response, candidate/runtime identity, and cleanup without modifying production connector code or normal client registrations.
@@ -314,8 +336,13 @@
 ## 6. Decide, review, and close without migration
 
 - [ ] 6.1 Enforce the 16-hour total active evaluation ceiling, including at most one hour for accepted repairs and reruns, and generate a machine-readable decision receipt plus concise acceptance report choosing exactly one of `promote_pyrefly`, `promote_ty`, `retain_pyright`, or `inconclusive_retain_pyright`.
-- [ ] 6.2 Apply the lexicographic rule only to candidates that reached each phase, retaining earlier eliminations as gate exclusions and leaving call/context savings at the efficiency rank rather than future-utility rank.
-- [ ] 6.3 Obtain an independent Sol-xhigh static/correctness review and Opus-max runtime/evidence review against the exact evaluation identity, then disposition every blocker without deciding by majority vote.
+> **Open closeout requirement.** `phase-2-acceptance.md` records the human recommendation,
+> but the immutable protocol receipt is not a final decision receipt. Closing 6.1 still
+> requires a complete active-time attempt ledger, including unpublished failures and temporary
+> repair/rerun attempts, before an evidence-only machine-readable `retain_pyright` decision can
+> bind the accepted protocol receipt. Published receipt windows alone are not a complete total.
+- [x] 6.2 Apply the lexicographic rule only to candidates that reached each phase, retaining earlier eliminations as gate exclusions and leaving call/context savings at the efficiency rank rather than future-utility rank.
+- [x] 6.3 Obtain independent Sol-xhigh static/correctness and Sol-max runtime/evidence reviews against the exact evaluation identity, then disposition every blocker without deciding by majority vote. The earlier Opus-max HOLD remains repair input rather than final approval, following the user's final reviewer route.
 - [ ] 6.4 Re-run affected probes after any accepted repair, freeze the final artifact-tree digest, validate the change strictly, and present the recommendation, residual risks, and permitted next action to the user for an explicit decision.
 - [ ] 6.5 Remove all temporary MCP registrations and evaluation-owned processes; if Pyright is retained, remove candidate runtimes, and if a winner is approved for integration, retain only its immutable lock/evidence until the separate integration change owns it.
 - [ ] 6.6 Update the roadmap and acceptance evidence without changing the production backend or public schema, sync/archive this change only after all tasks and reviews are complete, and create no integration or feature change without separate user authorization.
