@@ -341,8 +341,11 @@
 > requires a complete active-time attempt ledger, including unpublished failures and temporary
 > repair/rerun attempts, before an evidence-only machine-readable `retain_pyright` decision can
 > bind the accepted protocol receipt. Published receipt windows alone are not a complete total.
-- [x] 6.2 Apply the lexicographic rule only to candidates that reached each phase, retaining earlier eliminations as gate exclusions and leaving call/context savings at the efficiency rank rather than future-utility rank.
-- [x] 6.3 Obtain independent Sol-xhigh static/correctness and Sol-max runtime/evidence reviews against the exact evaluation identity, then disposition every blocker without deciding by majority vote. The earlier Opus-max HOLD remains repair input rather than final approval, following the user's final reviewer route.
+- [ ] 6.2 Apply the lexicographic rule only to candidates that reached each phase, retaining earlier eliminations as gate exclusions and leaving call/context savings at the efficiency rank rather than future-utility rank.
+> The Phase 2 stop gate already excludes ty and Pyrefly without ranking deferred feature or
+> efficiency evidence, but the complete lexicographic disposition remains open until the final
+> machine-readable decision receipt binds that exclusion set.
+- [x] 6.3 Obtain independent Sol-xhigh static/correctness and Sol-max runtime/evidence reviews against the exact evaluation identity, then disposition every blocker without deciding by majority vote. The earlier Opus-max HOLD remains repair input rather than final approval, following the user's final reviewer route. These reviews approve the protocol receipt; review of the later machine-readable decision receipt remains part of 6.4.
 - [ ] 6.4 Re-run affected probes after any accepted repair, freeze the final artifact-tree digest, validate the change strictly, and present the recommendation, residual risks, and permitted next action to the user for an explicit decision.
 - [ ] 6.5 Remove all temporary MCP registrations and evaluation-owned processes; if Pyright is retained, remove candidate runtimes, and if a winner is approved for integration, retain only its immutable lock/evidence until the separate integration change owns it.
 - [ ] 6.6 Update the roadmap and acceptance evidence without changing the production backend or public schema, sync/archive this change only after all tasks and reviews are complete, and create no integration or feature change without separate user authorization.
