@@ -2,13 +2,22 @@
   "mcpServers": {
     "serena": {
       "type": "stdio",
-      "command": "/usr/bin/setpriv",
+      "command": "/root/.local/bin/serena",
       "args": [
-        "--pdeathsig",
-        "TERM",
-        "/root/miniconda3/envs/ms/bin/python",
-        "/data/CoordExp/.codex/serena/serena_worktree_mcp.py",
-        "serve"
+        "start-mcp-server",
+        "--transport",
+        "stdio",
+        "--project-from-cwd",
+        "--context",
+        "coordexp-minimal",
+        "--enable-web-dashboard",
+        "false",
+        "--enable-gui-log-window",
+        "false",
+        "--open-web-dashboard",
+        "false",
+        "--log-level",
+        "ERROR"
       ],
       "env": {
         "SERENA_HOME": "/data/CoordExp/.codex/serena",
