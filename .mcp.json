@@ -20,7 +20,10 @@
         "CRITICAL"
       ],
       "env": {
-        "SERENA_HOME": "/data/CoordExp/.codex/serena"
+        "SERENA_HOME": "/data/CoordExp/.codex/serena",
+        "PATH": "/root/miniconda3/envs/ms/bin:/root/.local/bin:/usr/local/bin:/usr/bin:/bin",
+        "CONDA_PREFIX": "/root/miniconda3/envs/ms",
+        "VIRTUAL_ENV": "/root/miniconda3/envs/ms"
       },
       "required": false,
       "supports_parallel_tool_calls": true,
