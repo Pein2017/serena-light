@@ -189,6 +189,14 @@ sample and are not summed into a false total. A later evidence-only closeout may
 bind this immutable receipt and add those fields after the complete attempt ledger
 is available; it does not require another backend run.
 
+The sum of `started_at`/`ended_at` windows across all 17 currently published
+admission and protocol receipts under the artifact root is 540 seconds: 381
+seconds across the three protocol receipts and 159 seconds across fourteen
+admission receipts. This is a receipt-backed lower bound and incomplete subset,
+not the Task 6.1 cumulative active-time total. It omits no-receipt failures and
+ad-hoc `/tmp` repair/rerun attempts, and it is a sum of attempt windows rather
+than a unique wall-clock span.
+
 Tasks 6.4 through 6.6 also remain open. The candidate runtime and lock are retained
 until the user authorizes cleanup; raw artifacts and production registrations are
 untouched. Roadmap update, user decision, archive strategy, archive, and push are

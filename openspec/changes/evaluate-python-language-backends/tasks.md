@@ -340,7 +340,9 @@
 > but the immutable protocol receipt is not a final decision receipt. Closing 6.1 still
 > requires a complete active-time attempt ledger, including unpublished failures and temporary
 > repair/rerun attempts, before an evidence-only machine-readable `retain_pyright` decision can
-> bind the accepted protocol receipt. Published receipt windows alone are not a complete total.
+> bind the accepted protocol receipt. The 17 published admission/protocol receipt windows sum
+> to a 540-second lower bound, not a complete total; no-receipt and ad-hoc temporary attempts
+> remain absent.
 - [ ] 6.2 Apply the lexicographic rule only to candidates that reached each phase, retaining earlier eliminations as gate exclusions and leaving call/context savings at the efficiency rank rather than future-utility rank.
 > The Phase 2 stop gate already excludes ty and Pyrefly without ranking deferred feature or
 > efficiency evidence, but the complete lexicographic disposition remains open until the final
