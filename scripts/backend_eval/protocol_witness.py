@@ -18,7 +18,11 @@ from pathlib import Path
 from typing import Any, Protocol, cast
 
 from scripts.backend_eval.manifests import MS_TRANSFORMERS_ROOT
-from scripts.backend_eval.models import canonical_json, sha256_bytes
+from scripts.backend_eval.models import (
+    PROTOCOL_WITNESS_SCHEMA_VERSION,
+    canonical_json,
+    sha256_bytes,
+)
 from scripts.backend_eval.process import Deadline, DeadlineExceeded
 from scripts.backend_eval.protocol import (
     BackendProtocolSpec,
@@ -48,7 +52,6 @@ __all__ = [
     "run_protocol_behavior_witness",
 ]
 
-PROTOCOL_WITNESS_SCHEMA_VERSION = 2
 FIXTURE_BYTES = (
     b"from definitely_missing_serena_light_witness import MissingWitness\n"
     b"from transformers import GenerationConfig\n"
@@ -243,6 +246,7 @@ class _ConfigurationObservation:
 @dataclass(slots=True)
 class _DiagnosticsObservation:
     fixture_uri: str
+    document_version: int | None = None
     exact_uri_observed: bool = False
     missing_import_observed: bool = False
     exact_uri_count: int = 0
@@ -253,11 +257,32 @@ class _DiagnosticsObservation:
         if self.event is None:
             self.event = threading.Event()
 
+    def arm(self, *, document_version: int) -> None:
+        if (
+            isinstance(document_version, bool)
+            or not isinstance(document_version, int)
+            or document_version < 0
+        ):
+            raise ValueError("diagnostics document version must be a non-negative integer")
+        if self.document_version is not None:
+            raise ValueError("diagnostics observation is already armed")
+        self.document_version = document_version
+
     def observe(self, method: str, params: Any) -> None:
         if method != "textDocument/publishDiagnostics" or not isinstance(params, Mapping):
             return
+        if self.document_version is None:
+            return
         if params.get("uri") != self.fixture_uri:
             return
+        if "version" in params:
+            published_version = params.get("version")
+            if (
+                isinstance(published_version, bool)
+                or not isinstance(published_version, int)
+                or published_version != self.document_version
+            ):
+                return
         diagnostics = params.get("diagnostics")
         if not isinstance(diagnostics, Sequence) or isinstance(diagnostics, str | bytes):
             return
@@ -612,6 +637,7 @@ def run_protocol_behavior_witness(
                 }
             },
         )
+        diagnostics.arm(document_version=1)
         try:
             external: Location | None = None
             local_y: Location | None = None

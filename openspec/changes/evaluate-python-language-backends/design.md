@@ -103,14 +103,17 @@ as proof even though this server version does not consume that notification. The
 harness advertises configuration support, answers exactly one server-issued scoped
 `workspace/configuration` request with the service-owned config and frozen interpreter, and
 requires both that request transcript and an external Transformers definition before calling
-configuration application conclusive. The same review found that an early empty exact-URI
-diagnostics publication ended the controlled missing-import wait and that a failed
-minimal-environment observation carried no key-level cause. The repaired witness waits for the
-required diagnostic within the existing bound and records publication/diagnostic counts and a
-completion reason; environment measurement is computed before candidate execution, persisted
-after candidate stderr using key names only, and any mismatch or unavailable measurement makes
-the phase incomplete rather than failing a candidate. No conclusion from the superseded receipt
-may eliminate or promote a backend; a fresh canonical run is required after this repair.
+configuration application conclusive. The same review found that an early empty or stale
+exact-URI diagnostics publication could satisfy evidence for the controlled document and that a
+failed minimal-environment observation carried no key-level cause. The repaired schema-v2
+witness and receipt model share one schema-version authority; diagnostics observation is armed
+only after the version-1 `didOpen`, ignores target publications before that boundary, and rejects
+any present document version other than the current version. It then waits for the required
+diagnostic within the existing bound and records publication/diagnostic counts and a completion
+reason. Environment measurement is computed before candidate execution, persisted after
+candidate stderr using key names only, and any mismatch or unavailable measurement makes the
+phase incomplete rather than failing a candidate. No conclusion from the superseded receipt may
+eliminate or promote a backend; a fresh canonical run is required after this repair.
 
 ### Decision 5: Preserve Serena Light freshness and failure semantics
 

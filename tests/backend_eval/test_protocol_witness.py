@@ -218,21 +218,20 @@ class _FakeClient:
         self._external_definition = external_definition
         self._publish_empty_before_diagnostic = publish_empty_before_diagnostic
         self._definition_count = 0
+        self._pending_diagnostics: list[Mapping[str, object]] = []
 
     def notify(self, method: str, params: object) -> None:
         if method != "textDocument/didOpen" or self._spec.notification_handler is None:
             return
         uri = self._diagnostics_uri or self._fixture_uri
         if self._publish_empty_before_diagnostic:
-            self._spec.notification_handler(
-                "textDocument/publishDiagnostics",
-                {"uri": uri, "diagnostics": []},
+            self._pending_diagnostics.append(
+                {"uri": uri, "version": 1, "diagnostics": []}
             )
-        self._spec.notification_handler(
-            "textDocument/publishDiagnostics",
-            {
-                "uri": uri,
-                "diagnostics": [
+        publication: Mapping[str, object] = {
+            "uri": uri,
+            "version": 1,
+            "diagnostics": [
                     {
                         "range": {
                             "start": {"line": 0, "character": 5},
@@ -245,12 +244,22 @@ class _FakeClient:
                         ),
                     }
                 ],
-            },
-        )
+        }
+        # Emit once before didOpen returns to prove it cannot satisfy freshness,
+        # then retain the same current-version publication for the first request.
+        self._spec.notification_handler("textDocument/publishDiagnostics", publication)
+        self._pending_diagnostics.append(publication)
 
     def request(self, method: str, params: object, *, timeout: float) -> object:
         del params, timeout
         assert method == "textDocument/definition"
+        if self._pending_diagnostics and self._spec.notification_handler is not None:
+            pending = tuple(self._pending_diagnostics)
+            self._pending_diagnostics.clear()
+            for publication in pending:
+                self._spec.notification_handler(
+                    "textDocument/publishDiagnostics", publication
+                )
         self._definition_count += 1
         if self._definition_count == 1:
             if self._external_definition is None:
@@ -642,6 +651,7 @@ def test_witness_binds_external_definition_diagnostics_and_first_readiness(
 
 def test_empty_exact_uri_publish_does_not_complete_the_missing_import_wait() -> None:
     observation = witness_module._DiagnosticsObservation("file:///fixture.py")
+    observation.arm(document_version=1)
 
     observation.observe(
         "textDocument/publishDiagnostics",
@@ -665,6 +675,37 @@ def test_empty_exact_uri_publish_does_not_complete_the_missing_import_wait() -> 
 
     assert observation.exact_uri_count == 2
     assert observation.diagnostic_count == 1
+    assert observation.missing_import_observed
+    assert observation.event.is_set()
+
+
+def test_diagnostics_observation_requires_open_and_current_document_version() -> None:
+    observation = witness_module._DiagnosticsObservation("file:///fixture.py")
+    diagnostic = [{"message": "definitely_missing_serena_light_witness"}]
+
+    observation.observe(
+        "textDocument/publishDiagnostics",
+        {"uri": "file:///fixture.py", "version": 1, "diagnostics": diagnostic},
+    )
+    observation.arm(document_version=1)
+    observation.observe(
+        "textDocument/publishDiagnostics",
+        {"uri": "file:///fixture.py", "version": 0, "diagnostics": diagnostic},
+    )
+
+    assert not observation.exact_uri_observed
+    assert observation.exact_uri_count == 0
+    assert not observation.missing_import_observed
+    assert observation.event is not None
+    assert not observation.event.is_set()
+
+    observation.observe(
+        "textDocument/publishDiagnostics",
+        {"uri": "file:///fixture.py", "version": 1, "diagnostics": diagnostic},
+    )
+
+    assert observation.exact_uri_observed
+    assert observation.exact_uri_count == 1
     assert observation.missing_import_observed
     assert observation.event.is_set()
 

@@ -227,11 +227,23 @@ def _run_capability_probe(
     source_uri = source.as_uri()
     started_elapsed = deadline.elapsed()
     push_diagnostics_observed = Event()
+    diagnostics_armed = False
+    document_version = 1
 
     def observe_notification(method: str, params: Any) -> None:
         if method != "textDocument/publishDiagnostics" or not isinstance(params, Mapping):
             return
+        if not diagnostics_armed:
+            return
         typed_params = cast("Mapping[str, object]", params)
+        if "version" in typed_params:
+            published_version = typed_params.get("version")
+            if (
+                isinstance(published_version, bool)
+                or not isinstance(published_version, int)
+                or published_version != document_version
+            ):
+                return
         diagnostics = typed_params.get("diagnostics")
         if (
             typed_params.get("uri") == source_uri
@@ -251,17 +263,19 @@ def _run_capability_probe(
         client: SyncLspClient,
         providers: RawLspProviders,
     ) -> _PyreflySessionResult:
+        nonlocal diagnostics_armed
         client.notify(
             "textDocument/didOpen",
             {
                 "textDocument": {
                     "uri": source_uri,
                     "languageId": "python",
-                    "version": 1,
+                    "version": document_version,
                     "text": source_text,
                 }
             },
         )
+        diagnostics_armed = True
         try:
             position_params = {
                 "textDocument": {"uri": source_uri},

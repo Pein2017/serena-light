@@ -1952,8 +1952,9 @@ PROTOCOL_PHASE_NEXT_ACTION_INCONCLUSIVE = "inconclusive_retain_pyright"
 
 # The private behavior witness is an evaluation artifact, not a public tool schema.  Probe
 # outcomes may exist briefly with an all-None witness leaf; every published survivor binds
-# one exact schema-v1 witness payload by SHA-256 before a receipt can pass.
-PROTOCOL_WITNESS_SCHEMA_VERSION = 1
+# one exact schema-v2 witness payload by SHA-256 before a receipt can pass.  This model-layer
+# constant is the single authority imported by the witness producer and receipt consumer.
+PROTOCOL_WITNESS_SCHEMA_VERSION = 2
 
 _CANDIDATE_PROTOCOL_NAMES = frozenset({"pyright", "ty", "pyrefly"})
 _GATE_DISPOSITIONS = frozenset(

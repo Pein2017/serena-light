@@ -262,10 +262,11 @@
 > **Phase 2 evidence HOLD.** The previously published protocol receipt under evaluation
 > `f081b5e69385020072840528e865d79426cebb1d0f08a58070afc0ddefae875b` is immutable but
 > superseded/infrastructure-invalid: its ty configuration witness was based on an unconsumed
-> client notification, an empty diagnostics publication could finish the controlled wait, and
-> a failed minimal-environment measurement did not retain a bounded key-level cause. The harness
-> repairs are unit-tested, but task 2.9 remains unchecked until the lead explicitly authorizes a
-> fresh real protocol execution and both required reviews disposition its new exact receipt.
+> client notification, empty or stale diagnostics could satisfy controlled-document evidence,
+> the witness producer and receipt model disagreed on schema version, and a failed
+> minimal-environment measurement did not retain a bounded key-level cause. The harness repairs
+> are unit-tested, but task 2.9 remains unchecked until the lead explicitly authorizes a fresh
+> real protocol execution and both required reviews disposition its new exact receipt.
 
 ## 3. Compare the current Serena Light product surface
 

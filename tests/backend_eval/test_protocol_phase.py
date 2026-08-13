@@ -38,6 +38,9 @@ from scripts.backend_eval.protocol_parent import (
     ParentAdmissionFailure,
 )
 from scripts.backend_eval.protocol_phase import ProtocolRunRoot
+from scripts.backend_eval.protocol_witness import (
+    PROTOCOL_WITNESS_SCHEMA_VERSION as BEHAVIOR_WITNESS_SCHEMA_VERSION,
+)
 from scripts.backend_eval.protocol_witness import ProtocolBehaviorWitness
 from scripts.backend_eval.publish import (
     PUBLICATION_FAILED,
@@ -729,6 +732,32 @@ def test_protocol_phase_rejects_sent_only_configuration_without_application_proo
     )
 
     assert outcome.gate_disposition == "configuration_inconclusive"
+
+
+def test_actual_behavior_witness_schema_binds_through_candidate_evidence() -> None:
+    """The real witness module and receipt model must share one schema authority."""
+
+    from scripts.backend_eval.protocol_phase import _finalize_candidate_outcome
+
+    witness = replace(
+        _witness("pyright"),
+        schema_version=BEHAVIOR_WITNESS_SCHEMA_VERSION,
+    )
+
+    outcome = _finalize_candidate_outcome(
+        _outcome("pyright"),
+        LifecycleBatteryResult(
+            lifecycle=_lifecycle(diagnostics_mode="push"),
+            scenarios=(),
+            issues=(),
+        ),
+        witness,
+        _SHA_B,
+    )
+
+    assert outcome.witness_schema_version == BEHAVIOR_WITNESS_SCHEMA_VERSION
+    assert outcome.witness_sha256 == _SHA_B
+    assert outcome.witness_passed is True
 
 
 def test_protocol_phase_records_environment_measurement_failure_as_incomplete_not_candidate_fail(
