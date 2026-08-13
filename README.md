@@ -1,8 +1,21 @@
-# serena-light
+# serena-light (archived)
+
+> **Maintenance status — 2026-08-13:** This repository is no longer
+> maintained. It is preserved as a read-only record of the Serena Light
+> experiment. New work should use and configure
+> [official Serena](https://github.com/oraios/serena), which now owns the
+> supported semantic-tooling path for Codex and Claude Code in this
+> environment. No security fixes, dependency updates, language-server updates,
+> or compatibility releases are planned here.
 
 `serena-light` is an internal, agent-first semantic code navigation service for
 the CoordExp environment. It is an independently owned, deliberately small
 derivative of selected MIT-licensed Serena and SolidLSP mechanisms.
+
+The implementation and historical acceptance evidence remain available for
+reference. Do not install this repository for new sessions. Existing
+`serena-light` client registrations should be replaced with the official
+`serena` MCP registration.
 
 The repository has archived its first OpenSpec change. The admission probes,
 provenance census, owned LSP core, workspace/adapter/daemon layers, containment,
