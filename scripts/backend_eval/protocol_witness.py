@@ -92,6 +92,7 @@ class ProtocolWitnessRequest:
     spec: BackendProtocolSpec
     runtime: CandidateRuntime
     owned_root: Path
+    owned_root_fd: int | None = None
 
     def __post_init__(self) -> None:
         if self.candidate not in _CANDIDATES:
@@ -111,6 +112,14 @@ class ProtocolWitnessRequest:
             raise ValueError(
                 "ProtocolWitnessRequest.owned_root must be a canonical per-run root "
                 "named by its 64-character run identity"
+            )
+        if self.owned_root_fd is not None and (
+            isinstance(self.owned_root_fd, bool)
+            or not isinstance(self.owned_root_fd, int)
+            or self.owned_root_fd < 0
+        ):
+            raise ValueError(
+                "ProtocolWitnessRequest.owned_root_fd must be one open descriptor or None"
             )
 
 
@@ -276,9 +285,14 @@ class _DisposableFixture:
         candidate: str,
         *,
         deadline: Deadline,
+        owned_root_fd: int | None = None,
     ) -> _DisposableFixture:
         try:
-            root_fd = _open_owned_run_root(owned_root, deadline=deadline)
+            root_fd = (
+                _open_owned_run_root(owned_root, deadline=deadline)
+                if owned_root_fd is None
+                else _duplicate_owned_run_root(owned_root_fd, deadline=deadline)
+            )
         except OSError as error:
             raise ProtocolWitnessSetupError(
                 f"could not open caller-owned witness root: {type(error).__name__}"
@@ -369,7 +383,11 @@ class _DisposableFixture:
             return cls(
                 owned_root=owned_root,
                 directory_name=directory_name,
-                directory_path=owned_root / directory_name,
+                directory_path=(
+                    owned_root / directory_name
+                    if owned_root_fd is None
+                    else Path(f"/proc/{os.getpid()}/fd/{root_fd}") / directory_name
+                ),
                 root_fd=root_fd,
                 directory_fd=directory_fd,
                 directory_identity=(directory_stat.st_dev, directory_stat.st_ino),
@@ -552,6 +570,7 @@ def run_protocol_behavior_witness(
         request.owned_root,
         request.candidate,
         deadline=deadline,
+        owned_root_fd=request.owned_root_fd,
     )
     fixture_uri = (fixture.directory_path / _FIXTURE_NAME).as_uri()
     diagnostics = _DiagnosticsObservation(fixture_uri)
@@ -1125,6 +1144,39 @@ def _open_owned_run_root(owned_root: Path, *, deadline: Deadline) -> int:
         if not stat.S_ISDIR(observed.st_mode) or stat.S_IMODE(observed.st_mode) != 0o700:
             raise ProtocolWitnessSetupError(
                 "caller-provided per-run root must be a 0700 directory"
+            )
+    except BaseException:
+        os.close(descriptor)
+        raise
+    return descriptor
+
+
+def _duplicate_owned_run_root(owned_root_fd: int, *, deadline: Deadline) -> int:
+    """Duplicate an orchestrator-retained run root without trusting its logical path."""
+
+    descriptor = _checked_open(
+        deadline,
+        "protocol witness run root duplicate",
+        lambda: os.dup(owned_root_fd),
+    )
+    try:
+        source = _checked_call(
+            deadline,
+            "protocol witness source run root fstat",
+            lambda: os.fstat(owned_root_fd),
+        )
+        observed = _checked_call(
+            deadline,
+            "protocol witness duplicated run root fstat",
+            lambda: os.fstat(descriptor),
+        )
+        if (
+            (source.st_dev, source.st_ino) != (observed.st_dev, observed.st_ino)
+            or not stat.S_ISDIR(observed.st_mode)
+            or stat.S_IMODE(observed.st_mode) != 0o700
+        ):
+            raise ProtocolWitnessSetupError(
+                "retained per-run descriptor must name its exact 0700 directory"
             )
     except BaseException:
         os.close(descriptor)

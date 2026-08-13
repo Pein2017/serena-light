@@ -29,6 +29,7 @@ from scripts.backend_eval.models import (
     PhaseBudget,
     ProductionIdentity,
     ProtocolPhaseReceipt,
+    ProtocolProbeBinding,
     ResolvedPackage,
     RootManifest,
     RuntimeBinding,
@@ -328,6 +329,13 @@ def _protocol_phase_receipt(*, status: str = "pass", **overrides: object) -> Pro
         "production_identity_after": before,
         "candidate_lock": _candidate_lock(),
         "runtime_binding": _runtime_binding(),
+        "probe_binding": ProtocolProbeBinding(
+            workspace_root="/data/CoordExp/serena-light",
+            relative_target="src/a.py",
+            absolute_target="/data/CoordExp/serena-light/src/a.py",
+            position=(4, 7),
+            root_witness=_admission_binding().parent_root_manifests[0],
+        ),
         "root_manifests_before": (_root_manifest(),),
         "root_manifests_after": (_root_manifest(),),
         "write_deltas": (_write_delta(),),
@@ -337,6 +345,20 @@ def _protocol_phase_receipt(*, status: str = "pass", **overrides: object) -> Pro
         "next_action": PROTOCOL_PHASE_NEXT_ACTION_STOP,
     }
     fields.update(overrides)
+    if "probe_binding" not in overrides:
+        frozen = cast("tuple[RootManifest, ...]", fields["root_manifests_before"])[0]
+        fields["probe_binding"] = ProtocolProbeBinding(
+            workspace_root=frozen.root,
+            relative_target="src/a.py",
+            absolute_target=f"{frozen.root}/src/a.py",
+            position=(4, 7),
+            root_witness=AdmissionRootWitness(
+                root=frozen.root,
+                kind=frozen.kind,
+                source_revision=frozen.source_revision,
+                manifest_digest=frozen.manifest_digest,
+            ),
+        )
     return ProtocolPhaseReceipt(**fields)
 
 
@@ -567,8 +589,41 @@ def test_protocol_phase_receipt_pass_requires_the_frozen_next_action_literal() -
         _protocol_phase_receipt(status="pass", next_action="do_something_else")
 
 
-def test_protocol_phase_receipt_schema_advances_to_v3_for_parent_binding() -> None:
-    assert PROTOCOL_PHASE_RECEIPT_SCHEMA_VERSION == 3
+def test_protocol_phase_receipt_schema_advances_to_v4_for_probe_binding() -> None:
+    assert PROTOCOL_PHASE_RECEIPT_SCHEMA_VERSION == 4
+
+
+def test_protocol_probe_binding_round_trips_exactly_and_is_lexically_closed() -> None:
+    binding = _protocol_phase_receipt().probe_binding
+
+    assert ProtocolProbeBinding.from_dict(binding.to_dict()) == binding
+    with pytest.raises(ValueError, match="relative_target"):
+        replace(binding, relative_target="../outside.py")
+    with pytest.raises(ValueError, match="absolute_target"):
+        replace(binding, absolute_target="/data/CoordExp/other/a.py")
+    with pytest.raises(ValueError, match="position"):
+        replace(binding, position=(-1, 0))
+    with pytest.raises(ValueError, match="root_witness"):
+        replace(
+            binding,
+            root_witness=replace(binding.root_witness, root="/data/CoordExp/other"),
+        )
+
+
+def test_protocol_phase_receipt_round_trip_carries_exact_probe_binding() -> None:
+    receipt = _protocol_phase_receipt()
+
+    assert ProtocolPhaseReceipt.from_dict(receipt.to_dict()) == receipt
+    payload = receipt.to_dict()
+    probe = cast("dict[str, object]", payload["probe_binding"])
+    probe["position"] = [4, -1]
+    with pytest.raises(ValueError, match="position"):
+        ProtocolPhaseReceipt.from_dict(payload)
+    payload = receipt.to_dict()
+    probe = cast("dict[str, object]", payload["probe_binding"])
+    probe["unexpected"] = True
+    with pytest.raises(ValueError, match="unknown fields"):
+        ProtocolPhaseReceipt.from_dict(payload)
 
 
 def test_protocol_phase_receipt_pass_requires_exact_parent_admission_binding() -> None:
@@ -841,6 +896,7 @@ def test_protocol_phase_receipt_from_dict_rejects_unrelated_only_corpus() -> Non
     )
     replacement = _protocol_phase_receipt(
         status="incomplete",
+        admission_binding=None,
         root_manifests_before=(unrelated,),
         root_manifests_after=(unrelated,),
         write_deltas=(unrelated_delta,),

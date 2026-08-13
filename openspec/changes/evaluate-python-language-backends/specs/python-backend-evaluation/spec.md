@@ -42,6 +42,10 @@ The evaluation SHALL keep candidate selection, candidate dependencies, temporary
 - **WHEN** a path the harness is about to write is a symlink, a FIFO, another special node, or lies below a symlinked intermediate component, or the runtime root is renamed and replaced during preparation
 - **THEN** the write is refused with a typed error, no byte is written or truncated anywhere outside the open root, no payload reaches a substituted reader, and any write that does proceed lands in the inode the harness opened rather than in whatever the pathname now names
 
+#### Scenario: A protocol-run ancestor is substituted after creation
+- **WHEN** the protocol phase has created its unique run directory and a caller renames or replaces the intermediate `protocol-runs` pathname before a sidecar or disposable witness is written
+- **THEN** the write remains confined to the retained original run-directory descriptor, no derived absolute run pathname is accepted as a new trust root, and no byte reaches the substituted tree
+
 #### Scenario: Published harness-owned state is verified
 - **WHEN** the evaluation re-reads a file it owns to verify a published runtime, snapshot, configuration, or manifest digest
 - **THEN** it reads through the same component-wise descriptor walk its writes use, so a substituted file holding exactly the expected bytes is refused rather than accepted as the file that was verified
@@ -103,6 +107,14 @@ Every phase receipt SHALL be bound to the exact evaluator source closure that pr
 #### Scenario: A receipt is published
 - **WHEN** any phase publishes a receipt
 - **THEN** it records the digest of the executed evaluation source closure, the source Git commit and whether that source was clean, the CLI host interpreter's configured path, realpath, SHA-256, and version, and the candidate runtime's logical root and canonical runtime-manifest SHA-256 recomputed from disk before the gate can pass
+
+#### Scenario: The protocol phase binds its exact probe
+- **WHEN** the protocol phase derives its child evaluation identity and receipt from an exact Phase 1 parent
+- **THEN** both bind the lexical workspace root, matching lexical relative and absolute target, zero-based line and character, and corresponding frozen root witness, so a target or position change creates a distinct child identity
+
+#### Scenario: The parent-bound runtime changes during protocol execution
+- **WHEN** finalization reloads the exact parent-bound runtime root with the original lock and manifest digests and its typed runtime identity differs from the one loaded before execution
+- **THEN** the phase fails closed without publishing a receipt and never prepares, resolves, or substitutes another runtime
 
 #### Scenario: A phase executes a production helper
 - **WHEN** evaluation code imports and runs a non-stdlib production helper for manifests, write detection, or production identity

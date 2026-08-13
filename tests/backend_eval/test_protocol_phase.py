@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+from dataclasses import replace
 from hashlib import sha256
 from pathlib import Path
 from types import SimpleNamespace
@@ -35,6 +37,7 @@ from scripts.backend_eval.protocol_parent import (
     ParentAdmissionError,
     ParentAdmissionFailure,
 )
+from scripts.backend_eval.protocol_phase import ProtocolRunRoot
 from scripts.backend_eval.protocol_witness import ProtocolBehaviorWitness
 from scripts.backend_eval.publish import (
     PUBLICATION_FAILED,
@@ -391,6 +394,7 @@ class _FakeServices:
         self.publish_error: PublicationError | None = None
         self.fail_parent = False
         self.drift_evaluator = False
+        self.mutate_runtime_file = False
         self.mutate_after = False
         self.drift_production = False
         self.source_uncertain_candidate: str | None = None
@@ -400,10 +404,12 @@ class _FakeServices:
         self.configuration_inconclusive: str | None = None
         self._evaluator_captures = 0
         self._production_captures = 0
+        self._runtime_loads = 0
         self.manifests = (
             _manifest(request.repo_root),
             _manifest(request.workspace_root),
         )
+        self.run_roots: list[ProtocolRunRoot] = []
         parent_roots = tuple(
             AdmissionRootWitness(
                 root=manifest.root,
@@ -435,7 +441,13 @@ class _FakeServices:
             parent_root_manifests=parent_roots,
         )
         self.lock = _candidate_lock()
-        self.runtime = SimpleNamespace(root=runtime_root)
+        self.runtime_identity_file = tmp_path / "runtime-identity"
+        self.runtime_identity_file.parent.mkdir(parents=True, exist_ok=True)
+        self.runtime_identity_file.write_bytes(b"runtime-before\n")
+        self.runtime = SimpleNamespace(
+            root=runtime_root,
+            identity_sha256=sha256(self.runtime_identity_file.read_bytes()).hexdigest(),
+        )
         self.production = _production_identity(request.repo_root)
 
     def capture_evaluator_identity(self, deadline: object) -> EvaluatorIdentity:
@@ -483,9 +495,13 @@ class _FakeServices:
         deadline: object,
     ) -> object:
         self.calls.append(("runtime", deadline))
+        self._runtime_loads += 1
         assert root == Path(self.binding.runtime_root)
         assert expected_lock_digest == _SHA_E
         assert expected_manifest_sha256 == _SHA_F
+        observed = sha256(self.runtime_identity_file.read_bytes()).hexdigest()
+        if observed != self.runtime.identity_sha256:
+            return SimpleNamespace(root=root, identity_sha256=observed)
         return self.runtime
 
     def capture_corpus(self, *, deadline: object, expectation: object) -> tuple[RootManifest, ...]:
@@ -502,12 +518,14 @@ class _FakeServices:
         run_identity: str,
         *,
         deadline: object,
-    ) -> Path:
+    ) -> ProtocolRunRoot:
         del repo_root
         self.calls.append(("create_run_root", deadline))
         root = self.tmp_path / "runs" / run_identity
         root.mkdir(parents=True, mode=0o700)
-        return root
+        handle = ProtocolRunRoot(root, os.open(root, os.O_RDONLY | os.O_DIRECTORY))
+        self.run_roots.append(handle)
+        return handle
 
     def candidate_spec(self, candidate: str, runtime: object, repo_root: Path) -> object:
         assert runtime is self.runtime
@@ -550,6 +568,8 @@ class _FakeServices:
         candidate = cast("Any", request).candidate
         self.calls.append((f"witness:{candidate}", deadline))
         inconclusive = self.configuration_inconclusive == candidate
+        if self.mutate_runtime_file and candidate == "pyrefly":
+            self.runtime_identity_file.write_bytes(b"runtime-after\n")
         return _witness(
             candidate,
             passed=not inconclusive,
@@ -557,21 +577,21 @@ class _FakeServices:
         )
 
     def write_sidecar(
-        self, run_root: Path, name: str, payload: bytes, *, deadline: object
+        self, run_root: ProtocolRunRoot, name: str, payload: bytes, *, deadline: object
     ) -> str:
         self.calls.append((f"sidecar:{name}", deadline))
-        assert run_root.name
-        path = run_root / name
+        assert run_root.logical_root.name
+        path = run_root.logical_root / name
         path.write_bytes(payload)
         path.chmod(0o600)
         return sha256(payload).hexdigest()
 
     def artifact_tree_digest(
-        self, repo_root: Path, run_root: Path, *, deadline: object
+        self, repo_root: Path, run_root: ProtocolRunRoot, *, deadline: object
     ) -> str:
         del repo_root
         self.calls.append(("artifact_digest", deadline))
-        names = sorted(path.name for path in run_root.iterdir())
+        names = sorted(path.name for path in run_root.logical_root.iterdir())
         return sha256(canonical_json({"sidecars": names})).hexdigest()
 
     def publish(self, request: object, *, deadline: object) -> Path:
@@ -615,10 +635,12 @@ def test_protocol_phase_runs_each_candidate_once_serially_and_brackets_one_manif
         "witness:pyrefly",
     ]
     assert sum(name == "corpus" for name, _deadline in services.calls) == 2
+    assert sum(name == "runtime" for name, _deadline in services.calls) == 2
     assert receipt.root_manifests_before == receipt.root_manifests_after
     assert all(not delta.unexpected for delta in receipt.write_deltas)
     assert receipt.next_action == PROTOCOL_PHASE_NEXT_ACTION_PASS
     assert services.published is False
+    assert services.run_roots and all(run.fd == -1 for run in services.run_roots)
 
 
 def test_protocol_phase_binds_each_witness_to_the_exact_written_sidecar(
@@ -736,6 +758,24 @@ def test_protocol_phase_derives_stable_child_evaluation_and_unique_run_identity(
     assert first.evaluation_identity != request.parent_evaluation_identity
     assert first.run_identity != second.run_identity
 
+    alternate_target = request.workspace_root / "alternate.py"
+    alternate_target.write_text("alternate = 1\n", encoding="utf-8")
+    target_changed = evaluate_protocol_phase(
+        replace(request, target=alternate_target),
+        services=_FakeServices(replace(request, target=alternate_target), tmp_path / "target"),
+        clock=_FakeClock(),
+    )
+    position_request = replace(request, symbol_position=(3, 8))
+    position_changed = evaluate_protocol_phase(
+        position_request,
+        services=_FakeServices(position_request, tmp_path / "position"),
+        clock=_FakeClock(),
+    )
+    assert target_changed.evaluation_identity != first.evaluation_identity
+    assert position_changed.evaluation_identity != first.evaluation_identity
+    assert first.probe_binding.absolute_target == str(request.target)
+    assert first.probe_binding.position == request.symbol_position
+
 
 def test_protocol_phase_propagates_one_origin_and_reserve_to_all_work(
     tmp_path: Path,
@@ -796,12 +836,13 @@ def test_protocol_phase_run_root_is_unique_private_and_sidecar_only(
         repo, evaluation_root, _SHA_B, deadline=deadline
     )
 
-    assert run_root.stat().st_mode & 0o777 == 0o700
+    assert run_root.logical_root.stat().st_mode & 0o777 == 0o700
     with pytest.raises(FileExistsError):
         services.create_run_root(repo, evaluation_root, _SHA_B, deadline=deadline)
+    run_root.close()
 
 
-def test_protocol_absolute_owner_and_run_root_opens_are_split_and_typed(
+def test_protocol_absolute_owner_open_is_split_and_typed(
     tmp_path: Path,
 ) -> None:
     from scripts.backend_eval import protocol_phase
@@ -814,12 +855,49 @@ def test_protocol_absolute_owner_and_run_root_opens_are_split_and_typed(
     with pytest.raises(ProtocolPhaseError, match="artifact owner root"):
         protocol_phase._open_protocol_artifact_owner_root(redirected_owner)
 
-    real_run = real_owner / "run"
-    real_run.mkdir()
-    redirected_run = real_owner / "redirected-run"
-    redirected_run.symlink_to(real_run, target_is_directory=True)
-    with pytest.raises(ProtocolPhaseError, match="protocol run root"):
-        protocol_phase._open_protocol_run_root(redirected_run)
+
+
+def test_protocol_run_handle_confines_sidecar_and_witness_after_ancestor_substitution(
+    tmp_path: Path,
+) -> None:
+    from scripts.backend_eval import protocol_witness
+    from scripts.backend_eval.protocol_phase import _ProductionServices
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    evaluation_root = repo / ".admission-artifacts/backend-eval" / _SHA_A
+    deadline = Deadline.start(_FakeClock(), 60.0)
+    services = _ProductionServices()
+    run = services.create_run_root(repo, evaluation_root, _SHA_B, deadline=deadline)
+    original_runs = evaluation_root / "protocol-runs"
+    held_runs = evaluation_root / "protocol-runs-held"
+    original_runs.rename(held_runs)
+    outside_runs = repo / "outside-runs"
+    outside_run = outside_runs / _SHA_B
+    outside_run.mkdir(parents=True, mode=0o700)
+    original_runs.symlink_to(outside_runs, target_is_directory=True)
+
+    payload = b"bound-sidecar\n"
+    services.write_sidecar(
+        run, "pyright-protocol-witness-v1.json", payload, deadline=deadline
+    )
+    fixture = protocol_witness._DisposableFixture.create(
+        run.logical_root,
+        "pyright",
+        deadline=deadline,
+        owned_root_fd=run.fd,
+    )
+    try:
+        assert (
+            held_runs / _SHA_B / "pyright-protocol-witness-v1.json"
+        ).read_bytes() == payload
+        assert not (outside_run / "pyright-protocol-witness-v1.json").exists()
+        assert (held_runs / _SHA_B / fixture.directory_name / "witness.py").is_file()
+        assert not (outside_run / fixture.directory_name).exists()
+        assert str(fixture.directory_path).startswith(f"/proc/{os.getpid()}/fd/")
+    finally:
+        assert fixture.cleanup(deadline=deadline) is None
+        run.close()
 
 
 def test_protocol_phase_parent_mismatch_fails_before_runtime_or_candidate_work(
@@ -848,6 +926,27 @@ def test_protocol_phase_evaluator_identity_drift_refuses_any_receipt(
     services.drift_evaluator = True
     with pytest.raises(ProtocolPhaseError, match="evaluator"):
         evaluate_protocol_phase(request, services=services, clock=_FakeClock())
+    assert services.published is False
+
+
+def test_protocol_phase_runtime_identity_drift_refuses_publication(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from scripts.backend_eval import protocol_phase
+    from scripts.backend_eval.protocol_phase import ProtocolPhaseError
+
+    request = _request(tmp_path)
+    services = _FakeServices(request, tmp_path)
+    services.mutate_runtime_file = True
+    monkeypatch.setattr(protocol_phase, "require_protocol_execution", lambda: None)
+
+    with pytest.raises(ProtocolPhaseError, match="runtime identity"):
+        protocol_phase.run_protocol_phase(
+            request, services=services, clock=_FakeClock()
+        )
+
+    assert sum(name == "runtime" for name, _deadline in services.calls) == 2
+    assert services.runtime_identity_file.read_bytes() == b"runtime-after\n"
     assert services.published is False
 
 

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import stat
 from collections.abc import Sequence
 from contextlib import suppress
 from dataclasses import dataclass, replace
@@ -32,6 +33,7 @@ from scripts.backend_eval.models import (
     PhaseBudget,
     ProductionIdentity,
     ProtocolPhaseReceipt,
+    ProtocolProbeBinding,
     RootManifest,
     RuntimeBinding,
     bind_candidate_protocol_witness,
@@ -88,6 +90,25 @@ _SIDECAR_FLAGS = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
 
 class ProtocolPhaseError(RuntimeError):
     """The protocol phase cannot produce or publish truthful evidence."""
+
+
+@dataclass(slots=True)
+class ProtocolRunRoot:
+    """One retained per-run descriptor plus its publication-facing logical path."""
+
+    logical_root: Path
+    fd: int
+
+    def __post_init__(self) -> None:
+        _require_absolute(self.logical_root, "ProtocolRunRoot.logical_root")
+        _require_sha256(self.logical_root.name, "ProtocolRunRoot.logical_root name")
+        if isinstance(self.fd, bool) or not isinstance(self.fd, int) or self.fd < 0:
+            raise ProtocolPhaseError("ProtocolRunRoot.fd must be one open descriptor")
+
+    def close(self) -> None:
+        if self.fd >= 0:
+            os.close(self.fd)
+            self.fd = -1
 
 
 def _require_absolute(path: Path, label: str) -> None:
@@ -215,6 +236,23 @@ class ProtocolPhaseRequest:
             production_build_identity=self.parent_production_build_identity,
         )
 
+    def probe_binding(self) -> ProtocolProbeBinding:
+        """Bind the exact lexical query surface to its frozen parent root witness."""
+
+        relative = self.target.relative_to(self.workspace_root).as_posix()
+        witness = next(
+            snapshot
+            for snapshot in self.workspace_snapshots
+            if snapshot.root == str(self.workspace_root)
+        )
+        return ProtocolProbeBinding(
+            workspace_root=str(self.workspace_root),
+            relative_target=relative,
+            absolute_target=str(self.target),
+            position=self.symbol_position,
+            root_witness=witness,
+        )
+
 
 class _ProtocolServices(Protocol):
     def capture_evaluator_identity(self, deadline: Deadline) -> EvaluatorIdentity: ...
@@ -249,7 +287,7 @@ class _ProtocolServices(Protocol):
         run_identity: str,
         *,
         deadline: Deadline,
-    ) -> Path: ...
+    ) -> ProtocolRunRoot: ...
 
     def candidate_spec(self, candidate: str, runtime: object, repo_root: Path) -> Any: ...
 
@@ -271,11 +309,11 @@ class _ProtocolServices(Protocol):
     ) -> ProtocolBehaviorWitness: ...
 
     def write_sidecar(
-        self, run_root: Path, name: str, payload: bytes, *, deadline: Deadline
+        self, run_root: ProtocolRunRoot, name: str, payload: bytes, *, deadline: Deadline
     ) -> str: ...
 
     def artifact_tree_digest(
-        self, repo_root: Path, run_root: Path, *, deadline: Deadline
+        self, repo_root: Path, run_root: ProtocolRunRoot, *, deadline: Deadline
     ) -> str: ...
 
     def publish(self, request: PublicationRequest, *, deadline: Deadline) -> Path: ...
@@ -333,7 +371,7 @@ class _ProductionServices:
         run_identity: str,
         *,
         deadline: Deadline,
-    ) -> Path:
+    ) -> ProtocolRunRoot:
         deadline.check("create protocol run root")
         parent_fd = _ensure_owned_directory(repo_root, evaluation_root / "protocol-runs")
         try:
@@ -342,13 +380,17 @@ class _ProductionServices:
             try:
                 os.fchmod(run_fd, 0o700)
                 os.fsync(run_fd)
-            finally:
+            except BaseException:
                 os.close(run_fd)
+                raise
             os.fsync(parent_fd)
         finally:
             os.close(parent_fd)
         deadline.check("created protocol run root")
-        return evaluation_root / "protocol-runs" / run_identity
+        return ProtocolRunRoot(
+            logical_root=evaluation_root / "protocol-runs" / run_identity,
+            fd=run_fd,
+        )
 
     def candidate_spec(
         self, candidate: str, runtime: object, repo_root: Path
@@ -415,12 +457,17 @@ class _ProductionServices:
         return run_protocol_behavior_witness(request, deadline=deadline)
 
     def write_sidecar(
-        self, run_root: Path, name: str, payload: bytes, *, deadline: Deadline
+        self,
+        run_root: ProtocolRunRoot,
+        name: str,
+        payload: bytes,
+        *,
+        deadline: Deadline,
     ) -> str:
         if "/" in name or name in {"", ".", ".."}:
             raise ProtocolPhaseError("protocol sidecar name is not one component")
         deadline.check(f"write protocol sidecar {name}")
-        directory_fd = _open_protocol_run_root(run_root)
+        directory_fd = _duplicate_protocol_run_root(run_root, deadline=deadline)
         file_fd: int | None = None
         try:
             file_fd = os.open(name, _SIDECAR_FLAGS, 0o600, dir_fd=directory_fd)
@@ -448,11 +495,11 @@ class _ProductionServices:
         return sha256(payload).hexdigest()
 
     def artifact_tree_digest(
-        self, repo_root: Path, run_root: Path, *, deadline: Deadline
+        self, repo_root: Path, run_root: ProtocolRunRoot, *, deadline: Deadline
     ) -> str:
         return artifact_tree_digest(
             repo_root,
-            run_root,
+            run_root.logical_root,
             check=lambda: deadline.check("protocol artifact digest"),
         )
 
@@ -505,11 +552,13 @@ def _execute_protocol_phase(
     except BaseException as exc:
         raise ProtocolPhaseError(f"parent/source/identity admission failed: {_detail(exc)}") from exc
 
+    probe_binding = request.probe_binding()
     evaluation_identity = _protocol_evaluation_identity(
         binding=binding,
         evaluator=evaluator_before,
         production=production_before,
         artifact_root=request.artifact_root,
+        probe_binding=probe_binding,
     )
     run_identity = _protocol_run_identity(evaluation_identity, started_at)
     evaluation_root = request.artifact_root / evaluation_identity
@@ -547,7 +596,8 @@ def _execute_protocol_phase(
                     candidate=candidate,
                     spec=spec,
                     runtime=runtime,  # type: ignore[arg-type]
-                    owned_root=run_root,
+                    owned_root=run_root.logical_root,
+                    owned_root_fd=run_root.fd,
                 ),
                 deadline=collection,
             )
@@ -566,6 +616,7 @@ def _execute_protocol_phase(
             issues.append(f"protocol timeout for {candidate}: {_detail(exc)}")
             break
         except SourceBindingError as exc:
+            run_root.close()
             raise ProtocolPhaseError(
                 f"protocol source identity became uncertain: {_detail(exc)}"
             ) from exc
@@ -593,6 +644,16 @@ def _execute_protocol_phase(
             request.repo_root, finalization, helper_expectation
         )
         assert_production_identity_unchanged(production_before, production_after)
+        runtime_after = selected.load_runtime(
+            runtime_root,
+            expected_lock_digest=binding.candidate_lock_digest,
+            expected_manifest_sha256=binding.runtime_manifest_sha256,
+            deadline=finalization,
+        )
+        if runtime_after != runtime:
+            raise ProtocolPhaseError(
+                "exact parent-bound candidate runtime identity changed during protocol phase"
+            )
         artifact_digest = selected.artifact_tree_digest(
             request.repo_root, run_root, deadline=finalization
         )
@@ -600,11 +661,14 @@ def _execute_protocol_phase(
         if evaluator_after != evaluator_before:
             raise ProtocolPhaseError("evaluator identity drifted during protocol phase")
     except ProtocolPhaseError:
+        run_root.close()
         raise
     except BaseException as exc:
+        run_root.close()
         raise ProtocolPhaseError(
             f"protocol finalization identity/source evidence failed: {_detail(exc)}"
         ) from exc
+    run_root.close()
 
     sorted_outcomes = tuple(sorted(outcomes, key=lambda outcome: outcome.candidate))
     if any(
@@ -638,6 +702,7 @@ def _execute_protocol_phase(
             production_identity_after=production_after,
             candidate_lock=candidate_lock,
             runtime_binding=runtime_binding,
+            probe_binding=probe_binding,
             root_manifests_before=manifests_before,
             root_manifests_after=manifests_after,
             write_deltas=write_deltas,
@@ -719,7 +784,12 @@ def _protocol_deadline(clock: Clock) -> Deadline:
 
 
 def _protocol_evaluation_identity(
-    *, binding: Any, evaluator: EvaluatorIdentity, production: ProductionIdentity, artifact_root: Path
+    *,
+    binding: Any,
+    evaluator: EvaluatorIdentity,
+    production: ProductionIdentity,
+    artifact_root: Path,
+    probe_binding: ProtocolProbeBinding,
 ) -> str:
     payload = {
         "algorithm_version": _EVALUATION_IDENTITY_ALGORITHM_VERSION,
@@ -729,6 +799,7 @@ def _protocol_evaluation_identity(
         "evaluator": evaluator.to_dict(),
         "production_identity_before": _production_identity_record(production),
         "artifact_root": str(artifact_root),
+        "probe_binding": probe_binding.to_dict(),
     }
     return sha256(canonical_json(payload)).hexdigest()
 
@@ -987,15 +1058,33 @@ def _open_protocol_artifact_owner_root(owner_root: Path) -> int:
         ) from exc
 
 
-def _open_protocol_run_root(run_root: Path) -> int:
-    """Open the one absolute run root before sidecar leaf operations become relative."""
+def _duplicate_protocol_run_root(
+    run_root: ProtocolRunRoot, *, deadline: Deadline
+) -> int:
+    """Duplicate and verify the retained run descriptor without reopening its pathname."""
 
+    deadline.check("duplicate protocol run root before")
     try:
-        return os.open(run_root, _NOFOLLOW_DIRECTORY_FLAGS)
+        duplicate = os.dup(run_root.fd)
     except OSError as exc:
-        raise ProtocolPhaseError(
-            f"cannot open declared protocol run root {run_root}: {exc}"
-        ) from exc
+        raise ProtocolPhaseError("cannot duplicate retained protocol run root") from exc
+    try:
+        deadline.check("duplicate protocol run root after")
+        original_stat = os.fstat(run_root.fd)
+        duplicate_stat = os.fstat(duplicate)
+        if (
+            (original_stat.st_dev, original_stat.st_ino)
+            != (duplicate_stat.st_dev, duplicate_stat.st_ino)
+            or not stat.S_ISDIR(duplicate_stat.st_mode)
+            or stat.S_IMODE(duplicate_stat.st_mode) != 0o700
+        ):
+            raise ProtocolPhaseError(
+                "retained protocol run root no longer names its exact 0700 directory"
+            )
+    except BaseException:
+        os.close(duplicate)
+        raise
+    return duplicate
 
 
 def _utc_now() -> str:

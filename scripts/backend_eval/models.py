@@ -719,6 +719,100 @@ def _admission_root_witness_from_dict(value: object) -> AdmissionRootWitness:
 
 
 @dataclass(frozen=True, slots=True)
+class ProtocolProbeBinding:
+    """The exact lexical workspace target and decoded-text position probed in Phase 2."""
+
+    workspace_root: str
+    relative_target: str
+    absolute_target: str
+    position: tuple[int, int]
+    root_witness: AdmissionRootWitness
+
+    def __post_init__(self) -> None:
+        root = _validate_canonical_absolute_path(
+            self.workspace_root, "ProtocolProbeBinding.workspace_root"
+        )
+        relative = _validate_relative_path(
+            self.relative_target, "ProtocolProbeBinding.relative_target"
+        )
+        if "\\" in relative or any(
+            part in {"", ".", ".."} for part in relative.split("/")
+        ):
+            raise ValueError(
+                "ProtocolProbeBinding.relative_target must be one canonical lexical relative path"
+            )
+        absolute = _validate_canonical_absolute_path(
+            self.absolute_target, "ProtocolProbeBinding.absolute_target"
+        )
+        if absolute != f"{root}/{relative}":
+            raise ValueError(
+                "ProtocolProbeBinding.absolute_target must equal workspace_root/relative_target lexically"
+            )
+        if (
+            not isinstance(self.position, tuple)
+            or len(self.position) != 2
+            or any(
+                isinstance(value, bool) or not isinstance(value, int) or value < 0
+                for value in self.position
+            )
+        ):
+            raise ValueError(
+                "ProtocolProbeBinding.position must contain two zero-based non-negative integers"
+            )
+        if not isinstance(self.root_witness, AdmissionRootWitness):
+            raise ValueError(
+                "ProtocolProbeBinding.root_witness must be an AdmissionRootWitness"
+            )
+        if self.root_witness.root != root:
+            raise ValueError(
+                "ProtocolProbeBinding.root_witness must witness workspace_root exactly"
+            )
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "workspace_root": self.workspace_root,
+            "relative_target": self.relative_target,
+            "absolute_target": self.absolute_target,
+            "position": list(self.position),
+            "root_witness": _admission_root_witness_to_dict(self.root_witness),
+        }
+
+    @staticmethod
+    def from_dict(value: Mapping[str, object]) -> ProtocolProbeBinding:
+        _closed_fields(value, _PROTOCOL_PROBE_BINDING_FIELDS, "ProtocolProbeBinding")
+        position = _expect_list(value["position"], "ProtocolProbeBinding.position")
+        if len(position) != 2:
+            raise ValueError("ProtocolProbeBinding.position must have two entries")
+        return ProtocolProbeBinding(
+            workspace_root=_expect_str(
+                value["workspace_root"], "ProtocolProbeBinding.workspace_root"
+            ),
+            relative_target=_expect_str(
+                value["relative_target"], "ProtocolProbeBinding.relative_target"
+            ),
+            absolute_target=_expect_str(
+                value["absolute_target"], "ProtocolProbeBinding.absolute_target"
+            ),
+            position=(
+                _expect_int(position[0], "ProtocolProbeBinding.position line"),
+                _expect_int(position[1], "ProtocolProbeBinding.position character"),
+            ),
+            root_witness=_admission_root_witness_from_dict(value["root_witness"]),
+        )
+
+
+_PROTOCOL_PROBE_BINDING_FIELDS = frozenset(
+    {
+        "workspace_root",
+        "relative_target",
+        "absolute_target",
+        "position",
+        "root_witness",
+    }
+)
+
+
+@dataclass(frozen=True, slots=True)
 class AdmissionBinding:
     """The exact immutable Phase 1 receipt one later phase is chained from.
 
@@ -1837,10 +1931,10 @@ _ADMISSION_RECEIPT_FIELDS = frozenset(
 # itself mirrors AdmissionReceipt's public to_dict/from_dict/closed-field/canonical-order
 # discipline exactly, because it is this phase's published, top-level receipt.
 
-# Schema 3 adds the exact immutable Phase 1 parent receipt binding.  No Phase 2 receipt
+# Schema 4 adds the exact immutable probe target binding.  No Phase 2 receipt
 # predating this schema was admitted or published, so there is no historical evidence to
 # migrate; older in-memory shapes are refused rather than guessed.
-PROTOCOL_PHASE_RECEIPT_SCHEMA_VERSION = 3
+PROTOCOL_PHASE_RECEIPT_SCHEMA_VERSION = 4
 
 # Decision P2-3: task_utility is a fixed disposition literal, never fabricated Phase 2 data.
 CAPABILITY_TASK_UTILITY_DEFERRED = "deferred_to_feature_phase"
@@ -2409,6 +2503,7 @@ class ProtocolPhaseReceipt:
     production_identity_after: ProductionIdentity
     candidate_lock: CandidateLock
     runtime_binding: RuntimeBinding | None
+    probe_binding: ProtocolProbeBinding
     root_manifests_before: tuple[RootManifest, ...]
     root_manifests_after: tuple[RootManifest, ...]
     write_deltas: tuple[WriteDelta, ...]
@@ -2451,6 +2546,10 @@ class ProtocolPhaseReceipt:
         outcomes = _validate_tuple(self.outcomes, "ProtocolPhaseReceipt.outcomes")
         _validate_sorted_unique([outcome.candidate for outcome in outcomes], "ProtocolPhaseReceipt.outcomes")
         issues = _validate_tuple(self.issues, "ProtocolPhaseReceipt.issues")
+        if not isinstance(self.probe_binding, ProtocolProbeBinding):
+            raise ValueError(
+                "ProtocolPhaseReceipt.probe_binding must be a ProtocolProbeBinding"
+            )
         _validate_sorted_unique(issues, "ProtocolPhaseReceipt.issues")
         _validate_sha256(self.artifact_tree_digest, "ProtocolPhaseReceipt.artifact_tree_digest")
         _validate_non_empty_str(self.next_action, "ProtocolPhaseReceipt.next_action")
@@ -2477,6 +2576,32 @@ class ProtocolPhaseReceipt:
             )
         if self.status == "pass":
             self._require_canonical_pass(budgets, root_manifests_before, root_manifests_after, write_deltas, outcomes)
+        self._require_probe_binding(root_manifests_before)
+
+    def _require_probe_binding(
+        self, root_manifests_before: tuple[RootManifest, ...]
+    ) -> None:
+        probe_witness = self.probe_binding.root_witness
+        before_witnesses = tuple(
+            AdmissionRootWitness(
+                root=manifest.root,
+                kind=manifest.kind,
+                source_revision=manifest.source_revision,
+                manifest_digest=manifest.manifest_digest,
+            )
+            for manifest in root_manifests_before
+        )
+        if probe_witness not in before_witnesses:
+            raise ValueError(
+                "ProtocolPhaseReceipt.probe_binding root_witness must equal its frozen before manifest"
+            )
+        if (
+            self.admission_binding is not None
+            and probe_witness not in self.admission_binding.parent_root_manifests
+        ):
+            raise ValueError(
+                "ProtocolPhaseReceipt.probe_binding root_witness must equal its exact parent witness"
+            )
 
     def _require_configuration_inconclusive(
         self,
@@ -2732,6 +2857,7 @@ class ProtocolPhaseReceipt:
             "runtime_binding": (
                 None if self.runtime_binding is None else _runtime_binding_to_dict(self.runtime_binding)
             ),
+            "probe_binding": self.probe_binding.to_dict(),
             "root_manifests_before": [_root_manifest_to_dict(manifest) for manifest in self.root_manifests_before],
             "root_manifests_after": [_root_manifest_to_dict(manifest) for manifest in self.root_manifests_after],
             "write_deltas": [_write_delta_to_dict(delta) for delta in self.write_deltas],
@@ -2779,6 +2905,9 @@ class ProtocolPhaseReceipt:
             production_identity_after=_production_identity_from_dict(value["production_identity_after"]),
             candidate_lock=_candidate_lock_from_dict(value["candidate_lock"]),
             runtime_binding=None if binding is None else _runtime_binding_from_dict(binding),
+            probe_binding=ProtocolProbeBinding.from_dict(
+                _expect_mapping(value["probe_binding"], "ProtocolPhaseReceipt.probe_binding")
+            ),
             root_manifests_before=tuple(
                 _root_manifest_from_dict(item)
                 for item in _expect_list(value["root_manifests_before"], "ProtocolPhaseReceipt.root_manifests_before")
@@ -2822,6 +2951,7 @@ _PROTOCOL_PHASE_RECEIPT_FIELDS = frozenset(
         "production_identity_after",
         "candidate_lock",
         "runtime_binding",
+        "probe_binding",
         "root_manifests_before",
         "root_manifests_after",
         "write_deltas",

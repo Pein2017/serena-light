@@ -292,21 +292,25 @@ Its remaining `open` calls are therefore `confined`; `fstat`, `fdopen`, `read`, 
 operate only on descriptors. A missing exact receipt cannot fall through to another run.
 
 `protocol_phase.py` owns the protocol-run artifact namespace, not candidate source or runtime
-files. It separates the two absolute `guarded` directory opens into
-`_open_protocol_artifact_owner_root` and `_open_protocol_run_root`. From those retained roots,
-the run-directory walk and creation plus sidecar creation/removal are `confined`; payload I/O,
-mode normalization, durability barriers, and release are descriptor operations. Candidate
-processes remain owned by `protocol.py` and `protocol_lifecycle.py`, while immutable receipt
-publication remains owned by `publish.py`.
+files. `_open_protocol_artifact_owner_root` is its single absolute `guarded` owner-root open.
+The component walk retains the newly created 0700 per-run directory descriptor in a
+`ProtocolRunRoot`; `_duplicate_protocol_run_root` validates and duplicates that descriptor for
+each sidecar operation, so a later pathname or `protocol-runs` ancestor substitution cannot
+redirect a write. Run-directory creation plus sidecar creation/removal are `confined`; payload
+I/O, mode normalization, durability barriers, duplication, and release are descriptor
+operations. Candidate processes remain owned by `protocol.py` and `protocol_lifecycle.py`,
+while immutable receipt publication remains owned by `publish.py`.
 
 `protocol_witness.py` owns a single disposable fixture below an already-created, caller-owned
-per-run directory. `_open_owned_run_root` is the only `guarded` absolute open and proves the
-root is the expected 0700 directory. Creation, verification, and cleanup then use only
-`dir_fd`-relative `mkdir`, `chmod`, `open`, `stat`, `unlink`, and `rmdir` calls (`confined`) or
-descriptor-only I/O and durability calls. `_checked_open` closes only the descriptor it just
-opened if the shared phase deadline expires after the syscall. The two `Path.resolve`
-locations merely reject a definition outside the frozen transformers root; they authorize no
-subsequent write and remain `declared-path` observations.
+per-run directory. The sealed phase supplies its retained descriptor and
+`_duplicate_owned_run_root` validates and duplicates it; `_open_owned_run_root` remains the
+standalone `guarded` absolute fallback and proves the root is the expected 0700 directory.
+Creation, verification, and cleanup then use only `dir_fd`-relative `mkdir`, `chmod`, `open`,
+`stat`, `unlink`, and `rmdir` calls (`confined`) or descriptor-only I/O, duplication, and
+durability calls. `_checked_open` closes only the descriptor it just opened if the shared
+phase deadline expires after the syscall. The two `Path.resolve` locations merely reject a
+definition outside the frozen transformers root; they authorize no subsequent write and
+remain `declared-path` observations.
 
 ## Executables the evaluation runs
 
@@ -345,8 +349,8 @@ ignore semantics, including `.gitignore` and `.git/info/exclude`, remain authori
 | `protocol.py` | no direct filesystem access; one structurally collected `candidate-child` delegation through the frozen production process/transport primitives |
 | `protocol_lifecycle.py` | lifecycle source-read delegation, exact candidate PID/create-time/PGID observation, fail-closed process-group signal and cleanup census, and the synchronously restored ambient poison proof |
 | `protocol_parent.py` | exact Phase 1 parent receipt binding: one guarded filesystem-root anchor, no-follow descriptor walk, strict regular-file read, and no discovery fallback |
-| `protocol_phase.py` | sealed Phase 2 orchestration and its protocol-run artifact namespace: guarded owner/run roots, confined run and sidecar operations, and descriptor-only payload durability |
-| `protocol_witness.py` | one deadline-bounded disposable witness below the caller-owned run root: confined creation, verification, durability, cleanup, and read-only external-definition observations |
+| `protocol_phase.py` | sealed Phase 2 orchestration and its protocol-run artifact namespace: one guarded owner root, a retained per-run descriptor, confined run and sidecar operations, and descriptor-only payload durability |
+| `protocol_witness.py` | one deadline-bounded disposable witness below the caller-owned run descriptor: confined creation, verification, durability, cleanup, and read-only external-definition observations |
 | `publish.py` | the generic atomic immutable publication: the per-target publication lock, the publication directory and every artifact component below the declared owner root, the `O_EXCL` temporary, the payload write, the atomic link, and the withdrawal |
 | `runtime.py` | service-owned candidate runtime preparation and the separate read-only prepared-runtime manifest loader/verifier |
 | `pyrefly_probe.py` | no direct filesystem access; delegates workspace manifests and source bytes to `manifests.py`, consumes the caller-bound prepared runtime, and delegates candidate lifecycle to `protocol.py` |

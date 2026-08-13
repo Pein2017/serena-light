@@ -258,7 +258,7 @@
 - [ ] 2.6 Add real subprocess tests for cold readiness, push/pull diagnostics mode, `ContentModified`, `RequestCancelled`, the identically disabled production retry seam, and bounded timeout; use an explicit pytest timeout above the repository's 30-second default for declared real-corpus cases.
 - [ ] 2.7 Add real subprocess tests for crash, graceful shutdown, parent/process-tree cleanup, proxy poisoning, minimal environment, and secret/environment redaction.
 - [ ] 2.8 Run each protocol probe under bounded write detection and prove zero workspace mutation for Pyright, ty, and Pyrefly.
-- [ ] 2.9 Run the complete protocol phase under its 90-minute ceiling, publish typed per-candidate gate outcomes for PASS/FAIL and `seam_incompatible_pull_only` dispositions with artifact-tree digests, and remove failed candidates from later phases.
+- [ ] 2.9 Run the complete protocol phase under its 90-minute ceiling from one exact Phase 1 parent; bind the lexical workspace/target/zero-based position and frozen root witness, revalidate the same read-only parent runtime during finalization, publish typed per-candidate gate outcomes for PASS/FAIL and `seam_incompatible_pull_only` dispositions with artifact-tree digests, and remove failed candidates from later phases.
 
 ## 3. Compare the current Serena Light product surface
 
