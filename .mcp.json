@@ -12,7 +12,7 @@
       ],
       "env": {
         "SERENA_HOME": "/data/CoordExp/.codex/serena",
-        "PATH": "/root/miniconda3/envs/ms/bin:/root/.local/bin:/usr/local/bin:/usr/bin:/bin",
+        "PATH": "/data/CoordExp/.codex/serena/runtime/node/bin:/root/miniconda3/envs/ms/bin:/root/.local/bin:/usr/local/bin:/usr/bin:/bin",
         "CONDA_PREFIX": "/root/miniconda3/envs/ms",
         "VIRTUAL_ENV": "/root/miniconda3/envs/ms"
       },

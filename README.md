@@ -8,6 +8,24 @@
 > environment. No security fixes, dependency updates, language-server updates,
 > or compatibility releases are planned here.
 
+## Final disposition
+
+- **Replacement:** [official Serena](https://github.com/oraios/serena), version
+  1.7.0 at the final local migration.
+- **Client transport:** a per-Git-worktree shared official Serena HTTP backend
+  with one stdio bridge per Codex or Claude Code session. Agents in the same
+  worktree reuse one backend; different worktrees receive independent backends.
+- **Language servers:** official Pyright 1.1.403 for Python and official
+  TypeScript 5.9.3 / typescript-language-server 5.1.3 for JavaScript and
+  TypeScript, installed in service-owned runtimes.
+- **Migration state:** the `serena-light` MCP registration and runtime are no
+  longer used. The repository-local `.mcp.json` points to the official Serena
+  worktree wrapper only so a final checkout remains usable internally.
+- **Historical record:** every section below this one describes the archived
+  experiment and its immutable evidence. Any wording such as “current”,
+  “pending”, or “candidate” below is historical and is superseded by this final
+  disposition.
+
 `serena-light` is an internal, agent-first semantic code navigation service for
 the CoordExp environment. It is an independently owned, deliberately small
 derivative of selected MIT-licensed Serena and SolidLSP mechanisms.
