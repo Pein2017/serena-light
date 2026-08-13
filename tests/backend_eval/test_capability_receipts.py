@@ -1072,6 +1072,121 @@ def test_protocol_phase_receipt_seam_incompatible_candidate_is_retained_but_not_
     assert receipt.outcomes[-1].gate_disposition == "seam_incompatible_pull_only"
 
 
+@pytest.mark.parametrize(
+    ("mutation", "match"),
+    [
+        ("required_rejected", "ty.*references.*accepted"),
+        ("required_not_normalized", "ty.*references.*normalized"),
+        ("lifecycle_false", "ty.*lifecycle.cleanup_clean"),
+        ("witness_false", "ty.*witness_passed"),
+    ],
+)
+def test_protocol_phase_receipt_rejects_unproven_pull_only_seam_constructor(
+    mutation: str,
+    match: str,
+) -> None:
+    seam = _failed_candidate_protocol_outcome(
+        "ty",
+        gate_disposition="seam_incompatible_pull_only",
+    )
+    if mutation.startswith("required_"):
+        seam = replace(
+            seam,
+            capabilities=tuple(
+                replace(
+                    capability,
+                    accepted=mutation != "required_rejected",
+                    normalized_valid=False,
+                )
+                if capability.name == "references"
+                else capability
+                for capability in seam.capabilities
+            ),
+        )
+    elif mutation == "lifecycle_false":
+        seam = replace(
+            seam,
+            lifecycle=replace(seam.lifecycle, cleanup_clean=False),
+        )
+    else:
+        seam = replace(seam, witness_passed=False)
+
+    with pytest.raises(ValueError, match=match):
+        _protocol_phase_receipt(outcomes=_canonical_protocol_outcomes(ty=seam))
+
+
+@pytest.mark.parametrize(
+    ("mutation", "match"),
+    [
+        ("required_rejected", "ty.*references.*accepted"),
+        ("required_not_normalized", "ty.*references.*normalized"),
+        ("lifecycle_false", "ty.*lifecycle.cleanup_clean"),
+        ("witness_false", "ty.*witness_passed"),
+    ],
+)
+def test_protocol_phase_receipt_rejects_unproven_pull_only_seam_from_dict(
+    mutation: str,
+    match: str,
+) -> None:
+    seam = _failed_candidate_protocol_outcome(
+        "ty",
+        gate_disposition="seam_incompatible_pull_only",
+    )
+    payload = _protocol_phase_receipt(
+        outcomes=_canonical_protocol_outcomes(ty=seam)
+    ).to_dict()
+    ty = next(
+        outcome
+        for outcome in cast("list[dict[str, Any]]", payload["outcomes"])
+        if outcome["candidate"] == "ty"
+    )
+    if mutation.startswith("required_"):
+        references = next(
+            capability
+            for capability in cast("list[dict[str, Any]]", ty["capabilities"])
+            if capability["name"] == "references"
+        )
+        references["accepted"] = mutation != "required_rejected"
+        references["normalized_valid"] = False
+    elif mutation == "lifecycle_false":
+        cast("dict[str, Any]", ty["lifecycle"])["cleanup_clean"] = False
+    else:
+        ty["witness_passed"] = False
+
+    with pytest.raises(ValueError, match=match):
+        ProtocolPhaseReceipt.from_dict(payload)
+
+
+def test_pull_only_seam_allows_deferred_optional_implementation_negative() -> None:
+    seam = _failed_candidate_protocol_outcome(
+        "ty",
+        gate_disposition="seam_incompatible_pull_only",
+    )
+    seam = replace(
+        seam,
+        capabilities=tuple(
+            replace(
+                capability,
+                accepted=True,
+                normalized_valid=False,
+                notes="normalization returned no evidence",
+            )
+            if capability.name == "implementation"
+            else capability
+            for capability in seam.capabilities
+        ),
+    )
+
+    receipt = _protocol_phase_receipt(
+        outcomes=_canonical_protocol_outcomes(ty=seam)
+    )
+    reparsed = ProtocolPhaseReceipt.from_dict(receipt.to_dict())
+
+    assert reparsed.status == "pass"
+    assert reparsed.next_action == PROTOCOL_PHASE_NEXT_ACTION_STOP
+    assert reparsed.outcomes[-1].gate_disposition == "seam_incompatible_pull_only"
+
+
 def test_protocol_phase_receipt_seam_incompatible_requires_pull_diagnostics_evidence() -> None:
     unsupported_claim = _candidate_protocol_outcome(
         "ty",

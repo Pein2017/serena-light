@@ -2459,14 +2459,16 @@ def _require_bound_candidate_witness(outcome: CandidateProtocolOutcome) -> None:
         raise ValueError(f"{label} lacks an exact bound witness")
 
 
-def _require_passing_candidate_evidence(outcome: CandidateProtocolOutcome) -> None:
-    """Reject a survivor unless all capability and lifecycle evidence is affirmative."""
+def _require_affirmative_candidate_evidence(outcome: CandidateProtocolOutcome) -> None:
+    """Require backend-positive evidence for a survivor or pull-only seam exclusion."""
 
     label = f"ProtocolPhaseReceipt outcome {outcome.candidate}"
+    disposition = outcome.gate_disposition
     _require_bound_candidate_witness(outcome)
     if outcome.witness_passed is not True:
         raise ValueError(
-            f"{label} has gate_disposition='pass' but witness_passed is not an exact bound true witness"
+            f"{label} has gate_disposition={disposition!r} but witness_passed is not "
+            "an exact bound true witness"
         )
     for capability in outcome.capabilities:
         if capability.name not in PHASE2_REQUIRED_CAPABILITY_NAMES:
@@ -2475,15 +2477,20 @@ def _require_passing_candidate_evidence(outcome: CandidateProtocolOutcome) -> No
             raise ValueError(
                 f"{label} capability {capability.name} is required but was not advertised"
             )
-        if capability.accepted is not True or capability.normalized_valid is not True:
+        if capability.accepted is not True:
             raise ValueError(
-                f"{label} capability {capability.name} was advertised but not accepted and normalized-valid"
+                f"{label} capability {capability.name} was advertised but not accepted"
+            )
+        if capability.normalized_valid is not True:
+            raise ValueError(
+                f"{label} capability {capability.name} was accepted but not normalized-valid"
             )
 
     for field in _PASS_LIFECYCLE_FIELDS:
         if getattr(outcome.lifecycle, field) is not True:
             raise ValueError(
-                f"{label} has gate_disposition='pass' but lifecycle.{field} is not true"
+                f"{label} has gate_disposition={disposition!r} but "
+                f"lifecycle.{field} is not true"
             )
 
 
@@ -2589,6 +2596,10 @@ class ProtocolPhaseReceipt:
                 "ProtocolPhaseReceipt next_action='inconclusive_retain_pyright' requires at least "
                 "one configuration_inconclusive candidate outcome"
             )
+        for outcome in outcomes:
+            if outcome.gate_disposition == "seam_incompatible_pull_only":
+                _require_candidate_protocol_evidence(outcome)
+                _require_affirmative_candidate_evidence(outcome)
         if self.status == "pass":
             self._require_canonical_pass(budgets, root_manifests_before, root_manifests_after, write_deltas, outcomes)
         self._require_probe_binding(root_manifests_before)
@@ -2653,7 +2664,7 @@ class ProtocolPhaseReceipt:
             _require_bound_candidate_witness(outcome)
             _require_candidate_protocol_evidence(outcome)
             if outcome.gate_disposition == "pass":
-                _require_passing_candidate_evidence(outcome)
+                _require_affirmative_candidate_evidence(outcome)
             if (
                 outcome.gate_disposition == "configuration_inconclusive"
                 and outcome.witness_passed is not False
@@ -2772,7 +2783,7 @@ class ProtocolPhaseReceipt:
             _require_bound_candidate_witness(outcome)
             _require_candidate_protocol_evidence(outcome)
         for survivor in survivors:
-            _require_passing_candidate_evidence(survivor)
+            _require_affirmative_candidate_evidence(survivor)
         expected_next_action = (
             PROTOCOL_PHASE_NEXT_ACTION_PASS
             if any(outcome.candidate != "pyright" for outcome in survivors)
