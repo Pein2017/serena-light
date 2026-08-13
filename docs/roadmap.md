@@ -1,5 +1,18 @@
 # Serena Light Roadmap
 
+## Repository retirement
+
+**2026-08-13 — STOPPED.** Serena Light is no longer maintained. The owner chose
+to return to official `oraios/serena` so language support, client integration,
+hooks, and updates remain upstream-owned. All phases below are historical; no
+deferred phase authorizes new implementation in this repository.
+
+The final Python-backend evaluation stopped after its Phase 2 protocol gate
+and retained Pyright for the frozen Serena Light configuration. Its incomplete
+tasks and exact evidence are archived without being converted into a stable
+product contract. See the archived change disposition for the precise claim
+boundary.
+
 This document is a non-normative execution map. Behavioral requirements and
 acceptance criteria are owned by OpenSpec. If this roadmap disagrees with an
 active OpenSpec change, OpenSpec wins.

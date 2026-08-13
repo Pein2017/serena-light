@@ -1,4 +1,11 @@
-"""Admission gates for tests that inspect mutable external roots."""
+"""Admission gates for tests that inspect mutable external roots.
+
+Importing ``scripts.backend_eval`` first is deliberate and must stay first: it binds
+``serena_light`` to *this* checkout's ``src`` before any test module imports it.  A CLI or
+test host virtual environment installed from another worktree would otherwise supply that
+worktree's production helpers, and the backend-evaluation identity tests would then measure
+code this repository does not own.
+"""
 
 from __future__ import annotations
 
@@ -10,6 +17,7 @@ from typing import NoReturn, cast
 
 import pytest
 
+import scripts.backend_eval  # noqa: F401  # binds this checkout's serena_light source first
 from scripts.external_snapshot import snapshot_identity, snapshot_profile_for_environment
 
 
