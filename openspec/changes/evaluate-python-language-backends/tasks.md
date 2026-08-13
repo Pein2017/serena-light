@@ -267,6 +267,13 @@
 > minimal-environment measurement did not retain a bounded key-level cause. The harness repairs
 > are unit-tested, but task 2.9 remains unchecked until the lead explicitly authorizes a fresh
 > real protocol execution and both required reviews disposition its new exact receipt.
+> The later immutable receipt under evaluation identity
+> `fecf778e2b86ae591ab8cabc17433fc694b8d6ca027323b99a5da85fe35238af` is integrity-valid but
+> classification-invalid and superseded: it made proven-configuration diagnostics failure
+> inconclusive, treated optional Phase 4 implementation evidence as a Phase 2 hard gate, and did
+> not classify otherwise-valid ty pull diagnostics as `seam_incompatible_pull_only`. A new Phase
+> 1 parent and fresh canonical Phase 2 receipt are required; neither historical receipt closes
+> task 2.9.
 
 ## 3. Compare the current Serena Light product surface
 

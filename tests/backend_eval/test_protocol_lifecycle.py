@@ -23,6 +23,7 @@ from scripts.backend_eval.protocol_lifecycle import (
 )
 from scripts.backend_eval.pyright_probe import _prepared_candidate_runtime, pyright_protocol_spec
 from scripts.backend_eval.runtime import CandidateRuntime
+from serena_light.lsp.client import LspResponseError
 from serena_light.lsp.pyright import PyrightFacts
 from serena_light.workspace.identity import MS_INTERPRETER
 
@@ -108,6 +109,31 @@ def _passing_scenarios() -> dict[str, LifecycleScenarioEvidence]:
             redaction_verified=True,
         ),
     }
+
+
+def test_candidate_eliminating_lifecycle_detail_retains_bounded_redacted_lsp_error() -> None:
+    secret = "lifecycle-secret"
+    observation = lifecycle_module._ProbeObservation(
+        session=None,
+        process=None,
+        process_reaped=True,
+        error=LspResponseError(
+            -32800,
+            f"password={secret} request cancelled " + "x" * 5000,
+        ),
+        elapsed_seconds=0.25,
+    )
+
+    detail = lifecycle_module._failure_detail(
+        "cold readiness or diagnostics proof failed",
+        observation,
+    )
+
+    assert "code=-32800" in detail
+    assert "message=" in detail
+    assert secret not in detail
+    assert "<redacted>" in detail
+    assert len(detail) <= 512
 
 
 def _fake_request() -> LifecycleBatteryRequest:

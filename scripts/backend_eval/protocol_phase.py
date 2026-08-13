@@ -953,10 +953,6 @@ def _configuration_conclusive(witness: ProtocolBehaviorWitness) -> bool:
         or witness.configuration_interpreter != witness.selected_interpreter
         or witness.configuration_payload_sha256 is None
         or not witness.configuration_application_proven
-        or (
-            witness.push_diagnostics_claimed
-            and witness.diagnostics_completion_reason != "missing_import_observed"
-        )
     ):
         return False
     if witness.candidate in {"pyright", "ty"}:

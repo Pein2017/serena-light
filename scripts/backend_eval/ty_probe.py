@@ -11,6 +11,7 @@ from typing import Any, cast
 from scripts.backend_eval.manifests import read_stable_source_text
 from scripts.backend_eval.models import (
     CAPABILITY_TASK_UTILITY_DEFERRED,
+    PHASE2_REQUIRED_CAPABILITY_NAMES,
     CandidateProtocolOutcome,
     CapabilityEvidence,
     LifecycleEvidence,
@@ -56,11 +57,6 @@ _CAPABILITY_NAMES = (
     "references",
     "workspace_symbols",
 )
-_REQUIRED_ADVERTISEMENTS = frozenset(
-    {"definition", "document_symbols", "references", "workspace_symbols"}
-)
-
-
 @dataclass(frozen=True, slots=True)
 class _ObservedCapability:
     name: str
@@ -341,18 +337,19 @@ def run_ty_capability_probe(
             f"{capability.notes or 'advertised request was not normalized-valid'}"
         )
         for capability in capabilities
-        if capability.advertised
+        if capability.name in PHASE2_REQUIRED_CAPABILITY_NAMES
+        and capability.advertised
         and (capability.accepted is not True or capability.normalized_valid is not True)
     ]
     capability_issues.extend(
         f"{name}: locked ty did not advertise the required provider"
-        for name in sorted(_REQUIRED_ADVERTISEMENTS)
+        for name in sorted(PHASE2_REQUIRED_CAPABILITY_NAMES)
         if not advertised[name]
     )
     required_readiness = tuple(
         observation.ready_elapsed
         for observation in observations.values()
-        if observation.name in _REQUIRED_ADVERTISEMENTS
+        if observation.name in PHASE2_REQUIRED_CAPABILITY_NAMES
         and observation.ready_elapsed is not None
     )
     if not required_readiness:
@@ -394,14 +391,16 @@ def run_ty_capability_probe(
         minimal_environment_verified=False,
         redaction_verified=False,
     )
+    seam_issue = "ty uses pull diagnostics; the current product seam requires push diagnostics"
+    disposition = "fail" if issues else "seam_incompatible_pull_only"
     return CandidateProtocolOutcome(
         candidate="ty",
         engine_version=protocol_session.engine.version,
         raw_providers=protocol_session.raw_providers,
         capabilities=capabilities,
         lifecycle=lifecycle,
-        gate_disposition="pass" if not issues else "fail",
-        issues=issues,
+        gate_disposition=disposition,
+        issues=(issues if issues else (seam_issue,)),
     )
 
 

@@ -1939,6 +1939,12 @@ PROTOCOL_PHASE_RECEIPT_SCHEMA_VERSION = 4
 # Decision P2-3: task_utility is a fixed disposition literal, never fabricated Phase 2 data.
 CAPABILITY_TASK_UTILITY_DEFERRED = "deferred_to_feature_phase"
 
+# Phase 2 proves the current Serena Light baseline only.  Implementation remains recorded as
+# protocol evidence but is decision-owning only in the closed Phase 4 feature comparison.
+PHASE2_REQUIRED_CAPABILITY_NAMES = frozenset(
+    {"definition", "document_symbols", "references", "workspace_symbols"}
+)
+
 # One canonical diagnostics-mode source: BackendProtocolSpec.diagnostics_mode (protocol.py)
 # and LifecycleEvidence.diagnostics_mode both validate against this same frozenset, never a
 # second locally duplicated set.
@@ -2415,7 +2421,11 @@ def _require_candidate_protocol_evidence(outcome: CandidateProtocolOutcome) -> N
                 )
     if outcome.gate_disposition == "fail":
         negative_capability = any(
-            capability.accepted is False or capability.normalized_valid is False
+            capability.name in PHASE2_REQUIRED_CAPABILITY_NAMES
+            and (
+                capability.accepted is False
+                or capability.normalized_valid is False
+            )
             for capability in outcome.capabilities
         )
         negative_lifecycle = any(
@@ -2459,9 +2469,13 @@ def _require_passing_candidate_evidence(outcome: CandidateProtocolOutcome) -> No
             f"{label} has gate_disposition='pass' but witness_passed is not an exact bound true witness"
         )
     for capability in outcome.capabilities:
-        if capability.advertised and (
-            capability.accepted is not True or capability.normalized_valid is not True
-        ):
+        if capability.name not in PHASE2_REQUIRED_CAPABILITY_NAMES:
+            continue
+        if not capability.advertised:
+            raise ValueError(
+                f"{label} capability {capability.name} is required but was not advertised"
+            )
+        if capability.accepted is not True or capability.normalized_valid is not True:
             raise ValueError(
                 f"{label} capability {capability.name} was advertised but not accepted and normalized-valid"
             )

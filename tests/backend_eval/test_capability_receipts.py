@@ -1017,6 +1017,36 @@ def test_protocol_phase_receipt_pass_derives_stop_action_for_sole_pyright_surviv
         _protocol_phase_receipt(next_action=PROTOCOL_PHASE_NEXT_ACTION_PASS)
 
 
+def test_protocol_phase_pass_allows_deferred_optional_implementation_negative() -> None:
+    pyright = _candidate_protocol_outcome("pyright")
+    capabilities = tuple(
+        replace(
+            capability,
+            accepted=True,
+            normalized_valid=False,
+            notes="normalization returned no evidence",
+        )
+        if capability.name == "implementation"
+        else capability
+        for capability in pyright.capabilities
+    )
+
+    receipt = _protocol_phase_receipt(
+        outcomes=_canonical_protocol_outcomes(
+            pyright=replace(pyright, capabilities=capabilities)
+        )
+    )
+
+    implementation = next(
+        capability
+        for capability in receipt.outcomes[1].capabilities
+        if capability.name == "implementation"
+    )
+    assert implementation.accepted is True
+    assert implementation.normalized_valid is False
+    assert implementation.task_utility == CAPABILITY_TASK_UTILITY_DEFERRED
+
+
 def test_protocol_phase_receipt_pass_derives_product_seam_action_for_competitor_survivor() -> None:
     passing_ty = _candidate_protocol_outcome("ty")
     receipt = _protocol_phase_receipt(
@@ -1339,6 +1369,27 @@ def test_protocol_phase_receipt_allows_existing_unadvertised_capability_represen
         capabilities=capabilities,
     )
     assert _protocol_phase_receipt_with_pyright(pyright).status == "pass"
+
+
+def test_protocol_phase_receipt_pass_rejects_unadvertised_required_capability() -> None:
+    raw_providers = _raw_providers(references=False)
+    capabilities = tuple(
+        _capability_evidence(
+            name,
+            advertised=getattr(raw_providers, name),
+            accepted=name != "references",
+            normalized_valid=name != "references",
+        )
+        for name in _PROBED_CAPABILITY_NAMES
+    )
+    invalid_pyright = _candidate_protocol_outcome(
+        "pyright",
+        raw_providers=raw_providers,
+        capabilities=capabilities,
+    )
+
+    with pytest.raises(ValueError, match="pyright.*references.*required"):
+        _protocol_phase_receipt_with_pyright(invalid_pyright)
 
 
 @pytest.mark.parametrize(

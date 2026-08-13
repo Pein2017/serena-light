@@ -282,7 +282,7 @@ def test_pyright_capability_probe_exercises_and_normalizes_every_advertised_prov
     assert client.notifications[0][1] == {"settings": {}}
 
 
-def test_pyright_capability_probe_records_typed_lsp_error_and_still_closes_document(
+def test_pyright_optional_implementation_error_is_recorded_without_failing_phase2(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     target = tmp_path / "known.py"
@@ -306,7 +306,7 @@ def test_pyright_capability_probe_records_typed_lsp_error_and_still_closes_docum
     assert implementation.normalized_valid is False
     assert "-32801" in implementation.notes
     assert outcome.lifecycle.content_modified_count == 1
-    assert outcome.gate_disposition == "fail"
+    assert outcome.gate_disposition == "pass"
     assert client.notifications[-1][0] == "textDocument/didClose"
 
 
@@ -377,8 +377,6 @@ def test_pyright_redacts_and_bounds_server_error_notes_and_issues(
         ("textDocument/definition", "definition", []),
         ("textDocument/references", "references", None),
         ("textDocument/references", "references", []),
-        ("textDocument/implementation", "implementation", None),
-        ("textDocument/implementation", "implementation", []),
         ("textDocument/documentSymbol", "document_symbols", None),
         ("textDocument/documentSymbol", "document_symbols", []),
         ("workspace/symbol", "workspace_symbols", None),
@@ -412,6 +410,37 @@ def test_advertised_empty_results_are_accepted_but_fail_normalized_validity(
     assert capability.accepted is True
     assert capability.normalized_valid is False
     assert outcome.gate_disposition == "fail"
+
+
+@pytest.mark.parametrize("empty_result", [None, []])
+def test_advertised_empty_implementation_is_recorded_but_deferred_from_phase2_gate(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    empty_result: object,
+) -> None:
+    target = tmp_path / "known.py"
+    target.write_text("Known = 1\n", encoding="utf-8")
+    responses = _responses(target)
+    responses["textDocument/implementation"] = empty_result
+    client = _FakeClient(_FakeClock(), responses)
+    _install_fake_runner(monkeypatch, client, {})
+
+    outcome = _run_fake_pyright_capability_probe(
+        _facts(tmp_path / "python"),
+        tmp_path,
+        target,
+        (0, 0),
+        deadline=Deadline.start(client.clock, 10.0),
+    )
+
+    implementation = next(
+        capability for capability in outcome.capabilities if capability.name == "implementation"
+    )
+    assert implementation.advertised is True
+    assert implementation.accepted is True
+    assert implementation.normalized_valid is False
+    assert implementation.task_utility == "deferred_to_feature_phase"
+    assert outcome.gate_disposition == "pass"
 
 
 @pytest.mark.parametrize(

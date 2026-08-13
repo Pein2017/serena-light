@@ -15,6 +15,7 @@ from scripts.backend_eval.models import (
     CAPABILITY_TASK_UTILITY_DEFERRED,
     PROTOCOL_PHASE_NEXT_ACTION_INCONCLUSIVE,
     PROTOCOL_PHASE_NEXT_ACTION_PASS,
+    PROTOCOL_PHASE_NEXT_ACTION_STOP,
     PROTOCOL_WITNESS_SCHEMA_VERSION,
     AdmissionBinding,
     AdmissionRootWitness,
@@ -779,7 +780,7 @@ def test_protocol_phase_records_environment_measurement_failure_as_incomplete_no
     )
 
 
-def test_unresolved_controlled_push_diagnostics_is_inconclusive_not_backend_failure() -> None:
+def test_proven_configuration_with_missing_fresh_diagnostics_is_backend_failure() -> None:
     from scripts.backend_eval.protocol_phase import _finalize_candidate_outcome
 
     witness = replace(
@@ -804,7 +805,8 @@ def test_unresolved_controlled_push_diagnostics_is_inconclusive_not_backend_fail
         _SHA_B,
     )
 
-    assert outcome.gate_disposition == "configuration_inconclusive"
+    assert outcome.gate_disposition == "fail"
+    assert outcome.witness_passed is False
 
 
 def test_protocol_phase_mutation_is_a_hold_with_the_changed_candidate_evidence_retained(
@@ -853,6 +855,27 @@ def test_protocol_phase_preserves_pull_only_as_a_product_seam_not_backend_failur
     ty = next(outcome for outcome in receipt.outcomes if outcome.candidate == "ty")
     assert ty.gate_disposition == "seam_incompatible_pull_only"
     assert receipt.status == "pass"
+
+
+def test_only_pyright_survives_when_ty_is_pull_only_and_pyrefly_fails(
+    tmp_path: Path,
+) -> None:
+    from scripts.backend_eval.protocol_phase import evaluate_protocol_phase
+
+    request = _request(tmp_path)
+    services = _FakeServices(request, tmp_path)
+    services.seam_candidate = "ty"
+    services.failed_candidate = "pyrefly"
+
+    receipt = evaluate_protocol_phase(request, services=services, clock=_FakeClock())
+
+    assert receipt.status == "pass"
+    assert [(outcome.candidate, outcome.gate_disposition) for outcome in receipt.outcomes] == [
+        ("pyrefly", "fail"),
+        ("pyright", "pass"),
+        ("ty", "seam_incompatible_pull_only"),
+    ]
+    assert receipt.next_action == PROTOCOL_PHASE_NEXT_ACTION_STOP
 
 
 def test_protocol_phase_derives_stable_child_evaluation_and_unique_run_identity(

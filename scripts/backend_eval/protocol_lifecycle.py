@@ -835,12 +835,17 @@ def _scenario_evidence(
 
 def _failure_detail(prefix: str, observed: _ProbeObservation) -> str:
     error_name = type(observed.error).__name__ if observed.error is not None else "none"
+    response_detail = ""
+    if isinstance(observed.error, LspResponseError):
+        response_message = redacted_evidence_text(observed.error.message)[:192]
+        response_detail = f"; code={observed.error.code}; message={response_message}"
     session = observed.session
     terminal_count = len(session.terminal_errors) if session is not None else 0
     cleanup_count = len(session.cleanup_errors) if session is not None else 0
     exit_status = session.exit_status if session is not None else None
     return (
-        f"{prefix}; error={error_name}; exit={exit_status}; terminal_errors={terminal_count}; "
+        f"{prefix}; error={error_name}{response_detail}; exit={exit_status}; "
+        f"terminal_errors={terminal_count}; "
         f"cleanup_errors={cleanup_count}; process_reaped={observed.process_reaped}"
     )[:_MAX_DETAIL_CHARS]
 

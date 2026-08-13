@@ -115,6 +115,19 @@ candidate stderr using key names only, and any mismatch or unavailable measureme
 phase incomplete rather than failing a candidate. No conclusion from the superseded receipt may
 eliminate or promote a backend; a fresh canonical run is required after this repair.
 
+The later protocol receipt under evaluation identity
+`fecf778e2b86ae591ab8cabc17433fc694b8d6ca027323b99a5da85fe35238af` and run identity
+`9faee89d273a59e0a25d274df2f81b492c73923f7a197bb40b2c30eb4a11e6c2` remains immutable
+and integrity-valid, but is classification-invalid and superseded as decision evidence. Its
+configuration proof is not the reason Pyrefly failed: once configuration transport,
+interpreter, payload/path, server transcript, and behavioral application are proven, missing
+fresh diagnostics are a candidate failure rather than `configuration_inconclusive`. Phase 2's
+required current-baseline capability set is definition, document symbols, references, and
+workspace symbols. Implementation advertisement and normalized result remain recorded with
+task utility deferred to Phase 4; an empty advertised implementation result alone cannot fail
+Phase 2. Locked ty's otherwise-valid pull diagnostics are classified
+`seam_incompatible_pull_only`, remain non-promotable, and never count as a surviving competitor.
+
 ### Decision 5: Preserve Serena Light freshness and failure semantics
 
 Backends receive the same open/change/close and watched-file notifications from the shared adapter. Every content-bearing call keeps the existing preflight, at-most-one complete replay, byte-witness postflight, and typed second-race failure. The existing `LspClient.set_content_modified_retry_methods` seam remains disabled for all arms, so every request has one backend attempt; the harness may not add hidden retry loops. Protocol receipts separately count `ContentModified` and `RequestCancelled` outcomes.

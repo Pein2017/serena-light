@@ -319,7 +319,7 @@ def test_ty_probe_uses_server_consumed_configuration_not_an_unproven_notificatio
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     outcome, client, runtime, config = _run_fake(tmp_path, monkeypatch)
-    assert outcome.gate_disposition == "pass"
+    assert outcome.gate_disposition == "seam_incompatible_pull_only"
     assert outcome.lifecycle.cold_readiness_seconds == pytest.approx(0.1)
     assert [method for method, _params in client.notifications] == [
         "textDocument/didOpen",
@@ -470,10 +470,33 @@ def test_advertised_implementation_is_requested_once_and_records_normalized_evid
     assert implementation.accepted is True
     assert implementation.normalized_valid is True
     assert implementation.notes == ""
-    assert outcome.gate_disposition == "pass"
+    assert outcome.gate_disposition == "seam_incompatible_pull_only"
+    assert any("pull" in issue and "push" in issue for issue in outcome.issues)
     assert [method for method, _params, _timeout in client.requests].count(
         "textDocument/implementation"
     ) == 1
+
+
+def test_empty_advertised_implementation_is_deferred_but_ty_remains_pull_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    responses = _responses(tmp_path / "known.py")
+    responses["textDocument/implementation"] = []
+    outcome, _client, _runtime_value, _config = _run_fake(
+        tmp_path,
+        monkeypatch,
+        responses=responses,
+        providers=_providers(implementation=True),
+    )
+
+    implementation = next(
+        capability for capability in outcome.capabilities if capability.name == "implementation"
+    )
+    assert implementation.accepted is True
+    assert implementation.normalized_valid is False
+    assert implementation.task_utility == "deferred_to_feature_phase"
+    assert outcome.gate_disposition == "seam_incompatible_pull_only"
+    assert not any(issue.startswith("implementation:") for issue in outcome.issues)
 
 
 def test_ty_probe_preserves_typed_lsp_error_and_fresh_request_deadlines(

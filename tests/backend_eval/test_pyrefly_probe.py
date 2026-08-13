@@ -691,8 +691,6 @@ def test_pyrefly_probe_exercises_and_normalizes_all_five_providers(
         ("textDocument/definition", "definition", []),
         ("textDocument/references", "references", None),
         ("textDocument/references", "references", []),
-        ("textDocument/implementation", "implementation", None),
-        ("textDocument/implementation", "implementation", []),
         ("textDocument/documentSymbol", "document_symbols", None),
         ("textDocument/documentSymbol", "document_symbols", []),
         ("workspace/symbol", "workspace_symbols", None),
@@ -719,12 +717,39 @@ def test_pyrefly_probe_rejects_empty_advertised_results(
     assert cast(Any, outcome).gate_disposition == "fail"
 
 
+@pytest.mark.parametrize("empty_result", [None, []])
+def test_pyrefly_empty_implementation_is_recorded_but_deferred_from_phase2_gate(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    empty_result: object,
+) -> None:
+    target = tmp_path / "known.py"
+    responses = _responses(target)
+    responses["textDocument/implementation"] = empty_result
+
+    outcome, _client, _runtime_value, _config, _captured = _run_fake(
+        tmp_path,
+        monkeypatch,
+        responses=responses,
+    )
+
+    implementation = next(
+        capability
+        for capability in cast(Any, outcome).capabilities
+        if capability.name == "implementation"
+    )
+    assert implementation.advertised is True
+    assert implementation.accepted is True
+    assert implementation.normalized_valid is False
+    assert implementation.task_utility == "deferred_to_feature_phase"
+    assert cast(Any, outcome).gate_disposition == "pass"
+
+
 @pytest.mark.parametrize(
     ("method", "capability_name", "malformed"),
     [
         ("textDocument/definition", "definition", "bad"),
         ("textDocument/references", "references", ["bad"]),
-        ("textDocument/implementation", "implementation", ["bad"]),
         ("textDocument/documentSymbol", "document_symbols", ["bad"]),
         ("workspace/symbol", "workspace_symbols", [{"name": "Known", "kind": 12}]),
         (
@@ -772,7 +797,6 @@ def test_pyrefly_probe_rejects_malformed_provider_results(
     [
         ("definition", "textDocument/definition"),
         ("references", "textDocument/references"),
-        ("implementation", "textDocument/implementation"),
         ("document_symbols", "textDocument/documentSymbol"),
         ("workspace_symbols", "workspace/symbol"),
     ],

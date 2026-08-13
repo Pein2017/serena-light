@@ -17,6 +17,7 @@ from scripts.backend_eval.manifests import (
 )
 from scripts.backend_eval.models import (
     CAPABILITY_TASK_UTILITY_DEFERRED,
+    PHASE2_REQUIRED_CAPABILITY_NAMES,
     CandidateProtocolOutcome,
     CapabilityEvidence,
     LifecycleEvidence,
@@ -56,9 +57,6 @@ _CAPABILITY_NAMES = (
     "references",
     "workspace_symbols",
 )
-_REQUIRED_ADVERTISEMENTS = frozenset(_CAPABILITY_NAMES)
-
-
 class PyreflyWorkspaceMutation(RuntimeError):
     """Pyrefly changed an evaluated workspace between the bounded manifests."""
 
@@ -401,18 +399,19 @@ def _run_capability_probe(
             f"{capability.notes or 'advertised request was not normalized-valid'}"
         )
         for capability in capabilities
-        if capability.advertised
+        if capability.name in PHASE2_REQUIRED_CAPABILITY_NAMES
+        and capability.advertised
         and (capability.accepted is not True or capability.normalized_valid is not True)
     ]
     capability_issues.extend(
         f"{name}: locked Pyrefly did not advertise the required provider"
-        for name in sorted(_REQUIRED_ADVERTISEMENTS)
+        for name in sorted(PHASE2_REQUIRED_CAPABILITY_NAMES)
         if not advertised[name]
     )
     required_readiness = tuple(
         observation.ready_elapsed
         for observation in observations.values()
-        if observation.name in _REQUIRED_ADVERTISEMENTS
+        if observation.name in PHASE2_REQUIRED_CAPABILITY_NAMES
         and observation.ready_elapsed is not None
     )
     if not required_readiness:

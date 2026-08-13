@@ -10,6 +10,7 @@ from typing import Any, cast
 from scripts.backend_eval.manifests import read_stable_source_text
 from scripts.backend_eval.models import (
     CAPABILITY_TASK_UTILITY_DEFERRED,
+    PHASE2_REQUIRED_CAPABILITY_NAMES,
     CandidateProtocolOutcome,
     CapabilityEvidence,
     LifecycleEvidence,
@@ -43,11 +44,6 @@ _CAPABILITY_NAMES = (
     "references",
     "workspace_symbols",
 )
-_REQUIRED_ADVERTISEMENTS = frozenset(
-    {"definition", "document_symbols", "references", "workspace_symbols"}
-)
-
-
 @dataclass(frozen=True, slots=True)
 class _ObservedCapability:
     name: str
@@ -254,17 +250,19 @@ def run_pyright_capability_probe(
             f"{capability.notes or 'advertised request was not normalized-valid'}"
         )
         for capability in capabilities
-        if capability.advertised and (capability.accepted is not True or capability.normalized_valid is not True)
+        if capability.name in PHASE2_REQUIRED_CAPABILITY_NAMES
+        and capability.advertised
+        and (capability.accepted is not True or capability.normalized_valid is not True)
     ]
     capability_issues.extend(
         f"{name}: locked Pyright baseline did not advertise the required provider"
-        for name in sorted(_REQUIRED_ADVERTISEMENTS)
+        for name in sorted(PHASE2_REQUIRED_CAPABILITY_NAMES)
         if not advertised[name]
     )
     required_readiness = tuple(
         observation.ready_elapsed
         for observation in observations.values()
-        if observation.name in _REQUIRED_ADVERTISEMENTS
+        if observation.name in PHASE2_REQUIRED_CAPABILITY_NAMES
         and observation.ready_elapsed is not None
     )
     if not required_readiness:
