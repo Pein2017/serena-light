@@ -359,12 +359,16 @@ def _build_protocol_source_image(owner_root: Path) -> ProtocolSourceImage:
     """Pack the reachable protocol evaluator and production Python closure.
 
     The graph starts at the one receipt-producing protocol module and follows only owned
-    ``scripts.backend_eval`` and ``serena_light`` imports.  An unknown third-party import is
-    refused.  psutil is the sole declared external dependency; its Linux Python modules and
-    native extensions are read from the invoking interpreter's exact locked installation.
+    ``scripts.backend_eval`` and ``serena_light`` imports.  It also seals the exact child
+    program and production-helper closure declared by ``source_binding.py``: those are later
+    executed by pathname-independent helper machinery rather than imported by this process,
+    so an import graph alone cannot discover them.  An unknown third-party import is refused.
+    psutil is the sole declared external dependency; its Linux Python modules and native
+    extensions are read from the invoking interpreter's exact locked installation.
     """
 
     entries, needs_psutil = _reachable_protocol_sources(owner_root)
+    entries.update(_protocol_execution_dependency_sources(owner_root, entries))
     extensions: tuple[tuple[str, bytes], ...] = ()
     if needs_psutil:
         psutil_entries, extensions = _bound_psutil_sources()
@@ -414,6 +418,106 @@ def _reachable_protocol_sources(owner_root: Path) -> tuple[dict[str, bytes], boo
                     f"protocol source {archive_name} imports undeclared external dependency {imported}"
                 )
     return entries, needs_psutil
+
+
+def _protocol_execution_dependency_sources(
+    owner_root: Path, reachable: Mapping[str, bytes]
+) -> dict[str, bytes]:
+    """Seal the declared non-import execution closure from its already-read authority.
+
+    ``production_child.py`` is executed later from a sealed descriptor, and its production
+    modules are imported from another sealed descriptor.  Neither edge is a Python import in
+    the protocol parent.  Parse the exact ``source_binding.py`` bytes already selected for the
+    image so these execution dependencies cannot drift from ``HelperExpectation``'s authority.
+    """
+
+    binding_name = "scripts/backend_eval/source_binding.py"
+    binding = reachable.get(binding_name)
+    if binding is None:
+        binding = _read_owned_source(
+            owner_root,
+            ("scripts", "backend_eval", "source_binding.py"),
+            binding_name,
+        )
+    try:
+        syntax = ast.parse(binding, filename=binding_name)
+        child = _literal_assignment(syntax, "PRODUCTION_CHILD_NAME")
+        operations = _literal_assignment(syntax, "OPERATION_HELPER_CLOSURES")
+    except (SyntaxError, ValueError) as error:
+        raise EvaluatorBootstrapError(
+            f"cannot parse protocol execution dependency closure: {error}"
+        ) from error
+    if (
+        not isinstance(child, str)
+        or Path(child).name != child
+        or not child.endswith(".py")
+    ):
+        raise EvaluatorBootstrapError(
+            f"protocol execution dependency declares an invalid child program: {child!r}"
+        )
+    if not isinstance(operations, dict) or not operations:
+        raise EvaluatorBootstrapError(
+            "protocol execution dependency declares no production-helper operations"
+        )
+    helpers: set[str] = set()
+    for operation, closure in operations.items():
+        if (
+            not isinstance(operation, str)
+            or not operation
+            or not isinstance(closure, tuple | list)
+            or not closure
+        ):
+            raise EvaluatorBootstrapError(
+                f"protocol execution dependency has an invalid helper closure for {operation!r}"
+            )
+        for relative in closure:
+            if not isinstance(relative, str):
+                raise EvaluatorBootstrapError(
+                    f"protocol execution dependency has a non-path helper for {operation!r}"
+                )
+            helpers.add(relative)
+
+    dependencies = {
+        binding_name: binding,
+        f"scripts/backend_eval/{child}": _read_owned_source(
+            owner_root,
+            ("scripts", "backend_eval", child),
+            f"scripts/backend_eval/{child}",
+        )
+    }
+    for relative in sorted(helpers):
+        parts = Path(relative).parts
+        if (
+            len(parts) < 3
+            or parts[:2] != ("src", "serena_light")
+            or any(part in {"", ".", ".."} for part in parts)
+            or not relative.endswith(".py")
+        ):
+            raise EvaluatorBootstrapError(
+                f"protocol execution dependency declares a foreign production helper: {relative!r}"
+            )
+        archive_name = relative.removeprefix("src/")
+        dependencies[archive_name] = _read_owned_source(owner_root, parts, archive_name)
+    for archive_name, payload in dependencies.items():
+        existing = reachable.get(archive_name)
+        if existing is not None and existing != payload:
+            raise EvaluatorBootstrapError(
+                f"protocol execution dependency disagrees with reachable source {archive_name}"
+            )
+    return dependencies
+
+
+def _literal_assignment(syntax: ast.Module, name: str) -> object:
+    for node in syntax.body:
+        target: ast.expr | None = None
+        value: ast.expr | None = None
+        if isinstance(node, ast.Assign) and len(node.targets) == 1:
+            target, value = node.targets[0], node.value
+        elif isinstance(node, ast.AnnAssign):
+            target, value = node.target, node.value
+        if isinstance(target, ast.Name) and target.id == name and value is not None:
+            return ast.literal_eval(value)
+    raise ValueError(f"source_binding.py does not declare {name}")
 
 
 def _owned_module_location(

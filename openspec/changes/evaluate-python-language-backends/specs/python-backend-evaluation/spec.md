@@ -282,6 +282,10 @@ The frozen evaluation contract SHALL cap active wall time at 30 minutes for mani
 - **WHEN** a caller imports the evaluator from disk and invokes admission with default services, explicit production services, dependency-injected services, or through `main(..., services=...)`
 - **THEN** admission refuses before constructing or invoking those services or creating any receipt path unless the admission module proves its exact loader and origin against the inherited sealed image; dependency-injected unit tests use a separate non-publishing orchestration seam
 
+#### Scenario: The protocol evaluator image is pruned without dropping executed dependencies
+- **WHEN** `python -I -S -B scripts/backend_eval_bootstrap.py protocol-phase` builds its sealed semantic image
+- **THEN** the image contains the protocol entry's complete reachable evaluator and production import closure plus `production_child.py` and the exact production-helper closure declared by the already-read `source_binding.py` bytes, even though those latter files are executed or imported only by the later helper child and are not reachable Python imports in the protocol parent; the pre-backend evaluator identity derives their digests from that sealed image, and a missing, malformed, foreign, or changed declaration fails before `HelperExpectation`, any backend, or any receipt path
+
 #### Scenario: A production helper is executed in a child
 - **WHEN** the sealed evaluator starts a production-helper child
 - **THEN** a `HelperExpectation` derived from that evaluator's captured identity names the exact child program and operation-specific helper closure before the child starts; both are read through component-wise no-follow walks, compared with the expectation, sealed into immutable in-memory images, and executed or imported only from those images in isolated mode with no ambient source root

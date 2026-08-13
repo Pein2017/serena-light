@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import io
 import json
 import os
 import shutil
@@ -16,6 +17,10 @@ from pathlib import Path
 import pytest
 
 import scripts.backend_eval_bootstrap as bootstrap
+from scripts.backend_eval.source_binding import (
+    CHILD_EXECUTED_HELPERS,
+    PRODUCTION_CHILD_NAME,
+)
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -99,6 +104,110 @@ def test_protocol_image_contains_only_the_reachable_evaluator_and_bound_runtime_
         "psutil._psutil_linux",
         "psutil._psutil_posix",
     )
+
+
+def test_protocol_image_prebinds_nonimported_production_helper_execution_closure(
+    tmp_path: Path,
+) -> None:
+    owner = _protocol_owner(
+        tmp_path,
+        "import psutil\n"
+        "from scripts.backend_eval.identity import capture_evaluator_identity\n"
+        "from scripts.backend_eval.source_binding import HelperExpectation\n"
+        "from scripts.backend_eval.source_image import require_protocol_execution\n"
+        "def main():\n"
+        "    require_protocol_execution()\n"
+        "    HelperExpectation.from_identity(capture_evaluator_identity())\n"
+        "    return 0\n",
+    )
+
+    image = bootstrap._build_protocol_source_image(owner)
+
+    with zipfile.ZipFile(io.BytesIO(image.archive)) as archive:
+        names = set(archive.namelist())
+    assert f"scripts/backend_eval/{PRODUCTION_CHILD_NAME}" in names
+    assert {relative.removeprefix("src/") for relative in CHILD_EXECUTED_HELPERS} <= names
+
+
+def test_sealed_protocol_preflight_builds_helper_expectation_before_any_backend(
+    tmp_path: Path,
+) -> None:
+    owner = _protocol_owner(
+        tmp_path,
+        "import json, psutil\n"
+        "from scripts.backend_eval.identity import capture_evaluator_identity\n"
+        "from scripts.backend_eval.source_binding import (\n"
+        "    CHILD_EXECUTED_HELPERS, HelperExpectation, PRODUCTION_CHILD_NAME,\n"
+        ")\n"
+        "from scripts.backend_eval.source_image import require_protocol_execution\n"
+        "def main():\n"
+        "    require_protocol_execution()\n"
+        "    identity = capture_evaluator_identity()\n"
+        "    expectation = HelperExpectation.from_identity(identity)\n"
+        "    print(json.dumps({\n"
+        "        'child': PRODUCTION_CHILD_NAME in dict(identity.source_files),\n"
+        "        'helpers': [name for name, _digest in expectation.closure],\n"
+        "    }))\n"
+        "    return 0\n",
+    )
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-I",
+            "-S",
+            "-B",
+            "scripts/backend_eval_bootstrap.py",
+            "protocol-phase",
+        ],
+        cwd=owner,
+        capture_output=True,
+        timeout=10,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr.decode("utf-8", "replace")
+    assert json.loads(result.stdout) == {
+        "child": True,
+        "helpers": list(CHILD_EXECUTED_HELPERS),
+    }
+
+
+def test_protocol_identity_keeps_transient_production_child_bytes_after_restore(
+    tmp_path: Path,
+) -> None:
+    owner = _protocol_owner(tmp_path, "")
+    child = owner / "scripts" / "backend_eval" / PRODUCTION_CHILD_NAME
+    pristine = child.read_bytes()
+    hostile = b"# transient protocol child bytes\n" + pristine
+    child.write_bytes(hostile)
+    (owner / "scripts" / "backend_eval" / "protocol_phase.py").write_text(
+        "import base64, json, pathlib, psutil\n"
+        "from scripts.backend_eval.identity import capture_evaluator_identity\n"
+        "from scripts.backend_eval.source_binding import PRODUCTION_CHILD_NAME\n"
+        "from scripts.backend_eval.source_image import require_protocol_execution\n"
+        "def main():\n"
+        "    require_protocol_execution()\n"
+        f"    path = pathlib.Path({str(child)!r})\n"
+        f"    path.write_bytes(base64.b64decode({b64encode(pristine).decode()!r}))\n"
+        "    identity = capture_evaluator_identity()\n"
+        "    print(json.dumps({\n"
+        "        'recorded': dict(identity.source_files)[PRODUCTION_CHILD_NAME],\n"
+        "        'clean': identity.source_clean,\n"
+        "    }))\n"
+        "    return 0\n",
+        encoding="utf-8",
+    )
+
+    returncode, stdout, stderr = bootstrap._run_sealed_protocol(
+        owner, (), timeout=10.0, environ=os.environ
+    )
+
+    assert returncode == 0, stderr.decode("utf-8", "replace")
+    assert json.loads(stdout) == {
+        "recorded": sha256(hostile).hexdigest(),
+        "clean": False,
+    }
 
 
 def test_protocol_child_runs_production_and_psutil_only_from_bound_images(

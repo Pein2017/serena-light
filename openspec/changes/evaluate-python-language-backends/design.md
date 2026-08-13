@@ -254,6 +254,17 @@ their enrichment, all three production-identity captures, the candidate-lock and
 identity brackets -- and compared before anything runs. No process-global first-use pin exists,
 so two admissions in one process cannot contaminate each other's truth.
 
+The Phase 2 protocol image is deliberately pruned to the static import closure, unlike the
+Phase 1 admission image's whole evaluator-package census. That graph is insufficient by
+itself: `production_child.py` is later executed from a descriptor, and the production helper
+modules are later imported by that child, so neither is an import edge in `protocol_phase`.
+The transport therefore parses `PRODUCTION_CHILD_NAME` and `OPERATION_HELPER_CLOSURES` from
+the exact `source_binding.py` bytes it is already sealing, reads those declared files through
+the same component-wise no-follow owner walk, and adds them to the protocol image before the
+identity is captured. `HelperExpectation.from_identity` consequently consumes image-derived
+digests for the complete executable helper universe; a missing or foreign declaration fails
+before any helper or backend starts instead of falling back to disk or ambient packages.
+
 **The evaluator itself starts from one pre-import source image.** The expectation above used
 to begin too late for the parent evaluator: `python -m scripts.backend_eval.admission` imported
 `candidate_lock`, `identity`, `manifests`, `models`, `runtime`, and the rest of the admission

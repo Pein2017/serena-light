@@ -281,7 +281,11 @@ its `ZipFile` reads operate on an in-memory `BytesIO`, not a filesystem pathname
 owner covers the protocol image's frozen production Python entries and pure-Python dependency
 entries, plus `fstat`/`pread` of the two already-sealed native dependency descriptors. These
 reads bind the delayed-import universe before a candidate starts; they do not reopen disk
-source or a site-packages pathname.
+source or a site-packages pathname. The protocol image's closure includes both ordinary
+reachable imports and the non-import execution dependencies declared by its sealed
+`source_binding.py`: `production_child.py` plus the exact production-helper module union. The
+bootstrap reads each of those files through its same confined owner walk before sealing; the
+later `HelperExpectation` cannot recover a missing child or helper from ambient disk.
 
 ## Exact parent admission and disposable protocol witness
 
