@@ -166,6 +166,15 @@ def _spec(
                 {},
             ]
         }
+    elif candidate == "ty":
+        request_handlers = {
+            "workspace/configuration": lambda _params: [
+                {
+                    "configurationFile": config.config_path,
+                    "configuration": {"environment": {"python": str(interpreter)}},
+                }
+            ]
+        }
     elif candidate == "pyrefly":
         request_handlers = {
             "workspace/configuration": lambda params: [
@@ -198,18 +207,27 @@ class _FakeClient:
         *,
         diagnostics_uri: str | None,
         y_raw_start: int | None,
+        external_definition: Path | None,
+        publish_empty_before_diagnostic: bool,
     ) -> None:
         self._spec = spec
         self._fixture_uri = fixture_uri
         self._encoding = encoding
         self._diagnostics_uri = diagnostics_uri
         self._y_raw_start = y_raw_start
+        self._external_definition = external_definition
+        self._publish_empty_before_diagnostic = publish_empty_before_diagnostic
         self._definition_count = 0
 
     def notify(self, method: str, params: object) -> None:
         if method != "textDocument/didOpen" or self._spec.notification_handler is None:
             return
         uri = self._diagnostics_uri or self._fixture_uri
+        if self._publish_empty_before_diagnostic:
+            self._spec.notification_handler(
+                "textDocument/publishDiagnostics",
+                {"uri": uri, "diagnostics": []},
+            )
         self._spec.notification_handler(
             "textDocument/publishDiagnostics",
             {
@@ -235,8 +253,10 @@ class _FakeClient:
         assert method == "textDocument/definition"
         self._definition_count += 1
         if self._definition_count == 1:
+            if self._external_definition is None:
+                return None
             return {
-                "uri": _EXTERNAL_DEFINITION.as_uri(),
+                "uri": self._external_definition.as_uri(),
                 "range": {
                     "start": {"line": 70, "character": 0},
                     "end": {"line": 70, "character": 22},
@@ -269,6 +289,8 @@ def _fake_runner(
     exit_status: int | None = 0,
     swap_directory_after_session: bool = False,
     expected_deadline: Deadline | None = None,
+    external_definition: Path | None = _EXTERNAL_DEFINITION,
+    publish_empty_before_diagnostic: bool = False,
 ) -> Callable[..., ProtocolSession[Any]]:
     def run(
         spec: BackendProtocolSpec,
@@ -295,6 +317,17 @@ def _fake_runner(
                         ]
                     }
                 )
+            elif spec.name == "ty":
+                configuration(
+                    {
+                        "items": [
+                            {
+                                "scopeUri": workspace_root.as_uri(),
+                                "section": "ty",
+                            }
+                        ]
+                    }
+                )
             else:
                 configuration({"items": [{"section": "pyrefly"}]})
         client = _FakeClient(
@@ -303,6 +336,8 @@ def _fake_runner(
             encoding,
             diagnostics_uri=diagnostics_uri,
             y_raw_start=y_raw_start,
+            external_definition=external_definition,
+            publish_empty_before_diagnostic=publish_empty_before_diagnostic,
         )
         result = session(cast("SyncLspClient", client), RawLspProviders(definition=True))
         if mutate_after_session:
@@ -526,14 +561,15 @@ def test_witness_records_exact_candidate_configuration_transport(
     assert witness.configuration_interpreter == str(runtime.python)
     assert witness.configuration_transport == {
         "pyright": "workspace_configuration",
-        "ty": "did_change_configuration",
+        "ty": "workspace_configuration",
         "pyrefly": "initialization_options",
     }[candidate]
     assert witness.configuration_path == (
         None if candidate == "pyright" else _service_config(runtime, candidate).config_path
     )
     assert witness.configuration_payload_sha256 is not None
-    assert witness.configuration_request_count == (0 if candidate == "ty" else 1)
+    assert witness.configuration_request_count == 1
+    assert witness.configuration_application_proven
     assert not tuple(owned_root.iterdir())
 
 
@@ -584,13 +620,16 @@ def test_witness_binds_external_definition_diagnostics_and_first_readiness(
             owned_root=owned_root,
         ),
         deadline=Deadline.start(monotonic_clock, 30.0),
-        probe_runner=_fake_runner(),
+        probe_runner=_fake_runner(publish_empty_before_diagnostic=True),
     )
 
     assert witness.external_definition_relative_path == "generation/configuration_utils.py"
     assert witness.push_diagnostics_claimed
     assert witness.exact_uri_diagnostics
     assert witness.missing_import_diagnostic
+    assert witness.exact_uri_publish_count == 2
+    assert witness.exact_uri_diagnostic_count == 1
+    assert witness.diagnostics_completion_reason == "missing_import_observed"
     assert witness.first_normalized_capability == "definition"
     assert witness.first_normalized_count == 1
     assert witness.first_readiness_seconds is not None
@@ -599,6 +638,81 @@ def test_witness_binds_external_definition_diagnostics_and_first_readiness(
     assert witness.fixture_sha256 == "84abcaab9124d982101995bc01a6119083c9a7c15de158e31015ee266a91ff40"
     assert witness.fixture_mode == 0o600
     assert witness.issues == ()
+
+
+def test_empty_exact_uri_publish_does_not_complete_the_missing_import_wait() -> None:
+    observation = witness_module._DiagnosticsObservation("file:///fixture.py")
+
+    observation.observe(
+        "textDocument/publishDiagnostics",
+        {"uri": "file:///fixture.py", "diagnostics": []},
+    )
+
+    assert observation.exact_uri_observed
+    assert observation.exact_uri_count == 1
+    assert observation.diagnostic_count == 0
+    assert not observation.missing_import_observed
+    assert observation.event is not None
+    assert not observation.event.is_set()
+
+    observation.observe(
+        "textDocument/publishDiagnostics",
+        {
+            "uri": "file:///fixture.py",
+            "diagnostics": [{"message": "definitely_missing_serena_light_witness"}],
+        },
+    )
+
+    assert observation.exact_uri_count == 2
+    assert observation.diagnostic_count == 1
+    assert observation.missing_import_observed
+    assert observation.event.is_set()
+
+
+def test_ty_configuration_remains_inconclusive_without_behavioral_application_proof(
+    tmp_path: Path,
+) -> None:
+    runtime = _runtime(tmp_path)
+    owned_root = _owned_run_root(tmp_path)
+
+    witness = run_protocol_behavior_witness(
+        ProtocolWitnessRequest(
+            candidate="ty",
+            spec=_spec(runtime, "ty"),
+            runtime=runtime,
+            owned_root=owned_root,
+        ),
+        deadline=Deadline.start(monotonic_clock, 30.0),
+        probe_runner=_fake_runner(external_definition=None),
+    )
+
+    assert not witness.configuration_application_proven
+    assert not witness.passed
+    assert any("configuration application" in issue for issue in witness.issues)
+
+
+def test_ty_configuration_remains_inconclusive_without_a_server_request(
+    tmp_path: Path,
+) -> None:
+    runtime = _runtime(tmp_path)
+    owned_root = _owned_run_root(tmp_path)
+    sent_only_spec = replace(_spec(runtime, "ty"), request_handlers=None)
+
+    witness = run_protocol_behavior_witness(
+        ProtocolWitnessRequest(
+            candidate="ty",
+            spec=sent_only_spec,
+            runtime=runtime,
+            owned_root=owned_root,
+        ),
+        deadline=Deadline.start(monotonic_clock, 30.0),
+        probe_runner=_fake_runner(),
+    )
+
+    assert witness.configuration_request_count == 0
+    assert not witness.configuration_application_proven
+    assert not witness.passed
+    assert any("server request" in issue for issue in witness.issues)
 
 
 def test_witness_fails_closed_on_wrong_diagnostics_uri_and_fixture_mutation(

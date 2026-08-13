@@ -54,6 +54,7 @@ from scripts.backend_eval.protocol_parent import (
     load_parent_admission,
 )
 from scripts.backend_eval.protocol_witness import (
+    PROTOCOL_WITNESS_SCHEMA_VERSION,
     ProtocolBehaviorWitness,
     ProtocolWitnessRequest,
     run_protocol_behavior_witness,
@@ -604,7 +605,7 @@ def _execute_protocol_phase(
             witness_payload = witness.canonical_bytes()
             witness_sha256 = selected.write_sidecar(
                 run_root,
-                f"{candidate}-protocol-witness-v1.json",
+                f"{candidate}-protocol-witness-v{PROTOCOL_WITNESS_SCHEMA_VERSION}.json",
                 witness_payload,
                 deadline=collection,
             )
@@ -944,16 +945,21 @@ def _finalize_candidate_outcome(
 def _configuration_conclusive(witness: ProtocolBehaviorWitness) -> bool:
     expected_transport = {
         "pyright": "workspace_configuration",
-        "ty": "did_change_configuration",
+        "ty": "workspace_configuration",
         "pyrefly": "initialization_options",
     }[witness.candidate]
     if (
         witness.configuration_transport != expected_transport
         or witness.configuration_interpreter != witness.selected_interpreter
         or witness.configuration_payload_sha256 is None
+        or not witness.configuration_application_proven
+        or (
+            witness.push_diagnostics_claimed
+            and witness.diagnostics_completion_reason != "missing_import_observed"
+        )
     ):
         return False
-    if witness.candidate == "pyright":
+    if witness.candidate in {"pyright", "ty"}:
         return witness.configuration_request_count > 0
     return witness.configuration_path is not None
 

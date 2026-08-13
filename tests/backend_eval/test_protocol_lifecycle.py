@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import json
 import signal
+import subprocess
+import sys
 from dataclasses import replace
 from pathlib import Path
 from typing import cast
@@ -198,6 +201,85 @@ def test_scenario_detail_is_bounded_before_it_can_enter_a_receipt() -> None:
             redaction_verified=None,
             detail="x" * 513,
         )
+
+
+def test_environment_marker_retains_key_level_mismatch_cause_without_values() -> None:
+    secret = "super-secret-value"
+    stderr = (
+        "noise\n"
+        "SERENA_LIGHT_LIFECYCLE_ENV minimal=0 proxy=1 poison=1 "
+        '{"changed_keys":["PATH"],"extra_keys":["FOREIGN"],'
+        '"missing_keys":["HOME"]}\n'
+        f"password={secret}\n"
+    )
+
+    detail = lifecycle_module._environment_marker_detail(stderr)
+
+    assert "minimal=0" in detail
+    assert "changed_keys" in detail
+    assert "PATH" in detail
+    assert "extra_keys" in detail
+    assert "FOREIGN" in detail
+    assert "missing_keys" in detail
+    assert "HOME" in detail
+    assert secret not in detail
+    assert len(detail) <= 512
+
+
+def test_environment_mismatch_is_phase_infrastructure_not_candidate_evidence() -> None:
+    stderr = (
+        "SERENA_LIGHT_LIFECYCLE_ENV minimal=0 proxy=1 poison=1 "
+        '{"changed_keys":["PATH"],"extra_keys":[],"missing_keys":[]}\n'
+    )
+
+    with pytest.raises(
+        lifecycle_module.LifecycleInfrastructureError,
+        match="changed_keys.*PATH",
+    ):
+        lifecycle_module._require_minimal_environment_measurement(stderr)
+
+
+def test_missing_environment_measurement_is_phase_infrastructure() -> None:
+    with pytest.raises(
+        lifecycle_module.LifecycleInfrastructureError,
+        match="marker unavailable",
+    ):
+        lifecycle_module._require_minimal_environment_measurement("candidate stderr only")
+
+
+def test_environment_measurement_survives_more_than_the_persisted_stderr_tail() -> None:
+    expected = {
+        "HOME": "/service/home",
+        "PATH": "/service/bin",
+    }
+    child = "import sys;sys.stderr.write('candidate-noise-' * 256)"
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-I",
+            "-c",
+            lifecycle_module._environment_wrapper_program(),
+            json.dumps(expected, sort_keys=True, separators=(",", ":")),
+            sys.executable,
+            "-I",
+            "-c",
+            child,
+        ],
+        env=expected,
+        capture_output=True,
+        text=True,
+        timeout=10.0,
+        check=True,
+    )
+
+    persisted_tail = result.stderr[-1024:]
+    assert "candidate-noise" in persisted_tail
+    assert lifecycle_module._require_minimal_environment_measurement(persisted_tail) == (
+        True,
+        True,
+        True,
+    )
 
 
 class _FakeProcess:

@@ -271,6 +271,7 @@ _PHASE2_PRODUCTION_IMPORTS: dict[str, Counter[ProductionImport]] = {
         {
             ("serena_light.lsp.adapter", "EngineMetadata", None): 1,
             ("serena_light.lsp.adapter", "RawLspProviders", None): 1,
+            ("serena_light.lsp.adapter", "read_only_client_request_handlers", None): 1,
             ("serena_light.lsp.client", "CONTENT_MODIFIED", None): 1,
             ("serena_light.lsp.client", "LspResponseError", None): 1,
             ("serena_light.lsp.client", "SyncLspClient", None): 1,

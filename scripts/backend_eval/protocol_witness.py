@@ -48,7 +48,7 @@ __all__ = [
     "run_protocol_behavior_witness",
 ]
 
-PROTOCOL_WITNESS_SCHEMA_VERSION = 1
+PROTOCOL_WITNESS_SCHEMA_VERSION = 2
 FIXTURE_BYTES = (
     b"from definitely_missing_serena_light_witness import MissingWitness\n"
     b"from transformers import GenerationConfig\n"
@@ -139,6 +139,7 @@ class ProtocolBehaviorWitness:
     configuration_path: str | None
     configuration_payload_sha256: str | None
     configuration_request_count: int
+    configuration_application_proven: bool
     external_definition_relative_path: str | None
     position_encoding: str
     y_raw_range: tuple[int, int, int, int] | None
@@ -146,6 +147,9 @@ class ProtocolBehaviorWitness:
     push_diagnostics_claimed: bool
     exact_uri_diagnostics: bool
     missing_import_diagnostic: bool
+    exact_uri_publish_count: int
+    exact_uri_diagnostic_count: int
+    diagnostics_completion_reason: str
     first_normalized_capability: str | None
     first_normalized_count: int
     first_readiness_seconds: float | None
@@ -191,6 +195,7 @@ class ProtocolBehaviorWitness:
                 "observed_config_path": self.configuration_path,
                 "payload_sha256": self.configuration_payload_sha256,
                 "server_request_count": self.configuration_request_count,
+                "application_proven": self.configuration_application_proven,
             },
             "external_definition": {
                 "frozen_root": str(MS_TRANSFORMERS_ROOT),
@@ -205,6 +210,9 @@ class ProtocolBehaviorWitness:
                 "push_claimed": self.push_diagnostics_claimed,
                 "exact_uri_observed": self.exact_uri_diagnostics,
                 "missing_import_observed": self.missing_import_diagnostic,
+                "exact_uri_publish_count": self.exact_uri_publish_count,
+                "exact_uri_diagnostic_count": self.exact_uri_diagnostic_count,
+                "completion_reason": self.diagnostics_completion_reason,
             },
             "readiness": {
                 "first_normalized_capability": self.first_normalized_capability,
@@ -238,6 +246,7 @@ class _DiagnosticsObservation:
     exact_uri_observed: bool = False
     missing_import_observed: bool = False
     exact_uri_count: int = 0
+    diagnostic_count: int = 0
     event: threading.Event | None = None
 
     def __post_init__(self) -> None:
@@ -254,11 +263,13 @@ class _DiagnosticsObservation:
             return
         self.exact_uri_observed = True
         self.exact_uri_count += 1
+        self.diagnostic_count += len(diagnostics)
         for item in diagnostics:
             if isinstance(item, Mapping) and _MISSING_IMPORT in str(item.get("message", "")):
                 self.missing_import_observed = True
-        assert self.event is not None
-        self.event.set()
+        if self.missing_import_observed:
+            assert self.event is not None
+            self.event.set()
 
 
 @dataclass(frozen=True, slots=True)
@@ -653,11 +664,13 @@ def run_protocol_behavior_witness(
     config_interpreter: str | None = None
     config_path: str | None = None
     payload_sha: str | None = None
+    config_application_proven = False
     external_relative: str | None = None
     position_encoding = request.spec.position_encoding
     y_raw: tuple[int, int, int, int] | None = None
     y_decoded: tuple[int, int, int, int] | None = None
     push_claimed = request.spec.diagnostics_mode == "push"
+    diagnostics_completion_reason = "not_applicable_pull"
     unchanged = False
     mode = 0
     phase_deadline_error: DeadlineExceeded | None = None
@@ -706,15 +719,22 @@ def run_protocol_behavior_witness(
         if engine_interpreter != selected_interpreter:
             issues.append("candidate engine did not bind the exact frozen ms interpreter")
 
-        transport, config_interpreter, config_path, payload_sha = _configuration_evidence(
-            request,
-            configuration,
-            issues,
-        )
         external_relative = _external_relative_path(
             session_result,
             issues,
             deadline=deadline,
+        )
+        (
+            transport,
+            config_interpreter,
+            config_path,
+            payload_sha,
+            config_application_proven,
+        ) = _configuration_evidence(
+            request,
+            configuration,
+            external_definition_proven=external_relative is not None,
+            issues=issues,
         )
         position_encoding = (
             protocol_session.position_encoding
@@ -731,6 +751,16 @@ def run_protocol_behavior_witness(
             issues.append("push diagnostics claimed but none were published for the exact fixture URI")
         if push_claimed and not diagnostics.missing_import_observed:
             issues.append("push diagnostics did not report the fixture missing import")
+        if push_claimed:
+            diagnostics_completion_reason = (
+                "missing_import_observed"
+                if diagnostics.missing_import_observed
+                else (
+                    "bounded_wait_without_required_diagnostic"
+                    if diagnostics.exact_uri_observed
+                    else "bounded_wait_without_publication"
+                )
+            )
         if session_result is None or session_result.first_normalized_count < 1:
             issues.append("definition produced no first normalized readiness evidence")
 
@@ -785,6 +815,7 @@ def run_protocol_behavior_witness(
         configuration_path=config_path,
         configuration_payload_sha256=payload_sha,
         configuration_request_count=len(configuration.request_payloads or ()),
+        configuration_application_proven=config_application_proven,
         external_definition_relative_path=external_relative,
         position_encoding=position_encoding.value,
         y_raw_range=y_raw,
@@ -792,6 +823,9 @@ def run_protocol_behavior_witness(
         push_diagnostics_claimed=push_claimed,
         exact_uri_diagnostics=diagnostics.exact_uri_observed,
         missing_import_diagnostic=diagnostics.missing_import_observed,
+        exact_uri_publish_count=diagnostics.exact_uri_count,
+        exact_uri_diagnostic_count=diagnostics.diagnostic_count,
+        diagnostics_completion_reason=diagnostics_completion_reason,
         first_normalized_capability=(
             "definition"
             if session_result is not None and session_result.first_normalized_count > 0
@@ -859,17 +893,7 @@ def _send_configuration(
     if candidate == "pyright":
         payload: object = {"settings": {}}
     elif candidate == "ty":
-        config = _service_config(runtime, "ty")
-        payload = {
-            "settings": {
-                "ty": {
-                    "configurationFile": config.config_path,
-                    "configuration": {
-                        "environment": {"python": str(_ms_interpreter(runtime))}
-                    },
-                }
-            }
-        }
+        return
     else:
         return
     observation.sent_change_configuration = payload
@@ -879,8 +903,10 @@ def _send_configuration(
 def _configuration_evidence(
     request: ProtocolWitnessRequest,
     observation: _ConfigurationObservation,
+    *,
+    external_definition_proven: bool,
     issues: list[str],
-) -> tuple[str, str | None, str | None, str | None]:
+) -> tuple[str, str | None, str | None, str | None, bool]:
     expected_interpreter = str(_ms_interpreter(request.runtime))
     if request.candidate == "pyright":
         requests = observation.request_payloads or []
@@ -890,24 +916,63 @@ def _configuration_evidence(
             issues.append("Pyright workspace/configuration did not return the frozen ms interpreter")
         if not requests:
             issues.append("Pyright issued no observed workspace/configuration request")
+        application_proven = bool(requests) and external_definition_proven
+        if not application_proven:
+            issues.append(
+                "Pyright configuration application was not proven by a server request and "
+                "an external definition under the frozen ms environment"
+            )
         return (
             "workspace_configuration",
             observed_interpreter,
             None,
             _payload_digest({"requests": requests}, issues),
+            application_proven,
         )
     config = _service_config(request.runtime, request.candidate)
     if request.candidate == "ty":
-        payload = observation.sent_change_configuration
-        observed_interpreter = _find_nested_string(payload, "python")
-        observed_config = _find_nested_string(payload, "configurationFile")
+        requests = observation.request_payloads or []
+        expected_scope_uri = (observation.initialize_params or {}).get("rootUri")
+        expected_request = {
+            "items": [{"scopeUri": expected_scope_uri, "section": "ty"}]
+        }
+        expected_response = [
+            {
+                "configurationFile": config.config_path,
+                "configuration": {
+                    "environment": {"python": expected_interpreter},
+                },
+            }
+        ]
+        responses = [response for _params, response in requests]
+        observed_interpreter = _find_nested_string(responses, "python")
+        observed_config = _find_nested_string(responses, "configurationFile")
+        exact_request_observed = requests == [(expected_request, expected_response)]
         if observed_interpreter != expected_interpreter or observed_config != config.config_path:
-            issues.append("ty didChangeConfiguration did not bind the exact interpreter and config")
+            issues.append(
+                "ty workspace/configuration did not return the exact interpreter and config"
+            )
+        if not exact_request_observed:
+            issues.append(
+                "ty issued no exact scoped workspace/configuration server request"
+            )
+        application_proven = (
+            observed_interpreter == expected_interpreter
+            and observed_config == config.config_path
+            and exact_request_observed
+            and external_definition_proven
+        )
+        if not application_proven:
+            issues.append(
+                "ty configuration application was not proven by an exact server request and "
+                "an external definition under the frozen ms environment"
+            )
         return (
-            "did_change_configuration",
+            "workspace_configuration",
             observed_interpreter,
             observed_config,
-            _payload_digest({"notification": payload}, issues),
+            _payload_digest({"requests": requests}, issues),
+            application_proven,
         )
     initialize_params = observation.initialize_params or {}
     options = initialize_params.get("initializationOptions")
@@ -915,11 +980,22 @@ def _configuration_evidence(
     observed_config = _find_nested_string(options, "configPath")
     if observed_interpreter != expected_interpreter or observed_config != config.config_path:
         issues.append("Pyrefly initializationOptions did not bind the exact interpreter and config")
+    application_proven = (
+        observed_interpreter == expected_interpreter
+        and observed_config == config.config_path
+        and external_definition_proven
+    )
+    if not application_proven:
+        issues.append(
+            "Pyrefly configuration application was not proven by an external definition under "
+            "the frozen ms environment"
+        )
     return (
         "initialization_options",
         observed_interpreter,
         observed_config,
         _payload_digest({"initializationOptions": options}, issues),
+        application_proven,
     )
 
 

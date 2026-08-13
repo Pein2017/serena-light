@@ -94,6 +94,24 @@ This avoids giving Pyright an unfair advantage from its existing private attribu
 
 Roots without native Python configuration use the common service-owned controlled arm. `research-probes`, which has a native `pyrightconfig.json`, is reported separately: Pyright honours its production-native configuration, while each competitor receives a service-owned translation of the same include/exclude/interpreter intent. Those results are a compatibility/maintenance gate and are not pooled with no-native-config roots. An observation-only native-discovery arm may record divergence but cannot override the controlled comparison.
 
+**Phase 2 audit correction.** The protocol receipt under evaluation identity
+`f081b5e69385020072840528e865d79426cebb1d0f08a58070afc0ddefae875b` is retained as
+immutable historical output but is superseded and infrastructure-invalid as gate evidence.
+For locked ty `0.0.70`, the harness advertised `workspace.configuration=false`, sent empty
+initialization options, and later treated its own `workspace/didChangeConfiguration` payload
+as proof even though this server version does not consume that notification. The repaired
+harness advertises configuration support, answers exactly one server-issued scoped
+`workspace/configuration` request with the service-owned config and frozen interpreter, and
+requires both that request transcript and an external Transformers definition before calling
+configuration application conclusive. The same review found that an early empty exact-URI
+diagnostics publication ended the controlled missing-import wait and that a failed
+minimal-environment observation carried no key-level cause. The repaired witness waits for the
+required diagnostic within the existing bound and records publication/diagnostic counts and a
+completion reason; environment measurement is computed before candidate execution, persisted
+after candidate stderr using key names only, and any mismatch or unavailable measurement makes
+the phase incomplete rather than failing a candidate. No conclusion from the superseded receipt
+may eliminate or promote a backend; a fresh canonical run is required after this repair.
+
 ### Decision 5: Preserve Serena Light freshness and failure semantics
 
 Backends receive the same open/change/close and watched-file notifications from the shared adapter. Every content-bearing call keeps the existing preflight, at-most-one complete replay, byte-witness postflight, and typed second-race failure. The existing `LspClient.set_content_modified_retry_methods` seam remains disabled for all arms, so every request has one backend attempt; the harness may not add hidden retry loops. Protocol receipts separately count `ContentModified` and `RequestCancelled` outcomes.

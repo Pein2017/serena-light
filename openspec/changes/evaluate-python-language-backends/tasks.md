@@ -259,6 +259,13 @@
 - [ ] 2.7 Add real subprocess tests for crash, graceful shutdown, parent/process-tree cleanup, proxy poisoning, minimal environment, and secret/environment redaction.
 - [ ] 2.8 Run each protocol probe under bounded write detection and prove zero workspace mutation for Pyright, ty, and Pyrefly.
 - [ ] 2.9 Run the complete protocol phase under its 90-minute ceiling from one exact Phase 1 parent; bind the lexical workspace/target/zero-based position and frozen root witness, revalidate the same read-only parent runtime during finalization, publish typed per-candidate gate outcomes for PASS/FAIL and `seam_incompatible_pull_only` dispositions with artifact-tree digests, and remove failed candidates from later phases.
+> **Phase 2 evidence HOLD.** The previously published protocol receipt under evaluation
+> `f081b5e69385020072840528e865d79426cebb1d0f08a58070afc0ddefae875b` is immutable but
+> superseded/infrastructure-invalid: its ty configuration witness was based on an unconsumed
+> client notification, an empty diagnostics publication could finish the controlled wait, and
+> a failed minimal-environment measurement did not retain a bounded key-level cause. The harness
+> repairs are unit-tested, but task 2.9 remains unchecked until the lead explicitly authorizes a
+> fresh real protocol execution and both required reviews disposition its new exact receipt.
 
 ## 3. Compare the current Serena Light product surface
 

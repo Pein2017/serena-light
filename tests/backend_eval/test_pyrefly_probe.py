@@ -53,6 +53,10 @@ class _FakeClient:
         self.close_error = close_error
         self.requests: list[tuple[str, object, float | None]] = []
         self.notifications: list[tuple[str, object]] = []
+        self.notification_handler: Any = None
+        self.push_diagnostics_observed = True
+        self.foreign_push_diagnostics_uri = False
+        self.empty_push_diagnostics = False
 
     def request(self, method: str, params: object = None, *, timeout: float | None = None) -> object:
         self.requests.append((method, params, timeout))
@@ -64,6 +68,33 @@ class _FakeClient:
 
     def notify(self, method: str, params: object = None) -> None:
         self.notifications.append((method, params))
+        if (
+            method == "textDocument/didOpen"
+            and self.push_diagnostics_observed
+            and self.notification_handler is not None
+        ):
+            source_uri = cast(Any, params)["textDocument"]["uri"]
+            if self.foreign_push_diagnostics_uri:
+                source_uri = "file:///foreign.py"
+            self.notification_handler(
+                "textDocument/publishDiagnostics",
+                {
+                    "uri": source_uri,
+                    "diagnostics": (
+                        []
+                        if self.empty_push_diagnostics
+                        else [
+                            {
+                                "message": "controlled Pyrefly diagnostic",
+                                "range": {
+                                    "start": {"line": 0, "character": 0},
+                                    "end": {"line": 0, "character": 1},
+                                },
+                            }
+                        ]
+                    ),
+                },
+            )
         if method == "textDocument/didClose" and self.close_error is not None:
             raise self.close_error
 
@@ -168,9 +199,11 @@ def _install_fake_runner(
     after_protocol_advance: float = 0.0,
     push_diagnostics_observed: bool = True,
     foreign_push_diagnostics_uri: bool = False,
+    empty_push_diagnostics: bool = False,
 ) -> None:
     import scripts.backend_eval.pyrefly_probe as module
 
+    monkeypatch.setattr(module, "_PUSH_DIAGNOSTICS_WAIT_SECONDS", 0.0)
     manifest_values = iter(manifests)
 
     def fake_capture(workspace_root: Path, deadline: Deadline) -> object:
@@ -199,20 +232,11 @@ def _install_fake_runner(
             session_providers=validated_providers,
         )
         typed_spec = cast(Any, spec)
+        client.notification_handler = typed_spec.notification_handler
+        client.push_diagnostics_observed = push_diagnostics_observed
+        client.foreign_push_diagnostics_uri = foreign_push_diagnostics_uri
+        client.empty_push_diagnostics = empty_push_diagnostics
         result = session(client, validated_providers)
-        if push_diagnostics_observed and typed_spec.notification_handler is not None:
-            opened = next(
-                params
-                for method, params in client.notifications
-                if method == "textDocument/didOpen"
-            )
-            source_uri = cast(Any, opened)["textDocument"]["uri"]
-            if foreign_push_diagnostics_uri:
-                source_uri = (workspace_root / "foreign.py").as_uri()
-            typed_spec.notification_handler(
-                "textDocument/publishDiagnostics",
-                {"uri": source_uri, "diagnostics": []},
-            )
         client.clock.advance(after_protocol_advance)
         return ProtocolSession(
             raw_providers=validated_providers,
@@ -243,6 +267,7 @@ def _run_fake(
     after_protocol_advance: float = 0.0,
     push_diagnostics_observed: bool = True,
     foreign_push_diagnostics_uri: bool = False,
+    empty_push_diagnostics: bool = False,
 ) -> tuple[object, _FakeClient, CandidateRuntime, ServiceConfigIdentity, dict[str, object]]:
     target = tmp_path / "known.py"
     target.write_text("Known = 1\n", encoding="utf-8")
@@ -260,6 +285,7 @@ def _run_fake(
         after_protocol_advance=after_protocol_advance,
         push_diagnostics_observed=push_diagnostics_observed,
         foreign_push_diagnostics_uri=foreign_push_diagnostics_uri,
+        empty_push_diagnostics=empty_push_diagnostics,
     )
     outcome = run_pyrefly_capability_probe(
         runtime,
@@ -462,6 +488,21 @@ def test_pyrefly_probe_does_not_claim_clean_push_mode_without_exact_uri_publicat
         tmp_path,
         monkeypatch,
         foreign_push_diagnostics_uri=True,
+    )
+
+    typed = cast(Any, outcome)
+    assert typed.lifecycle.diagnostics_mode == "push"
+    assert typed.gate_disposition == "fail"
+    assert any("push diagnostics remain unproven" in issue for issue in typed.issues)
+
+
+def test_pyrefly_probe_does_not_treat_an_empty_exact_uri_publish_as_diagnostic_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    outcome, _client, _runtime_value, _config, _captured = _run_fake(
+        tmp_path,
+        monkeypatch,
+        empty_push_diagnostics=True,
     )
 
     typed = cast(Any, outcome)

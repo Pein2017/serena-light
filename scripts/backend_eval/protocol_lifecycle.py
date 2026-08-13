@@ -31,6 +31,7 @@ from scripts.backend_eval.protocol import (
     BackendProtocolSpec,
     ProtocolSession,
     protocol_session_from_error,
+    redacted_evidence_text,
     run_protocol_probe,
 )
 from scripts.backend_eval.runtime import CandidateRuntime, minimal_backend_environment
@@ -46,6 +47,7 @@ __all__ = [
     "LIFECYCLE_SCENARIOS",
     "LifecycleBatteryRequest",
     "LifecycleBatteryResult",
+    "LifecycleInfrastructureError",
     "LifecycleScenarioEvidence",
     "LifecycleScenarioExecutor",
     "run_lifecycle_battery",
@@ -88,6 +90,104 @@ _AMBIENT_POISON = {
     "SERENA_LIGHT_LIFECYCLE_POISON": "must-not-reach-candidate",
     "UV_INDEX_URL": "https://forbidden.invalid/simple",
 }
+
+
+class LifecycleInfrastructureError(RuntimeError):
+    """The harness could not prove a candidate-independent lifecycle precondition."""
+
+
+def _environment_measurement(
+    stderr: str,
+) -> tuple[bool, bool, bool, dict[str, tuple[str, ...]]] | None:
+    prefix = f"{_ENVIRONMENT_MARKER} "
+    for line in reversed(stderr.splitlines()):
+        if not line.startswith(prefix):
+            continue
+        parts = line.split(" ", 4)
+        if len(parts) != 5 or parts[0] != _ENVIRONMENT_MARKER:
+            return None
+        flags: list[bool] = []
+        for expected_name, token in zip(
+            ("minimal", "proxy", "poison"), parts[1:4], strict=True
+        ):
+            name, separator, value = token.partition("=")
+            if name != expected_name or separator != "=" or value not in {"0", "1"}:
+                return None
+            flags.append(value == "1")
+        try:
+            raw_keys = json.loads(parts[4])
+        except (TypeError, ValueError):
+            return None
+        if not isinstance(raw_keys, Mapping) or set(raw_keys) != {
+            "changed_keys",
+            "extra_keys",
+            "missing_keys",
+        }:
+            return None
+        key_sets: dict[str, tuple[str, ...]] = {}
+        for name in ("changed_keys", "extra_keys", "missing_keys"):
+            values = raw_keys.get(name)
+            if (
+                not isinstance(values, Sequence)
+                or isinstance(values, str | bytes)
+                or any(not isinstance(value, str) for value in values)
+            ):
+                return None
+            key_sets[name] = tuple(sorted(cast("Sequence[str]", values)))
+        return flags[0], flags[1], flags[2], key_sets
+    return None
+
+
+def _environment_marker_detail(stderr: str) -> str:
+    measurement = _environment_measurement(stderr)
+    if measurement is None:
+        return "environment measurement marker unavailable or malformed"
+    minimal, proxy, poison, key_sets = measurement
+    rendered = (
+        f"{_ENVIRONMENT_MARKER} minimal={int(minimal)} proxy={int(proxy)} "
+        f"poison={int(poison)} "
+        + json.dumps(key_sets, sort_keys=True, separators=(",", ":"))
+    )
+    return redacted_evidence_text(rendered)[:_MAX_DETAIL_CHARS]
+
+
+def _require_minimal_environment_measurement(stderr: str) -> tuple[bool, bool, bool]:
+    measurement = _environment_measurement(stderr)
+    detail = _environment_marker_detail(stderr)
+    if measurement is None:
+        raise LifecycleInfrastructureError(detail)
+    minimal, proxy, poison, _key_sets = measurement
+    if not minimal:
+        raise LifecycleInfrastructureError(
+            redacted_evidence_text(
+                f"minimal backend environment measurement mismatch: {detail}"
+            )[:_MAX_DETAIL_CHARS]
+        )
+    return minimal, proxy, poison
+
+
+def _environment_wrapper_program() -> str:
+    """Measure the exact inherited env and publish the marker after candidate stderr."""
+
+    return (
+        "import json,os,subprocess,sys;"
+        "expected=json.loads(sys.argv[1]);"
+        "actual={k:v for k,v in os.environ.items() if k not in {'PWD','LC_CTYPE'}};"
+        "missing=sorted(set(expected)-set(actual));"
+        "extra=sorted(set(actual)-set(expected));"
+        "changed=sorted(k for k in set(expected)&set(actual) if expected[k]!=actual[k]);"
+        "minimal=int(not missing and not extra and not changed);"
+        "proxy=int(not any(k.upper().endswith('_PROXY') for k in os.environ));"
+        "poison=int('SERENA_LIGHT_LIFECYCLE_POISON' not in os.environ);"
+        "keys={'changed_keys':changed,'extra_keys':extra,'missing_keys':missing};"
+        "status=subprocess.call(sys.argv[2:]);"
+        f"sys.stderr.write('\\nAuthorization: Bearer {_SYNTHETIC_BEARER}\\n');"
+        f"sys.stderr.write('password={_SYNTHETIC_PASSWORD}\\n');"
+        f"sys.stderr.write('\\n{_ENVIRONMENT_MARKER} minimal=%d proxy=%d poison=%d %s\\n'"
+        "% (minimal,proxy,poison,json.dumps(keys,sort_keys=True,separators=(',',':'))));"
+        "sys.stderr.flush();"
+        "sys.exit(status)"
+    )
 
 
 def _optional_bool(value: object, label: str) -> None:
@@ -632,20 +732,7 @@ class _RealLifecycleScenarioExecutor:
             )
         expected_environment = minimal_backend_environment(request.runtime, engine.interpreter)
         expected_json = json.dumps(expected_environment, sort_keys=True, separators=(",", ":"))
-        wrapper = (
-            "import json,os,sys;"
-            "expected=json.loads(sys.argv[1]);"
-            "actual={k:v for k,v in os.environ.items() if k not in {'PWD','LC_CTYPE'}};"
-            "minimal=int(actual==expected);"
-            "proxy=int(not any(k.upper().endswith('_PROXY') for k in os.environ));"
-            "poison=int('SERENA_LIGHT_LIFECYCLE_POISON' not in os.environ);"
-            f"sys.stderr.write('{_ENVIRONMENT_MARKER} minimal=%d proxy=%d poison=%d\\n'"
-            "% (minimal,proxy,poison));"
-            f"sys.stderr.write('Authorization: Bearer {_SYNTHETIC_BEARER}\\n');"
-            f"sys.stderr.write('password={_SYNTHETIC_PASSWORD}\\n');"
-            "sys.stderr.flush();"
-            "os.execv(sys.argv[2],sys.argv[2:])"
-        )
+        wrapper = _environment_wrapper_program()
 
         def wrapped_command(runtime: CandidateRuntime) -> tuple[str, ...]:
             command = direct_build_command(runtime)
@@ -666,9 +753,7 @@ class _RealLifecycleScenarioExecutor:
                 spec=wrapped_spec,
             )
         stderr = observed.session.stderr_tail if observed.session is not None else ""
-        minimal = f"{_ENVIRONMENT_MARKER} minimal=1" in stderr
-        proxy = "proxy=1" in stderr
-        poison = "poison=1" in stderr
+        minimal, proxy, poison = _require_minimal_environment_measurement(stderr)
         redacted = (
             _SYNTHETIC_BEARER not in stderr
             and _SYNTHETIC_PASSWORD not in stderr
@@ -694,7 +779,14 @@ class _RealLifecycleScenarioExecutor:
             proxy_rejected=proxy and poison,
             minimal_environment_verified=minimal,
             redaction_verified=redacted,
-            detail=("" if passed else _failure_detail("environment or redaction proof failed", observed)),
+            detail=(
+                ""
+                if passed
+                else (
+                    f"{_environment_marker_detail(stderr)}; "
+                    f"{_failure_detail('environment or redaction proof failed', observed)}"
+                )[:_MAX_DETAIL_CHARS]
+            ),
         )
 
 
@@ -702,29 +794,6 @@ def _notify_configuration(client: SyncLspClient, request: LifecycleBatteryReques
     if request.candidate == "pyright":
         client.notify("workspace/didChangeConfiguration", {"settings": {}})
         return
-    if request.candidate == "ty":
-        service_config = next(
-            (item for item in request.runtime.service_configs if item.backend == "ty"),
-            None,
-        )
-        if service_config is None:
-            raise ValueError("CandidateRuntime has no service-owned ty configuration")
-        engine = request.spec.engine(request.runtime)
-        if engine.interpreter is None:
-            raise ValueError("ty configuration requires an engine-bound interpreter")
-        client.notify(
-            "workspace/didChangeConfiguration",
-            {
-                "settings": {
-                    "ty": {
-                        "configurationFile": service_config.config_path,
-                        "configuration": {
-                            "environment": {"python": str(engine.interpreter)}
-                        },
-                    }
-                }
-            },
-        )
 
 
 def _scenario_evidence(

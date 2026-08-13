@@ -326,7 +326,7 @@ def _witness(
 ) -> ProtocolBehaviorWitness:
     transport = {
         "pyright": "workspace_configuration",
-        "ty": "did_change_configuration",
+        "ty": "workspace_configuration",
         "pyrefly": "initialization_options",
     }[candidate]
     config_path = None if candidate == "pyright" else f"/runtime/config/{candidate}/config"
@@ -345,7 +345,10 @@ def _witness(
         ),
         configuration_path=(config_path if configuration_conclusive else None),
         configuration_payload_sha256=(_SHA_B if configuration_conclusive else None),
-        configuration_request_count=(1 if candidate == "pyright" and configuration_conclusive else 0),
+        configuration_request_count=(
+            1 if candidate in {"pyright", "ty"} and configuration_conclusive else 0
+        ),
+        configuration_application_proven=configuration_conclusive,
         external_definition_relative_path="generation/configuration_utils.py",
         position_encoding="utf-16",
         y_raw_range=(6, 0, 6, 1),
@@ -353,6 +356,11 @@ def _witness(
         push_diagnostics_claimed=candidate != "ty",
         exact_uri_diagnostics=candidate != "ty",
         missing_import_diagnostic=candidate != "ty",
+        exact_uri_publish_count=1 if candidate != "ty" else 0,
+        exact_uri_diagnostic_count=1 if candidate != "ty" else 0,
+        diagnostics_completion_reason=(
+            "missing_import_observed" if candidate != "ty" else "not_applicable_pull"
+        ),
         first_normalized_capability="definition",
         first_normalized_count=1,
         first_readiness_seconds=0.25,
@@ -402,6 +410,7 @@ class _FakeServices:
         self.failed_candidate: str | None = None
         self.seam_candidate: str | None = None
         self.configuration_inconclusive: str | None = None
+        self.infrastructure_candidate: str | None = None
         self._evaluator_captures = 0
         self._production_captures = 0
         self._runtime_loads = 0
@@ -558,6 +567,10 @@ class _FakeServices:
     ) -> LifecycleBatteryResult:
         candidate = cast("Any", request).candidate
         self.calls.append((f"lifecycle:{candidate}", deadline))
+        if self.infrastructure_candidate == candidate:
+            raise RuntimeError(
+                "minimal backend environment measurement mismatch: changed_keys=[PATH]"
+            )
         return LifecycleBatteryResult(
             lifecycle=_lifecycle(diagnostics_mode="pull" if candidate == "ty" else "push"),
             scenarios=(),
@@ -691,6 +704,78 @@ def test_protocol_phase_never_converts_configuration_uncertainty_into_backend_fa
     assert pyrefly.gate_disposition == "configuration_inconclusive"
     assert pyrefly.witness_passed is False
     assert receipt.next_action == PROTOCOL_PHASE_NEXT_ACTION_INCONCLUSIVE
+
+
+def test_protocol_phase_rejects_sent_only_configuration_without_application_proof(
+    tmp_path: Path,
+) -> None:
+    from scripts.backend_eval.protocol_phase import _finalize_candidate_outcome
+
+    witness = replace(
+        _witness("ty"),
+        passed=False,
+        configuration_application_proven=False,
+        issues=("server-side configuration application was not proven",),
+    )
+    outcome = _finalize_candidate_outcome(
+        _outcome("ty"),
+        LifecycleBatteryResult(
+            lifecycle=_lifecycle(diagnostics_mode="pull"),
+            scenarios=(),
+            issues=(),
+        ),
+        witness,
+        _SHA_B,
+    )
+
+    assert outcome.gate_disposition == "configuration_inconclusive"
+
+
+def test_protocol_phase_records_environment_measurement_failure_as_incomplete_not_candidate_fail(
+    tmp_path: Path,
+) -> None:
+    from scripts.backend_eval.protocol_phase import evaluate_protocol_phase
+
+    request = _request(tmp_path)
+    services = _FakeServices(request, tmp_path)
+    services.infrastructure_candidate = "ty"
+
+    receipt = evaluate_protocol_phase(request, services=services, clock=_FakeClock())
+
+    assert receipt.status == "incomplete"
+    assert tuple(outcome.candidate for outcome in receipt.outcomes) == ("pyright",)
+    assert any(
+        "candidate ty incomplete" in issue and "changed_keys=[PATH]" in issue
+        for issue in receipt.issues
+    )
+
+
+def test_unresolved_controlled_push_diagnostics_is_inconclusive_not_backend_failure() -> None:
+    from scripts.backend_eval.protocol_phase import _finalize_candidate_outcome
+
+    witness = replace(
+        _witness("pyrefly"),
+        passed=False,
+        exact_uri_diagnostics=True,
+        missing_import_diagnostic=False,
+        exact_uri_publish_count=2,
+        exact_uri_diagnostic_count=0,
+        diagnostics_completion_reason="bounded_wait_without_required_diagnostic",
+        issues=("controlled missing-import diagnostics did not become decision-ready",),
+    )
+
+    outcome = _finalize_candidate_outcome(
+        _outcome("pyrefly"),
+        LifecycleBatteryResult(
+            lifecycle=_lifecycle(diagnostics_mode="push"),
+            scenarios=(),
+            issues=(),
+        ),
+        witness,
+        _SHA_B,
+    )
+
+    assert outcome.gate_disposition == "configuration_inconclusive"
 
 
 def test_protocol_phase_mutation_is_a_hold_with_the_changed_candidate_evidence_retained(
@@ -879,7 +964,10 @@ def test_protocol_run_handle_confines_sidecar_and_witness_after_ancestor_substit
 
     payload = b"bound-sidecar\n"
     services.write_sidecar(
-        run, "pyright-protocol-witness-v1.json", payload, deadline=deadline
+        run,
+        f"pyright-protocol-witness-v{PROTOCOL_WITNESS_SCHEMA_VERSION}.json",
+        payload,
+        deadline=deadline,
     )
     fixture = protocol_witness._DisposableFixture.create(
         run.logical_root,
@@ -889,9 +977,14 @@ def test_protocol_run_handle_confines_sidecar_and_witness_after_ancestor_substit
     )
     try:
         assert (
-            held_runs / _SHA_B / "pyright-protocol-witness-v1.json"
+            held_runs
+            / _SHA_B
+            / f"pyright-protocol-witness-v{PROTOCOL_WITNESS_SCHEMA_VERSION}.json"
         ).read_bytes() == payload
-        assert not (outside_run / "pyright-protocol-witness-v1.json").exists()
+        assert not (
+            outside_run
+            / f"pyright-protocol-witness-v{PROTOCOL_WITNESS_SCHEMA_VERSION}.json"
+        ).exists()
         assert (held_runs / _SHA_B / fixture.directory_name / "witness.py").is_file()
         assert not (outside_run / fixture.directory_name).exists()
         assert str(fixture.directory_path).startswith(f"/proc/{os.getpid()}/fd/")

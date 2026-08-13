@@ -26,7 +26,11 @@ from scripts.backend_eval.runtime import (
     CandidateRuntime,
     load_prepared_candidate_runtime,
 )
-from serena_light.lsp.adapter import EngineMetadata, RawLspProviders
+from serena_light.lsp.adapter import (
+    EngineMetadata,
+    RawLspProviders,
+    read_only_client_request_handlers,
+)
 from serena_light.lsp.client import CONTENT_MODIFIED, LspResponseError, SyncLspClient
 from serena_light.lsp.normalize import (
     NormalizationError,
@@ -89,6 +93,11 @@ def ty_protocol_spec(
     ):
         raise ValueError("service-owned ty configuration is not bound to this candidate runtime")
     selected_interpreter = _selected_ms_interpreter(runtime)
+    expected_scope_uri: str | None = None
+    client_options = {
+        "configurationFile": service_config.config_path,
+        "configuration": {"environment": {"python": str(selected_interpreter)}},
+    }
 
     def require_bound_runtime(candidate_runtime: CandidateRuntime) -> None:
         if candidate_runtime is not runtime:
@@ -108,10 +117,12 @@ def ty_protocol_spec(
         )
 
     def initialize_params(workspace_root: Path) -> Mapping[str, object]:
+        nonlocal expected_scope_uri
         root = workspace_root.resolve(strict=True)
         if not root.is_dir():
             raise ValueError(f"ty workspace root is not a directory: {root}")
         root_uri = root.as_uri()
+        expected_scope_uri = root_uri
         return {
             "processId": os.getpid(),
             "clientInfo": {"name": "serena-light", "version": "0.1.0"},
@@ -122,7 +133,7 @@ def ty_protocol_spec(
                 "general": {"positionEncodings": ["utf-16", "utf-8", "utf-32"]},
                 "workspace": {
                     "workspaceFolders": True,
-                    "configuration": False,
+                    "configuration": True,
                     "symbol": {"dynamicRegistration": False},
                 },
                 "textDocument": {
@@ -140,14 +151,49 @@ def ty_protocol_spec(
             "trace": "off",
         }
 
+    def workspace_configuration(params: object) -> list[dict[str, object]]:
+        if expected_scope_uri is None:
+            raise ValueError(
+                "ty workspace/configuration arrived before initialize params bound the scope"
+            )
+        if not isinstance(params, Mapping) or set(params) != {"items"}:
+            raise ValueError("ty workspace/configuration params must contain only items")
+        items = cast("Mapping[str, object]", params).get("items")
+        if (
+            not isinstance(items, Sequence)
+            or isinstance(items, str | bytes)
+            or len(items) != 1
+        ):
+            raise ValueError("ty workspace/configuration must contain exactly one item")
+        item = items[0]
+        if not isinstance(item, Mapping) or set(item) != {"scopeUri", "section"}:
+            raise ValueError(
+                "ty workspace/configuration item must contain only scopeUri and section"
+            )
+        item_mapping = cast("Mapping[str, object]", item)
+        if (
+            item_mapping.get("scopeUri") != expected_scope_uri
+            or item_mapping.get("section") != "ty"
+        ):
+            raise ValueError(
+                "ty workspace/configuration item must bind the exact workspace scope and ty section"
+            )
+        return [
+            {
+                "configurationFile": client_options["configurationFile"],
+                "configuration": {
+                    "environment": {
+                        "python": str(selected_interpreter),
+                    }
+                },
+            }
+        ]
+
     return BackendProtocolSpec(
         name="ty",
         build_command=build_command,
         initialize_params=initialize_params,
-        # The locked server is not assumed to issue workspace/configuration. A real request
-        # therefore remains visible as an unsupported server request rather than being hidden
-        # behind a speculative Pyright-shaped handler.
-        request_handlers=None,
+        request_handlers=read_only_client_request_handlers(workspace_configuration),
         engine=engine,
         position_encoding=PositionEncoding.UTF16,
         diagnostics_mode="pull",
@@ -178,7 +224,6 @@ def run_ty_capability_probe(
         raise ValueError("ty probe symbol_position must contain two non-negative integers")
 
     service_config = _ty_service_config(runtime)
-    selected_interpreter = _selected_ms_interpreter(runtime)
     source_text = read_stable_source_text(root, source, deadline=deadline)
     source_uri = source.as_uri()
     started_elapsed = deadline.elapsed()
@@ -187,19 +232,6 @@ def run_ty_capability_probe(
         client: SyncLspClient,
         providers: RawLspProviders,
     ) -> _TySessionResult:
-        client.notify(
-            "workspace/didChangeConfiguration",
-            {
-                "settings": {
-                    "ty": {
-                        "configurationFile": service_config.config_path,
-                        "configuration": {
-                            "environment": {"python": str(selected_interpreter)}
-                        },
-                    }
-                }
-            },
-        )
         client.notify(
             "textDocument/didOpen",
             {

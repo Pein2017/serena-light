@@ -119,18 +119,6 @@ def _run_real_session[T](
 def _notify_open_document(client: SyncLspClient, runtime: CandidateRuntime) -> str:
     source = MS_SWIFT / KNOWN_FILE
     source_uri = source.as_uri()
-    service_config = _ty_service_config(runtime)
-    client.notify(
-        "workspace/didChangeConfiguration",
-        {
-            "settings": {
-                "ty": {
-                    "configurationFile": service_config.config_path,
-                    "configuration": {"environment": {"python": str(runtime.python)}},
-                }
-            }
-        },
-    )
     client.notify(
         "textDocument/didOpen",
         {

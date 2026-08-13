@@ -47,6 +47,7 @@ __all__ = [
 # strictly loaded CandidateRuntime that owns the executable and service configuration.
 _PYREFLY_VERSION = "1.2.0"
 _REQUEST_CANCELLED = -32800
+_PUSH_DIAGNOSTICS_WAIT_SECONDS = 10.0
 
 _CAPABILITY_NAMES = (
     "definition",
@@ -236,6 +237,7 @@ def _run_capability_probe(
             typed_params.get("uri") == source_uri
             and isinstance(diagnostics, Sequence)
             and not isinstance(diagnostics, str | bytes)
+            and len(diagnostics) > 0
         ):
             push_diagnostics_observed.set()
 
@@ -327,6 +329,13 @@ def _run_capability_probe(
                     else _unadvertised_provider("workspace_symbols")
                 ),
             )
+            remaining = deadline.remaining()
+            if remaining <= 0.0:
+                deadline.check("Pyrefly push diagnostics wait")
+            push_diagnostics_observed.wait(
+                timeout=min(_PUSH_DIAGNOSTICS_WAIT_SECONDS, remaining)
+            )
+            deadline.check("Pyrefly push diagnostics wait complete")
         except BaseException as primary:
             try:
                 client.notify("textDocument/didClose", {"textDocument": {"uri": source_uri}})

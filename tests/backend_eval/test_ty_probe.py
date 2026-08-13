@@ -228,7 +228,7 @@ def test_ty_protocol_spec_binds_locked_command_config_and_interpreter(tmp_path: 
     spec = ty_protocol_spec(runtime, config)
 
     assert spec.build_command(runtime) == (str(runtime.ty), "server")
-    assert spec.request_handlers is None
+    assert spec.request_handlers is not None
     assert spec.position_encoding is PositionEncoding.UTF16
     assert spec.diagnostics_mode == "pull"
     assert spec.engine(runtime).name == "ty"
@@ -243,6 +243,15 @@ def test_ty_protocol_spec_binds_locked_command_config_and_interpreter(tmp_path: 
     assert params["rootPath"] == str(tmp_path)
     assert params["rootUri"] == tmp_path.as_uri()
     assert params["initializationOptions"] == {}
+    assert cast(Any, params)["capabilities"]["workspace"]["configuration"] is True
+    assert spec.request_handlers["workspace/configuration"](
+        {"items": [{"scopeUri": tmp_path.as_uri(), "section": "ty"}]}
+    ) == [
+        {
+            "configurationFile": config.config_path,
+            "configuration": {"environment": {"python": str(selected_interpreter)}},
+        }
+    ]
     environment = minimal_backend_environment(runtime, selected_interpreter)
     assert environment["SERENA_LIGHT_SELECTED_PYTHON"] == str(selected_interpreter)
     assert environment["XDG_CONFIG_HOME"] == str(runtime.config)
@@ -263,29 +272,66 @@ def test_ty_protocol_spec_rejects_a_config_not_bound_to_runtime(tmp_path: Path) 
         ty_protocol_spec(runtime, foreign)
 
 
-def test_ty_probe_uses_inline_interpreter_and_external_configuration(
+@pytest.mark.parametrize(
+    "params",
+    [
+        None,
+        {"items": None},
+        {"items": "bad"},
+        {"items": []},
+        {"items": ["bad"]},
+        {"items": [{"scopeUri": "/foreign", "section": "ty"}]},
+        {"items": [{"scopeUri": "file:///foreign", "section": "python"}]},
+        {
+            "items": [
+                {"scopeUri": "file:///workspace", "section": "ty"},
+                {"scopeUri": "file:///workspace", "section": "ty"},
+            ]
+        },
+    ],
+)
+def test_ty_workspace_configuration_rejects_malformed_or_foreign_requests(
+    tmp_path: Path, params: object
+) -> None:
+    runtime, config = _runtime(tmp_path)
+    spec = ty_protocol_spec(runtime, config)
+    assert spec.request_handlers is not None
+    spec.initialize_params(tmp_path)
+
+    with pytest.raises(ValueError, match="ty workspace/configuration"):
+        spec.request_handlers["workspace/configuration"](params)
+
+
+def test_ty_workspace_configuration_refuses_before_initialize_params_bind_scope(
+    tmp_path: Path,
+) -> None:
+    runtime, config = _runtime(tmp_path)
+    handlers = ty_protocol_spec(runtime, config).request_handlers
+    assert handlers is not None
+
+    with pytest.raises(ValueError, match="before initialize params"):
+        handlers["workspace/configuration"](
+            {"items": [{"scopeUri": tmp_path.as_uri(), "section": "ty"}]}
+        )
+
+
+def test_ty_probe_uses_server_consumed_configuration_not_an_unproven_notification(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     outcome, client, runtime, config = _run_fake(tmp_path, monkeypatch)
-    selected_interpreter = runtime.environments[0].interpreter_path
-
     assert outcome.gate_disposition == "pass"
     assert outcome.lifecycle.cold_readiness_seconds == pytest.approx(0.1)
-    assert client.notifications[0] == (
-        "workspace/didChangeConfiguration",
-        {
-            "settings": {
-                "ty": {
-                    "configurationFile": config.config_path,
-                    "configuration": {"environment": {"python": selected_interpreter}},
-                }
-            }
-        },
-    )
-    assert [method for method, _params in client.notifications[1:]] == [
+    assert [method for method, _params in client.notifications] == [
         "textDocument/didOpen",
         "textDocument/didClose",
     ]
+    spec = ty_protocol_spec(runtime, config)
+    params = spec.initialize_params(tmp_path)
+    assert spec.request_handlers is not None
+    assert spec.request_handlers["workspace/configuration"](
+        {"items": [{"scopeUri": tmp_path.as_uri(), "section": "ty"}]}
+    )[0]["configurationFile"] == config.config_path
+    assert cast(Any, params)["capabilities"]["workspace"]["configuration"] is True
 
 
 def test_ty_probe_records_explicit_negative_implementation_without_requesting_it(
